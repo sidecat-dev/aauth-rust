@@ -1,6 +1,9 @@
 //! Bounded deferred wire messages and atomic, role-local continuation storage.
 //! These values do not authenticate a peer or authorize network access. Hosts
 //! admit endpoints, authenticate each poll and supply unpredictable unique IDs.
+mod payment;
+pub use payment::{PaymentChallenge, PaymentChallengeError};
+
 use http::{Response, StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,9 +31,10 @@ pub enum Requirement {
     },
     /// Host directs the person to this HTTPS URL; the code is not a credential.
     Interaction {
-        /// HTTPS interaction target; never fetched by these helpers.
+        /// HTTPS interaction target without a query or fragment; never fetched.
         url: String,
-        /// Single-use interaction code managed by the hosting application.
+        /// At least eight case-insensitive Crockford Base32 symbols, optionally
+        /// hyphenated. The host manages unpredictability and single use.
         code: String,
     },
     /// Host is obtaining approval without directing the person at the Agent.
@@ -176,11 +180,14 @@ impl PendingResponse {
                                 _ => Err(PendingError),
                             };
                             let url = param("url")?;
-                            https_uri(&url)?;
-                            Requirement::Interaction {
-                                url,
-                                code: param("code")?,
+                            if https_uri(&url)?.query().is_some() {
+                                return Err(PendingError);
                             }
+                            let code = param("code")?;
+                            if !valid_interaction_code(&code) {
+                                return Err(PendingError);
+                            }
+                            Requirement::Interaction { url, code }
                         }
                         "approval" => Requirement::Approval,
                         _ => return Err(PendingError),
@@ -241,6 +248,16 @@ impl PendingResponse {
         Self::parse(&self.location, &wire)?;
         Ok(wire)
     }
+    /// Parse one unambiguous Payment HTTP authentication challenge, leaving the
+    /// original header untouched. Nonpayment requirements return `None`.
+    /// Details remain untrusted; the host owns payment method admission and
+    /// settlement. This accessor performs no network access or other I/O.
+    pub fn payment_challenge(&self) -> Result<Option<PaymentChallenge>, PaymentChallengeError> {
+        match &self.requirement {
+            Requirement::Payment { authenticate } => payment::parse(authenticate).map(Some),
+            _ => Ok(None),
+        }
+    }
     fn wire(&self) -> Result<Response<Vec<u8>>, PendingError> {
         let mut response = Response::builder()
             .status(if matches!(self.requirement, Requirement::Payment { .. }) {
@@ -274,6 +291,19 @@ impl PendingResponse {
             .body(self.body.to_string().into_bytes())
             .map_err(|_| PendingError)
     }
+}
+fn valid_interaction_code(code: &str) -> bool {
+    let mut symbols = 0;
+    for byte in code.bytes() {
+        match byte.to_ascii_uppercase() {
+            b'-' => {}
+            b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z' => {
+                symbols += 1
+            }
+            _ => return false,
+        }
+    }
+    symbols >= 8
 }
 fn sf_string(value: &str) -> Result<String, PendingError> {
     if !value.bytes().all(|v| (0x20..=0x7e).contains(&v)) {

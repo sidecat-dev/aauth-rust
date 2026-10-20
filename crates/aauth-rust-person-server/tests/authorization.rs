@@ -1232,11 +1232,29 @@ fn federated_consent_denial_prevents_any_as_dispatch() {
     let challenge = resource(&holder, &person, "read", |r| {
         r.aud = "https://as.example".into()
     });
-    f.host.mode.store(1, Ordering::SeqCst);
-    let response = f.exchange(&server, &holder, &challenge, &person, None);
-    assert_eq!(response.status(), 403);
-    assert_eq!(output(&response)["error"], "access_denied");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    for (mode, reason, status) in [
+        (1, PolicyError::Denied, 403),
+        (2, PolicyError::Unavailable, 500),
+        (8, PolicyError::UserUnreachable, 403),
+    ] {
+        f.host.mode.store(mode, Ordering::SeqCst);
+        let response = f.exchange(&server, &holder, &challenge, &person, None);
+        assert_eq!(response.status(), status);
+        if mode == 1 {
+            assert_eq!(output(&response)["error"], "access_denied");
+        }
+        let diagnostic = response
+            .extensions()
+            .get::<aauth_rust_person_server::FederationFailure>()
+            .expect("host must learn consent refused before AS contact");
+        assert_eq!(diagnostic.access_server, "https://as.example");
+        assert_eq!(diagnostic.status, None);
+        assert_eq!(
+            diagnostic.reason,
+            aauth_rust_person_server::FederationFailureReason::ConsentRefused(reason)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[test]

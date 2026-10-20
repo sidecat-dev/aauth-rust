@@ -29,7 +29,7 @@ impl<T: Federation + ?Sized> Federation for Box<T> {
     }
 }
 
-/// Local explanation of a failed PS-to-AS exchange. This value lives only in
+/// Local explanation of a refused or failed federation attempt. This value lives only in
 /// `http::Response::extensions`; it is never serialized into the Agent response.
 /// Inspect it before handing the response to a framework or network transport.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +47,8 @@ pub struct FederationFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FederationFailureReason {
+    /// Local consent refused before AS discovery or transport was invoked.
+    ConsentRefused(crate::PolicyError),
     /// Host could not discover/admit the configured AS endpoint.
     EndpointUnavailable,
     /// Discovered endpoint was not an acceptable HTTPS token target.

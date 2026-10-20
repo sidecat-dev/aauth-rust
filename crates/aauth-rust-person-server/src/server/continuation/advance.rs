@@ -222,18 +222,25 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             ]
             .contains(&response.status())
             {
+                let invalid_retry = || {
+                    super::federation::unreachable(
+                        &prepared.resource.claims().aud,
+                        Some(response.status()),
+                        crate::FederationFailureReason::MalformedResponse("invalid AS Retry-After"),
+                    )
+                };
+                let advertised =
+                    schedule::retry_after(&response, current).map_err(|_| invalid_retry())?;
                 let retry = if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                    pending.retry_after.saturating_add(5)
+                    pending
+                        .retry_after
+                        .saturating_add(5)
+                        .max(advertised.unwrap_or(0))
                 } else {
-                    response
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|h| h.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(5)
+                    advertised.unwrap_or(5)
                 };
                 if retry > 3600 {
-                    return Err(Failure::internal());
+                    return Err(invalid_retry());
                 }
                 value["next_as"] = json!(current.saturating_add(retry as i64));
                 value["as_pending"]["retry_after"] = json!(retry);

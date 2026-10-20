@@ -20,7 +20,12 @@ three-party authorization, an immediate direct downstream chain and immediate
 four-party federation. The proof subset is Ed25519 `hwk`/`jwt` plus explicit
 `jwks_uri` service proofs. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. Settlement and
-interaction/code lifecycle are host-owned. Missions, Supervision and companion
+interaction/code lifecycle are host-owned. The AS sends payment and claims
+requirements to the PS; the PS host handles them while the Agent sees Approval.
+There is no Agent payment hint or settlement API in this profile. Single terminal
+delivery applies per continuation, and Auth tokens carry no Resource challenge
+or continuation identifier for cross-exchange binding. Request replay protection
+and operation idempotency remain host duties. Missions, Supervision and companion
 authorization vocabularies remain outside this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).

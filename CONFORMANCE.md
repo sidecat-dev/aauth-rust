@@ -8,7 +8,7 @@ This development branch carries `bc5336efa3c29e9f604c9a4dbd9df7d7dba941a9`
 as the explicit Access Server/four-party prerequisite. Rust05 passed its gates and merged into sprint main. The prerequisite is now
 history; Rust06 is rebased onto that sprint main and remains a separate candidate.
 
-Current engineer evidence: **223 integration tests and 5 backend unit tests
+Current engineer evidence: **248 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -22,10 +22,10 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
-| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (9 tests) |
-| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (40 tests, including15 deferred cases), deferred TLS journey |
-| AS deferred authorization | Explicit policy for202 claims/clarification/interaction/approval or402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (18 tests, including11 deferred cases and omitted presented_token) |
-| Deferred wire and state primitives | Bounded202 claims/clarification/interaction/approval and402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (10 tests) |
+| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits, 429 linear backoff, 503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (10 tests) |
+| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (45 tests, including 20 deferred cases), deferred TLS journey |
+| AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (23 tests, including 16 deferred cases and omitted presented_token) |
+| Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
@@ -71,9 +71,9 @@ invalid service identities reported as invalid_key before policy.
 PS federation and the four-party TLS composition execute in the same checkout.
 The PS verifies AS role/issuer, recipient/key/person, tenant/account, scope and
 parent expiry before storing/releasing the exact credential. Well-formed terminal
-AS problems, including401, relay their status/error in the PS's own problem body;
+AS problems, including 401, relay their status/error in the PS's own problem body;
 AS Signature-Error/detail remain host-only FederationFailure response extensions.
-Terminal clock_skew at400 or401 preserves AS Date. Endpoint/transport/malformed,
+Terminal clock_skew at 400 or 401 preserves AS Date. Endpoint/transport/malformed,
 unverifiable grants and unsupported continuations remain as_unreachable. No shared four-party harness result or full
 cross-implementation equivalence is claimed by these native tests.
 
@@ -162,13 +162,13 @@ profile rather than conferring scope authority.
   Scope-free profiles and automatic step-up negotiation are absent. The PS does
   verify an authentic Auth token used as `presented_token` for a later grant.
   AS/PS policy may issue a proper scope subset, but this Resource helper then
-  refuses403 if that subset lacks any configured scope. Host must align its AS
+  refuses 403 if that subset lacks any configured scope. Host must align its AS
   policy and per-operation Resource profiles; partial grants do not trigger
   automatic step-up negotiation.
 - **AGENT-REQUIREMENT-PROFILE:** Agent parses immediate Agent/Person/Auth
   requirements with a 64 KiB combined-field limit. Other values remain
   explicit unsupported errors in that immediate parser. The separate
-  `PollSession` helper parses complete202/402 responses and prepares signed GET,
+  `PollSession` helper parses complete 202/402 responses and prepares signed GET,
   clarification POST and DELETE without transport or sleeps. It enforces finite
   deadlines and Retry-After/backoff. Final credentials still require verification.
   AS/PS continuation requires explicit with_deferred configuration and separate
@@ -203,9 +203,9 @@ profile rather than conferring scope authority.
 | Named limit | Pinned Core clause | Behavior and boundary |
 | --- | --- | --- |
 | **AS-IMMEDIATE-PROFILE** | [AS Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-token-endpoint) | Immediate top-level missionless Core-scope grants only. Subagent/upstream parameters, mission and unsupported companion claims fail closed. PS-issued three-party chaining remains available in direct mode; no AS call-chaining or parent-mediated AS authorization is claimed. |
-| **AS-DEFERRED-PROFILE** | [AS Response](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-response) | AS opt-in claims/clarification/interaction/approval and WWW-Authenticate payment continuations execute with authenticated PS polls. Opt-in PS stores its own continuation, exposes actual AS details to the trusted host and signs one explicit advancement; Agent GET never polls the AS. Default immediate PS still rejects continuation with502 as_unreachable. Settlement, billing cache and interaction UI/code consumption belong to host policy. |
+| **AS-DEFERRED-PROFILE** | [AS Response](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-response) | AS opt-in claims/clarification/interaction/approval and WWW-Authenticate payment continuations execute with authenticated PS polls. Opt-in PS stores its own continuation, exposes actual AS details to the trusted host and signs one explicit advancement; Agent GET never polls the AS. Default immediate PS still rejects continuation with 502 as_unreachable. Settlement, billing cache and interaction UI/code consumption belong to host policy. |
 | **AS-HOST-TRANSPORT** | [PS-AS Federation](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-as-federation), [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | Host admits AS discovery and verifies metadata issuer, bounded HTTPS/certificates, DNS/egress/deadlines/no credential redirects. PS validates endpoint syntax, signed exact body and complete returned grant. The example executes genuine admitted TLS; no general Internet transport is supplied. |
-| **AS-AGENT-PS-PROFILE** | [Agent Token](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-token), [PS-to-AS Token Request](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-to-as-token-request) | AS requires the Agent token's optional ps claim to be present and equal the signing PS; absent/different ps is400 invalid_agent_token before policy. This is a tighter shared Go/Rust profile, not a general claim that ps is mandatory in every Agent token. |
+| **AS-AGENT-PS-PROFILE** | [Agent Token](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-token), [PS-to-AS Token Request](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-to-as-token-request) | AS requires the Agent token's optional ps claim to be present and equal the signing PS; absent/different ps is 400 invalid_agent_token before policy. This is a tighter shared Go/Rust profile, not a general claim that ps is mandatory in every Agent token. |
 | **AS-RETAINED-PROFILE** | [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | PS retains every delivered AS Auth in its local exact-lineage policy before release. Optional TokenRecord.person_server preserves PS namespace separately from AS token identity. Older local JSON records remain unchanged; custom adapters must pass the extended contract before federation use. AS retains only explicit pending state in this profile, with no issued-JWT audit/revocation or replay cache. |
 
 ## Deferred profile boundaries
@@ -218,8 +218,8 @@ plus signed cancellation. AS and PS each retain their own round counter and
 absolute question deadline; repeating an unanswered question never restarts it,
 and the wire timeout reports remaining seconds. The PS acknowledges a queued
 answer with approval while awaiting host advancement, so an identical question
-in a subsequent round remains distinguishable. AS429 intervals accumulate five
-seconds per refusal. A queued answer or manual answer cannot bypass a429/503
+in a subsequent round remains distinguishable. AS 429 intervals accumulate five
+seconds per refusal. A queued answer or manual answer cannot bypass a 429/503
 retry deadline. Terminal grant checks run after final custody writes/removals,
 including current trust, PS binding, pending expiry and remaining token lifetime;
 `expires_in` uses that final clock. Claims never request or accept `sub`. Only the
@@ -234,10 +234,65 @@ expired-row collection and reconciliation of uncertain `busy`, `advancing` or
 conditional write never releases an Auth token. PS verified Auth rows already
 committed remain retained when subsequent delivery fails, as on the direct path.
 Host diagnostics for an AS advancement are returned by `advance_federation`;
+local consent refusal before AS discovery/transport attaches
+`FederationFailureReason::ConsentRefused(PolicyError)` with no AS status.
+The Agent retains the ordinary refusal status/error.
 Response extensions are not serialized into the stored Agent wire response.
 Missions, delegation, upstream AS authorization, R3 and companion continuation
 remain named gaps. Native tests and the real-TLS journey do not imply a shared
 deferred harness result; shared measurements are recorded separately.
+
+Authenticated callers that do not own a pending reference receive
+`403 wrong_poller`, independently of a real policy/user `403 denied`.
+This profile retains `410 gone` for both unknown and consumed references;
+it does not distinguish those two histories. Foreign callers never consume
+custody. When AS cancellation wins a race, an in-flight response is withheld
+with `410 gone`. A PS DELETE during host advancement returns `429 slow_down`;
+retry cancellation after that transition. Actual storage failures remain local
+`500 server_error`.
+An inherited PS race remains: expiry or trust-failure cleanup can consume
+`delivering` custody, causing its competing delivery to return a local 500 while
+withholding the token. This is a statically reviewed status-classification limit,
+separate from the tested live cancellation paths; it has no runtime race receipt.
+
+Agent-facing PS Retry-After derives from the larger of the PS minimum and the
+remaining AS wait. Early polling reports the remaining wait; contention with no
+completion estimate uses one second. The host's `federation_pending` view also
+reports remaining AS wait and refuses expired/nonwaiting custody. AS 429
+backoff adds five seconds while honoring a longer advertised minimum. AS 503
+accepts delta seconds or HTTP-date (missing means five seconds); malformed,
+duplicate or over-one-hour retry values are `502 as_unreachable` with a host
+malformed-answer diagnostic. The Agent helper honors a longer numeric 429
+Retry-After; its direct 503 helper accepts delta seconds. Neither helper sleeps.
+
+Interaction URLs reject queries and fragments. Codes require at least eight
+case-insensitive Crockford Base32 symbols, with optional hyphens. This checks
+format and length; unpredictability, single use and redemption remain host
+responsibilities. `PendingResponse::payment_challenge` parses the Payment
+challenge into bill id and optional opaque method/amount/currency fields,
+rejecting missing/ambiguous ids and malformed syntax without changing the raw
+header or settling a payment.
+
+**AS-GRANT-EQUIVALENCE:** Auth carries neither a Resource challenge identifier
+nor a continuation identifier. A previously retained, byte-identical grant can
+be accepted by another exchange with the same Person token and otherwise
+matching verified context. Reusing its issuer/JTI with a different presented
+Person parent conflicts with the retained receipt and returns
+`502 as_unreachable` / `InvalidGrant`, rather than a local storage error.
+A fresh-JTI equivalent grant has no cryptographic exchange tie either. This is
+not a grant replay cache: single terminal delivery applies to each continuation,
+and hosts own operation replay protection and application idempotency. Native
+`cross_exchange_grant_reuse_is_bounded_by_the_exact_presented_parent` pins both
+same-token acceptance and different-token refusal; actual storage unavailability
+still returns 500.
+
+**PENDING-PROOF-REPLAY:** There is no signed-request replay cache for pending
+URLs. A captured signed Agent GET replayed within the 60-second proof window
+can consume the single terminal delivery; the legitimate Agent then gets
+`410 gone`. The delivered Auth is still bound to the Agent key, so the captured
+request alone does not provide that key. Native
+`a_captured_signed_poll_can_take_one_delivery_inside_its_proof_window` pins this
+limit. Host transport/logging and replay controls remain necessary.
 
 ## Person Server clause limits
 
@@ -247,7 +302,7 @@ not claims that the cited clauses are fully implemented.
 | Named limit | Pinned Core clause | Behavior and boundary |
 | --- | --- | --- |
 | **PS-PRESENTED-ERRORS** | [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | A missing/different retained issuance or recipient Agent is invalid_presented_token. Genuine Resource-versus-presented jti/sub/tenant/PS mismatches remain invalid_resource_token. |
-| **PS-IMMEDIATE-DENIAL** | [Polling Error Codes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#polling-error-codes) | Immediate host PolicyError::Denied retains 403 access_denied. Deferred AS policy denial is403 denied, relayed by the PS on its pending URL. Expired pending state returns408 expired; consumed/cancelled state returns410 gone. A revoked binding on new Person issuance separately returns 403 denied; presented/upstream revocation uses its specific 400 code. |
+| **PS-IMMEDIATE-DENIAL** | [Polling Error Codes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#polling-error-codes) | Immediate host PolicyError::Denied retains 403 access_denied. Deferred AS policy denial is 403 denied, relayed by the PS on its pending URL. Expired pending state returns 408 expired; consumed/cancelled state returns 410 gone. A revoked binding on new Person issuance separately returns 403 denied; presented/upstream revocation uses its specific 400 code. |
 | **PS-BINDING-REVOCATION** | [Agent Person Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-person-binding), [token errors](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#token-endpoint-error-codes) | Binding revocation blocks new Person issuance with 403 denied, direct exchanges of outstanding Person/Auth with 400 revoked_presented_token, and chains with revoked_upstream_token, including policy/commit races. There is no individual token/Agent-token revocation set, cascade or Resource revocation delivery; an already issued Auth token still verifies at a Resource until expiry unless the host adds that state. |
 | **PS-SCOPE-ONLY** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure), [Scopes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#scopes) | The PS requires a nonempty Core scope string. Missing/empty scope and companion authority claims are refused; a companion claim cannot replace scope in this profile. Scope descriptions and identity-claim expansion are not implemented. |
 | **PS-MISSION-INPUT** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint), [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | mission_s256 is not accepted as a PS request parameter. Mission-bearing credentials/challenges are explicitly refused by PS/Resource roles, even when otherwise well formed. Core can parse their syntax but does not establish mission state; no mission is silently ignored. |
@@ -259,7 +314,7 @@ not claims that the cited clauses are fully implemented.
 | **PS-HOST-METADATA** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | First-use Resource metadata fetching/presentation and the distinct-resource-per-Agent rate-limit SHOULDs are host duties. The library has neither an outbound fetcher nor that limiter. Sanitize Agent-asserted justification before rendering; there is no library renderer. |
 | **PS-ACCOUNT-PROFILE** | [Account Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#account-binding) | PS copies account from a verified Resource challenge; the Resource helper emits none and has no explicit authorization endpoint/account selector. No application account linking, identity proofing or complete account-flow test claim is made. |
 | **PS-REISSUE** | [Auth Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-token-endpoint) | The draft does not make a Resource token single-use. Repeating an identical valid exchange reruns policy and can release another independently retained Auth token with a fresh jti and the same parent bounds. This is not operation idempotency or exactly-once delivery. |
-| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. If the newly issued token expires during the post-commit release window while its inputs remain valid, both immediate direct and federated PS paths return500 server_error, release no token and retain the committed row. Deferred custody additionally caps its deadline by the retained Auth expiry and returns408 expired if that deadline elapses before delivery. There is no rollback/delete API; host cleanup follows retain_until. Other parent-expiry/revocation failures keep their typed parameter errors. authorization.rs pins both post-commit modes and absence of AS Auth rows after unverified delivery. |
+| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. If the newly issued token expires during the post-commit release window while its inputs remain valid, both immediate direct and federated PS paths return 500 server_error, release no token and retain the committed row. Deferred custody additionally caps its deadline by the retained Auth expiry and returns 408 expired if that deadline elapses before delivery. There is no rollback/delete API; host cleanup follows retain_until. Other parent-expiry/revocation failures keep their typed parameter errors. authorization.rs pins both post-commit modes and absence of AS Auth rows after unverified delivery. |
 
 The TLS application uses a fixed operation and demo admission policy. It does
 not establish general caller-body forwarding, a downstream account database or
@@ -291,8 +346,8 @@ does not authenticate parent credentials or verify digest contents. Existing-
 record comparison still precedes validation, so a differing malformed retry is
 Conflict and cannot rewrite retained state.
 
-**DURABLE-STORE-PROFILE:** one redb4.4 database owner per file, shared by clones;
-five typed schema tables, keyed operations, immediate durability. Schema1 only;
+**DURABLE-STORE-PROFILE:** one redb 4.4 database owner per file, shared by clones;
+five typed schema tables, keyed operations, immediate durability. Schema 1 only;
 foreign/incompatible schema is refused without adoption, malformed/miskeyed rows
 return Unavailable rather than absent identity. Opening scans engine page
 integrity and schema; it does not decode every record or verify its ancestry.

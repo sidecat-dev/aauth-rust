@@ -8,13 +8,13 @@ use std::sync::Arc;
 pub struct DeferredConfig {
     /// Atomic pending store; records contain exact compact request credentials.
     pub store: Arc<dyn ContinuationStore>,
-    /// Maximum pending lifetime in seconds,1..=3600; parents and challenge cap it.
+    /// Maximum pending lifetime in seconds, 1..=3600; parents and challenge cap it.
     pub lifetime: i64,
-    /// Required GET polling interval in seconds,0..=3600; default five.
+    /// Required GET polling interval in seconds, 0..=3600; default five.
     pub retry_after: u64,
 }
 impl DeferredConfig {
-    /// Use host custody with a300-second lifetime and five-second GET interval.
+    /// Use host custody with a 300-second lifetime and five-second GET interval.
     pub fn new(store: impl ContinuationStore + 'static) -> Self {
         Self {
             store: Arc::new(store),
@@ -149,7 +149,7 @@ impl<
             .ok_or_else(|| Failure::status(StatusCode::GONE, "gone"))?;
         let mut value = snapshot.value;
         if value["person_server"].as_str() != Some(&owner) {
-            return Err(Failure::status(StatusCode::FORBIDDEN, "denied"));
+            return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
         }
         let expired = now >= number(&value, "deadline")?
             || value["question_deadline"]
@@ -162,7 +162,7 @@ impl<
                 .replace(id, snapshot.revision, None)
                 .map_err(|_| Failure::internal())?
             {
-                return Ok(throttled());
+                return Ok(throttled(1));
             }
             return if expired {
                 Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"))
@@ -173,8 +173,14 @@ impl<
                 ))
             };
         }
-        if value["state"] != "waiting" || (!post && now < number(&value, "next")?) {
-            return Ok(throttled());
+        if value["state"] != "waiting" {
+            return Ok(throttled(1));
+        }
+        if !post {
+            let next = number(&value, "next")?;
+            if now < next {
+                return Ok(throttled(next.saturating_sub(now) as u64));
+            }
         }
         let previous: PendingResponse =
             serde_json::from_value(value["pending"].clone()).map_err(|_| Failure::internal())?;
@@ -236,7 +242,7 @@ impl<
             .replace(id, snapshot.revision, Some(value.clone()))
             .map_err(|_| Failure::internal())?
         {
-            return Ok(throttled());
+            return Ok(throttled(1));
         }
         let result = (|| {
             let (context, presented) = self.authorize_body(&value["request"], &owner, now)?;
@@ -300,7 +306,7 @@ impl<
             .store
             .load(id)
             .map_err(|_| Failure::internal())?
-            .ok_or_else(Failure::internal)?;
+            .ok_or_else(|| Failure::status(StatusCode::GONE, "gone"))?;
         if held.value["state"] != "busy" {
             return Err(Failure::internal());
         }
@@ -317,6 +323,16 @@ impl<
             )
             .map_err(|_| Failure::internal())?
         {
+            // A concurrent cancellation or expiry can consume busy custody
+            // after the final load. Never release the prepared response then.
+            if d.config
+                .store
+                .load(id)
+                .map_err(|_| Failure::internal())?
+                .is_none()
+            {
+                return Err(Failure::status(StatusCode::GONE, "gone"));
+            }
             return Err(Failure::internal());
         }
         let mut response = result?;
@@ -368,9 +384,12 @@ fn question_deadline(pending: &PendingResponse, now: i64) -> Option<i64> {
         _ => None,
     }
 }
-fn throttled() -> Response<Vec<u8>> {
+fn throttled(retry_after: u64) -> Response<Vec<u8>> {
     let mut r = wire::json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error":"slow_down"}));
-    r.headers_mut().insert("retry-after", "1".parse().unwrap());
+    r.headers_mut().insert(
+        "retry-after",
+        retry_after.max(1).to_string().parse().unwrap(),
+    );
     r.headers_mut()
         .insert("content-type", "application/problem+json".parse().unwrap());
     r

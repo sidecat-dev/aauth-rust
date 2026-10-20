@@ -82,7 +82,7 @@ impl aauth_rust_person_server::Federation for NativeTransport {
                     }),
                     6 => Some(Requirement::Interaction {
                         url: "https://as.example/consent".into(),
-                        code: "host-single-use".into(),
+                        code: "C0DE8X42".into(),
                     }),
                     _ => None,
                 })
@@ -1001,9 +1001,15 @@ fn forwarded_answer_survives_agent_polls_after_its_old_question_timeout() {
     entered.wait();
     f.host.now.store(1010, Ordering::SeqCst);
     let competing = poll(&server, &holder, &p.location, "GET", None, 1010);
+    let cancellation = poll(&server, &holder, &p.location, "DELETE", None, 1010);
     release.wait();
     let completed = thread.join().unwrap();
     assert_eq!(competing.status(), 202);
+    assert_eq!(
+        cancellation.status(),
+        429,
+        "in-flight cancellation must request a retry"
+    );
     assert_eq!(completed.unwrap().status(), 202);
     let latest = poll(&server, &holder, &p.location, "GET", None, 1010);
     assert!(matches!(
@@ -1013,3 +1019,6 @@ fn forwarded_answer_survives_agent_polls_after_its_old_question_timeout() {
         Requirement::Clarification { .. }
     ));
 }
+
+#[path = "post_gate.rs"]
+mod post_gate;

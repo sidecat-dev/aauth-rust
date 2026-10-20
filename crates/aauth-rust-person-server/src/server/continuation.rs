@@ -1,4 +1,6 @@
 mod advance;
+mod schedule;
+use schedule::{agent_delay, throttled_for};
 mod wire;
 use super::*;
 use aauth_rust_core::continuation::{
@@ -14,13 +16,13 @@ use wire::decode;
 pub struct DeferredConfig {
     /// Atomic role-local custody containing exact original compact credentials.
     pub store: Arc<dyn ContinuationStore>,
-    /// Maximum waiting lifetime in seconds,1..=3600, capped by original inputs.
+    /// Maximum waiting lifetime in seconds, 1..=3600, capped by original inputs.
     pub lifetime: i64,
-    /// Agent GET interval in seconds,0..=3600; default five.
+    /// Agent GET interval in seconds, 0..=3600; default five.
     pub retry_after: u64,
 }
 impl DeferredConfig {
-    /// Use host custody with300 seconds and five-second Agent polling.
+    /// Use host custody with 300 seconds and five-second Agent polling.
     pub fn new(store: impl ContinuationStore + 'static) -> Self {
         Self {
             store: Arc::new(store),
@@ -109,11 +111,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let location = format!("{}/token/pending/{id}", self.config.signed_origin);
         let ps_pending = self.agent_pending(&location, &pending)?;
-        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(d.retry_after as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now)});
+        let interval = d.retry_after.max(pending.retry_after);
+        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(interval as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now)});
         d.store
-            .insert(&id, value)
+            .insert(&id, value.clone())
             .map_err(|_| Failure::internal())?;
-        ps_pending.response().map_err(|_| Failure::internal())
+        pending_wire(&ps_pending, &value, (self.clock)(), d.retry_after)
     }
     fn agent_pending(
         &self,
@@ -128,7 +131,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         PendingResponse::new(
             &self.config.signed_origin,
             location,
-            d.retry_after,
+            d.retry_after.max(pending.retry_after),
             requirement,
         )
         .map_err(|_| Failure::internal())
@@ -147,6 +150,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or(AdvanceError::Gone)
     }
     /// Inspect actual AS payment/claims/interaction details for trusted host use.
+    /// The returned retry_after is the remaining AS wait at the current clock.
+    /// Expired custody returns Expired; in-flight or ready custody returns NotReady.
     /// The Agent polls its own PS Location; this API never dispatches a request.
     pub fn federation_pending(&self, reference: &str) -> Result<PendingResponse, AdvanceError> {
         let d = self.deferred.as_ref().ok_or(AdvanceError::Unavailable)?;
@@ -157,7 +162,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|_| AdvanceError::Unavailable)?
             .ok_or(AdvanceError::Gone)?
             .value;
-        serde_json::from_value(value["as_pending"].clone()).map_err(|_| AdvanceError::Unavailable)
+        let now = (self.clock)();
+        if expired(&value, now).map_err(|_| AdvanceError::Unavailable)? {
+            return Err(AdvanceError::Expired);
+        }
+        if value["state"] != "waiting" {
+            return Err(AdvanceError::NotReady);
+        }
+        let mut pending: PendingResponse = serde_json::from_value(value["as_pending"].clone())
+            .map_err(|_| AdvanceError::Unavailable)?;
+        pending.retry_after = number(&value, "next_as")
+            .map_err(|_| AdvanceError::Unavailable)?
+            .saturating_sub(now)
+            .max(0) as u64;
+        Ok(pending)
     }
     // Store publication/removal is a host boundary. A prepared grant must still
     // match current trust, retained inputs and binding after that I/O finishes.
@@ -225,7 +243,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || caller.claims().ps.as_deref() != Some(&self.config.issuer)
             || caller.claims().parent_agent.is_some()
         {
-            return Err(Failure::status(StatusCode::FORBIDDEN, "denied"));
+            return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
         }
         if expired(&value, now)? {
             if !d
@@ -233,7 +251,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .replace(&id, snapshot.revision, None)
                 .map_err(|_| Failure::internal())?
             {
-                return Ok(throttled());
+                return throttled_for(&value, (self.clock)());
             }
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
@@ -253,13 +271,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .replace(&id, snapshot.revision, None)
                     .map_err(|_| Failure::internal())?
                 {
-                    return Ok(throttled());
+                    return throttled_for(&value, (self.clock)());
                 }
                 return Err(error);
             }
         };
         if value["state"] == "delivering" {
-            return Ok(throttled());
+            return throttled_for(&value, (self.clock)());
         }
         if request.method() == "DELETE" {
             if value["state"] == "ready" {
@@ -268,13 +286,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .replace(&id, snapshot.revision, None)
                     .map_err(|_| Failure::internal())?
                 {
-                    return Ok(throttled());
+                    return throttled_for(&value, (self.clock)());
                 }
                 return Ok(json_response(StatusCode::OK, json!({"status":"cancelled"})));
             }
-            return self
-                .advance_federation(&id, FederationInput::Cancel)
-                .map_err(|_| Failure::internal());
+            return match self.advance_federation(&id, FederationInput::Cancel) {
+                Ok(response) => Ok(response),
+                Err(AdvanceError::NotReady) => Ok(throttled_for(&value, (self.clock)())?),
+                Err(AdvanceError::Gone) => Err(Failure::status(StatusCode::GONE, "gone")),
+                Err(AdvanceError::Expired) => {
+                    Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"))
+                }
+                Err(_) => Err(Failure::internal()),
+            };
         }
         let pending: PendingResponse =
             serde_json::from_value(value["ps_pending"].clone()).map_err(|_| Failure::internal())?;
@@ -320,9 +344,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .replace(&id, snapshot.revision, Some(value.clone()))
                 .map_err(|_| Failure::internal())?
             {
-                return Ok(throttled());
+                return throttled_for(&value, (self.clock)());
             }
-            return pending_wire(&acknowledgement, &value, (self.clock)());
+            return pending_wire(&acknowledgement, &value, (self.clock)(), d.retry_after);
         }
         if value["state"] == "ready" {
             value["state"] = json!("delivering");
@@ -331,7 +355,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .replace(&id, snapshot.revision, Some(value.clone()))
                 .map_err(|_| Failure::internal())?
             {
-                return Ok(throttled());
+                return throttled_for(&value, (self.clock)());
             }
             let result = (|| {
                 let response = decode(&value["terminal"])?;
@@ -363,19 +387,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Ok(response);
         }
         if now < number(&value, "next_agent")? {
-            return Ok(throttled());
+            return throttled_for(&value, (self.clock)());
         }
         if value["state"] == "waiting" {
-            value["next_agent"] = json!(now.saturating_add(d.retry_after as i64));
+            value["next_agent"] =
+                json!(now.saturating_add(agent_delay(&value, now, d.retry_after)? as i64));
             if !d
                 .store
                 .replace(&id, snapshot.revision, Some(value.clone()))
                 .map_err(|_| Failure::internal())?
             {
-                return Ok(throttled());
+                return throttled_for(&value, (self.clock)());
             }
         }
-        pending_wire(&pending, &value, (self.clock)())
+        pending_wire(&pending, &value, (self.clock)(), d.retry_after)
     }
 }
 fn safe_id(s: &str) -> bool {
@@ -386,11 +411,6 @@ fn safe_id(s: &str) -> bool {
 }
 fn number(v: &Value, k: &str) -> Result<i64, Failure> {
     v[k].as_i64().ok_or_else(Failure::internal)
-}
-fn throttled() -> Response<Vec<u8>> {
-    let mut r = Failure::status(StatusCode::TOO_MANY_REQUESTS, "slow_down").response();
-    r.headers_mut().insert("retry-after", "1".parse().unwrap());
-    r
 }
 
 fn question_deadline(pending: &PendingResponse, now: i64) -> Option<i64> {
@@ -415,8 +435,10 @@ fn pending_wire(
     pending: &PendingResponse,
     value: &Value,
     now: i64,
+    minimum: u64,
 ) -> Result<Response<Vec<u8>>, Failure> {
     let mut pending = pending.clone();
+    pending.retry_after = agent_delay(value, now, minimum)?;
     if let Some(at) = value["question_deadline"].as_i64()
         && !(value["state"] == "advancing" && value["answering"] == true)
     {

@@ -218,6 +218,14 @@ identifies a credential, not an operation; using it alone would suppress differe
 legitimate requests made with that token. PS retained lineage does not deduplicate
 application requests or provide exactly-once downstream delivery.
 
+The same replay limit applies to PS pending delivery. A captured signed Agent
+GET replayed within the accepted 60-second proof window can consume the single
+terminal response; the legitimate Agent's next GET then receives `410 Gone`.
+The Auth token remains bound to the Agent's proof key, so the replay does not
+give another holder a usable credential. There is no built-in request replay
+cache for pending URLs. Hosts that require replay refusal must enforce it before
+the PS consumes custody.
+
 Forwarded Agent-token bytes prove what their issuer signed. They do not prove
 that the original caller authorized this service or this downstream operation:
 Agent tokens have no Resource audience binding in this slice. Carrying the bytes
@@ -573,19 +581,19 @@ name captured dependencies in application state. The AS serves:
 Set published `issuer` separately from `signed_origin` for a listener with a port.
 The AS policy sees verified PS identity, Agent posture, Resource claims and Core
 scopes after independent presented-token verification. Return `Decision` with a
-nonempty requested-scope subset and lifetime1..3600 seconds. The current
+nonempty requested-scope subset and lifetime 1..3600 seconds. The current
 `PsAuthorizationResource` helper requires every scope in its configured profile.
-A correctly narrowed AS grant can therefore be valid but still receive403 at that
+A correctly narrowed AS grant can therefore be valid but still receive 403 at that
 Resource. Keep the AS policy and the per-operation Resource profiles consistent;
 the helper does not turn a partial grant into a new challenge automatically.
-Denied is403,
-Unavailable or an invalid grant is500. Issued Auth uses `aauth-access.json`, is
+Denied is 403,
+Unavailable or an invalid grant is 500. Issued Auth uses `aauth-access.json`, is
 bound to the intended Resource/person/Agent key and cannot outlive the Agent or
 presented credential. The challenge must be current but does not cap a
 missionless grant's lifetime. The host supplies authorization policy; accepting
 a valid PS proof alone does not grant access. This AS profile additionally requires
 the Agent token's optional `ps` claim to be present and equal to the signing PS.
-Missing/different `ps` is400 `invalid_agent_token` before policy; this is the named
+Missing/different `ps` is 400 `invalid_agent_token` before policy; this is the named
 `AS-AGENT-PS-PROFILE` limit shared with the Go sibling.
 
 For the PS, construct the ordinary PersonServer then call
@@ -609,14 +617,14 @@ Content-Type or signature headers, and do not follow redirects carrying the
 credentials. The library imposes the 1 MiB buffered response check; the adapter
 must bound collection before allocation. Use blocking workers for this synchronous
 callback in an async server. Every well-formed terminal AS problem, including
-401, relays its AS status and `error` in the PS's own problem body. An AS401
+401, relays its AS status and `error` in the PS's own problem body. An AS 401
 can refuse the PS service proof or another AS check; it is not automatically a
 transport failure. The PS does not copy AS Signature-Error/Accept-Signature headers
 onto the Agent response: they describe a different request and verifier.
-Malformed/unverifiable results and transport failure return502 `as_unreachable`.
+Malformed/unverifiable results and transport failure return 502 `as_unreachable`.
 The default immediate profile also rejects deferred responses with that error.
 Opt-in continuation handling is described below; host advancement remains explicit.
-Terminal `clock_skew` at400 or401 preserves the AS Date.
+Terminal `clock_skew` at 400 or 401 preserves the AS Date.
 
 Inspect host-only diagnostics on the returned response before handing it to a
 framework. Response extensions are local Rust data and do not go on the wire:
@@ -635,8 +643,13 @@ if let Some(failure) = response.extensions()
 
 `FederationFailureReason` distinguishes endpoint admission, transport, malformed
 response, unsupported continuation, token verification, grant mismatch and
-terminal AS refusal. A token that expires after its successful retention but
-before release is a local500 `server_error` in both direct and federated paths.
+terminal AS refusal. `ConsentRefused(PolicyError)` identifies local consent
+refusal before AS contact: `access_server` is the verified AS identity and
+`status` is `None`; neither endpoint discovery nor transport was called. Check
+this diagnostic when a new route is refused before any AS activity.
+
+A token that expires after its successful retention but before release is a
+local 500 `server_error` in both direct and federated paths.
 Neither path releases it or deletes its already committed receipt; cleanup must
 respect `retain_until`. The federated diagnostic is `ExpiredBeforeRelease`, with
 the AS's successful status retained for the operator.
@@ -664,11 +677,19 @@ proof key while switching Person/Auth credentials at the Resource.
 
 Federated retention uses `TokenRecord.person_server=Some(PS)` to separate the
 AS token's issuer/JTI from the PS binding namespace. None retains old local
-behavior; old schema1 JSON rows decode unchanged. MemoryStore and RedbStore
+behavior; old schema 1 JSON rows decode unchanged. MemoryStore and RedbStore
 validate the exact retained presented parent and commit the receipt atomically
 before release. Custom adapters must honor this field and the updated storetest
 contract; an older adapter is not federation-qualified. The PS's internal
 accountable person and directed identity remain stable across this exchange.
+If an AS reuses an issuer/JTI whose retained receipt names a different Person
+parent, the PS refuses the conflicting answer with `502 as_unreachable` and a
+host diagnostic. With the same Person token and otherwise identical verified
+context, a byte-identical equivalent grant may be accepted in another exchange.
+Auth carries neither a Resource challenge identifier nor a continuation
+identifier, so there is no cross-exchange binding check or global grant replay
+cache. Single terminal delivery applies to each continuation. Hosts own operation
+replay protection and application idempotency.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
 Missions, AS call chaining and subagents remain named gaps of this Core-scope
@@ -730,7 +751,9 @@ let audience = if request.method() == "POST" && request.uri().path() == "/token"
         .and_then(|t| ResourceToken::parse(&t).ok())
         .map(|t| t.unverified_claims().aud.clone())
 } else { None };
-let response = if audience.as_deref() == Some(AS) {
+let pending = request.uri().path().starts_with("/token/pending/")
+    && matches!(request.method().as_str(), "GET" | "POST" | "DELETE");
+let response = if pending || audience.as_deref() == Some(AS) {
     federated.handle(request)
 } else {
     direct.handle(request)
@@ -743,6 +766,13 @@ unknown audiences also reach its normal authenticated refusal (`aud` must equal
 PS in direct mode). This is a single selection, never a retry through direct
 issuance after an AS refusal. The adapter independently admits its AS before any
 network access. Bound request collection before routing.
+
+To enable deferred grants, configure `with_deferred` on the federated instance.
+Route **GET, POST and DELETE `/token/pending/*` to that same instance**, including
+queued clarification answers and cancellation. Pending requests have no original
+Resource token for audience selection; sending them to the direct instance loses
+access to the deferred custody. Keep the same external `signed_origin` and shared
+PS issuance store described above, with a separate PS continuation store.
 
 The executable/test verifies both grants, common person binding, exact shared
 JWKS and both retained receipts. It also submits a foreign-signed AS-directed
@@ -757,10 +787,13 @@ no outbound AS call.
 an authenticated 202/402 response from a host-admitted HTTPS endpoint. It accepts
 absolute or root-relative same-origin pending locations, rejects changes of
 Location during the session, and bounds the host deadline to one hour. Missing
-Retry-After uses five seconds;429 increases the interval by five seconds.
+Retry-After uses five seconds; 429 increases the interval by five seconds.
 The host supplies trusted Unix seconds, schedules work and sends the request
 returned by `session.request(&agent, now)`. That request is a signed GET with no
 original POST body. Calling early returns `PollError::TooEarly { at }`.
+Add a small scheduling margin when converting that whole-second timestamp into
+a sub-second timer; waking on a second boundary can otherwise arrive early and
+trigger `429` backoff. Respect the finite session deadline when scheduling.
 
 Pass the actual response to `session.accept(response, now)`. `None` keeps the
 session pending; `Some(response)` returns the terminal wire response and closes
@@ -775,13 +808,19 @@ actual response to the next `accept`; discard the session if the prepared answer
 is abandoned. This lets a subsequent identical question start a new round.
 An unanswered question keeps its original absolute timeout across repeated polls.
 A successful reply to an on-time answer may arrive after the old question timeout;
-the overall session deadline still bounds accepting that reply. A429/503 refusal
+the overall session deadline still bounds accepting that reply. A 429/503 refusal
 preserves the old question deadline for any answer retry. `session.cancel(&agent, now)` creates a signed DELETE; observe the
 server's result before reporting cancellation. Interaction URLs and codes are
 host inputs for directing a person; sanitize untrusted Markdown before display.
-Payment details are opaque host input. The current parser supports the
-WWW-Authenticate payment profile with an empty or JSON body; other payment
-protocol encodings need a separate parser. It never settles a bill.
+Payment details stay between the AS and the trusted PS host. The Agent sees
+Approval when the AS requests Payment or Claims; it receives no payment hint.
+`PendingResponse::payment_challenge()` returns `Ok(Some(PaymentChallenge))`
+for the supported WWW-Authenticate Payment profile, `Ok(None)` for a non-payment
+requirement, and an error for malformed or unsupported payment framing. The
+challenge has string fields `id`, `method`, `amount` and `currency`; only `id` is
+required, and the other fields are `Option<String>`. The host decides what the
+values mean and whether the admitted AS/provider has confirmed settlement.
+The parser accepts an empty or JSON payment body and never charges or pays.
 
 The shared `aauth_rust_core::continuation::ContinuationStore` contract exposes
 atomic insert/load/conditional replace or remove. AS and PS hosts must use
@@ -812,22 +851,168 @@ it is still that policy's responsibility to approve scopes and lifetime.
 For a PS, first configure its existing `Federation` adapter, then call
 `people.with_deferred(aauth_rust_person_server::DeferredConfig::new(store))?`.
 Use separate AS and PS stores or namespaces. Both configs expose `lifetime`
-(default300 seconds) and `retry_after` (default5 seconds); zero interval is
+(default 300 seconds) and `retry_after` (default 5 seconds); zero interval is
 useful only in controlled fixtures. Pending URLs use the existing host ID
 source: provide unique, unpredictable URL-safe IDs, not a production counter.
 The TLS example includes fresh random material in every pending ID.
 
-On an AS202/402, the PS returns202 with its own pending URL. Agent GET only reads
-PS custody. The trusted host calls `people.federation_pending(reference)?` to
-inspect the actual AS requirement and payment details. It settles a bill,
+On an AS 202 or 402, the PS returns 202 with its own pending URL. Payment and
+Claims map to Approval toward the Agent; the original AS requirement remains
+available only to the trusted PS host. Agent GET only reads PS custody. The
+host calls `people.federation_pending(reference)?` to inspect that AS requirement
+and its current remaining retry wait. It settles a bill,
 completes an interaction, supplies claims or waits for an external approver.
 Then `people.advance_federation(reference, FederationInput::Poll)?` performs one
 signed AS GET, or POSTs a queued Agent clarification answer. It never resends
 the original token POST. Respect AS Retry-After: an early host call returns
 `AdvanceError::NotReady`; the library does not sleep or retry. An initial requested
-answer can be submitted promptly, but a429/503 refusal delays all subsequent
-answer retries as well as GETs. Each consecutive429 adds five seconds to the
-persisted interval.
+answer can be submitted promptly, but a 429/503 refusal delays all subsequent
+answer retries as well as GETs. Each consecutive 429 adds five seconds to the
+persisted interval. An AS 503 uses its numeric or HTTP-date Retry-After, with
+five seconds when absent. Malformed or out-of-profile upstream retry values
+are bad AS answers and return `502 as_unreachable`. Agent-facing Retry-After
+also accounts for the remaining AS wait and the PS's configured minimum.
+
+The following helper performs one bounded host step. It is the exact source of
+[`deferred_host.rs`](crates/aauth-rust-person-server/examples/deferred_host.rs),
+checked with
+`cargo check --locked -p aauth-rust-person-server --example deferred_host`.
+Pass an already configured federated/deferred PS and its PS pending reference.
+The two callbacks must use real host evidence: settlement is confirmed by the
+admitted provider/AS, and approval by the host's authenticated approver or
+interaction state. Return `false` while waiting. Serialize work for each
+reference and make settlement idempotent by admitted AS identity plus bill ID;
+a repeated 402 must not charge twice. Bound callback I/O and runtime within the
+host job's deadline; the helper does not impose timeouts on host callbacks.
+
+```rust
+use aauth_rust_core::{
+    AgentKeyResolver,
+    continuation::{PaymentChallenge, PendingResponse, Requirement},
+};
+use aauth_rust_person_server::{
+    AdvanceError, FederationFailure, FederationInput, PersonServer, Policy, Store,
+};
+use http::StatusCode;
+use std::{error::Error, time::Duration};
+
+#[derive(Debug)]
+pub enum HostStep {
+    RetryAfter(Duration),
+    NeedsClaims(Vec<String>),
+    Terminal {
+        status: StatusCode,
+        diagnostic: Option<FederationFailure>,
+    },
+    Closed(AdvanceError),
+}
+
+// Run on a blocking worker. Serialize work for this reference, and make both
+// callbacks idempotent: another AS response can repeat the same requirement.
+pub fn host_step<K, S, P, C, I>(
+    people: &PersonServer<K, S, P, C, I>,
+    reference: &str,
+    settle_payment: impl FnOnce(&PendingResponse, &PaymentChallenge) -> Result<bool, Box<dyn Error>>,
+    approval_complete: impl FnOnce(&PendingResponse) -> Result<bool, Box<dyn Error>>,
+) -> Result<HostStep, Box<dyn Error>>
+where
+    K: AgentKeyResolver,
+    S: Store,
+    P: Policy,
+    C: Fn() -> i64,
+    I: Fn() -> String,
+{
+    let pending = match people.federation_pending(reference) {
+        Ok(pending) => pending,
+        Err(error @ (AdvanceError::Gone | AdvanceError::Expired)) => {
+            return Ok(HostStep::Closed(error));
+        }
+        Err(AdvanceError::NotReady) => return Ok(HostStep::RetryAfter(Duration::from_secs(1))),
+        Err(error) => return Err(error.into()),
+    };
+    // Whole-second clocks can straddle a boundary; keep a scheduling margin.
+    let retry = Duration::from_secs(pending.retry_after.saturating_add(1));
+    let ready = match &pending.requirement {
+        Requirement::Payment { .. } => {
+            let payment = pending
+                .payment_challenge()?
+                .ok_or("AS payment requirement has no Payment challenge")?;
+            // The host confirms settlement with its admitted provider/AS.
+            // Key its billing cache by admitted AS identity plus payment.id.
+            settle_payment(&pending, &payment)?
+        }
+        Requirement::Approval | Requirement::Interaction { .. } => {
+            // The host checks its authenticated approver/interaction state.
+            approval_complete(&pending)?
+        }
+        Requirement::Claims(names) => return Ok(HostStep::NeedsClaims(names.clone())),
+        // Poll also sends an Agent clarification answer already queued at PS.
+        Requirement::Clarification { .. } | Requirement::Waiting => true,
+    };
+    if !ready {
+        return Ok(HostStep::RetryAfter(retry));
+    }
+    let response = match people.advance_federation(reference, FederationInput::Poll) {
+        Ok(response) => response,
+        Err(AdvanceError::NotReady) => return Ok(HostStep::RetryAfter(retry)),
+        Err(error @ (AdvanceError::Gone | AdvanceError::Expired)) => {
+            return Ok(HostStep::Closed(error));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let status = response.status();
+    if [
+        StatusCode::ACCEPTED,
+        StatusCode::PAYMENT_REQUIRED,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ]
+    .contains(&status)
+    {
+        // Read the persisted interval after 429/503 backoff changed it.
+        let pending = match people.federation_pending(reference) {
+            Ok(pending) => pending,
+            Err(error @ (AdvanceError::Gone | AdvanceError::Expired)) => {
+                return Ok(HostStep::Closed(error));
+            }
+            Err(AdvanceError::NotReady) => {
+                return Ok(HostStep::RetryAfter(Duration::from_secs(1)));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        return Ok(HostStep::RetryAfter(Duration::from_secs(
+            pending.retry_after.saturating_add(1),
+        )));
+    }
+    // Keep diagnostics before framework conversion. No token is logged here.
+    // A terminal 200 is held at the PS pending URL for the Agent's next poll.
+    Ok(HostStep::Terminal {
+        status,
+        diagnostic: response.extensions().get::<FederationFailure>().cloned(),
+    })
+}
+
+fn main() {
+    println!("host_step compiled; supply a configured PS and real host callbacks to use it");
+}
+```
+
+The helper schedules no work itself and makes at most one signed AS request.
+On `RetryAfter`, arrange another step after that delay, within the host job's
+finite deadline. It rereads the persisted interval after 429/503 responses;
+`NotReady` also requires a later step. `Closed` stops host advancement. Stop on
+`Terminal` and inspect `diagnostic.access_server`, `status` and `reason` when a
+diagnostic is present. Remote detail text is untrusted and may be private; apply
+your logging policy. A terminal 200 is retained for Agent delivery, so keep
+serving the PS pending URL and let the Agent verify the final Auth token. The
+helper's `main` only confirms compilation; it does not compose a service or
+contact a payment provider. The complete TLS example exercises that composition.
+
+`NeedsClaims(names)` deliberately returns control to the host. Obtain those
+claims from a trusted source, then call `advance_federation` with
+`FederationInput::Claims(map)` and handle its response/errors using the same
+rules. A host-supplied clarification can use `FederationInput::Clarification`;
+the helper's Poll automatically sends an answer already queued by the Agent.
 
 Use `FederationInput::Claims(map)` to POST requested claims from a trusted source;
 `sub` is forbidden because the presented token already identifies the person.
@@ -842,12 +1027,12 @@ confirm completion; an Agent poll does not approve an interaction or a payment.
 
 `advance_federation` returns the actual AS pending response or the PS's verified
 terminal response. Inspect its `FederationFailure` extension for diagnostics
-before framework conversion. A200 here is available in retained PS custody;
+before framework conversion. A 200 here is available in retained PS custody;
 the Agent still obtains its terminal result through the PS pending URL. The PS
 verifies that grant again and confirms current bindings after final custody I/O
 before delivery. Its remaining `expires_in` uses the final clock; expiry or
 revocation during store publication/removal never releases a prepared token. One
-conditional consumer receives it; later GETs return410. Signed DELETE cancels
+conditional consumer receives it; later GETs return 410. Signed DELETE cancels
 both roles with one AS request, and consumes local custody. Transport failure
 reports failure even though local cancellation closes the PS continuation.
 

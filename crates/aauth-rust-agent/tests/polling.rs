@@ -258,3 +258,30 @@ fn on_time_answer_accepts_a_delayed_response_within_the_session_lifetime() {
         Err(PollError::Expired)
     ));
 }
+
+#[test]
+fn a_429_preserves_the_servers_longer_retry_after_minimum() {
+    let a = agent();
+    let mut session = PollSession::new(
+        "https://ps.example/token",
+        &pending(Requirement::Approval),
+        1000,
+        1100,
+    )
+    .unwrap();
+    session
+        .accept(
+            Response::builder()
+                .status(429)
+                .header("retry-after", "30")
+                .body(Vec::new())
+                .unwrap(),
+            1005,
+        )
+        .unwrap();
+    assert!(matches!(
+        session.request(&a, 1034),
+        Err(PollError::TooEarly { at: 1035 })
+    ));
+    assert!(session.request(&a, 1035).is_ok());
+}

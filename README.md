@@ -91,6 +91,22 @@ Structured Fields; the Agent then verifies it before exchanging credentials.
 For explicit client polling helpers and their current server-side limits, see
 [prepare Agent polls](USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls).
 
+## Deferred grants and host settlement
+
+With continuations enabled, an Access Server sends its `402 Payment` challenge
+to the Person Server. The trusted **Person Server host settles the payment**;
+the Agent receives `202 Approval` and polls the PS pending URL. Claims requests
+also stay host-side and appear to the Agent as Approval. This profile provides
+no Agent payment hint or Agent settlement operation.
+
+The host inspects `federation_pending`, obtains confirmed settlement, claims or
+external approval, then explicitly calls `advance_federation`. Agent polls only
+read PS custody and never advance the AS exchange. The
+[service guide](USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) includes
+a compile-checked host step, retry handling and the delivery/replay limits.
+The deferred four-party example above executes payment, approval and one terminal
+delivery over TLS with fixture settlement; it calls no payment provider.
+
 ## Use the libraries
 
 The following complete program issues a token, signs a request, verifies it,

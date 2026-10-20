@@ -9,12 +9,12 @@ unimplemented role surfaces as empty Rust crates.
 | --- | --- | --- |
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
 | `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
-| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots | JOSE |
+| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
-| `aauth-rust-agent` | One signed request using caller-owned credentials | Core, Signature-Key, JOSE |
+| `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions | Core, Signature-Key, JOSE |
 | `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions | Core, Signature-Key, JOSE |
-| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and immediate direct call chaining | Core, Signature-Key, JOSE |
-| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants | Core, Signature-Key, JOSE |
+| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining | Core, Signature-Key, JOSE |
+| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy | Core, Signature-Key, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
 Normal role dependencies never import one another; Resource dev-dependencies
@@ -79,13 +79,24 @@ and release. A federated retained record keeps AS issuer/JTI token identity and
 an explicit PS binding namespace. Old local records omit that optional field.
 The memory/redb contracts check ancestry, exact retries, revocation and reopen.
 
+AS and PS continuations use separate role-local stores. The PS exposes an AS
+Payment or Claims requirement only to its trusted host; the Agent receives
+Approval at the PS pending URL. The host confirms settlement, supplies trusted
+claims or obtains approval, then explicitly advances the AS exchange. Agent
+polls read PS custody without outbound AS I/O. Each continuation has one terminal
+delivery, while cross-exchange equivalent-grant reuse and HTTP request replay
+remain separate host concerns. The issued-token store is not a replay cache or
+a durable continuation adapter.
+
 ## Bytes and consequences
 
 JWS verification uses the original protected-header and payload segments. The
 verified Agent token retains the original compact string. Unknown additive Agent
 claims remain available to host policy; they are not rewritten as authority.
-Protocol functions perform no network I/O themselves. The explicit PS federation
-path invokes one host transport callback; it never polls or retries effects.
+Protocol functions perform no network I/O themselves. PS federation invokes its
+host transport callback during an explicit token request or continuation advance.
+Each advance sends at most one signed AS request; there is no background polling,
+automatic settlement or retry of application effects.
 
 The Resource HTTP profile accepts absolute HTTPS requests with buffered actual content,
 up to 1 MiB. It covers the four AAuth base components, query and Authorization

@@ -34,11 +34,11 @@ fn pending_requirements_preserve_host_inputs() {
             },
         ),
         (
-            "requirement=interaction; url=\"https://as.example/consent\"; code=\"abc\"",
+            "requirement=interaction; url=\"https://as.example/consent\"; code=\"C0DE8X42\"",
             json!({"status":"interacting"}),
             Requirement::Interaction {
                 url: "https://as.example/consent".into(),
-                code: "abc".into(),
+                code: "C0DE8X42".into(),
             },
         ),
         (
@@ -230,4 +230,118 @@ fn absent_retry_after_uses_the_protocol_default() {
             .retry_after,
         5
     );
+}
+
+#[test]
+fn interaction_urls_reject_queries_and_fragments_when_parsed() {
+    for url in [
+        "https://as.example/consent?secret=1",
+        "https://as.example/consent?",
+        "https://as.example/consent#fragment",
+    ] {
+        let field = format!("requirement=interaction; url=\"{url}\"; code=\"C0DE8X42\"");
+        assert!(
+            PendingResponse::parse(
+                "https://as.example/token",
+                &response(202, &field, json!({"status":"pending"})),
+            )
+            .is_err(),
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn interaction_urls_reject_queries_and_fragments_when_constructed() {
+    for url in [
+        "https://as.example/consent?secret=1",
+        "https://as.example/consent?",
+        "https://as.example/consent#fragment",
+    ] {
+        assert!(
+            PendingResponse::new(
+                "https://as.example/token",
+                "/pending/interaction",
+                5,
+                Requirement::Interaction {
+                    url: url.into(),
+                    code: "C0DE8X42".into(),
+                },
+            )
+            .is_err(),
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn interaction_codes_require_eight_crockford_symbols_when_parsed_and_constructed() {
+    for code in [
+        "",
+        "C0DE8X4",
+        "C0DE-8X4",
+        "--------",
+        "C0DE8X4I",
+        "C0DE8X4L",
+        "C0DE8X4O",
+        "C0DE8X4U",
+        "C0DE8X4u",
+        "C0DE8X4_",
+        "C0DE 8X42",
+        "C0DE8X42=",
+    ] {
+        let requirement = Requirement::Interaction {
+            url: "https://as.example/consent".into(),
+            code: code.into(),
+        };
+        let field =
+            format!("requirement=interaction; url=\"https://as.example/consent\"; code=\"{code}\"");
+        assert!(
+            PendingResponse::parse(
+                "https://as.example/token",
+                &response(202, &field, json!({"status":"pending"})),
+            )
+            .is_err(),
+            "parsed {code}"
+        );
+        assert!(
+            PendingResponse::new(
+                "https://as.example/token",
+                "/pending/interaction",
+                5,
+                requirement,
+            )
+            .is_err(),
+            "constructed {code}"
+        );
+    }
+}
+
+#[test]
+fn interaction_codes_preserve_case_and_optional_hyphens() {
+    for code in [
+        "C0DE8X42",
+        "c0de8x42",
+        "C0de-8x42",
+        "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
+    ] {
+        let requirement = Requirement::Interaction {
+            url: "https://as.example/consent".into(),
+            code: code.into(),
+        };
+        let pending = PendingResponse::new(
+            "https://as.example/token",
+            "/pending/interaction",
+            5,
+            requirement.clone(),
+        )
+        .unwrap();
+        assert_eq!(pending.requirement, requirement);
+        assert_eq!(
+            PendingResponse::parse("https://as.example/token", &pending.response().unwrap())
+                .unwrap()
+                .requirement,
+            requirement,
+        );
+    }
 }

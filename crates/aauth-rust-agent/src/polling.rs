@@ -201,7 +201,19 @@ impl PollSession {
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
                 self.answering = false;
                 let interval = if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                    self.pending.retry_after.saturating_add(5)
+                    self.pending.retry_after.saturating_add(5).max(
+                        response
+                            .headers()
+                            .get("retry-after")
+                            .map(|h| {
+                                h.to_str()
+                                    .ok()
+                                    .and_then(|s| s.parse::<u64>().ok())
+                                    .ok_or(PollError::InvalidResponse)
+                            })
+                            .transpose()?
+                            .unwrap_or(0),
+                    )
                 } else {
                     response
                         .headers()

@@ -96,9 +96,11 @@ identity. The AS verifies both, the Resource challenge and its actual presented
 credential before resource policy. The PS independently verifies the returned
 AS grant and commits exact retained ancestry before release. Use explicit
 federated Resource/Agent APIs to pin AS issuer and `aauth-access.json`, including
-when PS=AS. An AS 401 concerns the PS service proof; it becomes `as_unreachable`,
-not an Agent signature failure. Other well-formed terminal AS errors relay their
-status/error in a new PS problem body. The PS does not return unverified grants.
+when PS=AS. An AS 401 may refuse the PS service proof or another AS check. A
+well-formed terminal AS problem relays its status/error, including 401, in a new
+PS problem body. Its signature diagnostics stay host-side because they describe
+the PS-to-AS request. Malformed or unverifiable delivery becomes
+`502 as_unreachable`. The PS does not return unverified grants.
 
 The host `Federation` adapter must admit the AS before discovery, validate exact
 metadata issuer, enforce HTTPS certificates/SNI, bound request/response collection,
@@ -108,6 +110,30 @@ network behavior. Consent is explicit and defaults to denial. AS grants and PS
 retention do not prevent request replay or deduplicate application effects.
 Merged JWKS and explicit dispatch are required when roles share an origin; do
 not infer AS authority solely because an issuer string equals the PS identifier.
+
+With deferred federation, AS Payment and Claims requirements stay with the
+trusted PS host; the Agent receives Approval and cannot settle through its
+pending URL. Confirm settlement and approval using admitted host evidence.
+Make billing idempotent by admitted AS identity and bill ID, since another 402
+can repeat the same payment challenge. The typed payment accessor parses strings;
+it does not establish a payment provider's authority or prove settlement.
+
+One terminal delivery is enforced per continuation. It does not prevent an AS
+from reusing a byte-identical equivalent grant across exchanges that use the
+same Person token and matching verified context: Auth has no Resource challenge
+or continuation identifier. Reusing an issuer/JTI with a different retained
+Person parent conflicts and is refused as `502 as_unreachable`. There is no
+global grant replay cache. Hosts still own operation replay and idempotency.
+
+There is also no pending-request replay cache. An Agent GET captured and replayed
+within the accepted 60-second proof window can consume the single terminal
+response, leaving the legitimate Agent with `410 Gone`. The token remains
+proof-of-possession bound to that Agent's key; a captured GET alone does not let
+another holder use it. Enforce any required replay refusal before the pending
+handler consumes custody. Use unpredictable unique pending IDs, protect the
+continuation store's compact credentials, and reconcile uncertain transitions
+without blindly retrying settlement or delivery. Memory continuation stores
+provide neither process restart durability nor automatic recovery.
 
 ## Supported code
 

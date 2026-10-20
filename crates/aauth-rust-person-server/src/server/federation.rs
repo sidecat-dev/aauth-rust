@@ -21,7 +21,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if presented.kind == TokenKind::Auth && presented.issuer != r.aud {
             return Err(Failure::parameter("invalid_presented_token"));
         }
-        self.policy.consent(context).map_err(Failure::policy)?;
+        self.policy.consent(context).map_err(|error| {
+            Failure::policy(error).with_federation(FederationFailure {
+                access_server: r.aud.clone(),
+                status: None,
+                reason: Reason::ConsentRefused(error),
+            })
+        })?;
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
         self.binding(&retained.principal, BindingContext::Presented)?
@@ -202,9 +208,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         )?;
         record.token.reference.issuer = c.iss.clone();
         record.person_server = Some(self.config.issuer.clone());
-        self.store
-            .commit(record, false)
-            .map_err(|e| store_issuance_failure(e, BindingContext::Presented))?;
+        self.store.commit(record, false).map_err(|e| match e {
+            StoreError::Conflict => failed(Reason::InvalidGrant),
+            other => store_issuance_failure(other, BindingContext::Presented),
+        })?;
         self.binding(&retained.principal, BindingContext::Presented)?
             .ok_or_else(Failure::internal)?;
         let released = (self.clock)();

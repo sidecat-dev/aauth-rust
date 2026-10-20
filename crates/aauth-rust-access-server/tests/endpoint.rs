@@ -14,6 +14,7 @@ use std::sync::{
 };
 const AS: &str = "https://as.example";
 const PS: &str = "https://ps.example";
+const OTHER_PS: &str = "https://other-ps.example";
 const RESOURCE: &str = "https://resource.example";
 #[derive(Clone)]
 struct Keys;
@@ -21,6 +22,7 @@ impl AgentKeyResolver for Keys {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         let seed = match (issuer, dwk, kid) {
             (PS, "aauth-person.json", "ps") => 3,
+            (OTHER_PS, "aauth-person.json", "ps") => 6,
             (AS, "aauth-access.json", "as") => 4,
             (RESOURCE, "aauth-resource.json", "resource") => 5,
             ("https://ap.example", "aauth-agent.json", "ap") => 1,

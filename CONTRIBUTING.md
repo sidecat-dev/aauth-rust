@@ -22,6 +22,10 @@ cargo run --locked -p aauth-rust-resource --example library
 cargo run --locked -p aauth-rust-resource --example axum
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
+cargo run --locked -p aauth-rust-resource --example four-party
+cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
+cargo run --locked -p aauth-rust-person-server --example mixed-grants
+cargo check --locked -p aauth-rust-person-server --example deferred_host
 cargo run --locked -p aauth-rust-person-server-redb --example contracts
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 git diff --check
@@ -39,6 +43,14 @@ remaining limitation in the merge request. Update public docs when supported
 behavior changes. Keep development diaries and review transcripts outside the
 product repository. API and package names may change during the alpha series;
 there are no supported releases yet.
+
+Keep the service guide's host-step code identical to `examples/deferred_host.rs`
+in the Person Server crate, and compile-check that example after editing it.
+The helper needs host callbacks and a configured PS; the deferred four-party
+example supplies the executable TLS journey. Documentation checks must preserve
+the distinction between fixture settlement and a real payment provider, delivery
+per continuation and cross-exchange replay, and memory recomposition and process
+restart durability.
 
 Before filing specification feedback with editors, reproduce the behavior in
 both this implementation and [aauth-go](https://gitlab.com/sidecat-dev/aauth-go).
