@@ -4,6 +4,11 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
+This development branch carries `bc5336efa3c29e9f604c9a4dbd9df7d7dba941a9`
+as the explicit Access Server/four-party prerequisite. That Rust05 candidate is
+in its separate gates; this branch does not imply its acceptance or merge.
+Rebase this branch if those gates change the prerequisite.
+
 Current engineer evidence: **192 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
