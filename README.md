@@ -1,76 +1,179 @@
 # AAuth for Rust
 
-`aauth-rust` implements the AAuth protocol family (agent authorization: Agent, Agent Provider, Person Server, Resource, Access Server; R3, Events, Budgets, Bootstrap; HTTP Signature Keys) as a Rust workspace, developed alongside [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) against the same pinned editor sources, so that findings can be checked in both before they are raised with the editors.
+Rust libraries for [AAuth](https://github.com/dickhardt/AAuth), developed alongside
+[aauth-go](https://gitlab.com/sidecat-dev/aauth-go). The current subset lets an
+Agent prove its identity directly to a Resource, using an Agent Provider's
+signed token and an HTTP request signature. Person-mediated authorization and
+the other AAuth roles are future work. [CONFORMANCE.md](CONFORMANCE.md) names
+the tested behavior and limits.
 
-Status: first development cycle. The direct Agent-identity journey runs locally
-over certificate-verified loopback TLS. This is a bounded implementation;
-[CONFORMANCE.md](CONFORMANCE.md) lists the executing behavior and gaps.
+The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
+is the project home. Development forks may carry changes before upstream accepts
+them. The commands below start in a development checkout containing this README
+and `Cargo.toml`. No crate or release binary has been published yet.
 
-Principles: local-first testing, then remote; easy to stand up and build on; small crates with clear boundaries; conformance stated only where a test executes it.
-
-License: MIT.
-
-## Try it
+## Run the local example
 
 Install [Rust with rustup](https://rustup.rs/) and a platform C compiler for the
-example's TLS provider (Linux: `build-essential`; macOS: Xcode Command Line Tools;
-Windows: Visual Studio C++ Build Tools). Protocol library builds use pure Rust.
-The checkout selects Rust 1.99.1; Cargo downloads dependencies on the first run.
+test/example TLS provider: Linux `build-essential`, macOS Xcode Command Line
+Tools, or Windows Visual Studio C++ Build Tools. Library builds use pure Rust
+dependencies. The checkout pins Rust 1.99.1; on first use rustup downloads that
+toolchain, rustfmt and clippy (several hundred MB), and Cargo downloads crates.
 
 ```sh
-git clone https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust.git
-cd aauth-rust
-git switch wc-aauth-rust-01
-cargo test --locked
-cargo run --locked -p aauth-resource --example direct-identity
+cargo test --workspace --locked
+cargo run --locked -p aauth-rust-resource --example direct-identity
 ```
 
-The example starts an Agent Provider and Resource on randomly assigned loopback
-ports, generates fresh keys and certificates, retrieves AP metadata/JWKS, and
-executes 14 checks. No account, DNS change, privileged port, existing certificate
-or external service is needed. Typical output includes:
+This example generates fresh keys and certificates, starts an Agent Provider
+and Resource on random loopback ports, retrieves public discovery documents,
+and runs 14 wire/TLS checks. It needs no account, DNS change, privileged port,
+existing certificate or external service. It uses a fixed clock for repeatable
+boundary cases and closes its listeners and threads on exit. Output includes:
 
 ```text
 unsigned: 401 requirement=agent-token
 valid-identity: 200 aauth:Agent@ap.example
+hwk-proof: 200 pseudonymous proof verified
+hwk-identity: 401 error=unsupported_scheme
 tampered-signature: 401 error=invalid_signature
 policy-denial: 403 no signature diagnostics
+untrusted-tls: 0 certificate refused
 ```
 
-The full sequence also checks `hwk` proof, token expiry, missing key coverage,
-future timestamps, a wrong confirmation key, and certificate refusal. It uses a
-fixed protocol clock for reproducible boundary cases. All listeners and threads
-close before it exits.
+The proof-only endpoint accepts an inline public key; the identity endpoint
+requires an Agent token. Thus `hwk-proof` and `hwk-identity` have different
+outcomes. Status `0` means the TLS handshake failed before any HTTP response.
 
-## Build on it
+## Use the libraries
 
-- `aauth-agent-provider`: issue a host-approved Agent token and publish discovery.
-- `aauth-agent`: retain the exact token and sign an HTTP request once.
-- `aauth-resource`: verify proof and token before calling your admission policy.
-- `aauth-core`, `aauth-signature-key`, `aauth-jose`: reusable protocol layers.
+The following complete program issues a token, signs a request, verifies it,
+and applies admission policy in process. Run its exact source with
+`cargo run --locked -p aauth-rust-resource --example library`.
 
-The [example composition](crates/aauth-resource/examples/support/mod.rs) shows
-these APIs together. Replace its transport, pinned issuer snapshot and policy
-with your application's dependencies. Do not use its small HTTP codec as a
-production server. Host applications own issuer trust, egress admission, JWKS
-refresh/caching, replay policy, clocks, enrollment and key storage.
+```rust
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
+use aauth_rust_jose::SigningKey;
+use aauth_rust_resource::{AgentIdentityResource, Decision};
+use http::Request;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for the crate boundaries and
-[SPECIFICATIONS.md](SPECIFICATIONS.md) for exact sources and digests. Workcycle
-status and unresolved questions are in [NOTES-wc-aauth-rust-01.md](NOTES-wc-aauth-rust-01.md).
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let issuer = "https://ap.example";
+    let provider = AgentProvider::new(issuer, "ap-1", SigningKey::generate())?;
+    let agent_key = SigningKey::generate();
+    let token = provider.issue(&AgentClaims {
+        iss: issuer.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent@ap.example".into(),
+        jti: "example-issuance-1".into(),
+        iat: now,
+        exp: now + 300,
+        cnf: Confirmation {
+            jwk: agent_key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    // This application trusts this provider; a network host supplies admitted documents.
+    let keys = AgentProviderKeys::from_documents(issuer, &provider.metadata()?, &provider.jwks()?)?;
+    let resource = AgentIdentityResource::new(
+        "https://resource.example/whoami",
+        keys,
+        |token: &VerifiedAgentToken| token.claims().sub == "aauth:Agent@ap.example",
+    )?;
+    let agent = Agent::new(agent_key, token)?;
+    let mut request = Request::builder()
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())?;
+    agent.sign(&mut request, now)?;
+    match resource.authorize(&request, now) {
+        Decision::Granted(token) => println!("verified {}", token.claims().sub),
+        other => return Err(format!("request refused: {}", other.into_response().status()).into()),
+    }
+    Ok(())
+}
+```
 
-## Portability
+For a separate application, use versioned path dependencies until the alpha
+packages are published. Adjust these paths to your checkout:
+
+```toml
+[dependencies]
+aauth-rust-agent = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-resource" }
+http = "1"
+```
+
+Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
+secret material; the constant seeds in tests are fixtures. Assign a unique `jti`
+for each real issuance. Put the Agent key's public JWK in `cnf.jwk`, then move
+the same private key into `Agent::new`. Call `sign` last, after the URI and other
+headers are final. It replaces previous signature headers; changing covered
+values afterward invalidates the signature. Signing never sends or retries.
+
+Configure each Resource with its own HTTPS endpoint (authority and path);
+never copy that configuration from the client Host header. The library refuses
+requests for another endpoint before invoking policy, even if their signatures
+are valid. Signed query values may vary at the configured path.
+
+All times are **Unix seconds**, not milliseconds. Expiry has no leeway; the
+Resource accepts signature `created` within ±60 seconds and refuses `iat` more
+than 60 seconds ahead. Core JWT verification alone does not use `iat` as a
+validity check. The AP issues tokens lasting at most 24 hours; verification
+does not turn that recommendation into a mandatory lifetime ceiling for other
+issuers. This request profile requires a bodyless absolute HTTPS URI.
+
+## Trust and vocabulary
+
+The application chooses trusted Agent Providers. It obtains metadata and public
+keys over admitted, verified HTTPS, then gives the library those bytes as an
+immutable snapshot. `from_documents` checks issuer equality and key selection;
+it does not decide to trust an arbitrary issuer or fetch anything. Production
+hosts own destination admission, timeouts, cache lifetime and refresh (including
+the draft's once-per-minute fetch floor), key storage, enrollment, revocation,
+replay policy and clocks. See [SECURITY.md](SECURITY.md).
+
+| Name | Meaning here |
+| --- | --- |
+| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (represents a person), Access Server (authorizes access); only AP and direct Resource identity execute. |
+| `dwk` | Discovery well-known document name; `aauth-agent.json` locates AP metadata at `{iss}/.well-known/aauth-agent.json`. |
+| JWK, JWKS, JWS | JSON Web Key, set of public JWKs, JSON Web Signature. `kid` selects an issuer key from its JWKS. |
+| `hwk`, `jwt`, `cnf.jwk` | Signature-Key schemes conveying an inline public key or a compact token; the token's confirmation JWK binds its holder's request-signing key. |
+| `sig`, coverage, SFV | The selected signature label, the request values bound by its signature, and Structured Field Values used to encode signature headers. The same label correlates Signature-Key, Signature-Input and Signature. |
+| Direct Agent identity | An Agent proves itself directly to a Resource, without a Person Server in the exchange. The loopback example executes this complete exchange. |
+| R3 | Rich Resource Requests, an AAuth companion outside the implemented subset. |
+
+A `Decision` grants verified identity, requests an Agent token (`401` with
+`AAuth-Requirement`), reports a signature failure (`401` with `Signature-Error`),
+or denies host policy (`403`). Algorithm/scheme failures include
+`Accept-Signature-Alg`/`Accept-Signature-Scheme`. Failures have Problem Details
+bodies; policy denials contain no signature diagnostics. Local Rust error
+messages explain what to fix; `.code()` returns the stable protocol code.
+
+## Build and contribute
+
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the six crate boundaries;
+[SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
+[CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
 
 ```sh
 rustup target add aarch64-unknown-linux-gnu
-cargo build --locked --target aarch64-unknown-linux-gnu
+cargo build --workspace --lib --locked --target aarch64-unknown-linux-gnu
 ```
 
-That command builds the library workspace without a cross C compiler. The
-example uses rustls/ring as a development-only exception to pure Rust crypto;
-cross-building the TLS executable needs the target C toolchain and linker.
-[CI](.gitlab-ci.yml) defines native Linux x86_64/ARM64 test and executable-artifact
-jobs. macOS and Windows jobs are available when `AAUTH_NATIVE_RUNNERS=1` and the
-corresponding runners are enabled. Native Linux x86_64 and ARM64 tests and
-optimized examples pass in [pipeline 2966578100](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/pipelines/2966578100).
-macOS and Windows execution remains unverified. No release is published.
+This library cross-build needs no cross C compiler. Tests and the TLS example
+use rustls/ring as a development dependency; ring compiles C and assembly, so
+cross-building those targets needs the target C compiler and linker.
+[CI](.gitlab-ci.yml) runs native Linux x86_64 and ARM64 tests and produces demo
+binaries. macOS and Windows jobs are opt-in with `AAUTH_NATIVE_RUNNERS=1` when
+runners are available; execution on those platforms is unverified. The tested
+toolchain is 1.99.1 and the declared minimum is 1.99. License: [MIT](LICENSE).

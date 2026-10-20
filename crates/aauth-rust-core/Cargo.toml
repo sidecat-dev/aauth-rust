@@ -1,0 +1,20 @@
+[package]
+name = "aauth-rust-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/aauth-rust-core"
+description = "AAuth Agent identifiers, token verification and trusted issuer key snapshots"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+thiserror.workspace = true

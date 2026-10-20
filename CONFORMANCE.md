@@ -1,23 +1,24 @@
 # Executing behavior
 
-Development cycle `wc-aauth-rust-01`, 2026-10-20. This is not complete AAuth or
+As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **26 Rust tests passed, 0 failed**, including one TLS
+Current engineer evidence: **48 integration tests passed, 0 failed**, 47 protocol/role tests plus one TLS
 integration test with **14 wire/TLS checks**. The executable example runs that
-same composition. A check is not counted as a separate Rust test.
+same composition. A wire check is not counted as a separate Rust test. One additional rustdoc test
+executes the unsigned Resource challenge.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
-| RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-jose/tests/jose.rs` (5 tests, including RFC 8032 empty-message signature vector) |
+| RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-signature-key/tests/proofs.rs` (8 tests), TLS journey |
+| Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (15 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Bodyless requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window | Proof tests, independently stated signature-base fixture |
-| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-core/tests/agent_tokens.rs` (7 tests) |
+| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (13 tests) |
 | AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
-| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; denial after valid authentication | `aauth-resource/tests/identity.rs` (5 tests), TLS journey |
-| Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
+| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; configured authority/path binding before policy; denial after valid authentication | `aauth-rust-resource/tests/identity.rs` (10 tests), TLS journey |
+| Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
 
 The 14 checks are AP metadata, AP JWKS, unsigned challenge, accepted identity,
 accepted pseudonymous `hwk` proof, `hwk` identity scheme rejection, tampered signature,
@@ -40,6 +41,9 @@ turn an `hwk` key into an AAuth identity.
   Content-Digest, component parameters, general field canonicalization, nonce
   replay storage, `keyid` and complete negotiation are absent. `keyid` is refused
   explicitly rather than guessed. The `alg` signature parameter is ignored.
+- The AP follows the Agent-token 24-hour lifetime SHOULD as an issuance limit.
+  Core/Resource verification does not impose that recommendation as a hard
+  ceiling on other issuers. Hosts can enforce a stricter lifetime in policy.
 - The Resource applies the optional future-`iat` refusal at its 60-second proof
   window. Core token verification alone does not treat `iat` as validity.
   Query coverage is an additional local requirement when a query is present.
@@ -47,9 +51,9 @@ turn an `hwk` key into an AAuth identity.
   JWKS cache lifetime, once-per-minute fetch floor and refresh policy. The local
   journey fetches one configured AP snapshot and reuses it; it is not an open
   Internet discovery/cache client.
-- No external-peer or cross-implementation run, general security audit,
-  different-vendor review or cold QA has passed yet. Findings must be checked in
-  aauth-go before being filed with editors.
+- No external-peer or cross-implementation run or general security audit has
+  passed. Review findings are not conformance evidence unless executed by the
+  cited tests. Findings must be checked in aauth-go before filing with editors.
 
 ## Build evidence
 
@@ -57,13 +61,8 @@ Local host: Linux x86_64, Rust 1.99.1. `cargo test --locked`, the optimized TLS
 example, formatting and clippy with warnings denied pass. The library workspace
 also cross-builds with `cargo build --locked --target aarch64-unknown-linux-gnu`.
 
-[Pipeline 2966578100](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/pipelines/2966578100)
-passed at code commit `8dbf5c958d35b82576cf568349bb0cabc315da7f`:
-
-| Native platform | Job | Evidence |
-| --- | --- | --- |
-| Linux x86_64 | [17308800499](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/jobs/17308800499) | Formatting, clippy, 26 tests, optimized executable build and 14-check run; binary archive uploaded |
-| Linux ARM64 | [17308800500](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/jobs/17308800500) | Same checks run natively; ARM64 binary archive uploaded |
-
-Artifacts expire in 14 days. These are demo build artifacts, not a published
-release. macOS and Windows jobs remain opt-in and have not executed.
+[CI](.gitlab-ci.yml) runs the suite and optimized TLS example natively on Linux
+x86_64 and ARM64 and retains per-target demo binaries for 14 days. These are
+build artifacts, not a published release. macOS and Windows jobs are opt-in;
+execution on those platforms remains unverified. To verify packaging without
+uploading crates, run `cargo publish --workspace --dry-run --locked`.

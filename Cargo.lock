@@ -3,29 +3,29 @@
 version = 4
 
 [[package]]
-name = "aauth-agent"
-version = "0.1.0"
+name = "aauth-rust-agent"
+version = "0.1.0-alpha.1"
 dependencies = [
- "aauth-core",
- "aauth-jose",
- "aauth-signature-key",
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
  "http",
 ]
 
 [[package]]
-name = "aauth-agent-provider"
-version = "0.1.0"
+name = "aauth-rust-agent-provider"
+version = "0.1.0-alpha.1"
 dependencies = [
- "aauth-core",
- "aauth-jose",
+ "aauth-rust-core",
+ "aauth-rust-jose",
  "serde_json",
 ]
 
 [[package]]
-name = "aauth-core"
-version = "0.1.0"
+name = "aauth-rust-core"
+version = "0.1.0-alpha.1"
 dependencies = [
- "aauth-jose",
+ "aauth-rust-jose",
  "serde",
  "serde_json",
  "thiserror",
@@ -33,8 +33,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "aauth-jose"
-version = "0.1.0"
+name = "aauth-rust-jose"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -46,14 +46,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "aauth-resource"
-version = "0.1.0"
+name = "aauth-rust-resource"
+version = "0.1.0-alpha.1"
 dependencies = [
- "aauth-agent",
- "aauth-agent-provider",
- "aauth-core",
- "aauth-jose",
- "aauth-signature-key",
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
  "http",
  "httparse",
  "rcgen",
@@ -62,10 +62,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "aauth-signature-key"
-version = "0.1.0"
+name = "aauth-rust-signature-key"
+version = "0.1.0-alpha.1"
 dependencies = [
- "aauth-jose",
+ "aauth-rust-jose",
  "base64",
  "http",
  "sfv",

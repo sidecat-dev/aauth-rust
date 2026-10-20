@@ -1,0 +1,20 @@
+[package]
+name = "aauth-rust-signature-key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/aauth-rust-signature-key"
+description = "Bodyless HTTP Message Signatures with inline Ed25519 keys and JWT key conveyance"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+http.workspace = true
+sfv.workspace = true
+base64.workspace = true
+thiserror.workspace = true

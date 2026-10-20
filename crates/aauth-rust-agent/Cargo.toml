@@ -1,0 +1,19 @@
+[package]
+name = "aauth-rust-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://docs.rs/aauth-rust-agent"
+description = "Sign AAuth Agent requests using caller-owned keys and exact token bytes"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+aauth-rust-core.workspace = true
+aauth-rust-signature-key.workspace = true
+http.workspace = true
