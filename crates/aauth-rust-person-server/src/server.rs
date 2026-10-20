@@ -278,7 +278,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.split(';').next())
             .map(str::trim)
-            != Some("application/json")
+            .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
         {
             return Err(Failure::parameter("invalid_request"));
         }
@@ -419,11 +419,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         .map_err(Failure::policy)?;
         validate_person(&person)?;
         if binding.is_some_and(|binding| binding.person_id != person.id)
-            || upstream.as_ref().is_some_and(|up| {
-                up.context.record.person_id != person.id || up.token.sub == person.subject
-            })
+            || upstream
+                .as_ref()
+                .is_some_and(|up| up.context.record.person_id != person.id)
         {
             return Err(Failure::internal());
+        }
+        if upstream
+            .as_ref()
+            .is_some_and(|up| up.token.sub == person.subject)
+        {
+            return Err(Failure::policy(PolicyError::Denied));
         }
         let now = (self.clock)();
         check_agent_current(&agent, now)?;

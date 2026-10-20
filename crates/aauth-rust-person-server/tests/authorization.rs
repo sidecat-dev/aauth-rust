@@ -796,10 +796,107 @@ fn copied_upstream_subject_is_refused_before_a_downstream_token_is_released() {
     let (_, upstream) = original(&f, &s);
     f.host.mode.store(9, Ordering::SeqCst);
     let response = f.person(&s, &agent(true), INVENTORY, Some(&upstream));
-    assert_eq!(response.status(), 500);
-    assert_eq!(output(&response)["error"], "server_error");
+    assert_eq!(response.status(), 403);
+    assert_eq!(output(&response)["error"], "access_denied");
+    assert!(!response.headers().contains_key("signature-error"));
     assert!(output(&response).get("person_token").is_none());
     assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.ids.load(Ordering::SeqCst), 2);
+    assert!(
+        f.store
+            .binding(
+                PS,
+                &AgentIdentity {
+                    issuer: ORDERS.into(),
+                    subject: "aauth:Orders@orders.example".into(),
+                }
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+
+fn signed_json(agent: &Agent, path: &str, body: Value, content_type: &str) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("{PS}{path}"))
+        .header("content-type", content_type)
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    agent.sign(&mut request, 1000).unwrap();
+    request
+}
+
+#[test]
+fn json_media_type_is_case_insensitive_without_normalizing_signed_header_bytes() {
+    for media_type in ["Application/JSON", "APPLICATION/json; charset=UTF-8"] {
+        let f = Fixture::new();
+        let s = f.server(900);
+        let a = agent(false);
+        let request = signed_json(&a, "/person", json!({"resource":ORDERS}), media_type);
+        let person = compact(&s.handle(&request), "person_token");
+        let challenge = resource(&a, &person, "orders.read", |_| {});
+        let request = signed_json(
+            &a,
+            "/token",
+            json!({"resource_token":challenge,"presented_token":person}),
+            media_type,
+        );
+        compact(&s.handle(&request), "auth_token");
+        assert_eq!(f.host.bind_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 1);
+        let mut changed = request;
+        changed
+            .headers_mut()
+            .insert("content-type", "application/json".parse().unwrap());
+        let refused = s.handle(&changed);
+        assert_eq!(refused.status(), 401);
+        assert_eq!(
+            refused.headers()["signature-error"],
+            "error=invalid_signature"
+        );
+        assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn identical_auth_exchange_can_issue_distinct_retained_tokens_for_one_resource_challenge() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let a = agent(false);
+    let person = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    let challenge = resource(&a, &person, "orders.read", |_| {});
+    let request = signed_json(
+        &a,
+        "/token",
+        json!({"resource_token":challenge,"presented_token":person}),
+        "application/json",
+    );
+    let first = compact(&s.handle(&request), "auth_token");
+    let second = compact(&s.handle(&request), "auth_token");
+    let first = AuthToken::parse(&first)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    let second = AuthToken::parse(&second)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_ne!(first.claims().jti, second.claims().jti);
+    assert_eq!(first.claims().aud, second.claims().aud);
+    assert_eq!(first.claims().scope, second.claims().scope);
+    for auth in [first, second] {
+        assert!(
+            f.store
+                .token(&TokenReference {
+                    issuer: PS.into(),
+                    jti: auth.claims().jti.clone()
+                })
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 2);
 }
 
 #[test]

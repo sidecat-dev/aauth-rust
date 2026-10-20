@@ -207,7 +207,9 @@ than exact replays, so choose that policy with your application's concurrency in
 
 In a chain, replaying the same upstream POST can start a **whole second downstream
 chain**: new PS Person/Auth issuances, another downstream call and another
-application effect. Establish application idempotency at the intermediary
+application effect. The TLS replay regression sends the exact authorized POST
+twice and observes two Orders effects and two Inventory effects. Establish
+application idempotency at the intermediary
 **before** requesting downstream credentials or dispatching work. Bind a signed
 operation key to the authenticated caller and request content, atomically reserve
 it, and retain the result for retries. Exact-proof replay detection is another
@@ -246,6 +248,9 @@ configured signed authority and verified TLS names. Invalid configuration fails
 at construction with `invalid_configuration`. PS JSON POSTs require covered
 Content-Type and Content-Digest. Send `application/json` and sign after populating
 the actual bytes; the Agent helper supplies the digest and coverage automatically.
+Media type matching ignores ASCII case and accepts parameters, such as
+`Application/JSON; charset=utf-8`. Signature verification still covers the original
+header bytes: changing only Content-Type case after signing invalidates the proof.
 
 Implement `Policy::bind_person` using host-authenticated evidence and the verified
 Agent identity. Login hints and tenant parameters are signed Agent assertions,
@@ -279,6 +284,13 @@ Signature-Error. The PS checks lineage before policy, caps parent lifetimes,
 commits retained state, resamples its trusted clock and only then releases tokens.
 A Resource challenge must still be current at exchange; its five-minute lifetime
 does not cap the issued Auth token, whose other parent bounds still apply.
+
+A Resource token is a signed challenge, not a one-use exchange code. The draft
+does not require consuming it after an Auth grant. Repeating the same valid
+`/token` request reruns host policy and can issue another Auth token with a fresh
+`jti`, the same audience and scopes, and the same parent-expiry bounds. Both
+issuances are retained. This does not make an application operation idempotent;
+the host's operation key and stored result govern application retries.
 
 A presented credential missing its exact retained issuance, changed after
 issuance, or issued to another Agent returns `invalid_presented_token`. A
@@ -403,7 +415,8 @@ issuer as Resource metadata. Host resolution must obtain keys through that
 `aauth-agent.json`, with admitted verified discovery, to establish origin
 ownership. An injected key resolver is a trust boundary, not proof by itself
 that any network fetch occurred. Return stable, downstream-directed subjects
-from host policy; the PS rejects copying the immediate upstream subject but
+from host policy; the PS refuses copying the immediate upstream subject with
+`403 access_denied` through the typed policy-denial path. It
 does not derive pairwise IDs or prevent every cross-Resource reuse for the host.
 
 The scoped, missionless profile requires a nonempty Core scope string and

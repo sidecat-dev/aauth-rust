@@ -15,3 +15,13 @@ fn tls_person_authorization_and_chaining_change_application_state_once() {
     assert!(!transcript.intermediary_has_binding);
     assert!(transcript.untrusted_tls_refused);
 }
+
+#[test]
+fn replaying_identical_authorized_post_runs_a_second_complete_chain_without_host_idempotency() {
+    let transcript = journey::run_replayed().unwrap();
+    assert_eq!(transcript.authorized_status, 200);
+    assert_eq!(transcript.tampered_status, 401);
+    assert_eq!(transcript.order_count, 2);
+    assert_eq!(transcript.inventory_count, 2);
+    assert!(!transcript.intermediary_has_binding);
+}

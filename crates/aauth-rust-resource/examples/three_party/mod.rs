@@ -265,6 +265,15 @@ fn downstream(
 }
 
 pub fn run() -> Result<Transcript> {
+    run_requests(1)
+}
+
+#[cfg(test)]
+pub fn run_replayed() -> Result<Transcript> {
+    run_requests(2)
+}
+
+fn run_requests(authorized_requests: usize) -> Result<Transcript> {
     let trust = Trust::default();
     let provider = Arc::new(AgentProvider::new(
         "https://ap.example",
@@ -469,6 +478,11 @@ pub fn run() -> Result<Transcript> {
     let response = orders_tls.send(&request)?;
     let authorized_status = response.status().as_u16();
     let result = successful(response)?;
+    // Deliberately no host idempotency: reuse these exact signed bytes, including
+    // the holder credential and proof. Every accepted request repeats the chain.
+    for _ in 1..authorized_requests {
+        successful(orders_tls.send(&request)?)?;
+    }
     let intermediary_has_binding = stored
         .binding(
             PS,
