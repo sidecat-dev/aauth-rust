@@ -72,6 +72,7 @@ dependencies = [
  "aauth-rust-agent-provider",
  "aauth-rust-core",
  "aauth-rust-jose",
+ "aauth-rust-person-server",
  "aauth-rust-signature-key",
  "axum",
  "http",
