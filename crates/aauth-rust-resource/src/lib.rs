@@ -253,6 +253,27 @@ where
             path: uri.path().to_owned(),
         })
     }
+    /// Minimal metadata for this verifier, served by the host at
+    /// `/.well-known/aauth-resource.json` as application/json over HTTPS.
+    /// Advertises Agent-token access and the actual 60-second signature window.
+    /// No JWKS or token/authorization endpoint is invented for a verifying role.
+    /// Hosts may add branding to an owned copy without changing protocol fields.
+    /// Conditional body digest/type requirements are reported by `required_input`;
+    /// this document does not declare them unconditional for every empty request.
+    ///
+    /// # Errors
+    /// Returns `InvalidServerIdentifier` if the configured authority is not a
+    /// canonical DNS server identity (for example an IP or nondefault port).
+    /// Local transport ports belong in the host's logical-to-socket mapping.
+    pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
+        let issuer = format!("https://{}", self.authority);
+        aauth_rust_core::validate_server_identifier(&issuer)?;
+        Ok(serde_json::json!({
+            "issuer":issuer, "access_mode":"agent-token", "signature_window":60
+        })
+        .to_string()
+        .into_bytes())
+    }
     /// Replace admission policy while retaining the configured target and keys.
     pub fn with_policy<Q, R>(self, policy: Q) -> AgentIdentityResource<K, Q>
     where

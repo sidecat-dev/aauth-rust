@@ -119,7 +119,7 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
     }
     if content_digest::needed(req) {
         required.push("content-digest");
-        if req.headers().contains_key("content-type") {
+        if !req.body().is_empty() && req.headers().contains_key("content-type") {
             required.push("content-type");
         }
     }
@@ -419,7 +419,7 @@ impl PreparedRequest {
 ///
 /// # Errors
 /// Computes and covers SHA-256 Content-Digest on nonempty content or when a
-/// digest field was supplied; covers Content-Type when present with that digest.
+/// digest field was supplied; covers Content-Type when present on nonempty content.
 /// Existing digest bytes are replaced from actual content before signing.
 /// Rejects bodies over 1 MiB, non-HTTPS/invalid targets, invalid clocks, malformed
 /// JWT/key material or an inline public key that differs from the signer.
@@ -468,7 +468,7 @@ pub fn sign_request(
             digest.parse().map_err(|_| Error::InvalidDigest)?,
         );
         covered.push("content-digest");
-        if req.headers().contains_key("content-type") {
+        if !req.body().is_empty() && req.headers().contains_key("content-type") {
             covered.push("content-type");
         }
     }

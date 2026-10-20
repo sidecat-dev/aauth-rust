@@ -27,7 +27,7 @@ The HTTP profile requires `@method`, `@authority`, `@path`, `signature-key` and
 `created`. This implementation additionally requires `@query` when present,
 and `authorization` when present. The local buffered profile additionally
 requires covered SHA-256 Content-Digest for nonempty content or a supplied digest,
-plus Content-Type when present with that digest. Actual bytes are checked, with a
+plus Content-Type when present on nonempty content. Actual bytes are checked, with a
 1 MiB limit. Core Covered Components mandates body digest/type at PS/AS and
 revocation endpoints; ordinary Resource body requirements remain Resource policy.
 This implementation chooses the safe buffered default without changing that

@@ -684,3 +684,42 @@ fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn resource_metadata_describes_only_the_implemented_verifier_profile() {
+    let (_, resource) = composition();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata,
+        serde_json::json!({
+            "issuer":"https://resource.example", "access_mode":"agent-token", "signature_window":60
+        })
+    );
+    for endpoint in [
+        "https://resource.example:8443/whoami",
+        "https://127.0.0.1/whoami",
+    ] {
+        let resource = AgentIdentityResource::new(
+            endpoint,
+            resource_keys(),
+            |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+        )
+        .unwrap();
+        assert!(
+            resource.metadata().is_err(),
+            "invalid server identifier published: {endpoint}"
+        );
+    }
+}
+
+fn resource_keys() -> AgentProviderKeys {
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    AgentProviderKeys::from_documents(
+        "https://ap.example",
+        &ap.metadata().unwrap(),
+        &ap.jwks().unwrap(),
+    )
+    .unwrap()
+}

@@ -150,3 +150,25 @@ async fn axum_reads_real_bodies_and_rejects_over_limit_bodies_before_the_gate() 
     assert_eq!(oversized.status(), 413);
     assert!(!oversized.headers().contains_key("signature-error"));
 }
+
+#[tokio::test]
+async fn axum_publishes_resource_metadata_without_requiring_an_agent() {
+    let (_, app) = fixture();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/aauth-resource.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let content = to_bytes(response.into_body(), 1024).await.unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&content).unwrap();
+    assert_eq!(
+        document,
+        serde_json::json!({"issuer":"https://resource.example","access_mode":"agent-token","signature_window":60})
+    );
+}

@@ -625,3 +625,30 @@ fn buffered_body_limit_accepts_one_mib_and_refuses_more() {
             .contains("1048576")
     );
 }
+
+#[test]
+fn an_empty_digest_does_not_make_content_type_a_body_requirement() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    req.headers_mut()
+        .insert("content-type", "text/plain".parse().unwrap());
+    req.headers_mut().insert(
+        "content-digest",
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+            .parse()
+            .unwrap(),
+    );
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    assert!(
+        !req.headers()["signature-input"]
+            .to_str()
+            .unwrap()
+            .contains("content-type")
+    );
+    req.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+}

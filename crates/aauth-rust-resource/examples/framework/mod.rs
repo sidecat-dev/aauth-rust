@@ -5,7 +5,7 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::State,
-    routing::any,
+    routing::{any, get},
 };
 use http::{Request, Response, StatusCode, Uri};
 use std::{
@@ -33,6 +33,7 @@ pub fn now() -> i64 {
 pub fn router(origin: Uri, resource: Arc<Resource>) -> Router {
     Router::new()
         .route("/whoami", any(gate))
+        .route("/.well-known/aauth-resource.json", get(metadata))
         .with_state(Arc::new(Gate { origin, resource }))
 }
 
@@ -67,5 +68,20 @@ async fn gate(State(state): State<Arc<Gate>>, request: Request<Body>) -> Respons
             token.claims().sub
         ))),
         Err(response) => (*response).map(Body::from),
+    }
+}
+
+async fn metadata(State(state): State<Arc<Gate>>) -> Response<Body> {
+    match state.resource.metadata() {
+        Ok(bytes) => Response::builder()
+            .header("content-type", "application/json")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(
+                "configure a canonical external Resource identity",
+            ))
+            .unwrap(),
     }
 }

@@ -34,7 +34,14 @@ configuration; accept forwarded scheme/authority only through an explicitly
 trusted proxy boundary. An arbitrary Host or Forwarded header is not configuration.
 One Resource binds one exact authority/path. Construct one per protected route
 and share an `Arc<AgentKeyResolver>`; this does not fetch keys once per route.
-Path predicates and Resource discovery metadata are not supplied yet.
+Resource discovery metadata is available through resource.metadata(); the host
+serves it at /.well-known/aauth-resource.json (the axum example does this).
+It reports agent-token access and the actual60-second window. This verifier
+publishes no signing keys, so no JWKS URL or authorization endpoint is invented.
+The conditional nonempty-content coverage default is reported by required_input;
+metadata does not falsely require digest/type on every empty call. A host may
+add name/logo/documentation fields to its owned document while preserving the
+configured issuer and actual protocol fields. Path-wide binding follows below.
 
 Covered header fields use RFC 9421 canonicalization: trim outer spaces/tabs and
 combine field lines with `, `. Outer whitespace changes alone preserve a proof.
@@ -104,8 +111,8 @@ The host owns retention, refresh and retirement policy. Go shares this AP gap.
 
 `metadata()` supplies minimal issuer/JWKS-location bytes. A host can publish its
 own metadata with the same exact issuer and admitted HTTPS JWKS URL, plus the
-draft's branding/policy fields. No AP branding builder or Resource metadata API
-is provided. Server identifiers have no port or path. In local deployments,
+draft's branding/policy fields. No AP branding builder is provided.
+AgentIdentityResource::metadata() is a separate verifier-only Resource document. Server identifiers have no port or path. In local deployments,
 map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.
