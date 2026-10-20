@@ -4,8 +4,9 @@
 //! presented credentials before policy. It performs no discovery fetch or HTTP
 //! transport. Hosts admit issuers before key resolution and bound request collection.
 //! Explicit `with_deferred` adds bounded claims, clarification, interaction,
-//! approval and payment continuations. Full R3, missions, subagents and call
-//! chaining remain outside this profile and are refused.
+//! approval and payment continuations. One-level parent-mediated sub-agents use
+//! the parent's policy identity and the child's credential key. Full R3, missions
+//! and call chaining remain outside this profile and are refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
 //!
@@ -39,7 +40,7 @@ mod wire;
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
     ResourceToken, TokenError, VerifiedAgentToken, VerifiedResourceToken, mint_auth_token,
-    validate_server_identifier,
+    validate_server_identifier, verify_subagent,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
@@ -92,8 +93,11 @@ impl ConfigurationError {
 pub struct AuthorizationRequest {
     /// Person Server whose admitted key authenticated the signed POST.
     pub person_server: String,
-    /// Agent identity and posture authenticated by its admitted provider.
+    /// Parent/top-level Agent identity and posture authenticated by its provider.
     pub agent: VerifiedAgentToken,
+    /// Independently verified one-level child, when authorization is parent-mediated.
+    /// Policy evaluates the parent; issued credentials belong to this child's key.
+    pub subagent: Option<VerifiedAgentToken>,
     /// Verified Resource challenge, matched to the actual presented credential.
     pub resource: VerifiedResourceToken,
     /// Nonempty distinct requested Core scope values.
@@ -296,10 +300,15 @@ impl<
         let object = body
             .as_object()
             .ok_or_else(|| Failure::parameter("invalid_request"))?;
-        if object
-            .keys()
-            .any(|k| !["agent_token", "resource_token", "presented_token"].contains(&k.as_str()))
-        {
+        if object.keys().any(|k| {
+            ![
+                "agent_token",
+                "subagent_token",
+                "resource_token",
+                "presented_token",
+            ]
+            .contains(&k.as_str())
+        }) {
             return Err(Failure::parameter("invalid_request"));
         }
         let agent = AgentToken::parse(required(body, "agent_token")?)
@@ -309,6 +318,23 @@ impl<
         if agent.claims().ps.as_deref() != Some(id) || agent.claims().parent_agent.is_some() {
             return Err(Failure::parameter("invalid_agent_token"));
         }
+        let subagent = body
+            .get("subagent_token")
+            .map(|value| {
+                let compact = value
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| Failure::parameter("invalid_subagent_token"))?;
+                let child = verify_subagent(compact, &agent, &self.resolver(), now)
+                    .map_err(|e| Failure::token(e, "subagent", now))?;
+                check_iat(child.claims().iat, now)?;
+                if child.claims().ps.as_deref().is_some_and(|ps| ps != id) {
+                    return Err(Failure::parameter("invalid_subagent_token"));
+                }
+                Ok(child)
+            })
+            .transpose()?;
+        let holder = subagent.as_ref().unwrap_or(&agent);
         let resource = ResourceToken::parse(required(body, "resource_token")?)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|e| Failure::token(e, "resource", now))?;
@@ -318,7 +344,7 @@ impl<
             || r.ps != id
             || r.exp - r.iat > self.config.max_resource_lifetime
             || r.agent_jkt
-                != agent
+                != holder
                     .claims()
                     .cnf
                     .jwk
@@ -336,6 +362,7 @@ impl<
         let context = AuthorizationRequest {
             person_server: id.to_owned(),
             agent: agent.clone(),
+            subagent,
             resource: resource.clone(),
             scopes: requested_scopes,
         };
@@ -346,7 +373,7 @@ impl<
         context: AuthorizationRequest,
         presented: Presented,
     ) -> Result<Response<Vec<u8>>, Failure> {
-        let agent = context.agent.clone();
+        let holder = context.subagent.as_ref().unwrap_or(&context.agent);
         let r = context.resource.claims();
         let id = context.person_server.clone();
         let decision = (self.policy)(&context).map_err(Failure::policy)?;
@@ -357,10 +384,11 @@ impl<
             return Err(Failure::internal());
         }
         let issued_at = (self.clock)();
-        current(issued_at, &agent, r, &presented)?;
+        current(issued_at, &context, &presented)?;
         let expires_at = issued_at
             .saturating_add(decision.lifetime)
-            .min(agent.claims().exp)
+            .min(context.agent.claims().exp)
+            .min(holder.claims().exp)
             .min(presented.exp);
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
@@ -369,7 +397,7 @@ impl<
             ps: id.clone(),
             sub: r.sub.clone(),
             cnf: Confirmation {
-                jwk: agent.claims().cnf.jwk.clone(),
+                jwk: holder.claims().cnf.jwk.clone(),
             },
             jti: (self.ids)(),
             iat: issued_at,
@@ -384,7 +412,7 @@ impl<
         let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
             .map_err(|_| Failure::internal())?;
         let release = (self.clock)();
-        current(release, &agent, r, &presented)?;
+        current(release, &context, &presented)?;
         if release >= expires_at {
             return Err(Failure::internal());
         }
@@ -465,19 +493,21 @@ fn presented(compact: &str, keys: &dyn AgentKeyResolver, now: i64) -> Result<Pre
     check_iat(p.iat, now)?;
     Ok(p)
 }
-fn current(
-    now: i64,
-    a: &VerifiedAgentToken,
-    r: &ResourceClaims,
-    p: &Presented,
-) -> Result<(), Failure> {
+fn current(now: i64, context: &AuthorizationRequest, p: &Presented) -> Result<(), Failure> {
     if !(0..=(1_i64 << 33) - 1).contains(&now) {
         return Err(Failure::internal());
     }
-    if a.claims().exp <= now {
+    if context.agent.claims().exp <= now {
         return Err(Failure::parameter("expired_agent_token"));
     }
-    if r.exp <= now {
+    if context
+        .subagent
+        .as_ref()
+        .is_some_and(|child| child.claims().exp <= now)
+    {
+        return Err(Failure::parameter("expired_subagent_token"));
+    }
+    if context.resource.claims().exp <= now {
         return Err(Failure::parameter("expired_resource_token"));
     }
     if p.exp <= now {

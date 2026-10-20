@@ -40,6 +40,8 @@ impl Failure {
         let code = match (parameter, error) {
             ("agent", TokenError::ExpiredJwt) => "expired_agent_token",
             ("agent", _) => "invalid_agent_token",
+            ("subagent", TokenError::ExpiredJwt) => "expired_subagent_token",
+            ("subagent", _) => "invalid_subagent_token",
             ("resource", TokenError::ExpiredJwt) => "expired_resource_token",
             ("presented", TokenError::ExpiredJwt) => "expired_presented_token",
             ("upstream", TokenError::ExpiredJwt) => "expired_upstream_token",

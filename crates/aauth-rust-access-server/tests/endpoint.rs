@@ -26,6 +26,7 @@ impl AgentKeyResolver for Keys {
             (AS, "aauth-access.json", "as") => 4,
             (RESOURCE, "aauth-resource.json", "resource") => 5,
             ("https://ap.example", "aauth-agent.json", "ap") => 1,
+            ("https://other-ap.example", "aauth-agent.json", "ap") => 1,
             _ => return Err(TokenError::UntrustedIssuer),
         };
         Ok(SigningKey::from_seed([seed; 32]).public_jwk())
@@ -395,6 +396,8 @@ fn agent_expiry_is_the_tightest_auth_lifetime_bound() {
 
 #[path = "support/deferred.rs"]
 mod deferred;
+#[path = "support/subagent.rs"]
+mod subagent;
 
 #[test]
 fn missing_presented_token_is_invalid_request_before_policy() {

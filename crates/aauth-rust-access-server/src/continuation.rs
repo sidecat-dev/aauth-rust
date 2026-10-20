@@ -88,15 +88,17 @@ impl<
         let deadline = now
             .saturating_add(d.config.lifetime)
             .min(input.authorization.agent.claims().exp)
+            .min(
+                input
+                    .authorization
+                    .subagent
+                    .as_ref()
+                    .map_or(i64::MAX, |child| child.claims().exp),
+            )
             .min(input.authorization.resource.claims().exp)
             .min(presented.exp);
         let released = (self.clock)();
-        current(
-            released,
-            &input.authorization.agent,
-            input.authorization.resource.claims(),
-            &presented,
-        )?;
+        current(released, &input.authorization, &presented)?;
         if released >= deadline {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
@@ -115,9 +117,39 @@ impl<
         let value = json!({"state":"waiting","request":body,"person_server":input.authorization.person_server,"deadline":deadline,"next":released.saturating_add(d.config.retry_after as i64),"claims":{},"clarifications":[],"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,released),"pending":pending});
         d.config
             .store
-            .insert(&id, value)
+            .insert(&id, value.clone())
             .map_err(|_| Failure::internal())?;
+        self.pending_current(&id, &value, &input.authorization.person_server)?;
         pending.response().map_err(|_| Failure::internal())
+    }
+    fn pending_current(&self, id: &str, value: &Value, owner: &str) -> Result<(), Failure> {
+        let result = (|| {
+            let now = (self.clock)();
+            if pending_expired(value, now)? {
+                return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+            }
+            let (context, presented) = self.authorize_body(&value["request"], owner, now)?;
+            let released = (self.clock)();
+            if pending_expired(value, released)? {
+                return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+            }
+            current(released, &context, &presented)
+        })();
+        if result.is_err() {
+            let d = self.deferred.as_ref().ok_or_else(Failure::internal)?;
+            if let Some(held) = d.config.store.load(id).map_err(|_| Failure::internal())? {
+                if held.value["request"] != value["request"]
+                    || held.value["person_server"] != value["person_server"]
+                {
+                    return Err(Failure::internal());
+                }
+                d.config
+                    .store
+                    .replace(id, held.revision, None)
+                    .map_err(|_| Failure::internal())?;
+            }
+        }
+        result
     }
     pub(super) fn pending(
         &self,
@@ -151,10 +183,7 @@ impl<
         if value["person_server"].as_str() != Some(&owner) {
             return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
         }
-        let expired = now >= number(&value, "deadline")?
-            || value["question_deadline"]
-                .as_i64()
-                .is_some_and(|at| now >= at);
+        let expired = pending_expired(&value, now)?;
         if expired || request.method() == "DELETE" {
             if !d
                 .config
@@ -179,6 +208,7 @@ impl<
         if !post {
             let next = number(&value, "next")?;
             if now < next {
+                self.pending_current(id, &value, &owner)?;
                 return Ok(throttled(next.saturating_sub(now) as u64));
             }
         }
@@ -190,6 +220,17 @@ impl<
             let object = body
                 .as_object()
                 .ok_or_else(|| Failure::parameter("invalid_request"))?;
+            if [
+                "agent_token",
+                "subagent_token",
+                "resource_token",
+                "presented_token",
+            ]
+            .iter()
+            .any(|name| object.contains_key(*name))
+            {
+                return Err(Failure::parameter("invalid_request"));
+            }
             match &previous.requirement {
                 Requirement::Claims(names) => {
                     if object.contains_key("sub") {
@@ -257,7 +298,7 @@ impl<
                 PolicyError::Denied => Failure::status(StatusCode::FORBIDDEN, "denied"),
                 _ => Failure::policy(e),
             })?;
-            if (self.clock)() >= number(&value, "deadline")? {
+            if pending_expired(&value, (self.clock)())? {
                 return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
             }
             match requirement {
@@ -271,7 +312,7 @@ impl<
                     )
                     .map_err(|_| Failure::internal())?;
                     let current = (self.clock)();
-                    if current >= number(&value, "deadline")? {
+                    if pending_expired(&value, current)? {
                         return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
                     }
                     let new_question =
@@ -336,11 +377,14 @@ impl<
             return Err(Failure::internal());
         }
         let mut response = result?;
+        if waiting {
+            self.pending_current(id, &value, &owner)?;
+        }
         if response.status() == StatusCode::OK {
             // Custody removal can perform host I/O. Revalidate after it, before
             // releasing a credential that was prepared under an earlier clock.
             let now = (self.clock)();
-            if now >= number(&value, "deadline")? {
+            if pending_expired(&value, now)? {
                 return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
             }
             let (context, presented) = self.authorize_body(&value["request"], &owner, now)?;
@@ -348,15 +392,10 @@ impl<
             let token = AuthToken::parse(required(&body, "auth_token")?)
                 .map_err(|_| Failure::internal())?;
             let released = (self.clock)();
-            if released >= number(&value, "deadline")? {
+            if pending_expired(&value, released)? {
                 return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
             }
-            current(
-                released,
-                &context.agent,
-                context.resource.claims(),
-                &presented,
-            )?;
+            current(released, &context, &presented)?;
             if released >= token.unverified_claims().exp {
                 return Err(Failure::internal());
             }
@@ -375,6 +414,12 @@ fn safe_id(id: &str) -> bool {
 }
 fn number(value: &Value, name: &str) -> Result<i64, Failure> {
     value[name].as_i64().ok_or_else(Failure::internal)
+}
+fn pending_expired(value: &Value, now: i64) -> Result<bool, Failure> {
+    Ok(now >= number(value, "deadline")?
+        || value["question_deadline"]
+            .as_i64()
+            .is_some_and(|at| now >= at))
 }
 fn question_deadline(pending: &PendingResponse, now: i64) -> Option<i64> {
     match pending.requirement {

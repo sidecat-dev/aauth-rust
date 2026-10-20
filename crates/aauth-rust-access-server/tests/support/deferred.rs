@@ -51,6 +51,441 @@ fn config(store: Arc<MemoryContinuations>) -> DeferredConfig {
     c
 }
 #[test]
+fn subagent_payment_approval_retains_exact_tokens_and_recomposes_child_grant() {
+    let stage = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(MemoryContinuations::new(4));
+    let original = super::subagent::child_body(agent_claims(), super::subagent::child_claims());
+    let make_server = || {
+        let stage = stage.clone();
+        AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            grant,
+            || 1000,
+            || "child-pending".into(),
+        )
+        .unwrap()
+        .with_deferred(config(store.clone()), move |c: &DeferredContext| {
+            assert_eq!(
+                c.authorization.agent.claims().sub,
+                "aauth:Caller@ap.example"
+            );
+            assert_eq!(
+                c.authorization.subagent.as_ref().unwrap().claims().sub,
+                "aauth:Caller+worker@ap.example"
+            );
+            Ok(match stage.load(Ordering::SeqCst) {
+                0 => Some(Requirement::Payment {
+                    authenticate: "Payment id=\"child-bill\", method=\"example\"".into(),
+                }),
+                1 => Some(Requirement::Approval),
+                _ => None,
+            })
+        })
+        .unwrap()
+    };
+    let first = make_server().handle(&request(original.clone()));
+    assert_eq!(
+        first.status(),
+        402,
+        "{}",
+        String::from_utf8_lossy(first.body())
+    );
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+    assert_eq!(
+        store.load("child-pending").unwrap().unwrap().value["request"],
+        original
+    );
+    for method in ["GET", "DELETE"] {
+        assert_eq!(
+            make_server()
+                .handle(&poll_as(&pending.location, method, None, 1000, OTHER_PS, 6))
+                .status(),
+            403
+        );
+    }
+    let mut child_poll = Request::builder()
+        .uri(&pending.location)
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut child_poll,
+        &SigningKey::from_seed([7; 32]),
+        KeyMaterial::Jwt(original["subagent_token"].as_str().unwrap().into()),
+        1000,
+    )
+    .unwrap();
+    assert_eq!(make_server().handle(&child_poll).status(), 401);
+    stage.store(1, Ordering::SeqCst);
+    assert_eq!(
+        make_server()
+            .handle(&poll(&pending.location, "GET", None, 1000))
+            .status(),
+        202
+    );
+    assert_eq!(
+        store.load("child-pending").unwrap().unwrap().value["request"],
+        original
+    );
+    stage.store(2, Ordering::SeqCst);
+    let final_response = make_server().handle(&poll(&pending.location, "GET", None, 1000));
+    assert_eq!(final_response.status(), 200);
+    let body: Value = serde_json::from_slice(final_response.body()).unwrap();
+    let token = AuthToken::parse(body["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(
+        token.claims().cnf.jwk.thumbprint().unwrap(),
+        SigningKey::from_seed([7; 32])
+            .public_jwk()
+            .thumbprint()
+            .unwrap()
+    );
+    assert_eq!(token.claims().exp, 1600);
+    assert_eq!(
+        make_server()
+            .handle(&poll(&pending.location, "GET", None, 1000))
+            .status(),
+        410
+    );
+}
+#[test]
+fn subagent_claims_cannot_replace_the_original_credentials() {
+    let store = Arc::new(MemoryContinuations::new(4));
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        || 1000,
+        || "child-pending".into(),
+    )
+    .unwrap()
+    .with_deferred(config(store.clone()), |c: &DeferredContext| {
+        Ok(if c.claims.contains_key("email") {
+            None
+        } else {
+            Some(Requirement::Claims(vec!["email".into()]))
+        })
+    })
+    .unwrap();
+    let original = super::subagent::child_body(agent_claims(), super::subagent::child_claims());
+    let response = server.handle(&request(original));
+    assert_eq!(response.status(), 202);
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
+    let original = store.load("child-pending").unwrap();
+    for name in [
+        "agent_token",
+        "subagent_token",
+        "presented_token",
+        "resource_token",
+    ] {
+        let mut body = json!({"email":"parent@example"});
+        body[name] = json!("replacement-credential");
+        let response = server.handle(&poll(&pending.location, "POST", Some(body), 1000));
+        assert_eq!(response.status(), 400, "{name}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
+            "invalid_request"
+        );
+        assert_eq!(store.load("child-pending").unwrap(), original);
+    }
+}
+#[test]
+fn subagent_pending_release_rechecks_expiry_after_initial_waiting_and_terminal_store_writes() {
+    struct PersistClock {
+        inner: MemoryContinuations,
+        now: Arc<AtomicI64>,
+        phase: &'static str,
+    }
+    impl ContinuationStore for PersistClock {
+        fn insert(
+            &self,
+            id: &str,
+            value: Value,
+        ) -> Result<(), aauth_rust_core::continuation::StoreError> {
+            self.inner.insert(id, value)?;
+            if self.phase == "initial" {
+                self.now.store(1010, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+        fn load(
+            &self,
+            id: &str,
+        ) -> Result<
+            Option<aauth_rust_core::continuation::Snapshot>,
+            aauth_rust_core::continuation::StoreError,
+        > {
+            self.inner.load(id)
+        }
+        fn replace(
+            &self,
+            id: &str,
+            revision: u64,
+            value: Option<Value>,
+        ) -> Result<bool, aauth_rust_core::continuation::StoreError> {
+            let pause = (self.phase == "waiting"
+                && value.as_ref().is_some_and(|v| v["state"] == "waiting"))
+                || (self.phase == "terminal" && value.is_none());
+            let changed = self.inner.replace(id, revision, value)?;
+            if changed && pause {
+                self.now.store(1010, Ordering::SeqCst);
+            }
+            Ok(changed)
+        }
+    }
+    for (phase, question) in [
+        ("initial", false),
+        ("waiting", false),
+        ("terminal", false),
+        ("initial", true),
+        ("waiting", true),
+        ("terminal", true),
+    ] {
+        let now = Arc::new(AtomicI64::new(1000));
+        let clock = now.clone();
+        let store = Arc::new(PersistClock {
+            inner: MemoryContinuations::new(4),
+            now,
+            phase,
+        });
+        let mut cfg = DeferredConfig::new(store.clone());
+        cfg.retry_after = 0;
+        let stage = Arc::new(AtomicUsize::new(0));
+        let state = stage.clone();
+        let server = AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            grant,
+            move || clock.load(Ordering::SeqCst),
+            || "child-pending".into(),
+        )
+        .unwrap()
+        .with_deferred(cfg, move |_: &DeferredContext| {
+            Ok(
+                if phase == "terminal" && state.load(Ordering::SeqCst) == 1 {
+                    None
+                } else {
+                    Some(if question {
+                        Requirement::Clarification {
+                            question: "Why?".into(),
+                            timeout: Some(10),
+                            options: vec![],
+                        }
+                    } else {
+                        Requirement::Approval
+                    })
+                },
+            )
+        })
+        .unwrap();
+        let mut child = super::subagent::child_claims();
+        child.exp = if question { 1600 } else { 1010 };
+        let first = server.handle(&request(super::subagent::child_body(agent_claims(), child)));
+        let response = if phase == "initial" {
+            first
+        } else {
+            assert_eq!(first.status(), 202);
+            stage.store(1, Ordering::SeqCst);
+            let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+            server.handle(&poll(&pending.location, "GET", None, 1000))
+        };
+        assert_eq!(response.status(), 408, "phase={phase}");
+        assert!(!String::from_utf8_lossy(response.body()).contains("auth_token"));
+        assert!(
+            store.load("child-pending").unwrap().is_none(),
+            "phase={phase}"
+        );
+    }
+}
+#[test]
+fn subagent_pending_deadline_is_capped_by_parent_and_child_expiry() {
+    for parent_expires in [false, true] {
+        let now = Arc::new(AtomicI64::new(1000));
+        let clock = now.clone();
+        let store = Arc::new(MemoryContinuations::new(4));
+        let server = AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            grant,
+            move || clock.load(Ordering::SeqCst),
+            || "child-pending".into(),
+        )
+        .unwrap()
+        .with_deferred(config(store.clone()), |_: &DeferredContext| {
+            Ok(Some(Requirement::Approval))
+        })
+        .unwrap();
+        let mut parent = agent_claims();
+        let mut child = super::subagent::child_claims();
+        if parent_expires {
+            parent.exp = 1010;
+        } else {
+            child.exp = 1010;
+        }
+        let first = server.handle(&request(super::subagent::child_body(parent, child)));
+        assert_eq!(first.status(), 202);
+        let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+        assert_eq!(
+            store.load("child-pending").unwrap().unwrap().value["deadline"],
+            1010
+        );
+        now.store(1010, Ordering::SeqCst);
+        let response = server.handle(&poll(&pending.location, "GET", None, 1010));
+        assert_eq!(response.status(), 408);
+        assert!(!String::from_utf8_lossy(response.body()).contains("auth_token"));
+        assert!(store.load("child-pending").unwrap().is_none());
+    }
+}
+#[test]
+fn subagent_child_trust_is_refreshed_on_each_poll_and_after_final_custody() {
+    struct ChildKeys(Arc<std::sync::atomic::AtomicBool>);
+    impl AgentKeyResolver for ChildKeys {
+        fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+            if issuer == "https://ap.example" && dwk == "aauth-agent.json" && kid == "child-ap" {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(TokenError::UntrustedIssuer);
+                }
+                return Ok(SigningKey::from_seed([1; 32]).public_jwk());
+            }
+            Keys.key(issuer, dwk, kid)
+        }
+    }
+    struct FinalTrustStore {
+        inner: MemoryContinuations,
+        revoked: Arc<std::sync::atomic::AtomicBool>,
+        final_revoke: bool,
+    }
+    impl ContinuationStore for FinalTrustStore {
+        fn insert(
+            &self,
+            id: &str,
+            value: Value,
+        ) -> Result<(), aauth_rust_core::continuation::StoreError> {
+            self.inner.insert(id, value)
+        }
+        fn load(
+            &self,
+            id: &str,
+        ) -> Result<
+            Option<aauth_rust_core::continuation::Snapshot>,
+            aauth_rust_core::continuation::StoreError,
+        > {
+            self.inner.load(id)
+        }
+        fn replace(
+            &self,
+            id: &str,
+            revision: u64,
+            value: Option<Value>,
+        ) -> Result<bool, aauth_rust_core::continuation::StoreError> {
+            let final_write = value.is_none();
+            let result = self.inner.replace(id, revision, value)?;
+            if result && final_write && self.final_revoke {
+                self.revoked.store(true, Ordering::SeqCst);
+            }
+            Ok(result)
+        }
+    }
+    for final_revoke in [false, true] {
+        let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let store = Arc::new(FinalTrustStore {
+            inner: MemoryContinuations::new(4),
+            revoked: revoked.clone(),
+            final_revoke,
+        });
+        let stage = Arc::new(AtomicUsize::new(0));
+        let state = stage.clone();
+        let mut cfg = DeferredConfig::new(store.clone());
+        cfg.retry_after = 0;
+        let server = AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            ChildKeys(revoked.clone()),
+            grant,
+            || 1000,
+            || "child-pending".into(),
+        )
+        .unwrap()
+        .with_deferred(cfg, move |_: &DeferredContext| {
+            Ok(if state.load(Ordering::SeqCst) == 0 {
+                Some(Requirement::Approval)
+            } else {
+                None
+            })
+        })
+        .unwrap();
+        let mut body = super::subagent::child_body(agent_claims(), super::subagent::child_claims());
+        body["subagent_token"] = json!(super::subagent::agent_compact(
+            &super::subagent::child_claims(),
+            1,
+            "child-ap"
+        ));
+        let first = server.handle(&request(body));
+        assert_eq!(first.status(), 202);
+        let p = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+        stage.store(1, Ordering::SeqCst);
+        if !final_revoke {
+            revoked.store(true, Ordering::SeqCst);
+        }
+        let response = server.handle(&poll(&p.location, "GET", None, 1000));
+        assert_eq!(response.status(), 400);
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"], "invalid_subagent_token");
+        assert!(body.get("auth_token").is_none());
+        assert!(store.load("child-pending").unwrap().is_none());
+    }
+}
+#[test]
+fn subagent_early_poll_refreshes_child_trust_and_consumes_invalid_custody() {
+    struct ChildKeys(Arc<std::sync::atomic::AtomicBool>);
+    impl AgentKeyResolver for ChildKeys {
+        fn key(&self, i: &str, d: &str, k: &str) -> Result<Jwk, TokenError> {
+            if k == "child-ap" {
+                if self.0.load(Ordering::SeqCst) {
+                    return Err(TokenError::UntrustedIssuer);
+                }
+                return Keys.key(i, d, "ap");
+            }
+            Keys.key(i, d, k)
+        }
+    }
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock = now.clone();
+    let store = Arc::new(MemoryContinuations::new(4));
+    let mut cfg = config(store.clone());
+    cfg.retry_after = 5;
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        ChildKeys(revoked.clone()),
+        grant,
+        move || clock.load(Ordering::SeqCst),
+        || "child-pending".into(),
+    )
+    .unwrap()
+    .with_deferred(cfg, |_: &DeferredContext| Ok(Some(Requirement::Approval)))
+    .unwrap();
+    let mut body = super::subagent::child_body(agent_claims(), super::subagent::child_claims());
+    body["subagent_token"] = json!(super::subagent::agent_compact(
+        &super::subagent::child_claims(),
+        1,
+        "child-ap"
+    ));
+    let first = server.handle(&request(body));
+    assert_eq!(first.status(), 202);
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+    now.store(1001, Ordering::SeqCst);
+    revoked.store(true, Ordering::SeqCst);
+    let response = server.handle(&poll(&pending.location, "GET", None, 1001));
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
+        "invalid_subagent_token"
+    );
+    assert!(store.load("child-pending").unwrap().is_none());
+}
+#[test]
 fn payment_approval_grant_is_authenticated_and_consumed_once() {
     let stage = Arc::new(AtomicUsize::new(0));
     let policy = stage.clone();
@@ -437,7 +872,7 @@ fn concurrent_poll_or_cancellation_cannot_release_two_grants() {
 }
 #[test]
 fn cancellation_winning_final_cas_refuses_prepared_grants_and_pending_responses() {
-    for waiting in [false, true] {
+    for (waiting, child) in [(false, false), (true, false), (false, true), (true, true)] {
         let entered = Arc::new(std::sync::Barrier::new(2));
         let release = Arc::new(std::sync::Barrier::new(2));
         let store = Arc::new(FinalizationStore {
@@ -469,7 +904,12 @@ fn cancellation_winning_final_cas_refuses_prepared_grants_and_pending_responses(
             })
             .unwrap(),
         );
-        let first = server.handle(&request(good()));
+        let body = if child {
+            super::subagent::child_body(agent_claims(), super::subagent::child_claims())
+        } else {
+            good()
+        };
+        let first = server.handle(&request(body));
         let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
         let worker = server.clone();
         let location = pending.location.clone();
