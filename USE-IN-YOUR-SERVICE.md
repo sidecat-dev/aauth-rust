@@ -273,12 +273,22 @@ evidence. If the host lacks the evidence or needs fresh interaction, refuse;
 `Policy::authorize` receives verified Agent and Resource claims, the exact
 retained presented issuance, requested scopes and signed parameters. Return a
 nonempty subset of those scopes and a positive lifetime up to one hour. Intentional
-denial returns 403; an unavailable policy/store returns 500. Invalid token
+PS policy denial returns 403 with `denied`; an unavailable policy/store returns 500. Invalid token
 parameters return typed 400 errors; HTTP proof/credential failures return 401
 Signature-Error. The PS checks lineage before policy, caps parent lifetimes,
 commits retained state, resamples its trusted clock and only then releases tokens.
 A Resource challenge must still be current at exchange; its five-minute lifetime
 does not cap the issued Auth token, whose other parent bounds still apply.
+
+A presented credential missing its exact retained issuance, changed after
+issuance, or issued to another Agent returns `invalid_presented_token`. A
+genuine mismatch between a valid credential and the Resource challenge's copied
+claims returns `invalid_resource_token`. Revoking the original binding prevents
+new Person issuance (`403 denied`); an exchange of its outstanding Person/Auth
+credential returns `400 revoked_presented_token`, including revocation during
+policy or commit. Chained requests instead use `revoked_upstream_token`. This
+does not deliver revocations to Resources: already issued Auth tokens remain
+valid there until expiry unless the host supplies additional revocation state.
 
 Use a durable `Store` in a running service. Run
 `storetest::check_store_contract(|| new_disposable_store())` against your adapter.
@@ -371,6 +381,37 @@ default to denial. The hooks decide downstream purpose and directed identity;
 scope names across Resources need not form a syntactic subset. Credential expiry
 cannot outlive upstream authority. Omitting, replacing or adding an inconsistent
 upstream tie fails, including when an Auth token is presented for step-up.
+
+Route both downstream token requests to the PS named by the **verified upstream
+credential**: `iss` for a Person token, `ps` for an Auth token. Read that PS's
+admitted endpoint metadata. Never use the intermediary's own Agent-token `ps`
+for this route; that would select the intermediary's person rather than the
+original caller's. The PS verifies that the upstream names itself. The example
+has one configured upstream PS and deliberately gives the intermediary another
+`ps` value; a general host selects among its admitted PS transports.
+
+Use a token as upstream evidence only from a request the intermediary actually
+served. A Person-token request answered with an Auth challenge was not served
+and must not start a downstream chain. `PsAuthorizationResource` reaches the
+application handler only on a granted Auth token; start chaining there. A custom
+Resource that serves on Person identity can use that served request's Person
+token. The PS cannot observe which remote handler ran, so it cannot enforce this
+caller duty with retained issuance records or a fabricated served flag.
+
+The intermediary must publish its own Agent metadata on its origin with the same
+issuer as Resource metadata. Host resolution must obtain keys through that
+`aauth-agent.json`, with admitted verified discovery, to establish origin
+ownership. An injected key resolver is a trust boundary, not proof by itself
+that any network fetch occurred. Return stable, downstream-directed subjects
+from host policy; the PS rejects copying the immediate upstream subject but
+does not derive pairwise IDs or prevent every cross-Resource reuse for the host.
+
+The scoped, missionless profile requires a nonempty Core scope string and
+rejects mission-bearing PS inputs and known companion authority claims. It does
+not accept a companion claim in place of scope. First-use Resource metadata
+presentation and distinct-resource-per-Agent rate limits belong to host policy.
+If displaying `justification` or other Agent-provided Markdown, sanitize it and
+label it as Agent-asserted content.
 
 This profile implements immediate, missionless PS authorization. AS federation,
 missions, R3, Budget semantics, sub-agent delegation, deferred consent/polling,

@@ -119,11 +119,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || record.person_id.is_empty()
             || record.agent_token_jti.is_empty()
         {
-            return Err(Failure::parameter(if parameter == "upstream" {
-                "invalid_upstream_token"
-            } else {
-                "invalid_resource_token"
-            }));
+            return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
         }
         Ok(record)
     }

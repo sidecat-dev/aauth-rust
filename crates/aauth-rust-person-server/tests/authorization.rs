@@ -78,6 +78,7 @@ struct TestStore {
     now: Arc<AtomicI64>,
     stall: Arc<AtomicI64>,
     fail: Arc<AtomicBool>,
+    revoke_after_commit: Arc<AtomicBool>,
 }
 impl Store for TestStore {
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
@@ -93,7 +94,11 @@ impl Store for TestStore {
         if self.fail.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable);
         }
+        let principal = record.principal.clone();
         self.inner.commit(record, establish)?;
+        if self.revoke_after_commit.swap(false, Ordering::SeqCst) {
+            self.inner.revoke_binding(PS, &principal)?;
+        }
         let stall = self.stall.load(Ordering::SeqCst);
         if stall > 0 {
             self.now.store(stall, Ordering::SeqCst);
@@ -111,12 +116,17 @@ struct Host {
 }
 impl Host {
     fn person(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
+        if self.mode.load(Ordering::SeqCst) == 8 {
+            return Err(PolicyError::UserUnreachable);
+        }
         if self.mode.load(Ordering::SeqCst) == 7 {
             self.now.store(5000, Ordering::SeqCst);
         }
         Ok(Person {
             id: "internal-person".into(),
-            subject: if request.resource == ORDERS {
+            subject: if self.mode.load(Ordering::SeqCst) == 9 {
+                request.upstream.as_ref().unwrap().record.subject.clone()
+            } else if request.resource == ORDERS {
                 "orders-person".into()
             } else {
                 "inventory-person".into()
@@ -128,6 +138,7 @@ impl Host {
         match self.mode.load(Ordering::SeqCst) {
             1 => Err(PolicyError::Denied),
             2 => Err(PolicyError::Unavailable),
+            8 => Err(PolicyError::UserUnreachable),
             3 => Ok(Grant {
                 scopes: vec!["admin".into()],
                 lifetime: 600,
@@ -196,6 +207,7 @@ impl Fixture {
                 now: now.clone(),
                 stall: Arc::new(AtomicI64::new(0)),
                 fail: Arc::new(AtomicBool::new(false)),
+                revoke_after_commit: Arc::new(AtomicBool::new(false)),
             },
             host: Host {
                 mode: Arc::new(AtomicUsize::new(0)),
@@ -467,7 +479,7 @@ fn token_parameter_lineage_failures_are_typed_and_precede_policy() {
 #[test]
 fn refusal_bad_grants_and_policy_expiry_never_release_credentials() {
     for (mode, status, code) in [
-        (1, 403, "access_denied"),
+        (1, 403, "denied"),
         (2, 500, "server_error"),
         (3, 500, "server_error"),
         (4, 400, "expired_resource_token"),
@@ -547,13 +559,13 @@ fn direct_binding_revocation_prevents_rebinding_and_exchange() {
             },
         )
         .unwrap();
-    for response in [
-        f.person(&s, &a, ORDERS, None),
-        f.exchange(&s, &a, &r, &p, None),
-    ] {
-        assert_eq!(response.status(), 403);
-        assert_eq!(output(&response)["error"], "access_denied");
-    }
+    let denied = f.person(&s, &a, ORDERS, None);
+    assert_eq!(denied.status(), 403);
+    assert_eq!(output(&denied)["error"], "denied");
+    let revoked = f.exchange(&s, &a, &r, &p, None);
+    assert_eq!(revoked.status(), 400);
+    assert_eq!(output(&revoked)["error"], "revoked_presented_token");
+    assert!(!revoked.headers().contains_key("signature-error"));
     assert_eq!(f.host.bind_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 0);
 }
@@ -652,4 +664,160 @@ fn upstream_requires_the_exact_retained_bytes_and_current_expiry() {
         "expired_upstream_token"
     );
     assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn rewritten_presented_bytes_are_not_a_resource_challenge_failure() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let a = agent(false);
+    let (person, auth) = original(&f, &s);
+    for presented in [person, auth] {
+        let parsed = aauth_rust_jose::Jws::parse(&presented).unwrap();
+        let sorted: Value = serde_json::from_slice(parsed.payload()).unwrap();
+        let rewritten = aauth_rust_jose::Jws::sign(
+            parsed.header(),
+            &serde_json::to_vec(&sorted).unwrap(),
+            &SigningKey::from_seed([3; 32]),
+        )
+        .unwrap();
+        assert_ne!(rewritten, presented);
+        let r = resource(&a, &rewritten, "orders.read", |_| {});
+        let response = f.exchange(&s, &a, &r, &rewritten, None);
+        assert_eq!(response.status(), 400);
+        assert_eq!(output(&response)["error"], "invalid_presented_token");
+        assert!(!response.headers().contains_key("signature-error"));
+        assert!(output(&response).get("auth_token").is_none());
+    }
+    assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn presented_issuance_for_another_agent_with_the_same_key_is_invalid_presented() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let a = agent(false);
+    let p = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    let mut claims = aauth_rust_core::AgentToken::parse(a.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    claims.sub = "aauth:Other@ap.example".into();
+    claims.jti = "other-agent".into();
+    let provider = AgentProvider::new(
+        "https://ap.example",
+        "ap-key",
+        SigningKey::from_seed([1; 32]),
+    )
+    .unwrap();
+    let other = a.with_token(provider.issue(&claims).unwrap()).unwrap();
+    let r = resource(&other, &p, "orders.read", |_| {});
+    let response = f.exchange(&s, &other, &r, &p, None);
+    assert_eq!(response.status(), 400);
+    assert_eq!(output(&response)["error"], "invalid_presented_token");
+    assert!(!response.headers().contains_key("signature-error"));
+    assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn revocation_during_policy_or_after_commit_preserves_the_parameter_error_context() {
+    struct RevokingPolicy(Host, TestStore);
+    impl RevokingPolicy {
+        fn revoke(&self) {
+            self.1
+                .revoke_binding(
+                    PS,
+                    &AgentIdentity {
+                        issuer: "https://ap.example".into(),
+                        subject: "aauth:Caller@ap.example".into(),
+                    },
+                )
+                .unwrap();
+        }
+    }
+    impl Policy for RevokingPolicy {
+        fn bind_person(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
+            self.revoke();
+            self.0.bind_person(request)
+        }
+        fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+            self.revoke();
+            self.0.authorize(request)
+        }
+    }
+    for during_policy in [true, false] {
+        for path in ["/person", "/token"] {
+            let f = Fixture::new();
+            let a = agent(false);
+            let p = compact(&f.person(&f.server(900), &a, ORDERS, None), "person_token");
+            let r = resource(&a, &p, "orders.read", |_| {});
+            let policy: BoxedPolicy = if during_policy {
+                Box::new(RevokingPolicy(f.host.clone(), f.store.clone()))
+            } else {
+                f.store.revoke_after_commit.store(true, Ordering::SeqCst);
+                Box::new(f.host.clone())
+            };
+            let clock = f.host.now.clone();
+            let ids = f.ids.clone();
+            let s: Server = PersonServer::new(
+                Config::new(PS, "ps-key", SigningKey::from_seed([3; 32])),
+                Keys,
+                f.store.clone(),
+                policy,
+                Box::new(move || clock.load(Ordering::SeqCst)) as BoxedClock,
+                Box::new(move || format!("token-{}", ids.fetch_add(1, Ordering::SeqCst)))
+                    as BoxedTokenIds,
+            )
+            .unwrap();
+            let body = if path == "/person" {
+                json!({"resource":ORDERS})
+            } else {
+                json!({"resource_token":r,"presented_token":p})
+            };
+            let response = f.call(&s, &a, path, body);
+            if path == "/person" {
+                assert_eq!(response.status(), 403);
+                assert_eq!(output(&response)["error"], "denied");
+            } else {
+                assert_eq!(response.status(), 400);
+                assert_eq!(output(&response)["error"], "revoked_presented_token");
+            }
+            assert!(!response.headers().contains_key("signature-error"));
+            assert!(output(&response).get("person_token").is_none());
+            assert!(output(&response).get("auth_token").is_none());
+        }
+    }
+}
+
+#[test]
+fn copied_upstream_subject_is_refused_before_a_downstream_token_is_released() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let (_, upstream) = original(&f, &s);
+    f.host.mode.store(9, Ordering::SeqCst);
+    let response = f.person(&s, &agent(true), INVENTORY, Some(&upstream));
+    assert_eq!(response.status(), 500);
+    assert_eq!(output(&response)["error"], "server_error");
+    assert!(output(&response).get("person_token").is_none());
+    assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn user_unreachable_is_explicit_at_both_token_endpoints() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let a = agent(false);
+    let p = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    let r = resource(&a, &p, "orders.read", |_| {});
+    f.host.mode.store(8, Ordering::SeqCst);
+    for response in [
+        f.person(&s, &a, ORDERS, None),
+        f.exchange(&s, &a, &r, &p, None),
+    ] {
+        assert_eq!(response.status(), 403);
+        assert_eq!(output(&response)["error"], "user_unreachable");
+        assert!(!response.headers().contains_key("signature-error"));
+        assert!(output(&response).get("person_token").is_none());
+        assert!(output(&response).get("auth_token").is_none());
+    }
 }

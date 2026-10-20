@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **133 integration tests passed, 0 failed**, including
+Current engineer evidence: **138 integration tests passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. Executable examples
 run those same compositions. A wire check is not counted as a separate Rust test.
@@ -24,7 +24,7 @@ constructor/metadata example.
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; scope narrowing; expiry bounds rechecked after policy/storage; no release before commit | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (11 tests), `store.rs` (1 executable store contract) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (16 tests), `store.rs` (1 executable store contract) |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (1 full application/TLS test) |
@@ -97,6 +97,13 @@ turn an `hwk` key into an AAuth identity.
   crash recovery and retention/cleanup through `retain_until` belong to the host.
   `storetest` exercises atomic conflicts, concurrency, revocation and exact records,
   not a production database's durability.
+  Against Core [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint),
+  the retained data exceeds the required jti/aud/exp record: kind, directed
+  subject, internal person/Agent identity, tenant, holder thumbprint, compact
+  hash and presented/upstream ties. `retain_until` is exp plus the configured
+  Resource lifetime bound plus 3660 seconds. This longer local retention and
+  exact-record verification requirement are not the draft's minimum revocation
+  record or a requirement on interoperating JWT verifiers.
 - **PS-DIRECT-PROFILE:** Immediate PS-issued Auth only, with Core scope strings,
   explicit direct/upstream host policy and Resource-directed identity. PS JSON
   requires covered Content-Type and Content-Digest. PS issuance caps Person/Auth
@@ -135,6 +142,31 @@ turn an `hwk` key into an AAuth identity.
   general security audit. Review findings are conformance evidence only when
   executed by cited tests. Cross-check draft findings in other implementations
   before filing with editors.
+
+## Person Server clause limits
+
+These are limits of the implemented profile or duties assigned to its host,
+not claims that the cited clauses are fully implemented.
+
+| Named limit | Pinned Core clause | Behavior and boundary |
+| --- | --- | --- |
+| **PS-PRESENTED-ERRORS** | [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | A missing/different retained issuance or recipient Agent is invalid_presented_token. Genuine Resource-versus-presented jti/sub/tenant/PS mismatches remain invalid_resource_token. |
+| **PS-BINDING-REVOCATION** | [Agent Person Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-person-binding), [token errors](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#token-endpoint-error-codes) | Binding revocation blocks new Person issuance with 403 denied, direct exchanges of outstanding Person/Auth with 400 revoked_presented_token, and chains with revoked_upstream_token, including policy/commit races. There is no individual token/Agent-token revocation set, cascade or Resource revocation delivery; an already issued Auth token still verifies at a Resource until expiry unless the host adds that state. |
+| **PS-SCOPE-ONLY** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure), [Scopes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#scopes) | The PS requires a nonempty Core scope string. Missing/empty scope and companion authority claims are refused; a companion claim cannot replace scope in this profile. Scope descriptions and identity-claim expansion are not implemented. |
+| **PS-MISSION-INPUT** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint), [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | mission_s256 is not accepted as a PS request parameter. Mission-bearing credentials/challenges are explicitly refused by PS/Resource roles, even when otherwise well formed. Core can parse their syntax but does not establish mission state; no mission is silently ignored. |
+| **PS-RESOURCE-LIFETIME** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure) | The PS hard-refuses a current Resource token whose lifetime exceeds max_resource_lifetime (default 300 seconds, configurable 1..3600). This is local policy above the five-minute SHOULD, not a draft MUST or an Auth expiry cap. |
+| **CHAIN-PS-ROUTING** | [Call Chaining](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#call-chaining) | The host routes using verified upstream Person iss or Auth ps, never the intermediary Agent's ps. The PS verifies that the upstream names itself. There is no automatic Agent HTTP router; the one-PS example deliberately gives the intermediary a different ps and still reaches the upstream PS. |
+| **CHAIN-SERVED-REQUEST** | [Call Chaining](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#call-chaining) | The intermediary may use only a token from a request it served. A Person-token request answered with an Auth challenge does not qualify. The PS accepts valid Person upstream evidence but cannot observe a remote handler's served state; host code must enforce this before starting the chain. No synthetic served bit is claimed. |
+| **INTERMEDIARY-DISCOVERY** | [Intermediary Agent Identity](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#intermediary-agent-identity) | The library verifies Agent iss equals upstream aud and resolves keys through aauth-agent.json. Host discovery must obtain that intermediary's own-origin Agent metadata with the same issuer as Resource metadata, rather than an unrelated AP. Resolver injection alone does not establish network provenance. The TLS example executes both role documents and a merged JWKS. |
+| **DIRECTED-SUB-POLICY** | [Directed Identifiers Across a Chain](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#directed-sub-chaining) | Host policy supplies stable downstream-directed subjects. The PS refuses copying the immediate upstream subject (500 bad host policy); the store enforces stable per-person/resource mappings and per-resource uniqueness. It does not derive HMAC subjects or enforce global inequality across every Resource. Pairwise derivation and prevention of nonadjacent reuse remain host duties. |
+| **PS-HOST-METADATA** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | First-use Resource metadata fetching/presentation and the distinct-resource-per-Agent rate-limit SHOULDs are host duties. The library has neither an outbound fetcher nor that limiter. Sanitize Agent-asserted justification before rendering; there is no library renderer. |
+| **PS-ACCOUNT-PROFILE** | [Account Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#account-binding) | PS copies account from a verified Resource challenge; the Resource helper emits none and has no explicit authorization endpoint/account selector. No application account linking, identity proofing or complete account-flow test claim is made. |
+| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. There is no rollback/delete API; host cleanup follows retain_until. Tests establish refusal to release, not rollback or absence of an internal write. |
+
+The TLS application uses a fixed operation and demo admission policy. It does
+not establish general caller-body forwarding, a downstream account database or
+arbitrary router admission. Native PS tests separately isolate parent lifetime
+bounds; the TLS expiry ordering alone is not proof of which cap was decisive.
 
 ## Build evidence
 

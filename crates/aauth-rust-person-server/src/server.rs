@@ -118,6 +118,21 @@ struct Upstream {
     context: UpstreamContext,
     token: Presented,
 }
+#[derive(Clone, Copy)]
+enum BindingContext {
+    NewPerson,
+    Presented,
+    Upstream,
+}
+impl BindingContext {
+    fn revoked(self) -> Failure {
+        match self {
+            Self::NewPerson => Failure::policy(PolicyError::Denied),
+            Self::Presented => Failure::parameter("revoked_presented_token"),
+            Self::Upstream => Failure::parameter("revoked_upstream_token"),
+        }
+    }
+}
 impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
     PersonServer<K, S, P, C, I>
 {
@@ -328,18 +343,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     fn binding(
         &self,
         principal: &AgentIdentity,
-        upstream: bool,
+        context: BindingContext,
     ) -> Result<Option<crate::Binding>, Failure> {
         let binding = self
             .store
             .binding(&self.config.issuer, principal)
             .map_err(|_| Failure::internal())?;
         if binding.as_ref().is_some_and(|binding| binding.revoked) {
-            return Err(if upstream {
-                Failure::parameter("revoked_upstream_token")
-            } else {
-                Failure::status(StatusCode::FORBIDDEN, "access_denied")
-            });
+            return Err(context.revoked());
         }
         Ok(binding)
     }
@@ -358,7 +369,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let record = self.load_record(&token, compact, now, "upstream")?;
         let binding = self
-            .binding(&record.principal, true)?
+            .binding(&record.principal, BindingContext::Upstream)?
             .ok_or_else(|| Failure::parameter("invalid_upstream_token"))?;
         if binding.person_id != record.person_id {
             return Err(Failure::parameter("invalid_upstream_token"));
@@ -379,6 +390,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ) -> Result<Response<Vec<u8>>, Failure> {
         let resource = required_string(&parameters, "resource")?;
         validate_server_identifier(resource).map_err(|_| Failure::parameter("invalid_request"))?;
+        let binding_context = if upstream.is_some() {
+            BindingContext::Upstream
+        } else {
+            BindingContext::NewPerson
+        };
         let principal = upstream
             .as_ref()
             .map(|up| up.context.record.principal.clone())
@@ -386,7 +402,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let binding = if upstream.is_some() {
             None
         } else {
-            self.binding(&principal, false)?
+            self.binding(&principal, binding_context)?
         };
         let policy_request = PersonRequest {
             agent: agent.clone(),
@@ -455,8 +471,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         )?;
         self.store
             .commit(record, upstream.is_none())
-            .map_err(|error| store_issuance_failure(error, upstream.is_some()))?;
-        self.binding(&principal, upstream.is_some())?
+            .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.binding(&principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
         check_agent_current(&agent, released_at)?;
@@ -509,7 +525,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.match_resource(&presented, r)?;
         let retained = self.load_record(&presented, presented_compact, verified_at, "presented")?;
         if retained.agent != Self::identity(&agent) {
-            return Err(Failure::parameter("invalid_resource_token"));
+            return Err(Failure::parameter("invalid_presented_token"));
         }
         if retained.upstream != upstream.as_ref().map(|up| up.context.record.token.clone()) {
             return Err(Failure::parameter("invalid_upstream_token"));
@@ -523,11 +539,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }) {
             return Err(Failure::parameter("invalid_upstream_token"));
         }
+        let binding_context = if upstream.is_some() {
+            BindingContext::Upstream
+        } else {
+            BindingContext::Presented
+        };
         let binding = self
-            .binding(&retained.principal, upstream.is_some())?
+            .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
         if binding.person_id != retained.person_id {
-            return Err(Failure::parameter("invalid_resource_token"));
+            return Err(binding_context.revoked());
         }
         if r.login_hint
             .as_deref()
@@ -600,8 +621,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         )?;
         self.store
             .commit(record, false)
-            .map_err(|error| store_issuance_failure(error, upstream.is_some()))?;
-        self.binding(&retained.principal, upstream.is_some())?
+            .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
         self.inputs_current(&agent, &resource, &presented, released_at)?;
@@ -685,10 +706,9 @@ fn check_parameter_iat(iat: i64, now: i64) -> Result<(), Failure> {
         Ok(())
     }
 }
-fn store_issuance_failure(error: StoreError, upstream: bool) -> Failure {
+fn store_issuance_failure(error: StoreError, context: BindingContext) -> Failure {
     match error {
-        StoreError::RevokedBinding if upstream => Failure::parameter("revoked_upstream_token"),
-        StoreError::RevokedBinding => Failure::status(StatusCode::FORBIDDEN, "access_denied"),
+        StoreError::RevokedBinding => context.revoked(),
         _ => Failure::internal(),
     }
 }
