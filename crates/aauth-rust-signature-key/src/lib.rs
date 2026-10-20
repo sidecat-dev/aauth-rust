@@ -107,8 +107,9 @@ pub enum KeyMaterial {
 pub const MAX_BODY_BYTES: usize = 1_048_576;
 
 /// Components required by the local buffered request profile.
-/// Nonempty bodies or a supplied Content-Digest require covered digest, plus
-/// Content-Type when present. A supplied empty-content digest is also checked.
+/// Nonempty bodies or a supplied Content-Digest require covered digest.
+/// Content-Type is additionally required when present on nonempty content.
+/// A supplied empty-content digest is also checked.
 pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
     let mut required = vec!["@method", "@authority", "@path", "signature-key"];
     if req.uri().query().is_some() {

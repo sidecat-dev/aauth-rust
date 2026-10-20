@@ -94,4 +94,5 @@ also cross-builds with `cargo build --locked --target aarch64-unknown-linux-gnu`
 x86_64 and ARM64 and retains per-target demo binaries for 14 days. These are
 build artifacts, not a published release. macOS and Windows jobs are opt-in;
 execution on those platforms remains unverified. To verify packaging without
-uploading crates, run `cargo publish --workspace --dry-run --locked`.
+uploading crates, run `cargo publish --workspace --dry-run --locked` with an
+unused `CARGO_TARGET_DIR` for repeated checks of unchanged alpha versions.

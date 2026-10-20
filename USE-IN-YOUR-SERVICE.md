@@ -53,6 +53,11 @@ metadata; the verifier helper does not supply those roles. Point agents at this 
 Use the configured canonical HTTPS identity; a caller-supplied Host is not that
 identity. The Rust Agent does not fetch metadata automatically.
 
+Only the named fields are authenticated. Content-Encoding and other headers
+are not automatically covered. The library does not transform content; if your
+host interprets an encoding, reject unsupported encodings or use a profile that
+also authenticates those semantics. Verify raw content before decompression.
+
 Covered header fields use RFC 9421 canonicalization: trim outer spaces/tabs and
 combine field lines with `, `. Outer whitespace changes alone preserve a proof.
 Interpret Authorization consistently, or reject forms your application does not
