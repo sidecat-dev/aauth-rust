@@ -5,7 +5,9 @@ use aauth_rust_core::{
     TokenError, TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
-use aauth_rust_resource::{AuthDecision, Deny, PsAuthorizationConfig, PsAuthorizationResource};
+use aauth_rust_resource::{
+    AuthDecision, BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig, PsAuthorizationResource,
+};
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
@@ -126,8 +128,7 @@ fn config() -> PsAuthorizationConfig {
         scopes: vec!["records.read".into()],
     }
 }
-type Policy =
-    Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> Result<String, Deny> + Send + Sync>;
+type Policy = BoxedAuthAdmissionPolicy<String>;
 type Resource = PsAuthorizationResource<Keys, Policy>;
 fn resource(calls: Arc<AtomicUsize>, allow: bool) -> Resource {
     PsAuthorizationResource::new(
@@ -504,4 +505,61 @@ fn auth_challenge_debug_does_not_print_forwardable_token_bytes() {
         panic!("missing challenge")
     };
     assert!(!format!("{decision:?}").contains(resource_token));
+}
+
+#[test]
+fn boxed_auth_boolean_policy_captures_service_state() {
+    use aauth_rust_resource::BoxedAuthPolicy;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let policy: BoxedAuthPolicy = Box::new(move |token, request| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        token.claims().sub == "directed-person" && request.uri().path() == "/records"
+    });
+    let resource: PsAuthorizationResource<Keys, BoxedAuthPolicy> =
+        PsAuthorizationResource::new(config(), keys(), policy).unwrap();
+    assert!(
+        resource
+            .authorize(&signed(&auth(&auth_claims())), NOW, "unused")
+            .into_result()
+            .is_ok()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn wrong_audience_has_a_specific_diagnostic_without_challenge_or_policy() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = resource(calls.clone(), true);
+    let mut identity = person_claims();
+    identity.aud = "https://other.example".into();
+    let mut authorization = auth_claims();
+    authorization.aud = "https://other.example".into();
+    for compact in [
+        mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &identity).unwrap(),
+        auth(&authorization),
+    ] {
+        let decision = resource.authorize(&signed(&compact), NOW, "unused");
+        let AuthDecision::SignatureFailure(aauth_rust_resource::SignatureFailure::Token(error)) =
+            &decision
+        else {
+            panic!("expected token refusal, got {decision:?}");
+        };
+        assert_eq!(*error, TokenError::AudienceMismatch);
+        assert!(error.to_string().contains("audience"), "{error}");
+        let response = decision.into_response();
+        assert_eq!(response.status(), 401);
+        // Keep the pinned Signature-Key code while diagnosing the actual fix.
+        assert_eq!(response.headers()["signature-error"], "error=invalid_jwt");
+        assert!(!response.headers().contains_key("aauth-requirement"));
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"], "invalid_jwt");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|value| value.contains("audience"))
+        );
+        assert!(!String::from_utf8_lossy(response.body()).contains(&compact));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

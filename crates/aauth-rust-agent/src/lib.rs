@@ -2,10 +2,12 @@
 //! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
 mod credentials;
+mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
 use http::Request;
+pub use requirements::{Requirement, RequirementError};
 use std::sync::Arc;
 
 /// Caller-owned proof key and exact issuer token; no transport or refresh loop.

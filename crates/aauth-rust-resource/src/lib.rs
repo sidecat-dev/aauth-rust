@@ -5,8 +5,8 @@ use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentTok
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
-    AuthAuthorized, AuthDecision, PsAuthorizationConfig, PsAuthorizationResource,
-    PsConfigurationError,
+    AuthAuthorized, AuthDecision, BoxedAuthAdmissionPolicy, BoxedAuthPolicy, PsAuthorizationConfig,
+    PsAuthorizationResource, PsConfigurationError,
 };
 
 /// Invalid host configuration, separate from a caller's proof or token failure.
@@ -158,11 +158,17 @@ impl<T> Decision<T> {
                     "aauth-requirement",
                     "requirement=agent-token".parse().unwrap(),
                 );
-                problem(&mut response, "about:blank", "Agent token required", 401);
+                problem(
+                    &mut response,
+                    "about:blank",
+                    "Agent token required",
+                    401,
+                    None,
+                );
             }
             Self::Forbidden => {
                 *response.status_mut() = StatusCode::FORBIDDEN;
-                problem(&mut response, "about:blank", "Forbidden", 403);
+                problem(&mut response, "about:blank", "Forbidden", 403, None);
             }
             Self::Granted(token) => {
                 *response.body_mut() = token.claims().sub.as_bytes().to_vec();
@@ -193,8 +199,25 @@ impl<T> Decision<T> {
                 problem(
                     &mut response,
                     &format!("urn:ietf:params:sig-error:{}", failure.code()),
-                    "Request signature rejected",
+                    if matches!(
+                        failure,
+                        SignatureFailure::Token(TokenError::AudienceMismatch)
+                    ) {
+                        "Token audience mismatch"
+                    } else {
+                        "Request signature rejected"
+                    },
                     401,
+                    if matches!(
+                        failure,
+                        SignatureFailure::Token(TokenError::AudienceMismatch)
+                    ) {
+                        Some(
+                            "Token audience does not match this Resource; obtain a token for this Resource before retrying.",
+                        )
+                    } else {
+                        None
+                    },
                 );
                 if matches!(
                     failure,
@@ -225,7 +248,13 @@ impl<T> Decision<T> {
     }
 }
 
-fn problem(response: &mut Response<Vec<u8>>, kind: &str, title: &str, status: u16) {
+fn problem(
+    response: &mut Response<Vec<u8>>,
+    kind: &str,
+    title: &str,
+    status: u16,
+    detail: Option<&str>,
+) {
     response
         .headers_mut()
         .insert("content-type", "application/problem+json".parse().unwrap());
@@ -236,10 +265,12 @@ fn problem(response: &mut Response<Vec<u8>>, kind: &str, title: &str, status: u1
         } else {
             "agent_token_required"
         });
-    *response.body_mut() = serde_json::to_vec(
-        &serde_json::json!({"type":kind,"title":title,"status":status,"error":code}),
-    )
-    .expect("fixed Problem Details fields are serializable");
+    let mut value = serde_json::json!({"type":kind,"title":title,"status":status,"error":code});
+    if let Some(detail) = detail {
+        value["detail"] = serde_json::json!(detail);
+    }
+    *response.body_mut() =
+        serde_json::to_vec(&value).expect("fixed Problem Details fields are serializable");
 }
 
 /// A named policy type for Resource values stored in application state.

@@ -6,9 +6,9 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
-    AgentIdentity, AuthorizationRequest, Binding, Config, Grant, MemoryStore, Person,
-    PersonRequest, PersonServer, Policy, PolicyError, Store, StoreError, TokenRecord,
-    TokenReference,
+    AgentIdentity, AuthorizationRequest, Binding, BoxedClock, BoxedPolicy, BoxedTokenIds, Config,
+    Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError, Store,
+    StoreError, TokenRecord, TokenReference,
 };
 use http::{Request, Response};
 use serde_json::{Value, json};
@@ -186,7 +186,7 @@ struct Fixture {
     host: Host,
     ids: Arc<AtomicUsize>,
 }
-type Server = PersonServer<Keys, TestStore, Host, Box<dyn Fn() -> i64>, Box<dyn Fn() -> String>>;
+type Server = PersonServer<Keys, TestStore, BoxedPolicy, BoxedClock, BoxedTokenIds>;
 impl Fixture {
     fn new() -> Self {
         let now = Arc::new(AtomicI64::new(1000));
@@ -216,10 +216,10 @@ impl Fixture {
             config,
             Keys,
             self.store.clone(),
-            self.host.clone(),
-            Box::new(move || now.load(Ordering::SeqCst)) as Box<dyn Fn() -> i64>,
+            Box::new(self.host.clone()) as BoxedPolicy,
+            Box::new(move || now.load(Ordering::SeqCst)) as BoxedClock,
             Box::new(move || format!("token-{}", ids.fetch_add(1, Ordering::SeqCst)))
-                as Box<dyn Fn() -> String>,
+                as BoxedTokenIds,
         )
         .unwrap()
     }

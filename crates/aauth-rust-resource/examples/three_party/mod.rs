@@ -2,7 +2,7 @@
 #[path = "../support/tls.rs"]
 mod tls;
 
-use aauth_rust_agent::Agent;
+use aauth_rust_agent::{Agent, Requirement};
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
@@ -126,18 +126,13 @@ fn token_from(value: &Value, member: &str) -> Result<String> {
         .to_owned())
 }
 fn resource_challenge(response: &Response<Vec<u8>>) -> Result<String> {
-    let header = response
-        .headers()
-        .get("aauth-requirement")
-        .ok_or("missing AAuth requirement")?
-        .to_str()?;
-    // The demo's native Resource emits exactly this one selected requirement.
-    // A general HTTP client parses the Structured Fields dictionary instead.
-    Ok(header
-        .strip_prefix("requirement=auth-token;resource-token=\"")
-        .and_then(|s| s.strip_suffix('"'))
-        .ok_or("unexpected Resource challenge")?
-        .to_owned())
+    if response.status() != 401 {
+        return Err("this immediate flow requires a 401 challenge".into());
+    }
+    match Requirement::from_headers(response.headers())? {
+        Some(Requirement::AuthToken { resource_token }) => Ok(resource_token),
+        _ => Err("expected an auth-token Resource challenge".into()),
+    }
 }
 fn enrolled(
     provider: &AgentProvider,
@@ -375,6 +370,9 @@ pub fn run() -> Result<Transcript> {
         trust.clone(),
         |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true,
     )?;
+    // Both default role documents name this origin's same JWKS URL. Publish all
+    // role keys together under unique kids; serving either role's set alone
+    // would make the other role unverifiable. See the service guide's JWKS section.
     let mut combined_keys: Value = serde_json::from_slice(&orders.jwks()?)?;
     let ap_keys: Value = serde_json::from_slice(&intermediary_ap.jwks()?)?;
     combined_keys["keys"]

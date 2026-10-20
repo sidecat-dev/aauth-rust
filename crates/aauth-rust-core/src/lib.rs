@@ -18,11 +18,16 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-/// Agent-token, identifier or trusted discovery failure with a stable wire code.
+/// Token, identifier or trusted discovery failure with a stable wire code.
 pub enum TokenError {
     /// invalid Agent JWT: check compact encoding, required claim types and issuer signature.
     #[error("invalid Agent JWT: check compact encoding, required claim types and issuer signature")]
     InvalidJwt,
+    /// A verified token targets another recipient; maps to the draft's invalid_jwt.
+    #[error(
+        "token audience differs from the intended recipient: obtain a token for this Resource or Person Server"
+    )]
+    AudienceMismatch,
     #[error(
         "issuer is not trusted by this key snapshot: do not refresh or fetch keys from this issuer"
     )]
@@ -109,6 +114,7 @@ impl TokenError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidJwt
+            | Self::AudienceMismatch
             | Self::InvalidServerIdentifier
             | Self::InvalidAgentIdentifier
             | Self::InvalidDiscoveryDocument

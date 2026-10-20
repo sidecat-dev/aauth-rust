@@ -167,6 +167,32 @@ map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.
 
+### Collocated AP and Resource keys
+
+When a Resource is also its own AP, both default metadata documents name
+`https://resource.example/.well-known/jwks.json`. Serve **one merged JWKS** there
+containing the public keys for both roles, with unique `kid` values for distinct
+keys. Serving only `resource.jwks()` makes the AP's Agent tokens unverifiable;
+serving only `provider.jwks()` makes Resource challenges unverifiable. Each role
+still has its own well-known metadata document and the same exact issuer.
+
+The [three-party example](crates/aauth-rust-resource/examples/three_party/mod.rs)
+composes the host-owned document this way, using its own validated helper outputs:
+
+```rust
+let mut combined: serde_json::Value = serde_json::from_slice(&resource.jwks()?)?;
+let ap: serde_json::Value = serde_json::from_slice(&provider.jwks()?)?;
+combined["keys"].as_array_mut().unwrap()
+    .extend(ap["keys"].as_array().unwrap().iter().cloned());
+let public_jwks = serde_json::to_vec(&combined)?;
+```
+
+Configure distinct kids before merging and publish the resulting bytes at the
+shared route. Merging does not add rotation or retirement policy. A host can
+instead publish separately admitted JWKS URLs in its owned role metadata; the
+default helpers use the shared URL. Do not accept arbitrary external JWKS input
+through this composition path.
+
 ## Replay and application effects
 
 **Identical signed bytes can be accepted twice within the validity window.**
@@ -178,6 +204,17 @@ and proof bytes for the proof's accepted window, including allowed future skew.
 Token `jti` identifies issuance, not one request; many requests reuse a token.
 A freshness tuple that omits query/authorization may intentionally reject more
 than exact replays, so choose that policy with your application's concurrency in mind.
+
+In a chain, replaying the same upstream POST can start a **whole second downstream
+chain**: new PS Person/Auth issuances, another downstream call and another
+application effect. Establish application idempotency at the intermediary
+**before** requesting downstream credentials or dispatching work. Bind a signed
+operation key to the authenticated caller and request content, atomically reserve
+it, and retain the result for retries. Exact-proof replay detection is another
+host option within the accepted proof window. An upstream token's `(iss, jti)`
+identifies a credential, not an operation; using it alone would suppress different
+legitimate requests made with that token. PS retained lineage does not deduplicate
+application requests or provide exactly-once downstream delivery.
 
 Forwarded Agent-token bytes prove what their issuer signed. They do not prove
 that the original caller authorized this service or this downstream operation:
@@ -219,6 +256,20 @@ another Resource. Tenant is organization context and may change without changing
 the person. One Agent issuer/subject tuple binds to one accountable person;
 conflicting or revoked bindings cannot be overwritten by policy.
 
+This subset has no interaction endpoint or deferred login channel. Person
+authentication therefore comes from evidence the host already has. Two patterns
+are a prelinked directory entry for the exact verified Agent `(iss, sub)` tuple,
+established through the person's existing authenticated account/onboarding flow;
+or an explicit contract with a trusted AP that authenticates the person before
+issuing its Agent token and signs a host-specific account claim such as `acct`.
+In the latter pattern, `bind_person` checks the exact admitted AP issuer, reads
+`request.agent.claims().extra.get("acct")`, validates the agreed claim shape and
+maps it through the host's account directory. Generic AP trust alone does not
+give an arbitrary custom claim person-authentication meaning. Never substitute
+`parameters.login_hint`, tenant or the Agent token's routing `ps` claim for that
+evidence. If the host lacks the evidence or needs fresh interaction, refuse;
+`PolicyError::UserUnreachable` reports the absent channel rather than creating it.
+
 `Policy::authorize` receives verified Agent and Resource claims, the exact
 retained presented issuance, requested scopes and signed parameters. Return a
 nonempty subset of those scopes and a positive lifetime up to one hour. Intentional
@@ -239,6 +290,12 @@ reference with no cleanup; cloning it shares state, restarting without it loses
 outstanding-token lineage. This PS deliberately requires the exact retained
 Person/Auth issuance in exchanges and chains. A valid JWT without its record is
 refused, so retain state and preserve token bytes rather than reconstructing JWTs.
+
+For named application state, the PS exports `BoxedPolicy = Box<dyn Policy>`,
+`BoxedClock` and `BoxedTokenIds`. Boxed policy forwards all four direct/upstream
+hooks; clock and ID closures can capture state and are Send + Sync. For example,
+`PersonServer<K, S, BoxedPolicy, BoxedClock, BoxedTokenIds>` names the service type
+without naming closures. The constructor rustdoc uses these aliases.
 
 ## Protect a Resource with PS authorization
 
@@ -261,12 +318,41 @@ holder key and exchange context, beyond Core JWT syntax/common verification.
 `agent.with_token(person_or_auth)` reuses the same private proof key for Resource
 requests; `Agent::new` initially accepts an Agent credential.
 
+Read challenges with `Requirement::parse(&HeaderValue)` or
+`Requirement::from_headers(response.headers())` from `aauth-rust-agent`. The latter
+combines all field lines as an RFC 9651 dictionary and returns `None` only when
+the field is absent. It handles parameters on the requirement member, ignores
+unknown parameters and returns the exact decoded `resource_token` string for
+`Requirement::AuthToken`. **Parsing does not authenticate that JWT**: pass it to
+`verify_resource_challenge` before sending it to the PS. Malformed or unsupported
+requirements are errors, never permission to retry. The parser supports the
+immediate Agent/Person/Auth values; interaction, approval, clarification, claims
+and extension values return `RequirementError::Unsupported`. The combined field
+limit is 64 KiB and repeated names use RFC 9651 last-wins behavior. Status handling,
+deferred/polling behavior and transport remain host decisions. The running
+three-party example uses this parser instead of matching a serialized prefix.
+
+Discover PS endpoints from the configured PS's admitted metadata, using its
+`person_token_endpoint` and `auth_token_endpoint`, rather than assuming `/person`
+and `/token` for every implementation. Check exact metadata issuer equality and
+admit HTTPS endpoint destinations before network access. Restricting endpoints
+to that PS origin is a reasonable host policy, not a rule imposed by these
+helpers. Core's `TrustedIssuerKeys` handles issuer/role/JWKS verification; the
+host reads endpoint URLs and owns fetching, cache and redirect policy.
+
 `AuthDecision::into_result()` yields `(VerifiedAuthToken, admitted_context)` or a
 boxed refusal response. Application policy sees the verified Auth token and
 actual request only after audience, holder, expiry and configured scopes pass.
 Return your own response after performing authorized work. Admission does not
 freeze time: a long-running operation must decide whether to recheck expiry
 before its eventual effect.
+
+`BoxedAuthPolicy` names a captured boolean policy, and
+`BoxedAuthAdmissionPolicy<T>` names one returning `Result<T, Deny>` for typed
+application state. Wrong-audience Person/Auth tokens return local
+`TokenError::AudienceMismatch` and a Problem Details audience diagnosis before
+policy. Their wire code remains the pinned draft's `invalid_jwt`; obtain a
+credential for the intended Resource instead of refreshing an otherwise valid JWT.
 
 ## Make an immediate downstream call
 

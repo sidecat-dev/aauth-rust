@@ -10,7 +10,8 @@
 //! use aauth_rust_core::{AgentKeyResolver, TokenError};
 //! use aauth_rust_jose::{Jwk, SigningKey};
 //! use aauth_rust_person_server::{
-//!     AuthorizationRequest, Config, Grant, MemoryStore, Person, PersonRequest,
+//!     AuthorizationRequest, BoxedClock, BoxedPolicy, BoxedTokenIds,
+//!     Config, Grant, MemoryStore, Person, PersonRequest,
 //!     PersonServer, Policy, PolicyError,
 //! };
 //! use http::Request;
@@ -31,13 +32,16 @@
 //!         Err(TokenError::UntrustedIssuer)
 //!     }
 //! }
-//! let server = PersonServer::new(
+//! type HostServer = PersonServer<AdmittedIssuers, MemoryStore,
+//!     BoxedPolicy, BoxedClock, BoxedTokenIds>;
+//! let server: HostServer = PersonServer::new(
 //!     Config::new("https://ps.example", "ps-1", SigningKey::generate()),
 //!     AdmittedIssuers,
 //!     MemoryStore::default(),
-//!     ClosedPolicy,
-//!     || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-//!     || SigningKey::generate().public_jwk().thumbprint().unwrap(),
+//!     Box::new(ClosedPolicy) as BoxedPolicy,
+//!     Box::new(|| SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64)
+//!         as BoxedClock,
+//!     Box::new(|| SigningKey::generate().public_jwk().thumbprint().unwrap()) as BoxedTokenIds,
 //! )?;
 //! let request = Request::builder()
 //!     .uri("https://ps.example/.well-known/aauth-person.json")
@@ -51,7 +55,8 @@ mod server;
 mod store;
 pub mod storetest;
 pub use policy::{
-    AuthorizationRequest, Grant, Person, PersonRequest, Policy, PolicyError, UpstreamContext,
+    AuthorizationRequest, BoxedClock, BoxedPolicy, BoxedTokenIds, Grant, Person, PersonRequest,
+    Policy, PolicyError, UpstreamContext,
 };
 pub use server::{Config, ConfigurationError, PersonServer};
 pub use store::{

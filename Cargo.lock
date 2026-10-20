@@ -10,6 +10,8 @@ dependencies = [
  "aauth-rust-jose",
  "aauth-rust-signature-key",
  "http",
+ "sfv",
+ "thiserror",
 ]
 
 [[package]]

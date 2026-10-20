@@ -2,6 +2,15 @@ use crate::{Binding, TokenRecord};
 use aauth_rust_core::{VerifiedAgentToken, VerifiedResourceToken};
 use serde_json::Value;
 
+/// Named host policy for PersonServer values stored in application state.
+pub type BoxedPolicy = Box<dyn Policy>;
+
+/// Captured trusted clock returning current Unix seconds; safe to share in state.
+pub type BoxedClock = Box<dyn Fn() -> i64 + Send + Sync>;
+
+/// Captured fresh issuance-ID source; safe to share in state. Host owns uniqueness.
+pub type BoxedTokenIds = Box<dyn Fn() -> String + Send + Sync>;
+
 /// Host-authenticated accountable person and a Resource-directed public identity.
 #[derive(Clone, Debug)]
 pub struct Person {
@@ -88,5 +97,20 @@ pub trait Policy: Send + Sync {
     /// Downstream scope need not be a syntactic subset of upstream scope.
     fn authorize_upstream(&self, _request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
         Err(PolicyError::Denied)
+    }
+}
+
+impl<P: Policy + ?Sized> Policy for Box<P> {
+    fn bind_person(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
+        (**self).bind_person(request)
+    }
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+        (**self).authorize(request)
+    }
+    fn bind_upstream(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
+        (**self).bind_upstream(request)
+    }
+    fn authorize_upstream(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+        (**self).authorize_upstream(request)
     }
 }

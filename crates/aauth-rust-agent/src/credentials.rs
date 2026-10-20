@@ -104,7 +104,7 @@ fn challenge_context(
 impl Agent {
     /// Authenticate a Resource challenge against the actual target, PS, presented
     /// Person/Auth credential and this retained proof key. The host extracts the
-    /// compact resource-token parameter from AAuth-Requirement before calling.
+    /// compact resource-token parameter with Requirement::from_headers before calling.
     /// This implements immediate PS authorization, without AS federation or
     /// companion authorization. It performs no discovery fetch or HTTP request.
     ///

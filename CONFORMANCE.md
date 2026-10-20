@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **125 integration tests passed, 0 failed**, including
+Current engineer evidence: **133 integration tests passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. Executable examples
 run those same compositions. A wire check is not counted as a separate Rust test.
@@ -25,7 +25,8 @@ constructor/metadata example.
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
 | Person binding / PS token endpoints | Agent proof and covered JSON before policy; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; scope narrowing; expiry bounds rechecked after policy/storage; no release before commit | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (11 tests), `store.rs` (1 executable store contract) |
-| Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context | `aauth-rust-resource/tests/ps_authorization.rs` (10 tests) |
+| Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
+| Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (1 full application/TLS test) |
 
 Snapshot ownership and absence of network fetching are architecture properties
@@ -106,6 +107,10 @@ turn an `hwk` key into an AAuth identity.
   nonempty fixed scope profile across its origin; its host router admits paths.
   Scope-free profiles and automatic step-up negotiation are absent. The PS does
   verify an authentic Auth token used as `presented_token` for a later grant.
+- **AGENT-REQUIREMENT-PROFILE:** Agent parses immediate Agent/Person/Auth
+  requirements with a 64 KiB combined-field limit. Other requirement values are
+  explicit unsupported errors. Extraction is not JWT verification, automatic
+  retry, polling, interaction or deferred-delivery support.
 - PS and signing-Resource helpers also publish one active key. Their multi-key
   overlap/retirement lifecycle is absent, as with AP-KEY-ROLLOVER. Metadata
   advertises only implemented endpoints; branding extensions belong to the host.

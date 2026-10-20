@@ -62,6 +62,8 @@ See the [three-party source](crates/aauth-rust-resource/examples/three_party/mod
 and the [Person Server service guide](USE-IN-YOUR-SERVICE.md#run-a-person-server).
 The example supplies volatile state and one explicit demo policy. A real host
 supplies person authentication, durable storage and consent policy.
+`Requirement::from_headers` in the Agent crate extracts the challenge as
+Structured Fields; the Agent then verifies it before exchanging credentials.
 
 ## Use the libraries
 

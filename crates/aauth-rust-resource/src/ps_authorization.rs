@@ -11,6 +11,13 @@ use aauth_rust_signature_key::{
 use http::{Request, Response, StatusCode};
 use serde_json::json;
 
+/// Named captured-state policy for a PS-authorized Resource in application state.
+pub type BoxedAuthPolicy = Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
+
+/// Named PS Auth policy returning application context to the admitted handler.
+pub type BoxedAuthAdmissionPolicy<T> =
+    Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> Result<T, Deny> + Send + Sync>;
+
 /// Host configuration for one origin and one fixed route scope profile.
 /// The host router owns which paths use this profile.
 pub struct PsAuthorizationConfig {
@@ -309,10 +316,10 @@ where
                     .verify(&claims.cnf.jwk)
                     .map_err(SignatureFailure::Proof)?;
                 check_iat(claims.iat, now)?;
-                if claims.aud != self.config.issuer
-                    || claims.mission_s256.is_some()
-                    || unsupported_companion(&claims.extra)
-                {
+                if claims.aud != self.config.issuer {
+                    return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if claims.mission_s256.is_some() || unsupported_companion(&claims.extra) {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 let challenge = ResourceClaims {
@@ -352,9 +359,11 @@ where
                     .verify(&claims.cnf.jwk)
                     .map_err(SignatureFailure::Proof)?;
                 check_iat(claims.iat, now)?;
+                if claims.aud != self.config.issuer {
+                    return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
                 if claims.dwk != "aauth-person.json"
                     || claims.iss != claims.ps
-                    || claims.aud != self.config.issuer
                     || claims.mission_s256.is_some()
                     || unsupported_companion(&claims.extra)
                 {
