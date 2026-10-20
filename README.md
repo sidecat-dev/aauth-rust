@@ -119,8 +119,12 @@ Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
 secret material; the constant seeds in tests are fixtures. Assign a unique `jti`
 for each real issuance. Put the Agent key's public JWK in `cnf.jwk`, then move
 the same private key into `Agent::new`. Call `sign` last, after the URI and other
-headers are final. It replaces previous signature headers; changing covered
-values afterward invalidates the signature. Signing never sends or retries.
+headers are final. It replaces previous signature headers. Changing a covered
+component's canonical value afterward invalidates the signature. RFC 9421
+removes leading/trailing spaces and tabs from field values and combines field
+lines with `, `; outer whitespace alone does not change the signed value.
+Host policy must interpret Authorization consistently with that canonicalization
+or reject forms it does not support. Signing never sends or retries.
 
 Configure each Resource with its own HTTPS endpoint (authority and path);
 never copy that configuration from the client Host header. The library refuses
@@ -137,9 +141,21 @@ token and proof checks, so it can decide from the authenticated method, query
 and covered headers. For state stored in a server, use the named `BoxedPolicy`
 type with `AgentIdentityResource<AgentProviderKeys, BoxedPolicy>`; a boxed closure
 can capture application state. `VerifiedAgentToken` is Clone for handler state;
-its Debug output omits the compact credential.
+its Debug output omits the compact credential. A policy can also return
+`Result<T, Deny>`; `Decision::Granted` carries `Authorized<T>`, whose `admitted()`
+value reaches the handler without another verification. Boolean policies still
+work. Use `Decision::into_result()` to obtain `(verified_token, admitted_value)`
+or a boxed refusal response, instead of mapping a granted request to a demo body.
+`Agent::with_token(new_token)` reuses its key for refresh without handling seed
+bytes. Resolvers can be borrowed, boxed or shared with Arc; snapshots are Clone.
+The [service guide](USE-IN-YOUR-SERVICE.md) covers trust, refresh, rotation,
+replay and local ports. Run the [axum example](crates/aauth-rust-resource/examples/axum.rs)
+with `cargo run --locked -p aauth-rust-resource --example axum` to see request
+adaptation and a handler using typed policy context.
 
-All times are **Unix seconds**, not milliseconds. Expiry has no leeway; the
+All times are **Unix seconds**, not milliseconds. Local signing/verifier clocks
+and AP-issued iat/exp are limited to 0..=8589934591 (through 2242), rejecting
+contemporary millisecond timestamps before signing or issuance. Expiry has no leeway; the
 Resource accepts signature `created` within ±60 seconds and refuses `iat` more
 than 60 seconds ahead. Core JWT verification alone does not use `iat` as a
 validity check. The AP issues tokens lasting at most 24 hours; verification
@@ -163,8 +179,10 @@ it does not decide to trust an arbitrary issuer or fetch anything. A foreign
 issuer yields terminal `UntrustedIssuer` (`invalid_key` on the wire); only an
 unknown kid on a configured,
 trusted issuer yields `UnknownKey`. Refresh the configured JWKS source after
-checking issuer trust; never follow a token-supplied issuer on that error. Production
-hosts own destination admission, timeouts, cache lifetime and refresh (including
+checking issuer trust; never follow a token-supplied issuer on that error.
+Metadata with a missing or unusable `jwks_uri` yields terminal
+`InvalidDiscoveryMetadata` (`invalid_key`), not an unknown-key refresh hint.
+Production hosts own destination admission, timeouts, cache lifetime and refresh (including
 the draft's once-per-minute fetch floor), key storage, enrollment, revocation,
 replay policy and clocks. This profile supplies no nonce: if you require replay
 refusal, key the replay cache on the proof bytes within the accepted time window.
@@ -186,7 +204,8 @@ or denies host policy (`403`). Algorithm/scheme failures include
 `Accept-Signature-Alg`/`Accept-Signature-Scheme`. Failures have Problem Details
 bodies; policy denials contain no signature diagnostics. The successful
 `into_response()` convenience mapping writes the verified `sub` as its body;
-match `Granted` directly to call your own handler instead. Local Rust error
+use `into_result()` to call your own handler. A Resource `clock_skew` response
+includes Date from the supplied verifier clock. Local Rust error
 messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute

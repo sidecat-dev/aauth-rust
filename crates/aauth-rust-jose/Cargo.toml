@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://docs.rs/aauth-rust-jose"
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Ed25519 public JWKs, thumbprints and compact JWS primitives for AAuth"
 
 [dependencies]

@@ -30,6 +30,9 @@ impl AgentProvider {
     /// Issue a top-level Agent token after the host approves enrollment and
     /// assigns a unique `jti`. `iat`/`exp` use Unix seconds, with `exp > iat` and a lifetime of at most 24 hours.
     ///
+    /// `iat` and `exp` must be in 0..=8589934591 Unix seconds (through 2242);
+    /// contemporary millisecond values are refused before token serialization.
+    ///
     /// # Errors
     /// Rejects malformed claims, a different issuer, nonpositive or over-24-hour
     /// lifetime, sub-agent issuance, or token serialization/signing errors.
@@ -38,7 +41,11 @@ impl AgentProvider {
         if claims.iss != self.issuer {
             return Err(TokenError::IssuerMismatch);
         }
-        if claims.exp <= claims.iat || claims.exp.saturating_sub(claims.iat) > 86400 {
+        if !(0..=(1_i64 << 33) - 1).contains(&claims.iat)
+            || !(0..=(1_i64 << 33) - 1).contains(&claims.exp)
+            || claims.exp <= claims.iat
+            || claims.exp.saturating_sub(claims.iat) > 86400
+        {
             return Err(TokenError::InvalidTokenLifetime);
         }
         // Sub-agent issuance requires checking the parent's actual token/state.

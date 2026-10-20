@@ -19,6 +19,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo run --locked -p aauth-rust-resource --example library
+cargo run --locked -p aauth-rust-resource --example axum
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo doc --workspace --no-deps --locked
 git diff --check

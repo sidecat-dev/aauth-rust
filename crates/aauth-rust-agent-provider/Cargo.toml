@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://docs.rs/aauth-rust-agent-provider"
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Host-controlled AAuth Agent token issuance and public discovery documents"
 
 [dependencies]

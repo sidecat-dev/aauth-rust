@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **56 integration tests passed, 0 failed**, 55 protocol/role tests plus one TLS
+Current engineer evidence: **69 integration tests passed, 0 failed**, 68 protocol/role/adapter tests plus one TLS
 integration test with **14 wire/TLS checks**. The executable example runs that
 same composition. A wire check is not counted as a separate Rust test. One additional rustdoc test
 executes the unsigned Resource challenge.
@@ -13,11 +13,12 @@ executes the unsigned Resource challenge.
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (16 tests), TLS journey |
-| RFC 9421 / AAuth Signing | Bodyless requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window | Proof tests, independently stated signature-base fixture |
-| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (14 tests) |
-| AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location; reject foreign issuer with invalid_key separately from rotation; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
-| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; configured authority/path binding before policy; denial after valid authentication | `aauth-rust-resource/tests/identity.rs` (16 tests), TLS journey |
+| Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (18 tests), TLS journey |
+| RFC 9421 / AAuth Signing | Bodyless requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
+| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (17 tests) |
+| AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location with terminal invalid_key for unusable metadata; reject foreign issuer with invalid_key separately from rotation; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
+| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; configured authority/path binding before policy; denial after valid authentication; Date from verifier time on clock_skew | `aauth-rust-resource/tests/identity.rs` (20 tests), `response_mapping.rs` (2 tests), TLS journey |
+| Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling | `aauth-rust-resource/tests/axum_service.rs` (2 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
 
 Snapshot ownership and absence of network fetching are architecture properties
@@ -52,8 +53,18 @@ turn an `hwk` key into an AAuth identity.
   No Content-Digest is computed or verified; a nonempty POST body added after
   signing is refused before policy. Hosts must pass actual body bytes or reject
   bodies at transport, never authenticate an empty placeholder then forward a body.
+  Identical proof bytes can be accepted repeatedly inside the window; no replay
+  cache or application idempotency store is supplied.
   The Resource fixes label `sig`, a 60-second window and the jwt scheme; hosts
   needing a different profile compose the underlying Signature-Key API.
+- Local signing/verifier clocks and AP-issued iat/exp use the supported range
+  0..=8589934591 Unix seconds (through 2242), not contemporary milliseconds.
+  This is a local profile bound, not a general NumericDate rule.
+- **AP-KEY-ROLLOVER:** AP JWKS publication contains exactly one active key.
+  Retained old keys, overlap timing and automatic retirement are not implemented.
+  The resolver accepts supplied multi-key JWKS and selects by kid; tests prove
+  old/new verification during overlap and old-key refusal after removal. This
+  resolver behavior is not an AP rotation lifecycle.
 - The AP follows the Agent-token 24-hour lifetime SHOULD as an issuance limit.
   Core/Resource verification does not impose that recommendation as a hard
   ceiling on other issuers. Hosts can enforce a stricter lifetime in policy.

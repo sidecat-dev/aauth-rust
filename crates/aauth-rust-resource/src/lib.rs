@@ -13,6 +13,11 @@ pub enum SignatureFailure {
     Token(TokenError),
     /// Missing coverage, with the complete request-specific component list.
     Input(Vec<&'static str>),
+    /// Signature or token issuance is too far in the future; retains the verifier clock.
+    ClockSkew {
+        /// Verifier's trusted Unix seconds, used for the response Date header.
+        server_time: i64,
+    },
 }
 impl SignatureFailure {
     /// Machine-readable wire code, separate from local error explanations.
@@ -21,6 +26,7 @@ impl SignatureFailure {
             Self::Proof(error) => error.code(),
             Self::Token(error) => error.code(),
             Self::Input(_) => "invalid_input",
+            Self::ClockSkew { .. } => "clock_skew",
         }
     }
 }
@@ -29,15 +35,69 @@ impl std::fmt::Display for SignatureFailure {
         match self {
             Self::Proof(e) => e.fmt(f),
             Self::Token(e) => e.fmt(f),
+            Self::ClockSkew { .. } => Error::ClockSkew.fmt(f),
             Self::Input(required) => {
                 write!(f, "signature coverage is incomplete: cover {required:?}")
             }
         }
     }
 }
+/// Host policy refused an authenticated request. No signature diagnostics are sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deny;
+
+/// Result of a host policy: booleans carry no extra context; `Result<T, Deny>`
+/// carries a verified application value into the handler without checking it twice.
+pub trait PolicyOutcome {
+    /// Value retained only on successful admission.
+    type Context;
+    /// Convert a policy result into an allowed value or an opaque policy denial.
+    fn into_admission(self) -> Result<Self::Context, Deny>;
+}
+impl PolicyOutcome for bool {
+    type Context = ();
+    fn into_admission(self) -> Result<(), Deny> {
+        if self { Ok(()) } else { Err(Deny) }
+    }
+}
+impl<T> PolicyOutcome for Result<T, Deny> {
+    type Context = T;
+    fn into_admission(self) -> Result<T, Deny> {
+        self
+    }
+}
+
+/// Verified caller identity and the value returned by successful host policy.
+/// Dereferences to the token for read-only claim/compact-byte inspection.
+#[derive(Debug)]
+pub struct Authorized<T = ()> {
+    token: VerifiedAgentToken,
+    admitted: T,
+}
+impl<T> Authorized<T> {
+    /// Authenticated caller token; the HTTP proof and host policy also succeeded.
+    pub fn token(&self) -> &VerifiedAgentToken {
+        &self.token
+    }
+    /// Application context produced by policy, such as a verified upstream token.
+    pub fn admitted(&self) -> &T {
+        &self.admitted
+    }
+    /// Move both values into an application handler without verifying again.
+    pub fn into_parts(self) -> (VerifiedAgentToken, T) {
+        (self.token, self.admitted)
+    }
+}
+impl<T> std::ops::Deref for Authorized<T> {
+    type Target = VerifiedAgentToken;
+    fn deref(&self) -> &VerifiedAgentToken {
+        &self.token
+    }
+}
+
 /// Resource outcome. Convert to HTTP only after inspecting application needs.
 #[derive(Debug)]
-pub enum Decision {
+pub enum Decision<T = ()> {
     /// No proof was supplied: send a 401 Agent-token challenge.
     AgentTokenRequired,
     /// Proof/token verification failed: 401 with a stable Signature-Error code.
@@ -45,9 +105,19 @@ pub enum Decision {
     /// Verified identity failed host policy: 403 without signature diagnostics.
     Forbidden,
     /// Proof and issuer token verified and host policy allowed the identity.
-    Granted(Box<VerifiedAgentToken>),
+    Granted(Box<Authorized<T>>),
 }
-impl Decision {
+impl<T> Decision<T> {
+    /// Extract caller and admitted context for an application handler, or an HTTP refusal.
+    ///
+    /// # Errors
+    /// Returns the mapped 401/403 response if target, authentication or policy refused.
+    pub fn into_result(self) -> Result<(VerifiedAgentToken, T), Box<Response<Vec<u8>>>> {
+        match self {
+            Self::Granted(value) => Ok((*value).into_parts()),
+            other => Err(Box::new(other.into_response())),
+        }
+    }
     /// HTTP mapping with safe RFC 9457 Problem Details for failures.
     /// Granted writes the authenticated subject as the response body. Match
     /// Granted directly when handing control to an application handler instead.
@@ -80,14 +150,18 @@ impl Decision {
                         .join(" ");
                     error.push_str(&format!(", required_input=({components})"));
                 }
-                if matches!(failure, SignatureFailure::Proof(Error::InvalidInput)) {
-                    error.push_str(
-                        ", required_input=(\"@method\" \"@authority\" \"@path\" \"signature-key\")",
-                    );
-                }
                 response
                     .headers_mut()
                     .insert("signature-error", error.parse().unwrap());
+                if let SignatureFailure::ClockSkew { server_time } = &failure
+                    && (0..=(1_i64 << 33) - 1).contains(server_time)
+                    && let Some(time) = std::time::UNIX_EPOCH
+                        .checked_add(std::time::Duration::from_secs(*server_time as u64))
+                {
+                    response
+                        .headers_mut()
+                        .insert("date", httpdate::fmt_http_date(time).parse().unwrap());
+                }
                 problem(
                     &mut response,
                     &format!("urn:ietf:params:sig-error:{}", failure.code()),
@@ -144,6 +218,10 @@ fn problem(response: &mut Response<Vec<u8>>, kind: &str, title: &str, status: u1
 /// A boxed closure can capture application state while remaining Send + Sync.
 pub type BoxedPolicy = Box<dyn Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
 
+/// A named stateful policy carrying application context into a successful handler.
+pub type BoxedAdmissionPolicy<T> =
+    Box<dyn Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> Result<T, Deny> + Send + Sync>;
+
 /// Direct Agent identity: trusted issuer token, holder proof, then host policy.
 pub struct AgentIdentityResource<K, P> {
     keys: K,
@@ -151,8 +229,10 @@ pub struct AgentIdentityResource<K, P> {
     authority: String,
     path: String,
 }
-impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
-    AgentIdentityResource<K, P>
+impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
+where
+    P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> O,
+    O: PolicyOutcome,
 {
     /// Bind this Resource to one HTTPS endpoint, plus trusted keys and policy.
     /// Configure authority/path from server configuration, never from client Host.
@@ -174,10 +254,11 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
         })
     }
     /// Replace admission policy while retaining the configured target and keys.
-    pub fn with_policy<Q: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>(
-        self,
-        policy: Q,
-    ) -> AgentIdentityResource<K, Q> {
+    pub fn with_policy<Q, R>(self, policy: Q) -> AgentIdentityResource<K, Q>
+    where
+        Q: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> R,
+        R: PolicyOutcome,
+    {
         AgentIdentityResource {
             keys: self.keys,
             policy,
@@ -204,7 +285,7 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
     /// assert!(matches!(resource.authorize(&request, 1000), Decision::AgentTokenRequired));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn authorize(&self, request: &Request<Vec<u8>>, now: i64) -> Decision {
+    pub fn authorize(&self, request: &Request<Vec<u8>>, now: i64) -> Decision<O::Context> {
         let authority = match aauth_rust_signature_key::canonical_authority(request.uri()) {
             Ok(authority) => authority,
             Err(error) => return Decision::SignatureFailure(SignatureFailure::Proof(error)),
@@ -220,6 +301,11 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
         }
         let proof = match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"]) {
             Ok(v) => v,
+            Err(Error::ClockSkew) => {
+                return Decision::SignatureFailure(SignatureFailure::ClockSkew {
+                    server_time: now,
+                });
+            }
             Err(Error::InvalidInput) => {
                 return Decision::SignatureFailure(SignatureFailure::Input(required_components(
                     request,
@@ -235,14 +321,14 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
             Err(e) => return Decision::SignatureFailure(SignatureFailure::Token(e)),
         };
         if token.claims().iat > now.saturating_add(60) {
-            return Decision::SignatureFailure(SignatureFailure::Proof(Error::ClockSkew));
+            return Decision::SignatureFailure(SignatureFailure::ClockSkew { server_time: now });
         }
         if let Err(e) = proof.verify(&token.claims().cnf.jwk) {
             return Decision::SignatureFailure(SignatureFailure::Proof(e));
         }
-        if !(self.policy)(&token, request) {
-            return Decision::Forbidden;
+        match (self.policy)(&token, request).into_admission() {
+            Ok(admitted) => Decision::Granted(Box::new(Authorized { token, admitted })),
+            Err(Deny) => Decision::Forbidden,
         }
-        Decision::Granted(Box::new(token))
     }
 }

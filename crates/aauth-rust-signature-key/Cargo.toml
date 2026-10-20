@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://docs.rs/aauth-rust-signature-key"
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Bodyless HTTP Message Signatures with inline Ed25519 keys and JWT key conveyance"
 
 [dependencies]

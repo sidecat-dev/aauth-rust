@@ -4,10 +4,11 @@ use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
 use http::Request;
+use std::sync::Arc;
 
 /// Caller-owned proof key and exact issuer token; no transport or refresh loop.
 pub struct Agent {
-    key: SigningKey,
+    key: Arc<SigningKey>,
     token: String,
 }
 impl Agent {
@@ -18,6 +19,18 @@ impl Agent {
     /// Returns token-profile errors or `ConfirmationKeyMismatch` if the local
     /// signing key differs from cnf.jwk. This does not verify the issuer signature.
     pub fn new(key: SigningKey, token: String) -> Result<Self, TokenError> {
+        Self::from_shared_key(Arc::new(key), token)
+    }
+    /// Retain a refreshed token with the existing proof key. Earlier Agent values
+    /// remain usable for in-flight requests; secret seed bytes are never exported.
+    ///
+    /// # Errors
+    /// Rejects malformed tokens or a new cnf.jwk that differs from this Agent key.
+    /// Issuer authentication still belongs to the caller or receiving Resource.
+    pub fn with_token(&self, token: String) -> Result<Self, TokenError> {
+        Self::from_shared_key(self.key.clone(), token)
+    }
+    fn from_shared_key(key: Arc<SigningKey>, token: String) -> Result<Self, TokenError> {
         let parsed = AgentToken::parse(&token)?;
         if parsed.unverified_claims().cnf.jwk.thumbprint()? != key.public_jwk().thumbprint()? {
             return Err(TokenError::ConfirmationKeyMismatch);

@@ -369,3 +369,83 @@ fn a_foreign_issuer_does_not_look_like_a_rotated_key() {
         TokenError::UnknownKey
     );
 }
+
+#[test]
+fn snapshots_can_be_shared_as_references_arcs_and_boxed_resolvers() {
+    use aauth_rust_core::AgentKeyResolver;
+    use std::sync::Arc;
+    let (ap, _, claims, keys) = fixture();
+    let compact = mint(&ap, &claims, "aa-agent+jwt");
+    let token = AgentToken::parse(&compact).unwrap();
+    let cloned = keys.clone();
+    let borrowed = &keys;
+    token.verify(&borrowed, 1000).unwrap();
+    let shared = Arc::new(cloned);
+    token.verify(&shared, 1000).unwrap();
+    let erased: Box<dyn AgentKeyResolver> = Box::new(shared);
+    token.verify(&erased, 1000).unwrap();
+}
+
+#[test]
+fn supplied_multi_key_jwks_keeps_old_tokens_valid_until_the_key_is_retired() {
+    let (old, _, claims, _) = fixture();
+    let next = SigningKey::from_seed([8; 32]);
+    let old_token = AgentToken::parse(&mint(&old, &claims, "aa-agent+jwt")).unwrap();
+    let compact = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-2"}),
+        &serde_json::to_vec(&claims).unwrap(),
+        &next,
+    )
+    .unwrap();
+    let new_token = AgentToken::parse(&compact).unwrap();
+    let mut first = serde_json::to_value(old.public_jwk()).unwrap();
+    first["kid"] = json!("ap-1");
+    let mut second = serde_json::to_value(next.public_jwk()).unwrap();
+    second["kid"] = json!("ap-2");
+    let metadata = br#"{"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}"#;
+    let overlap = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        metadata,
+        &serde_json::to_vec(&json!({"keys":[first,second.clone()]})).unwrap(),
+    )
+    .unwrap();
+    old_token.verify(&overlap, 1000).unwrap();
+    new_token.verify(&overlap, 1000).unwrap();
+    let retired = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        metadata,
+        &serde_json::to_vec(&json!({"keys":[second]})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        old_token.verify(&retired, 1000).err().unwrap(),
+        TokenError::UnknownKey
+    );
+    new_token.verify(&retired, 1000).unwrap();
+}
+
+#[test]
+fn invalid_jwks_metadata_never_advertises_a_key_refresh() {
+    for location in [
+        None,
+        Some(json!(null)),
+        Some(json!("http://ap.example/keys")),
+        Some(json!("https://user@ap.example/keys")),
+        Some(json!("https://ap.example/keys#x")),
+        Some(json!("https://ap.example:bad/keys")),
+    ] {
+        let mut metadata = json!({"issuer":"https://ap.example"});
+        if let Some(location) = location {
+            metadata["jwks_uri"] = location;
+        }
+        let error = AgentProviderKeys::from_documents(
+            "https://ap.example",
+            &serde_json::to_vec(&metadata).unwrap(),
+            br#"{"keys":[]}"#,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code(), "invalid_key");
+        assert_ne!(error, TokenError::UnknownKey);
+    }
+}

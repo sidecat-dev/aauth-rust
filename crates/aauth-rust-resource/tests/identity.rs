@@ -189,7 +189,7 @@ fn wire_failures_have_problem_details_and_safe_recovery_hints() {
             Some(("aauth-requirement", "requirement=agent-token")),
         ),
     ] {
-        let response = Decision::SignatureFailure(failure).into_response();
+        let response = Decision::<()>::SignatureFailure(failure).into_response();
         assert_eq!(response.status(), 401);
         assert_eq!(
             response.headers()["content-type"],
@@ -207,7 +207,7 @@ fn wire_failures_have_problem_details_and_safe_recovery_hints() {
         assert_eq!(problem["status"], 401);
         assert_eq!(problem["error"], code);
     }
-    let response = Decision::Forbidden.into_response();
+    let response = Decision::<()>::Forbidden.into_response();
     assert_eq!(response.status(), 403);
     assert!(!response.headers().contains_key("signature-error"));
     let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
@@ -338,7 +338,7 @@ fn verified_identity_can_be_cloned_into_handler_state() {
     let Decision::Granted(token) = resource.authorize(&req, 1000) else {
         panic!("valid identity refused")
     };
-    let owned: VerifiedAgentToken = (*token).clone();
+    let owned: VerifiedAgentToken = token.token().clone();
     assert_eq!(owned.compact(), agent.token());
     assert_eq!(owned.claims().sub, token.claims().sub);
 }
@@ -416,8 +416,14 @@ fn future_iat_accepts_exactly_sixty_seconds_and_refuses_sixty_one() {
             let response = decision.into_response();
             assert_eq!(response.status(), 401);
             assert_eq!(response.headers()["signature-error"], "error=clock_skew");
+            assert_eq!(response.headers()["date"], "Thu, 01 Jan 1970 00:16:40 GMT");
         }
     }
+    let mut req = request();
+    agent.sign(&mut req, 1061).unwrap();
+    let response = resource.authorize(&req, 1000).into_response();
+    assert_eq!(response.headers()["signature-error"], "error=clock_skew");
+    assert_eq!(response.headers()["date"], "Thu, 01 Jan 1970 00:16:40 GMT");
 }
 
 #[test]
@@ -451,4 +457,131 @@ fn foreign_issuer_is_a_terminal_trust_failure_on_the_wire() {
     let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
     assert_eq!(problem["type"], "urn:ietf:params:sig-error:invalid_key");
     assert_eq!(problem["error"], "invalid_key");
+}
+
+#[test]
+fn ap_issuance_refuses_millisecond_timestamps_before_serializing() {
+    let (agent, _) = composition();
+    let mut claims = aauth_rust_core::AgentToken::parse(agent.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    claims.iat = (1_i64 << 33) - 2;
+    claims.exp = (1_i64 << 33) - 1;
+    ap.issue(&claims).unwrap();
+    for (iat, exp) in [
+        (1_800_000_000_000, 1_800_000_000_300),
+        ((1_i64 << 33) - 1, 1_i64 << 33),
+    ] {
+        claims.iat = iat;
+        claims.exp = exp;
+        assert_eq!(
+            ap.issue(&claims).unwrap_err(),
+            aauth_rust_core::TokenError::InvalidTokenLifetime
+        );
+    }
+}
+
+#[test]
+fn refreshing_an_agents_token_reuses_the_key_and_keeps_the_old_agent_usable() {
+    let (agent, resource) = composition();
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    let mut claims = aauth_rust_core::AgentToken::parse(agent.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    claims.jti = "refreshed-2".into();
+    claims.exp = 3000;
+    let next = agent.with_token(ap.issue(&claims).unwrap()).unwrap();
+    for current in [&agent, &next] {
+        let mut req = request();
+        current.sign(&mut req, 1000).unwrap();
+        assert!(matches!(
+            resource.authorize(&req, 1000),
+            Decision::Granted(_)
+        ));
+    }
+    claims.cnf.jwk = SigningKey::from_seed([9; 32]).public_jwk();
+    assert!(agent.with_token(ap.issue(&claims).unwrap()).is_err());
+}
+
+#[test]
+fn typed_policy_carries_verified_upstream_identity_to_the_handler_once() {
+    use aauth_rust_resource::Deny;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, resource) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    let keys = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        &ap.metadata().unwrap(),
+        &ap.jwks().unwrap(),
+    )
+    .unwrap();
+    let resource = resource.with_policy(
+        move |_: &VerifiedAgentToken, req: &Request<Vec<u8>>| -> Result<VerifiedAgentToken, Deny> {
+            seen.fetch_add(1, Ordering::SeqCst);
+            let compact = req
+                .headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("AAuth-Upstream "))
+                .ok_or(Deny)?;
+            aauth_rust_core::AgentToken::parse(compact)
+                .and_then(|token| token.verify(&keys, 1000))
+                .map_err(|_| Deny)
+        },
+    );
+    let mut req = request();
+    req.headers_mut().insert(
+        "authorization",
+        format!("AAuth-Upstream {}", agent.token()).parse().unwrap(),
+    );
+    agent.sign(&mut req, 1000).unwrap();
+    let (caller, upstream) = resource.authorize(&req, 1000).into_result().unwrap();
+    assert_eq!(caller.claims().sub, "aauth:Agent@ap.example");
+    assert_eq!(upstream.compact(), agent.token());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    req.headers_mut().remove("authorization");
+    agent.sign(&mut req, 1000).unwrap();
+    let response = resource.authorize(&req, 1000).into_result().unwrap_err();
+    assert_eq!(response.status(), 403);
+    assert!(!response.headers().contains_key("signature-error"));
+}
+
+#[test]
+fn identical_proofs_are_accepted_twice_inside_the_window_without_host_replay_policy() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, resource) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = resource.with_policy(move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        true
+    });
+    let mut req = request();
+    agent.sign(&mut req, 1000).unwrap();
+    for now in [1000, 1060] {
+        assert!(matches!(
+            resource.authorize(&req, now),
+            Decision::Granted(_)
+        ));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        resource.authorize(&req, 1061),
+        Decision::SignatureFailure(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }

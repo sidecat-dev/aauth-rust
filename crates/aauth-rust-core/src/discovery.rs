@@ -36,15 +36,19 @@ pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, 
     let uri = metadata
         .get("jwks_uri")
         .and_then(Value::as_str)
-        .ok_or(TokenError::UnknownKey)?;
-    let parsed: http::Uri = uri.parse().map_err(|_| TokenError::UnknownKey)?;
-    let authority = parsed.authority().ok_or(TokenError::UnknownKey)?;
+        .ok_or(TokenError::InvalidDiscoveryMetadata)?;
+    let parsed: http::Uri = uri
+        .parse()
+        .map_err(|_| TokenError::InvalidDiscoveryMetadata)?;
+    let authority = parsed
+        .authority()
+        .ok_or(TokenError::InvalidDiscoveryMetadata)?;
     if parsed.scheme_str() != Some("https")
         || authority.host().is_empty()
         || authority.as_str().contains('@')
         || uri.contains('#')
     {
-        return Err(TokenError::UnknownKey);
+        return Err(TokenError::InvalidDiscoveryMetadata);
     }
     let suffix = &authority.as_str()[authority.host().len()..];
     if !suffix.is_empty()
@@ -53,13 +57,14 @@ pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, 
             .and_then(|port| port.parse::<u16>().ok())
             .is_none()
     {
-        return Err(TokenError::UnknownKey);
+        return Err(TokenError::InvalidDiscoveryMetadata);
     }
     Ok(uri.into())
 }
 
 /// Immutable host-retained discovery snapshot for one explicitly trusted AP.
 /// Never performs a fetch; constructing it is not a trust decision for the host.
+#[derive(Clone)]
 pub struct AgentProviderKeys {
     issuer: String,
     jwks_uri: String,
@@ -132,5 +137,21 @@ impl AgentKeyResolver for AgentProviderKeys {
         let key: Jwk = serde_json::from_value(value.clone()).map_err(|_| TokenError::InvalidKey)?;
         key.validate()?;
         Ok(key)
+    }
+}
+
+impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for &T {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        (**self).key(issuer, dwk, kid)
+    }
+}
+impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for std::sync::Arc<T> {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        (**self).key(issuer, dwk, kid)
+    }
+}
+impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for Box<T> {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        (**self).key(issuer, dwk, kid)
     }
 }

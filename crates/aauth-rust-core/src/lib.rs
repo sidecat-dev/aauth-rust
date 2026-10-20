@@ -62,6 +62,11 @@ pub enum TokenError {
     )]
     /// Agent token dwk does not name aauth-agent.json.
     InvalidDiscoveryDocument,
+    /// Discovery metadata has no usable HTTPS JWKS URL; a key refresh cannot fix it.
+    #[error(
+        "invalid AP metadata jwks_uri: provide an HTTPS URL with a host and valid port, without userinfo or fragment"
+    )]
+    InvalidDiscoveryMetadata,
     /// sub domain must match the Agent Provider issuer host.
     #[error("sub domain must match the Agent Provider issuer host")]
     AgentIssuerMismatch,
@@ -79,7 +84,7 @@ pub enum TokenError {
     /// Selected public key or JWKS is malformed or ambiguous.
     InvalidKey,
     #[error(
-        "invalid issuance fields: jti must be non-empty and exp must be later than iat and within the AP 24-hour issuance limit; all timestamps use non-negative Unix seconds"
+        "invalid issuance fields: jti must be non-empty and exp must be later than iat and within the AP 24-hour issuance limit; iat/exp use Unix seconds in 0..=8589934591 for local issuance"
     )]
     /// Issuance fields or required timestamps are outside the supported profile.
     InvalidTokenLifetime,
@@ -111,7 +116,9 @@ impl TokenError {
             Self::IssuerMissing => "issuer_missing",
             Self::IssuerMismatch => "issuer_mismatch",
             Self::UnsupportedAlgorithm => "unsupported_algorithm",
-            Self::InvalidKey | Self::UntrustedIssuer => "invalid_key",
+            Self::InvalidKey | Self::UntrustedIssuer | Self::InvalidDiscoveryMetadata => {
+                "invalid_key"
+            }
         }
     }
 }

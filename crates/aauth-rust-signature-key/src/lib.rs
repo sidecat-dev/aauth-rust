@@ -49,7 +49,7 @@ pub enum Error {
     /// Request URI is not an absolute HTTPS target with a usable authority.
     InvalidUri,
     #[error(
-        "invalid clock: supply non-negative Unix seconds and a non-negative verification window"
+        "invalid clock: supply Unix seconds in 0..=8589934591, not contemporary milliseconds, and a non-negative verification window"
     )]
     /// Clock or verification window is outside the nonnegative Unix-second profile.
     InvalidClock,
@@ -272,6 +272,7 @@ pub struct PreparedRequest {
 }
 impl PreparedRequest {
     /// Capture a selected hwk/jwt assertion at `now` with a window in Unix seconds.
+    /// Local clocks are limited to 0..=8589934591 (through 2242).
     ///
     /// # Errors
     /// Returns profile, syntax, coverage, time or key-conveyance errors. No proof
@@ -302,7 +303,7 @@ impl PreparedRequest {
         if req.uri().scheme_str() != Some("https") {
             return Err(Error::InvalidUri);
         }
-        if window < 0 || now < 0 {
+        if window < 0 || !(0..=(1_i64 << 33) - 1).contains(&now) {
             return Err(Error::InvalidClock);
         }
         let inputs = dictionary(req, "signature-input")?;
@@ -384,7 +385,9 @@ impl PreparedRequest {
 }
 
 /// Sign once, without sending, retrying or obtaining credentials.
-/// `now` is Unix seconds. This replaces signature headers; call after URI and
+/// `now` is Unix seconds in 0..=8589934591 (through 2242). Contemporary
+/// millisecond timestamps are outside this local profile. This replaces
+/// signature headers; call after URI and
 /// other headers are final.
 ///
 /// # Errors
@@ -402,7 +405,7 @@ pub fn sign_request(
     if req.uri().scheme_str() != Some("https") {
         return Err(Error::InvalidUri);
     }
-    if !(0..=999_999_999_999_999).contains(&now) {
+    if !(0..=(1_i64 << 33) - 1).contains(&now) {
         return Err(Error::InvalidClock);
     }
     let key_header = match material {

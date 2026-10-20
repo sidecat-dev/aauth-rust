@@ -9,7 +9,7 @@ homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://docs.rs/aauth-rust-agent"
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Sign AAuth Agent requests using caller-owned keys and exact token bytes"
 
 [dependencies]

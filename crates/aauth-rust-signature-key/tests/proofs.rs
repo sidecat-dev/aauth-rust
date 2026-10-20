@@ -441,3 +441,69 @@ fn repeated_signature_input_lines_use_the_last_member_and_verify_its_base() {
         Err(Error::InvalidSignature)
     );
 }
+
+#[test]
+fn local_clock_range_rejects_contemporary_milliseconds_at_sign_and_prepare() {
+    let key = SigningKey::from_seed([7; 32]);
+    for now in [0, 1_800_000_000, (1_i64 << 33) - 1] {
+        let mut req = request();
+        sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), now).unwrap();
+        PreparedRequest::prepare(&req, "sig", now, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .unwrap();
+    }
+    for now in [-1, 1_i64 << 33, 1_800_000_000_000, i64::MAX] {
+        let mut req = request();
+        assert_eq!(
+            sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), now),
+            Err(Error::InvalidClock)
+        );
+        let (req, _) = signed();
+        assert_eq!(
+            PreparedRequest::prepare(&req, "sig", now, 60)
+                .err()
+                .unwrap(),
+            Error::InvalidClock
+        );
+    }
+}
+
+#[test]
+fn authorization_coverage_is_the_rfc9421_value_not_raw_outer_whitespace() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    req.headers_mut()
+        .insert("authorization", "AAuth session".parse().unwrap());
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    let base = PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .signature_base()
+        .to_vec();
+    for value in [" AAuth session", "AAuth session ", "\tAAuth session\t"] {
+        req.headers_mut()
+            .insert("authorization", value.parse().unwrap());
+        let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+        assert_eq!(prepared.signature_base(), base);
+        prepared.verify(&key.public_jwk()).unwrap();
+    }
+    req.headers_mut()
+        .insert("authorization", "AAuth changed".parse().unwrap());
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .is_err()
+    );
+    req.headers_mut()
+        .insert("authorization", "AAuth".parse().unwrap());
+    req.headers_mut()
+        .append("authorization", "session".parse().unwrap());
+    let combined = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    assert!(
+        std::str::from_utf8(combined.signature_base())
+            .unwrap()
+            .contains("\"authorization\": AAuth, session\n")
+    );
+    assert!(combined.verify(&key.public_jwk()).is_err());
+}

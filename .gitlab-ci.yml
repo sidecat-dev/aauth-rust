@@ -15,6 +15,7 @@ variables:
     - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
     - cargo test --locked
     - cargo run --locked -p aauth-rust-resource --example library
+    - cargo run --locked -p aauth-rust-resource --example axum
     - cargo build --locked --release -p aauth-rust-resource --example direct-identity
     - target/release/examples/direct-identity
     - cp target/release/examples/direct-identity "direct-identity-${TARGET}"
@@ -75,6 +76,8 @@ windows:
       cargo test --locked
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo run --locked -p aauth-rust-resource --example library
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      cargo run --locked -p aauth-rust-resource --example axum
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo build --locked --release -p aauth-rust-resource --example direct-identity
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
