@@ -111,7 +111,7 @@ fn changed_pending_location_and_expired_sessions_refuse_before_signing() {
 #[test]
 fn clarification_answers_and_cancellation_sign_exact_actions() {
     let a = agent();
-    let session = PollSession::new(
+    let mut session = PollSession::new(
         "https://ps.example/token",
         &pending(Requirement::Clarification {
             question: "Why?".into(),
@@ -135,7 +135,7 @@ fn clarification_answers_and_cancellation_sign_exact_actions() {
         .verify(&a.public_jwk())
         .unwrap();
     assert_eq!(session.cancel(&a, 1001).unwrap().method(), "DELETE");
-    let approval = PollSession::new(
+    let mut approval = PollSession::new(
         "https://ps.example/token",
         &pending(Requirement::Approval),
         1000,
@@ -153,7 +153,7 @@ fn clarification_timeout_refuses_late_answers_and_polls() {
         timeout: Some(2),
         options: vec![],
     });
-    let session = PollSession::new("https://ps.example/token", &response, 1000, 1100).unwrap();
+    let mut session = PollSession::new("https://ps.example/token", &response, 1000, 1100).unwrap();
     assert!(session.answer(&a, "on time", 1001).is_ok());
     assert!(matches!(
         session.answer(&a, "late", 1002),
@@ -179,4 +179,44 @@ fn answered_question_timeout_does_not_shorten_later_approval() {
             .is_none()
     );
     assert!(session.request(&a, 1006).is_ok());
+}
+
+#[test]
+fn unchanged_clarification_poll_does_not_slide_the_question_deadline() {
+    let a = agent();
+    let question = || {
+        pending(Requirement::Clarification {
+            question: "Why?".into(),
+            timeout: Some(10),
+            options: vec![],
+        })
+    };
+    let mut session =
+        PollSession::new("https://ps.example/token", &question(), 1000, 1100).unwrap();
+    session.request(&a, 1005).unwrap();
+    session.accept(question(), 1005).unwrap();
+    assert!(matches!(
+        session.answer(&a, "late", 1010),
+        Err(PollError::Expired)
+    ));
+    assert!(matches!(session.request(&a, 1010), Err(PollError::Expired)));
+}
+
+#[test]
+fn an_answer_can_start_a_new_round_with_identical_question_text() {
+    let a = agent();
+    let question = || {
+        pending(Requirement::Clarification {
+            question: "Why?".into(),
+            timeout: Some(10),
+            options: vec![],
+        })
+    };
+    let mut session =
+        PollSession::new("https://ps.example/token", &question(), 1000, 1100).unwrap();
+    session.answer(&a, "first answer", 1005).unwrap();
+    session.accept(question(), 1005).unwrap();
+    assert!(session.request(&a, 1010).is_ok());
+    assert!(session.answer(&a, "second answer", 1014).is_ok());
+    assert!(matches!(session.request(&a, 1015), Err(PollError::Expired)));
 }

@@ -496,3 +496,413 @@ fn concurrent_terminal_agent_delivery_has_one_consumer() {
         410
     );
 }
+
+struct BoundaryStore {
+    inner: MemoryContinuations,
+    on_publish: bool,
+    mutate: Box<dyn Fn() + Send + Sync>,
+}
+impl ContinuationStore for BoundaryStore {
+    fn insert(
+        &self,
+        id: &str,
+        value: Value,
+    ) -> Result<(), aauth_rust_core::continuation::StoreError> {
+        self.inner.insert(id, value)
+    }
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<aauth_rust_core::continuation::Snapshot>,
+        aauth_rust_core::continuation::StoreError,
+    > {
+        self.inner.load(id)
+    }
+    fn replace(
+        &self,
+        id: &str,
+        revision: u64,
+        value: Option<Value>,
+    ) -> Result<bool, aauth_rust_core::continuation::StoreError> {
+        let boundary = if self.on_publish {
+            value.as_ref().is_some_and(|v| v["state"] == "ready")
+        } else {
+            value.is_none()
+        };
+        let changed = self.inner.replace(id, revision, value)?;
+        if changed && boundary {
+            (self.mutate)();
+        }
+        Ok(changed)
+    }
+}
+fn boundary_config(f: &Fixture, publish: bool, revoke: bool, release_at: i64) -> DeferredConfig {
+    let store = f.store.clone();
+    let now = f.host.now.clone();
+    let mut cfg = DeferredConfig::new(BoundaryStore {
+        inner: MemoryContinuations::new(16),
+        on_publish: publish,
+        mutate: Box::new(move || {
+            if revoke {
+                store
+                    .inner
+                    .revoke_binding(
+                        PS,
+                        &AgentIdentity {
+                            issuer: "https://ap.example".into(),
+                            subject: "aauth:Caller@ap.example".into(),
+                        },
+                    )
+                    .unwrap();
+            } else {
+                now.store(release_at, Ordering::SeqCst);
+            }
+        }),
+    });
+    cfg.lifetime = 60;
+    cfg.retry_after = 0;
+    cfg
+}
+#[test]
+fn agent_terminal_release_rechecks_after_continuation_removal() {
+    for revoke in [false, true] {
+        let f = Fixture::new();
+        let transport = NativeTransport::new(&f, 1, 0);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(boundary_config(&f, false, revoke, 1061))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        transport.stage.store(2, Ordering::SeqCst);
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap()
+                .status(),
+            200
+        );
+        let result = poll(&server, &holder, &p.location, "GET", None, 1000);
+        assert_eq!(result.status(), if revoke { 400 } else { 408 });
+        assert!(
+            !output(&result)
+                .as_object()
+                .unwrap()
+                .contains_key("auth_token")
+        );
+        assert_eq!(
+            poll(
+                &server,
+                &holder,
+                &p.location,
+                "GET",
+                None,
+                f.host.now.load(Ordering::SeqCst)
+            )
+            .status(),
+            410
+        );
+    }
+}
+#[test]
+fn host_terminal_result_rechecks_after_continuation_publication() {
+    for revoke in [false, true] {
+        let f = Fixture::new();
+        let transport = NativeTransport::new(&f, 1, 0);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(boundary_config(&f, true, revoke, 1061))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        transport.stage.store(2, Ordering::SeqCst);
+        let result = server
+            .advance_federation(&p.location, FederationInput::Poll)
+            .unwrap();
+        assert_eq!(result.status(), if revoke { 400 } else { 408 });
+        assert!(
+            !output(&result)
+                .as_object()
+                .unwrap()
+                .contains_key("auth_token")
+        );
+        assert_eq!(
+            poll(
+                &server,
+                &holder,
+                &p.location,
+                "GET",
+                None,
+                f.host.now.load(Ordering::SeqCst)
+            )
+            .status(),
+            if revoke { 400 } else { 408 }
+        );
+    }
+}
+#[derive(Clone)]
+struct ScriptedTransport {
+    replies: Arc<Mutex<std::collections::VecDeque<Response<Vec<u8>>>>>,
+    calls: Arc<AtomicUsize>,
+}
+impl ScriptedTransport {
+    fn new(replies: Vec<Response<Vec<u8>>>) -> Self {
+        Self {
+            replies: Arc::new(Mutex::new(replies.into())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+impl aauth_rust_person_server::Federation for ScriptedTransport {
+    fn endpoint(&self, _: &str) -> Result<String, aauth_rust_person_server::FederationError> {
+        Ok("https://as.example/token".into())
+    }
+    fn send(
+        &self,
+        _: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected AS I/O"))
+    }
+}
+fn question(text: &str, timeout: u64) -> Response<Vec<u8>> {
+    PendingResponse::new(
+        "https://as.example/token",
+        "/token/pending/scripted",
+        0,
+        Requirement::Clarification {
+            question: text.into(),
+            timeout: Some(timeout),
+            options: vec![],
+        },
+    )
+    .unwrap()
+    .response()
+    .unwrap()
+}
+#[test]
+fn external_as_question_timeout_is_retained_across_unchanged_polls() {
+    for host_answer in [false, true] {
+        let f = Fixture::new();
+        let transport = ScriptedTransport::new(vec![question("Why?", 10), question("Why?", 10)]);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        f.host.now.store(1005, Ordering::SeqCst);
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap()
+                .status(),
+            202
+        );
+        let repeated = poll(&server, &holder, &p.location, "GET", None, 1005);
+        assert_eq!(output(&repeated)["timeout"], 5);
+        f.host.now.store(1010, Ordering::SeqCst);
+        if host_answer {
+            assert_eq!(
+                server
+                    .advance_federation(&p.location, FederationInput::Clarification("late".into()))
+                    .unwrap_err(),
+                aauth_rust_person_server::AdvanceError::Expired
+            );
+        } else {
+            assert_eq!(
+                poll(
+                    &server,
+                    &holder,
+                    &p.location,
+                    "POST",
+                    Some(
+                        json!({"action":"clarification_response","clarification_response":"late"})
+                    ),
+                    1010
+                )
+                .status(),
+                408
+            );
+        }
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 2);
+    }
+}
+#[test]
+fn ps_enforces_five_clarification_rounds_independently_of_the_as() {
+    for same_question in [false, true] {
+        let f = Fixture::new();
+        let replies = (0..6)
+            .map(|round| {
+                question(
+                    &if same_question {
+                        "same".into()
+                    } else {
+                        format!("question{round}")
+                    },
+                    30,
+                )
+            })
+            .collect();
+        let transport = ScriptedTransport::new(replies);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        for round in 0..5 {
+            let result = server
+                .advance_federation(
+                    &p.location,
+                    FederationInput::Clarification(format!("answer{round}")),
+                )
+                .unwrap();
+            assert_eq!(
+                result.status(),
+                if round == 4 { 403 } else { 202 },
+                "round={round},same_question={same_question}"
+            );
+        }
+        assert_eq!(
+            poll(&server, &holder, &p.location, "GET", None, 1000).status(),
+            403
+        );
+        assert_eq!(
+            poll(&server, &holder, &p.location, "GET", None, 1000).status(),
+            410
+        );
+    }
+}
+#[test]
+fn as_refusals_accumulate_backoff_and_delay_queued_answers() {
+    for status in [429, 503] {
+        let f = Fixture::new();
+        let refusal = || {
+            Response::builder()
+                .status(status)
+                .header("retry-after", "5")
+                .body(Vec::new())
+                .unwrap()
+        };
+        let transport = ScriptedTransport::new(vec![
+            question("Why?", 60),
+            refusal(),
+            refusal(),
+            question("Next?", 30),
+        ]);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        assert_eq!(
+            poll(
+                &server,
+                &holder,
+                &p.location,
+                "POST",
+                Some(json!({"action":"clarification_response","clarification_response":"answer"})),
+                1000
+            )
+            .status(),
+            202
+        );
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap()
+                .status(),
+            status
+        );
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap_err(),
+            aauth_rust_person_server::AdvanceError::NotReady
+        );
+        f.host.now.store(1005, Ordering::SeqCst);
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap()
+                .status(),
+            status
+        );
+        let next = if status == 429 { 1015 } else { 1010 };
+        f.host.now.store(next - 1, Ordering::SeqCst);
+        assert_eq!(
+            server
+                .advance_federation(
+                    &p.location,
+                    FederationInput::Clarification("manual retry".into())
+                )
+                .unwrap_err(),
+            aauth_rust_person_server::AdvanceError::NotReady
+        );
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap_err(),
+            aauth_rust_person_server::AdvanceError::NotReady
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 3);
+        f.host.now.store(next, Ordering::SeqCst);
+        assert_eq!(
+            server
+                .advance_federation(&p.location, FederationInput::Poll)
+                .unwrap()
+                .status(),
+            202
+        );
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 4);
+    }
+}
+
+#[test]
+fn expires_in_uses_the_clock_after_final_custody_io() {
+    for publish in [false, true] {
+        let f = Fixture::new();
+        let transport = NativeTransport::new(&f, 1, 0);
+        let server = f
+            .server(2000)
+            .with_federation(transport.clone())
+            .with_deferred(boundary_config(&f, publish, false, 1005))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, first) = initial(&f, &server, &holder);
+        let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+        transport.stage.store(2, Ordering::SeqCst);
+        let host = server
+            .advance_federation(&p.location, FederationInput::Poll)
+            .unwrap();
+        assert_eq!(output(&host)["expires_in"], if publish { 595 } else { 600 });
+        let result = poll(
+            &server,
+            &holder,
+            &p.location,
+            "GET",
+            None,
+            f.host.now.load(Ordering::SeqCst),
+        );
+        assert_eq!(result.status(), 200);
+        assert_eq!(output(&result)["expires_in"], 595);
+    }
+}

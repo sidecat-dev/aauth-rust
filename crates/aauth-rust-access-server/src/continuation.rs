@@ -246,6 +246,9 @@ impl<
                 PolicyError::Denied => Failure::status(StatusCode::FORBIDDEN, "denied"),
                 _ => Failure::policy(e),
             })?;
+            if (self.clock)() >= number(&value, "deadline")? {
+                return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+            }
             match requirement {
                 None => self.issue(input.authorization, presented),
                 Some(requirement) => {
@@ -260,8 +263,10 @@ impl<
                     if current >= number(&value, "deadline")? {
                         return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
                     }
+                    let new_question =
+                        answered || !same_question(&pending.requirement, &previous.requirement);
                     if matches!(pending.requirement, Requirement::Clarification { .. })
-                        && (answered || pending.requirement != previous.requirement)
+                        && new_question
                     {
                         value["rounds"] = json!(number(&value, "rounds")? + 1);
                     }
@@ -270,10 +275,18 @@ impl<
                     }
                     value["state"] = json!("waiting");
                     value["next"] = json!(current.saturating_add(d.config.retry_after as i64));
-                    value["question_deadline"] = json!(question_deadline(&pending, current));
+                    if new_question {
+                        value["question_deadline"] = json!(question_deadline(&pending, current));
+                    }
+                    if value["question_deadline"]
+                        .as_i64()
+                        .is_some_and(|at| current >= at)
+                    {
+                        return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+                    }
                     value["pending"] =
                         serde_json::to_value(&pending).map_err(|_| Failure::internal())?;
-                    pending.response().map_err(|_| Failure::internal())
+                    pending_wire(&pending, &value, current)
                 }
             }
         })();
@@ -292,12 +305,44 @@ impl<
         if !d
             .config
             .store
-            .replace(id, held.revision, if waiting { Some(value) } else { None })
+            .replace(
+                id,
+                held.revision,
+                if waiting { Some(value.clone()) } else { None },
+            )
             .map_err(|_| Failure::internal())?
         {
             return Err(Failure::internal());
         }
-        result
+        let mut response = result?;
+        if response.status() == StatusCode::OK {
+            // Custody removal can perform host I/O. Revalidate after it, before
+            // releasing a credential that was prepared under an earlier clock.
+            let now = (self.clock)();
+            if now >= number(&value, "deadline")? {
+                return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+            }
+            let (context, presented) = self.authorize_body(&value["request"], &owner, now)?;
+            let mut body = strict_json(response.body()).map_err(|_| Failure::internal())?;
+            let token = AuthToken::parse(required(&body, "auth_token")?)
+                .map_err(|_| Failure::internal())?;
+            let released = (self.clock)();
+            if released >= number(&value, "deadline")? {
+                return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+            }
+            current(
+                released,
+                &context.agent,
+                context.resource.claims(),
+                &presented,
+            )?;
+            if released >= token.unverified_claims().exp {
+                return Err(Failure::internal());
+            }
+            body["expires_in"] = json!(token.unverified_claims().exp - released);
+            *response.body_mut() = body.to_string().into_bytes();
+        }
+        Ok(response)
     }
 }
 fn safe_id(id: &str) -> bool {
@@ -324,4 +369,25 @@ fn throttled() -> Response<Vec<u8>> {
     r.headers_mut()
         .insert("content-type", "application/problem+json".parse().unwrap());
     r
+}
+
+fn same_question(left: &Requirement, right: &Requirement) -> bool {
+    matches!((left,right), (Requirement::Clarification{question:a,options:ao,..}, Requirement::Clarification{question:b,options:bo,..}) if a==b && ao==bo)
+}
+fn pending_wire(
+    pending: &PendingResponse,
+    value: &Value,
+    now: i64,
+) -> Result<Response<Vec<u8>>, Failure> {
+    let mut pending = pending.clone();
+    if let Some(at) = value["question_deadline"].as_i64() {
+        if now >= at {
+            return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+        }
+        if let Requirement::Clarification { timeout, .. } = &mut pending.requirement {
+            *timeout = Some((at - now) as u64);
+            pending.body["timeout"] = json!(at - now);
+        }
+    }
+    pending.response().map_err(|_| Failure::internal())
 }

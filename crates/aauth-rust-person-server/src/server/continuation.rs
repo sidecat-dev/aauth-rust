@@ -109,7 +109,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let location = format!("{}/token/pending/{id}", self.config.signed_origin);
         let ps_pending = self.agent_pending(&location, &pending)?;
-        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(d.retry_after as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null});
+        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(d.retry_after as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now)});
         d.store
             .insert(&id, value)
             .map_err(|_| Failure::internal())?;
@@ -159,6 +159,41 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .value;
         serde_json::from_value(value["as_pending"].clone()).map_err(|_| AdvanceError::Unavailable)
     }
+    // Store publication/removal is a host boundary. A prepared grant must still
+    // match current trust, retained inputs and binding after that I/O finishes.
+    fn check_release(
+        &self,
+        value: &Value,
+        response: &mut Response<Vec<u8>>,
+    ) -> Result<(), Failure> {
+        if response.status() != StatusCode::OK {
+            return Ok(());
+        }
+        let now = (self.clock)();
+        if now >= number(value, "deadline")? {
+            return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+        }
+        let original = AgentToken::parse(required_string(value, "agent_token")?)
+            .and_then(|t| t.verify(&self.resolver(), now))
+            .map_err(Failure::credential)?;
+        let mut body = strict_json(response.body()).map_err(|_| Failure::internal())?;
+        let auth = AuthToken::parse(required_string(&body, "auth_token")?)
+            .and_then(|t| t.verify(&self.resolver(), now))
+            .map_err(|_| Failure::internal())?;
+        let prepared =
+            self.prepare_authorization(&original, value["parameters"].clone(), now, None)?;
+        let released = (self.clock)();
+        if released >= number(value, "deadline")? {
+            return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+        }
+        self.inputs_current(&original, &prepared.resource, &prepared.presented, released)?;
+        if auth.claims().exp <= released {
+            return Err(Failure::internal());
+        }
+        body["expires_in"] = json!(auth.claims().exp - released);
+        *response.body_mut() = body.to_string().into_bytes();
+        Ok(())
+    }
     pub(super) fn pending(
         &self,
         request: &Request<Vec<u8>>,
@@ -192,7 +227,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::status(StatusCode::FORBIDDEN, "denied"));
         }
-        if now >= number(&value, "deadline")? {
+        if expired(&value, now)? {
             if !d
                 .store
                 .replace(&id, snapshot.revision, None)
@@ -270,12 +305,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             value["queued"] = json!(answer);
             if !d
                 .store
-                .replace(&id, snapshot.revision, Some(value))
+                .replace(&id, snapshot.revision, Some(value.clone()))
                 .map_err(|_| Failure::internal())?
             {
                 return Ok(throttled());
             }
-            return pending.response().map_err(|_| Failure::internal());
+            return pending_wire(&pending, &value, (self.clock)());
         }
         if value["state"] == "ready" {
             value["state"] = json!("delivering");
@@ -311,7 +346,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(Failure::internal());
             }
-            return result;
+            let mut response = result?;
+            self.check_release(&value, &mut response)?;
+            return Ok(response);
         }
         if now < number(&value, "next_agent")? {
             return Ok(throttled());
@@ -320,13 +357,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             value["next_agent"] = json!(now.saturating_add(d.retry_after as i64));
             if !d
                 .store
-                .replace(&id, snapshot.revision, Some(value))
+                .replace(&id, snapshot.revision, Some(value.clone()))
                 .map_err(|_| Failure::internal())?
             {
                 return Ok(throttled());
             }
         }
-        pending.response().map_err(|_| Failure::internal())
+        pending_wire(&pending, &value, (self.clock)())
     }
 }
 fn safe_id(s: &str) -> bool {
@@ -342,4 +379,39 @@ fn throttled() -> Response<Vec<u8>> {
     let mut r = Failure::status(StatusCode::TOO_MANY_REQUESTS, "slow_down").response();
     r.headers_mut().insert("retry-after", "1".parse().unwrap());
     r
+}
+
+fn question_deadline(pending: &PendingResponse, now: i64) -> Option<i64> {
+    match pending.requirement {
+        Requirement::Clarification {
+            timeout: Some(s), ..
+        } => Some(now.saturating_add(i64::try_from(s).unwrap_or(i64::MAX))),
+        _ => None,
+    }
+}
+fn same_question(left: &Requirement, right: &Requirement) -> bool {
+    matches!((left,right), (Requirement::Clarification{question:a,options:ao,..}, Requirement::Clarification{question:b,options:bo,..}) if a==b && ao==bo)
+}
+fn expired(value: &Value, now: i64) -> Result<bool, Failure> {
+    Ok(now >= number(value, "deadline")?
+        || value["question_deadline"]
+            .as_i64()
+            .is_some_and(|at| now >= at))
+}
+fn pending_wire(
+    pending: &PendingResponse,
+    value: &Value,
+    now: i64,
+) -> Result<Response<Vec<u8>>, Failure> {
+    let mut pending = pending.clone();
+    if let Some(at) = value["question_deadline"].as_i64() {
+        if now >= at {
+            return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+        }
+        if let Requirement::Clarification { timeout, .. } = &mut pending.requirement {
+            *timeout = Some((at - now) as u64);
+            pending.body["timeout"] = json!(at - now);
+        }
+    }
+    pending.response().map_err(|_| Failure::internal())
 }

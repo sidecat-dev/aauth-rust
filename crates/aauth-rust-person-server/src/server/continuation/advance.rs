@@ -22,7 +22,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or(AdvanceError::Gone)?;
         let mut value = snapshot.value;
         let now = (self.clock)();
-        if now >= number(&value, "deadline").map_err(|_| AdvanceError::Unavailable)? {
+        if expired(&value, now).map_err(|_| AdvanceError::Unavailable)? {
             return Err(AdvanceError::Expired);
         }
         if value["state"] != "waiting" {
@@ -31,6 +31,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let pending: PendingResponse = serde_json::from_value(value["as_pending"].clone())
             .map_err(|_| AdvanceError::Unavailable)?;
         let cancel = matches!(input, FederationInput::Cancel);
+        if !cancel
+            && value["retrying"] == true
+            && now < number(&value, "next_as").map_err(|_| AdvanceError::Unavailable)?
+        {
+            return Err(AdvanceError::NotReady);
+        }
         let (method, body) = match input {
             FederationInput::Cancel => ("DELETE", None),
             FederationInput::Claims(claims) => {
@@ -157,6 +163,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         ),
                     ));
                 }
+                let answered = method == "POST"
+                    && matches!(pending.requirement, Requirement::Clarification { .. });
+                let new_question =
+                    answered || !same_question(&next.requirement, &pending.requirement);
+                if new_question && matches!(next.requirement, Requirement::Clarification { .. }) {
+                    value["rounds"] = json!(number(&value, "rounds")? + 1);
+                    if number(&value, "rounds")? > 5 {
+                        return Err(Failure::status(StatusCode::FORBIDDEN, "denied"));
+                    }
+                }
+                if new_question {
+                    value["question_deadline"] = json!(question_deadline(&next, current));
+                } else if let Some(next_deadline) = question_deadline(&next, current) {
+                    value["question_deadline"] = json!(
+                        value["question_deadline"]
+                            .as_i64()
+                            .unwrap_or(next_deadline)
+                            .min(next_deadline)
+                    );
+                }
+                if expired(&value, current)? {
+                    return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
+                }
                 let own: PendingResponse = serde_json::from_value(value["ps_pending"].clone())
                     .map_err(|_| Failure::internal())?;
                 value["ps_pending"] =
@@ -166,6 +195,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 value["as_pending"] =
                     serde_json::to_value(next).map_err(|_| Failure::internal())?;
                 value["queued"] = Value::Null;
+                value["retrying"] = json!(false);
                 waiting = true;
                 return Ok(response);
             }
@@ -189,6 +219,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return Err(Failure::internal());
                 }
                 value["next_as"] = json!(current.saturating_add(retry as i64));
+                value["as_pending"]["retry_after"] = json!(retry);
+                value["retrying"] = json!(true);
                 waiting = true;
                 return Ok(response);
             }
@@ -237,14 +269,22 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 );
             }
         }
+        if !waiting {
+            value["question_deadline"] = Value::Null;
+        }
         // The lease is checked again at publication; no terminal response is
         // available to the Agent until this conditional write succeeds.
         if !d
             .store
-            .replace(&id, held.revision, Some(value))
+            .replace(&id, held.revision, Some(value.clone()))
             .map_err(|_| AdvanceError::Unavailable)?
         {
             return Err(AdvanceError::Unavailable);
+        }
+        if let Err(error) = self.check_release(&value, &mut response) {
+            // Agent delivery repeats the same validity checks; this trusted-host
+            // preview must also refuse a grant invalidated during publication.
+            response = error.response();
         }
         Ok(response)
     }

@@ -6,9 +6,9 @@ The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
 This development branch carries `bc5336efa3c29e9f604c9a4dbd9df7d7dba941a9`
 as the explicit Access Server/four-party prerequisite. Rust05 passed its gates and merged into sprint main. The prerequisite is now
-history; Rust06 development adds its own tests and remains a separate candidate.
+history; Rust06 is rebased onto that sprint main and remains a separate candidate.
 
-Current engineer evidence: **208 integration tests and 5 backend unit tests
+Current engineer evidence: **219 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -22,9 +22,9 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
-| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (6 tests) |
-| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (32 tests, including7 deferred cases), deferred TLS journey |
-| AS deferred authorization | Explicit policy for202 claims/clarification/interaction/approval or402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (14 tests, including7 deferred cases and omitted presented_token) |
+| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (8 tests) |
+| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (38 tests, including13 deferred cases), deferred TLS journey |
+| AS deferred authorization | Explicit policy for202 claims/clarification/interaction/approval or402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (17 tests, including10 deferred cases and omitted presented_token) |
 | Deferred wire and state primitives | Bounded202 claims/clarification/interaction/approval and402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
@@ -214,7 +214,13 @@ Both roles require separate explicit continuation stores. Pending deadlines are
 capped by the original Agent, presented and Resource expiry; long-wait request
 refresh/decision reuse and clarification `updated_request` are not implemented.
 The supported chat action is `clarification_response`, bounded to five rounds,
-plus signed cancellation. Claims never request or accept `sub`. Only the
+plus signed cancellation. AS and PS each retain their own round counter and
+absolute question deadline; repeating an unanswered question never restarts it,
+and the wire timeout reports remaining seconds. AS429 intervals accumulate five
+seconds per refusal. A queued answer or manual answer cannot bypass a429/503
+retry deadline. Terminal grant checks run after final custody writes/removals,
+including current trust, PS binding, pending expiry and remaining token lifetime;
+`expires_in` uses that final clock. Claims never request or accept `sub`. Only the
 WWW-Authenticate payment profile with empty/JSON body executes; settlement,
 per-AS billing caches, user authentication and interaction/code consumption
 belong to host policy. No provider or browser UI is supplied.
@@ -251,7 +257,7 @@ not claims that the cited clauses are fully implemented.
 | **PS-HOST-METADATA** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | First-use Resource metadata fetching/presentation and the distinct-resource-per-Agent rate-limit SHOULDs are host duties. The library has neither an outbound fetcher nor that limiter. Sanitize Agent-asserted justification before rendering; there is no library renderer. |
 | **PS-ACCOUNT-PROFILE** | [Account Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#account-binding) | PS copies account from a verified Resource challenge; the Resource helper emits none and has no explicit authorization endpoint/account selector. No application account linking, identity proofing or complete account-flow test claim is made. |
 | **PS-REISSUE** | [Auth Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-token-endpoint) | The draft does not make a Resource token single-use. Repeating an identical valid exchange reruns policy and can release another independently retained Auth token with a fresh jti and the same parent bounds. This is not operation idempotency or exactly-once delivery. |
-| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. If the newly issued token expires during the post-commit release window while its inputs remain valid, both direct and federated PS paths return500 server_error, release no token and retain the committed row. There is no rollback/delete API; host cleanup follows retain_until. Other parent-expiry/revocation failures keep their typed parameter errors. authorization.rs pins both post-commit modes and absence of AS Auth rows after unverified delivery. |
+| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. If the newly issued token expires during the post-commit release window while its inputs remain valid, both immediate direct and federated PS paths return500 server_error, release no token and retain the committed row. Deferred custody additionally caps its deadline by the retained Auth expiry and returns408 expired if that deadline elapses before delivery. There is no rollback/delete API; host cleanup follows retain_until. Other parent-expiry/revocation failures keep their typed parameter errors. authorization.rs pins both post-commit modes and absence of AS Auth rows after unverified delivery. |
 
 The TLS application uses a fixed operation and demo admission policy. It does
 not establish general caller-body forwarding, a downstream account database or

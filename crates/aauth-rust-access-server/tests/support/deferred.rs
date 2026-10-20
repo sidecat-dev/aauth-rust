@@ -390,3 +390,177 @@ fn exhausted_custody_and_early_polls_do_not_issue() {
         }
     }
 }
+
+#[test]
+fn pending_deadline_is_rechecked_after_both_policy_callbacks() {
+    for slow_grant in [false, true] {
+        let now = Arc::new(AtomicI64::new(1000));
+        let clock = now.clone();
+        let grant_clock = now.clone();
+        let deferred_clock = now.clone();
+        let stage = Arc::new(AtomicUsize::new(0));
+        let state = stage.clone();
+        let server = AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            move |c: &aauth_rust_access_server::AuthorizationRequest| {
+                if slow_grant {
+                    grant_clock.store(1061, Ordering::SeqCst);
+                }
+                grant(c)
+            },
+            move || clock.load(Ordering::SeqCst),
+            || "opaque".into(),
+        )
+        .unwrap()
+        .with_deferred(
+            config(Arc::new(MemoryContinuations::new(4))),
+            move |_: &DeferredContext| {
+                if state.load(Ordering::SeqCst) == 0 {
+                    Ok(Some(Requirement::Approval))
+                } else {
+                    if !slow_grant {
+                        deferred_clock.store(1061, Ordering::SeqCst);
+                    }
+                    Ok(None)
+                }
+            },
+        )
+        .unwrap();
+        let first = server.handle(&request(good()));
+        let p = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+        stage.store(1, Ordering::SeqCst);
+        now.store(1059, Ordering::SeqCst);
+        let result = server.handle(&poll(&p.location, "GET", None, 1059));
+        assert_eq!(result.status(), 408, "slow_grant={slow_grant}");
+        assert!(!String::from_utf8_lossy(result.body()).contains("auth_token"));
+        assert_eq!(
+            server
+                .handle(&poll(&p.location, "GET", None, 1061))
+                .status(),
+            410
+        );
+    }
+}
+struct RemovalClock {
+    inner: MemoryContinuations,
+    now: Arc<AtomicI64>,
+}
+impl ContinuationStore for RemovalClock {
+    fn insert(
+        &self,
+        id: &str,
+        value: Value,
+    ) -> Result<(), aauth_rust_core::continuation::StoreError> {
+        self.inner.insert(id, value)
+    }
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<aauth_rust_core::continuation::Snapshot>,
+        aauth_rust_core::continuation::StoreError,
+    > {
+        self.inner.load(id)
+    }
+    fn replace(
+        &self,
+        id: &str,
+        revision: u64,
+        value: Option<Value>,
+    ) -> Result<bool, aauth_rust_core::continuation::StoreError> {
+        let terminal = value.is_none();
+        let changed = self.inner.replace(id, revision, value)?;
+        if changed && terminal {
+            self.now.store(1061, Ordering::SeqCst);
+        }
+        Ok(changed)
+    }
+}
+#[test]
+fn terminal_store_removal_must_finish_before_the_pending_deadline() {
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock = now.clone();
+    let stage = Arc::new(AtomicUsize::new(0));
+    let state = stage.clone();
+    let mut cfg = DeferredConfig::new(RemovalClock {
+        inner: MemoryContinuations::new(4),
+        now: now.clone(),
+    });
+    cfg.lifetime = 60;
+    cfg.retry_after = 0;
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        move || clock.load(Ordering::SeqCst),
+        || "opaque".into(),
+    )
+    .unwrap()
+    .with_deferred(cfg, move |_: &DeferredContext| {
+        Ok(if state.load(Ordering::SeqCst) == 0 {
+            Some(Requirement::Approval)
+        } else {
+            None
+        })
+    })
+    .unwrap();
+    let first = server.handle(&request(good()));
+    let p = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+    stage.store(1, Ordering::SeqCst);
+    let result = server.handle(&poll(&p.location, "GET", None, 1000));
+    assert_eq!(result.status(), 408);
+    assert!(!String::from_utf8_lossy(result.body()).contains("auth_token"));
+    assert_eq!(
+        server
+            .handle(&poll(&p.location, "GET", None, 1061))
+            .status(),
+        410
+    );
+}
+#[test]
+fn unchanged_clarification_get_does_not_extend_its_timeout() {
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock = now.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        move || clock.load(Ordering::SeqCst),
+        || "opaque".into(),
+    )
+    .unwrap()
+    .with_deferred(
+        config(Arc::new(MemoryContinuations::new(4))),
+        |_: &DeferredContext| {
+            Ok(Some(Requirement::Clarification {
+                question: "Why?".into(),
+                timeout: Some(10),
+                options: vec![],
+            }))
+        },
+    )
+    .unwrap();
+    let first = server.handle(&request(good()));
+    let p = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+    now.store(1005, Ordering::SeqCst);
+    let repeated = server.handle(&poll(&p.location, "GET", None, 1005));
+    assert_eq!(repeated.status(), 202);
+    assert_eq!(
+        serde_json::from_slice::<Value>(repeated.body()).unwrap()["timeout"],
+        5
+    );
+    now.store(1010, Ordering::SeqCst);
+    assert_eq!(
+        server
+            .handle(&poll(&p.location, "GET", None, 1010))
+            .status(),
+        408
+    );
+    assert_eq!(
+        server
+            .handle(&poll(&p.location, "GET", None, 1010))
+            .status(),
+        410
+    );
+}

@@ -613,8 +613,9 @@ callback in an async server. Every well-formed terminal AS problem, including
 can refuse the PS service proof or another AS check; it is not automatically a
 transport failure. The PS does not copy AS Signature-Error/Accept-Signature headers
 onto the Agent response: they describe a different request and verifier.
-Malformed/unverifiable results, transport failure and unsupported deferred
-responses remain502 `as_unreachable`; automatic polling/payment/retry is absent.
+Malformed/unverifiable results and transport failure return502 `as_unreachable`.
+The default immediate profile also rejects deferred responses with that error.
+Opt-in continuation handling is described below; host advancement remains explicit.
 Terminal `clock_skew` at400 or401 preserves the AS Date.
 
 Inspect host-only diagnostics on the returned response before handing it to a
@@ -670,8 +671,8 @@ contract; an older adapter is not federation-qualified. The PS's internal
 accountable person and directed identity remain stable across this exchange.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
-Missions, AS call chaining, subagents and deferred federation remain named gaps
-of this immediate Core-scope profile. See the complete
+Missions, AS call chaining and subagents remain named gaps of this Core-scope
+profile. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 
@@ -768,9 +769,11 @@ before presenting it to a Resource. The polling helper does not authenticate
 response bytes or broaden issuer trust. Use a fresh admitted transport response
 for each call; never follow redirects with credentials.
 
-For a clarification, `session.answer(&agent, answer, now)` creates the signed
-`action=clarification_response` POST. The question's timeout also bounds this
-session. `session.cancel(&agent, now)` creates a signed DELETE; observe the
+For a clarification, `session.answer(&agent, answer, now)` mutably prepares the
+signed `action=clarification_response` POST. Send those exact bytes and give its
+actual response to the next `accept`; discard the session if the prepared answer
+is abandoned. This lets a subsequent identical question start a new round.
+An unanswered question keeps its original absolute timeout across repeated polls. `session.cancel(&agent, now)` creates a signed DELETE; observe the
 server's result before reporting cancellation. Interaction URLs and codes are
 host inputs for directing a person; sanitize untrusted Markdown before display.
 Payment details are opaque host input. The current parser supports the
@@ -818,7 +821,10 @@ completes an interaction, supplies claims or waits for an external approver.
 Then `people.advance_federation(reference, FederationInput::Poll)?` performs one
 signed AS GET, or POSTs a queued Agent clarification answer. It never resends
 the original token POST. Respect AS Retry-After: an early host call returns
-`AdvanceError::NotReady`; the library does not sleep or retry.
+`AdvanceError::NotReady`; the library does not sleep or retry. An initial requested
+answer can be submitted promptly, but a429/503 refusal delays all subsequent
+answer retries as well as GETs. Each consecutive429 adds five seconds to the
+persisted interval.
 
 Use `FederationInput::Claims(map)` to POST requested claims from a trusted source;
 `sub` is forbidden because the presented token already identifies the person.
@@ -832,7 +838,9 @@ confirm completion; an Agent poll does not approve an interaction or a payment.
 terminal response. Inspect its `FederationFailure` extension for diagnostics
 before framework conversion. A200 here is available in retained PS custody;
 the Agent still obtains its terminal result through the PS pending URL. The PS
-verifies that grant again and confirms current bindings before delivery. One
+verifies that grant again and confirms current bindings after final custody I/O
+before delivery. Its remaining `expires_in` uses the final clock; expiry or
+revocation during store publication/removal never releases a prepared token. One
 conditional consumer receives it; later GETs return410. Signed DELETE cancels
 both roles with one AS request, and consumes local custody. Transport failure
 reports failure even though local cancellation closes the PS continuation.
@@ -840,7 +848,8 @@ reports failure even though local cancellation closes the PS continuation.
 This is a top-level, missionless Core-scope profile. Deadlines are capped by all
 original credentials, including the Resource challenge. Long-wait refresh and
 clarification `updated_request` need a later profile; submit a fresh original
-request after expiry. There is no durable AS/PS continuation adapter in this
+request after expiry. AS and PS independently enforce five clarification rounds,
+preserve unanswered question deadlines and advertise remaining timeout seconds. There is no durable AS/PS continuation adapter in this
 release. Custom stores must preserve atomic revisions, bounded records and
 role namespaces across restart, collect expiry and reconcile uncertain in-flight
 transitions. No automatic recovery repeats a POST, settlement or grant delivery.

@@ -36,6 +36,7 @@ pub struct PollSession {
     deadline: i64,
     question_deadline: Option<i64>,
     finished: bool,
+    answering: bool,
 }
 impl PollSession {
     /// Parse initial202/402 and retain its stable same-origin Location.
@@ -59,6 +60,7 @@ impl PollSession {
             deadline,
             question_deadline,
             finished: false,
+            answering: false,
         })
     }
     /// Latest requirement/body for the host to satisfy or present safely.
@@ -105,8 +107,10 @@ impl PollSession {
     }
     /// Prepare a signed clarification_response POST for the active question.
     /// Answers are untrusted Markdown; the receiving host sanitizes presentation.
+    /// The next `accept` must receive this exact POST's actual response. Preparing
+    /// an answer does not dispatch it; discard the session if it is not sent.
     pub fn answer(
-        &self,
+        &mut self,
         agent: &Agent,
         answer: &str,
         now: i64,
@@ -117,14 +121,16 @@ impl PollSession {
         {
             return Err(PollError::InvalidResponse);
         }
-        self.signed(
+        let request = self.signed(
             agent,
             "POST",
             json!({"action":"clarification_response","clarification_response":answer})
                 .to_string()
                 .into_bytes(),
             now,
-        )
+        )?;
+        self.answering = true;
+        Ok(request)
     }
     /// Prepare a signed cancellation. The server owns cancellation and informs
     /// any person reviewing it; the host must observe the actual DELETE result.
@@ -156,7 +162,18 @@ impl PollSession {
                     self.finished = true;
                     return Err(PollError::InvalidResponse);
                 }
-                self.question_deadline = question_deadline(&pending, now);
+                let next_deadline = question_deadline(&pending, now);
+                self.question_deadline = if !self.answering
+                    && same_question(&pending.requirement, &self.pending.requirement)
+                {
+                    match (self.question_deadline, next_deadline) {
+                        (Some(old), Some(new)) => Some(old.min(new)),
+                        (old, new) => old.or(new),
+                    }
+                } else {
+                    next_deadline
+                };
+                self.answering = false;
                 self.next_at = now.saturating_add(pending.retry_after as i64);
                 self.pending = pending;
                 Ok(None)
@@ -205,4 +222,8 @@ fn question_deadline(pending: &PendingResponse, now: i64) -> Option<i64> {
         } => Some(now.saturating_add(i64::try_from(timeout).unwrap_or(i64::MAX))),
         _ => None,
     }
+}
+
+fn same_question(left: &Requirement, right: &Requirement) -> bool {
+    matches!((left,right), (Requirement::Clarification{question:a,options:ao,..}, Requirement::Clarification{question:b,options:bo,..}) if a==b && ao==bo)
 }
