@@ -319,6 +319,124 @@ hooks; clock and ID closures can capture state and are Send + Sync. For example,
 `PersonServer<K, S, BoxedPolicy, BoxedClock, BoxedTokenIds>` names the service type
 without naming closures. The constructor rustdoc uses these aliases.
 
+## Durable Person Server storage
+
+Add `aauth-rust-person-server-redb` alongside the PS dependency. With local
+checkouts, use `path = "../aauth-rust/crates/aauth-rust-person-server-redb"` in
+your consumer's dependencies, adjusting the path to your checkout. It implements
+the same `Store` as `MemoryStore` and adds no database dependency to the PS role.
+
+In the complete PS constructor linked above, replace `MemoryStore` with
+`RedbStore` in the `HostServer` type and pass this store argument:
+
+```rust
+use aauth_rust_person_server_redb::RedbStore;
+let store = RedbStore::open("/var/lib/my-service/person.redb")?;
+```
+
+Durably provision the private parent directory first. This adapter requires
+Unix and a filesystem supporting directory synchronization. `open` creates an
+absent/empty file or reopens the supported schema, then synchronizes its parent
+after initializing the database file and before returning a usable store. A
+bare filename uses the current directory. A directory-sync failure returns
+`OpenError::DirectoryDurability` with local code `store_unavailable`; non-Unix
+platforms are refused before file creation. This restriction belongs to the
+optional adapter; other platforms can supply a custom `Store`.
+
+The schema commit precedes directory synchronization. If open fails between
+those steps, the file can already contain an initialized schema, but no usable
+store was acknowledged and its directory entry may not be durable. An open
+error does not mean nothing was written. Diagnose the failure and reopen the
+same file; do not delete it as an initialization workaround.
+
+Open runs redb's page-integrity check before schema access. It refuses detected
+corruption, a reported integrity repair, and catchable unwinding engine panics
+with local code `store_unavailable`. The engine can modify a file during recovery
+or integrity repair even when the adapter refuses open. If corruption is
+suspected, stop the service and preserve a closed copy before diagnosing it;
+restore a verified closed backup before resuming. Such restoration can roll back
+issuances and revocations newer than the backup. The check costs a scan of
+retained engine pages at each open; it does not verify every JSON record or
+authenticate stored ancestry. The normal panic hook may still log a caught
+engine panic. Panic containment requires Rust's unwinding panic
+strategy; `panic=abort`, process signals and allocation aborts are not caught.
+
+A locked or unreadable database also has local code `store_unavailable`;
+an unrelated schema or unsupported version has
+`unsupported_store_schema`. These are configuration/storage errors, never
+Signature-Error codes. Unreadable stored records return `StoreError::Unavailable`,
+which stops the PS operation rather than treating the identity as absent.
+
+One process owns a database file. Clone `RedbStore` to share its transactions
+among handlers; opening the same file independently while any clone lives fails.
+The PS API is synchronous: run it on a blocking worker when adapting an async
+server. The adapter atomically checks and stores the binding, exact complete
+issuance and both directed-identity indexes before returning success. It uses
+immediate durability. Composite keys preserve issuer/JTI namespacing without
+scanning the database on ordinary Store calls. Startup separately scans engine
+integrity and checks schema identity/types/version. The file contains internal identity and credential hashes/lineage,
+with no encryption, signing key or compact token storage.
+
+After every handle is closed, reopen the same file and supply the same issuer
+signing key and a token-ID source that stays unique across restarts. Existing
+Person/Auth credentials keep their retained ancestry; binding revocation stays
+revoked. Never replace a missing database with an empty one to repair a token
+error. Close all handles before copying/restoring a backup. An I/O error may
+leave a whole commit's outcome uncertain; the PS releases no credential on a
+commit error, and the database exposes no partial binding/index/token update.
+After a redb commit fails, the live database refuses further writes, including
+revocation, on every clone. Stop issuance/revocation, drop all store clones
+(including the owning PersonServer and in-flight handlers), then reopen the
+same file and reconstruct the service. A surviving handle's reads can show the
+old in-memory snapshot; they do not resolve the failed commit's durable outcome.
+The adapter does not recover or replace a live handle automatically. Logical
+refusals such as Conflict or InvalidRecord do not require reopening.
+
+There is **no adapter-enforced bound on total file size or record count**, and
+no cleanup, quota, compaction or migration API. Records remain indefinitely,
+including after `retain_until`. Provision capacity for every issuance, including
+retained tokens that were never released; monitor growth and stop admission
+before capacity is exhausted. A filesystem quota can stop writes but does not
+reclaim records. Deleting/rotating the file or editing tables directly is not a
+supported bounding mechanism: it can discard outstanding lineage or revocation.
+
+Each retained record is capped at **1 MiB of encoded UTF-8 JSON**, including
+field names and escaping (`MAX_RECORD_BYTES`). A fresh larger record returns
+`StoreError::InvalidRecord` before any binding/index/token change; oversized
+stored values return Unavailable. Existing-record comparison still comes first,
+so a changed oversized retry of an existing JTI is Conflict. Serialization stops
+at the cap; callers must still bound the strings they allocate and the subjects/
+IDs supplied by policy. This local adapter limit differs from the PS HTTP body's
+1 MiB limit and does not bound total growth or apply to every custom Store.
+The adapter does not provide request replay detection or operation idempotency.
+
+Custom adapters run `storetest::check_store_contract` with a fresh empty store
+on every factory call. Its checks match the Go issued-token contract's exact
+round-trip, issuer namespace, every-field conflict and concurrent winner/retry
+guarantees, plus Rust's atomic binding/directed-identity rules. Run
+the shared `TokenRecord::validate_for_commit` shape checks in custom adapters,
+after the existing-record comparison. They check identifier syntax, nonempty
+references/digests and Person/Auth parent shape; credential verification remains
+the PS role's duty. Run
+`storetest::check_persistence_contract` separately with a consuming callback
+that drops the sole handle before reopening the same storage. Returning a live
+object or leaving a clone open does not test persistence. Both contracts mutate
+state and must use disposable databases. A complete runnable factory is in
+[the adapter example](crates/aauth-rust-person-server-redb/examples/contracts.rs):
+
+```sh
+cargo run --locked -p aauth-rust-person-server-redb --example contracts
+```
+
+It prints `logical-store=pass reopen-store=pass` and removes its disposable files.
+The adapter's tests additionally cover process exit without Rust destructors,
+an abandoned real transaction, one injected native write failure, parent-directory
+sync refusal and reconstructed
+direct/chained PS exchanges. These are separate backend checks, not evidence of
+physical power loss, every disk failure, distributed operation or other database
+engines. Missions, AS federation and token-revocation delivery stay outside the
+PS profile; adding persistence does not add those protocol roles.
+
 ## Protect a Resource with PS authorization
 
 Use `PsAuthorizationResource` with a `PsAuthorizationConfig`: published Resource

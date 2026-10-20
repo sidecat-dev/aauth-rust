@@ -4,12 +4,14 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **141 integration tests passed, 0 failed**, including
+Current engineer evidence: **158 integration tests and 5 backend unit tests
+passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. Executable examples
 run those same compositions. A wire check is not counted as a separate Rust test.
-Two additional rustdoc tests execute an unsigned Resource challenge and the PS
-constructor/metadata example.
+Three additional rustdoc tests execute an unsigned Resource challenge, the PS
+constructor/metadata example and durable-store open/reopen. One ignored backend
+test is a subprocess entry point, executed by its two parent recovery tests.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
@@ -24,7 +26,11 @@ constructor/metadata example.
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (18 tests), `store.rs` (1 executable store contract) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (18 tests), `store.rs` (4 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
+| Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (10 tests), `service_restart.rs` (2 tests), crate rustdoc |
+| Page corruption / bounded records | Exact data-byte checksum failure and 28 page-prefix bit flips/zeroings never escape open as a panic or bad record; 1 MiB accepted, one-byte overflow and 64 MiB refused without table writes; empty binding refused on read/commit/revoke | `aauth-rust-person-server-redb/tests/corruption.rs` (2 tests), backend tests |
+| Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
+| Durable file creation / record shape | Parent directory synchronized after file/schema initialization; sync failure refuses open; bare filenames use current directory. Both stores reject malformed Agent identities, parent ties and Person/Auth lineage without leaking state; durable decoder refuses malformed rows | `aauth-rust-person-server-redb/src/open_tests.rs` (2 Unix tests), shared store contract/validation and backend row tests; Linux syscall witness |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
@@ -93,10 +99,13 @@ turn an `hwk` key into an AAuth identity.
   Person/Auth issuance, not just a valid signed JWT. This is a local retained-state
   policy; it does not claim Core common JWT verification requires a database.
   The PS retains compact hashes and lineage without publishing internal person
-  IDs. `MemoryStore` is volatile and retains records indefinitely; durable store,
-  crash recovery and retention/cleanup through `retain_until` belong to the host.
-  `storetest` exercises atomic conflicts, concurrency, revocation and exact records,
-  not a production database's durability.
+  IDs. `MemoryStore` is volatile. The separate redb adapter supplies immediate-
+  durable transactions and tested process recovery, retaining records indefinitely.
+  Host adapters run `storetest` for atomic conflicts, concurrency, revocation and
+  exact records, plus its separate consuming reopen contract. Neither generic
+  contract establishes every backend's durability. `retain_until` is a removal
+  minimum, not implemented cleanup; backups, capacity and supported lifecycle
+  remain host duties.
   Against Core [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint),
   the retained data exceeds the required jti/aud/exp record: kind, directed
   subject, internal person/Agent identity, tenant, holder thumbprint, compact
@@ -169,6 +178,96 @@ The TLS application uses a fixed operation and demo admission policy. It does
 not establish general caller-body forwarding, a downstream account database or
 arbitrary router admission. Native PS tests separately isolate parent lifetime
 bounds; the TLS expiry ordering alone is not proof of which cap was decisive.
+
+## Durable storage evidence and limits
+
+The Go comparator is `personserver/storetest/issued_auth_token.go` at sprint
+`d914b4f`, with `storetest/doc.go`'s explicit separation of logical contracts
+from application restart/transaction/failure tests. This is a comparison of
+that issued-token contract, not a claim to implement Go's mission, deferred-
+consent, audit, revocation-delivery or other store interfaces.
+
+| Go issued-token guarantee | Rust evidence |
+| --- | --- |
+| Issuer/JTI namespace, complete retained round-trip and exact retry | `storetest::check_store_contract`, including populated Auth/presented/upstream ties and owned snapshots |
+| Each retained field conflicts independently, original preserved after every refusal | Auth scalar and nested issuer/JTI/digest/option-presence mutations; invalid conflicting expiry also pins conflict-before-validation precedence |
+| Concurrent same-JTI winner and identical retry linearization | 32 calls start at a barrier; every identical winner succeeds and each differing loser is Conflict |
+| Backend persistence is separate from logical conformance | `check_persistence_contract` consumes the only handle twice; concrete adapter recovery and reconstructed PS tests listed above |
+
+Rust also checks its stricter atomic Agent-person binding and stable directed
+identity profile, both private indexes after refused commits, and losing token
+absence in an eight-caller first-binding race. Mission state is not present in
+Rust's supported record profile; no Go mission-store parity is claimed.
+The shared shape validator checks identifier syntax and nonempty references/
+digests, requires a presented parent for Auth and forbids one for Person. It
+does not authenticate parent credentials or verify digest contents. Existing-
+record comparison still precedes validation, so a differing malformed retry is
+Conflict and cannot rewrite retained state.
+
+**DURABLE-STORE-PROFILE:** one redb4.4 database owner per file, shared by clones;
+five typed schema tables, keyed operations, immediate durability. Schema1 only;
+foreign/incompatible schema is refused without adoption, malformed/miskeyed rows
+return Unavailable rather than absent identity. Opening scans engine page
+integrity and schema; it does not decode every record or verify its ancestry.
+No encryption, migrations, garbage collection, distributed ownership, live-backup
+API, database-independent durability proof or other concrete backend is supplied.
+Records remain indefinitely, even past retain_until. The host preserves separate
+signing keys/unique token IDs and controls filesystem/backups/capacity.
+
+**DURABLE-STORE-GROWTH:** no adapter-enforced bound on total file size or record
+count. There is no quota/reclamation mechanism. Hosts provision capacity for all
+issuances and stop admission before exhaustion; a filesystem quota only stops
+writes. Deleting/rotating the file is not a supported retention/identity-preserving
+bound. Go's permission to remove records after ExpiresAt is not implemented;
+Rust's later retain_until floor and indefinite retention remain distinct.
+
+**DURABLE-STORE-RECORD-SIZE:** a local 1 MiB encoded UTF-8 JSON limit per retained
+record, including escaping, exposed as MAX_RECORD_BYTES. Fresh oversized commits
+are InvalidRecord before writes; oversized stored JSON is Unavailable. Encoding
+stops at the cap. Exact existing-record comparison precedes shape/size checks,
+preserving Conflict on differing retries. This bounds neither caller allocations
+nor record count/file size, and is not the shared Store/Go contract or HTTP body
+limit. Tests pin 64 MiB refusal without table changes, the exact accepted edge,
+one-byte overflow, existing-row conflict precedence and oversized stored rows.
+
+**DURABLE-STORE-CORRUPTION:** every open runs redb check_integrity before schema
+access and guards engine open, integrity and metadata parsing against unwinding
+panics. Detected page corruption, a reported repair or a caught panic refuses
+open with store_unavailable. redb may modify a file while repairing it, even if
+the adapter refuses it; preserve a closed copy before diagnosis and restore a
+verified closed backup before resuming. Startup cost grows with retained pages.
+The tests mutate exact serialized data and 28 page prefixes (single bit/512 zero
+bytes); each mutation is refused or leaves the exact retained record intact.
+Unused space need not fail integrity checks. Checksums do not authenticate
+coherently rewritten rows, and do not protect against external modification
+after open. panic=abort, allocation aborts and process signals are not contained.
+
+**DURABLE-STORE-PLATFORM:** this optional adapter requires Unix and a filesystem
+supporting directory synchronization. Every open synchronizes the parent after
+file/schema initialization, before returning; failure is a typed local
+store_unavailable. The host must durably provision the private parent directory.
+There is an unacknowledged window after the schema commit and before parent
+sync: the initialized file may exist without a durable directory entry; no
+usable store has been returned. An open error does not promise no file changes.
+Linux syscall evidence checks file-before-directory synchronization; relative-
+filename and injected directory-sync refusal tests execute. Non-Unix open is
+refused before creating a database. Linux x86_64/ARM64 are the native CI targets;
+macOS runtime remains unverified. Other protocol crates and custom Store
+implementations do not depend on this adapter's platform restriction.
+
+**DURABLE-STORE-IO:** logical refusal leaves all state unchanged. Operational
+I/O failure can make a whole transaction's outcome uncertain; PS commit errors
+never release a token. The FileBackend test injects one write error and verifies
+prior state/recovery and absent partial indexes for that failure. A failed redb
+commit latches the live database against further writes on every clone. Hosts
+must stop issuance/revocation, drop every owner/handler clone, reopen the same
+file and reconstruct the PS. Reads on surviving handles are not the oracle for
+the failed commit's durable outcome. No automatic live recovery is supplied.
+The fault test pins same-clone write/revoke refusal, last-clone locking and
+successful writes/revocation after reopen. Logical refusals do not latch it. Process exit
+without destructors is tested; physical power loss and all late-I/O failure
+positions are not simulated. There is no claim that every Unavailable means
+nothing was committed, or that database durability prevents HTTP request replay.
 
 ## Build evidence
 

@@ -22,6 +22,7 @@ cargo run --locked -p aauth-rust-resource --example library
 cargo run --locked -p aauth-rust-resource --example axum
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
+cargo run --locked -p aauth-rust-person-server-redb --example contracts
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 git diff --check
 ```

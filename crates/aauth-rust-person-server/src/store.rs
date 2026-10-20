@@ -1,10 +1,11 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
 /// Stable Agent identity; a rotated confirmation key does not create a new Agent.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AgentIdentity {
     /// Trusted Agent Provider identifier.
     pub issuer: String,
@@ -13,7 +14,7 @@ pub struct AgentIdentity {
 }
 
 /// Accountable person associated with an Agent in one Person Server namespace.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     /// Host's internal opaque person identifier, never put in a public token.
     pub person_id: String,
@@ -22,7 +23,7 @@ pub struct Binding {
 }
 
 /// Issuer-qualified token identifier; JTI alone is not globally unique.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TokenReference {
     /// Person Server that issued this retained token.
     pub issuer: String,
@@ -31,7 +32,7 @@ pub struct TokenReference {
 }
 
 /// Exact issued credential, preserving lineage across semantically equal JWTs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenTie {
     /// Issuer and token identifier.
     pub reference: TokenReference,
@@ -40,7 +41,7 @@ pub struct TokenTie {
 }
 
 /// Retained credential kind. Person identity alone is never authorization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TokenKind {
     /// PS-issued identity credential for one Resource.
     Person,
@@ -50,7 +51,7 @@ pub enum TokenKind {
 
 /// State committed before releasing a Person or Auth token.
 /// Hosts retain every field until retain_until and return owned snapshots.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenRecord {
     /// Exact issued token reference and compact digest.
     pub token: TokenTie,
@@ -84,6 +85,54 @@ pub struct TokenRecord {
     pub upstream: Option<TokenTie>,
 }
 
+impl TokenRecord {
+    /// Validate complete record shape and whether this issuance may establish a
+    /// binding. Storage adapters must still check retained-token equality first,
+    /// then validate, and atomically enforce binding and directed identities.
+    /// Checks identifier syntax, nonempty token references/digests, and Person
+    /// (no presented parent) / Auth (presented parent required) shape. Digest
+    /// contents and parent authenticity belong to credential verification.
+    /// This performs no lookup or current-time/credential verification.
+    ///
+    /// # Errors
+    /// Returns InvalidRecord for incomplete identity, digest, target or lifetime
+    /// fields, or when a non-direct Person issuance tries to establish a binding.
+    pub fn validate_for_commit(&self, establish_binding: bool) -> Result<(), StoreError> {
+        let valid_tie = |tie: &TokenTie| {
+            !tie.reference.jti.is_empty()
+                && !tie.compact_sha256.is_empty()
+                && aauth_rust_core::validate_server_identifier(&tie.reference.issuer).is_ok()
+        };
+        let valid_identity = |identity: &AgentIdentity| {
+            aauth_rust_core::validate_server_identifier(&identity.issuer).is_ok()
+                && aauth_rust_core::validate_agent_identifier(&identity.subject).is_ok()
+        };
+        if !valid_tie(&self.token)
+            || !valid_identity(&self.agent)
+            || !valid_identity(&self.principal)
+            || self.presented.as_ref().is_some_and(|tie| !valid_tie(tie))
+            || self.upstream.as_ref().is_some_and(|tie| !valid_tie(tie))
+            || (self.kind == TokenKind::Person && self.presented.is_some())
+            || (self.kind == TokenKind::Auth && self.presented.is_none())
+            || self.person_id.is_empty()
+            || self.subject.is_empty()
+            || self.agent_jkt.is_empty()
+            || self.agent_token_jti.is_empty()
+            || self.issued_at < 0
+            || self.expires_at <= self.issued_at
+            || self.retain_until < self.expires_at
+            || aauth_rust_core::validate_server_identifier(&self.resource).is_err()
+            || (establish_binding
+                && (self.kind != TokenKind::Person
+                    || self.agent != self.principal
+                    || self.upstream.is_some()))
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        Ok(())
+    }
+}
+
 /// Storage failure; operational failures must never release an unretained token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -98,16 +147,21 @@ pub enum StoreError {
     /// Authorization attempted without an existing original Agent binding.
     #[error("original Agent-person binding is missing")]
     MissingBinding,
-    /// Record fields are incomplete or inconsistent.
-    #[error("invalid issuance record: retain complete identity, token digest and expiry fields")]
+    /// Record fields are incomplete/inconsistent, or exceed an adapter's limit.
+    #[error(
+        "invalid issuance record: check identity, token digest, expiry and the adapter's record-size limit"
+    )]
     InvalidRecord,
-    /// Host storage cannot complete this operation.
+    /// Storage cannot confirm completion; a whole commit outcome may be unknown.
     #[error("Person Server storage is unavailable")]
     Unavailable,
 }
 
-/// Host storage boundary. Operations must be linearizable and preserve state on
-/// refusal. Commit is identical-record idempotent, issuer/JTI unique, and atomic
+/// Host storage boundary. Operations must be linearizable. Logical refusals
+/// (conflict, invalid record, missing/revoked binding) preserve state. An
+/// operational Unavailable may leave a whole transaction's outcome uncertain;
+/// partial binding/index/token changes must never become visible.
+/// Commit is identical-record idempotent, issuer/JTI unique, and atomic
 /// with person binding/directed-identity checks. Revocation cannot be undone by a
 /// token request. No record may disappear before its retain_until timestamp.
 pub trait Store: Send + Sync {
@@ -179,24 +233,7 @@ impl Store for MemoryStore {
                 Err(StoreError::Conflict)
             };
         }
-        if record.token.reference.jti.is_empty()
-            || record.token.compact_sha256.is_empty()
-            || record.person_id.is_empty()
-            || record.subject.is_empty()
-            || record.agent_jkt.is_empty()
-            || record.agent_token_jti.is_empty()
-            || record.issued_at < 0
-            || record.expires_at <= record.issued_at
-            || record.retain_until < record.expires_at
-            || aauth_rust_core::validate_server_identifier(&record.token.reference.issuer).is_err()
-            || aauth_rust_core::validate_server_identifier(&record.resource).is_err()
-            || (establish_binding
-                && (record.kind != TokenKind::Person
-                    || record.agent != record.principal
-                    || record.upstream.is_some()))
-        {
-            return Err(StoreError::InvalidRecord);
-        }
+        record.validate_for_commit(establish_binding)?;
         let issuer = &record.token.reference.issuer;
         let binding_key = (issuer.clone(), record.principal.clone());
         match state.bindings.get(&binding_key) {
