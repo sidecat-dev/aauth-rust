@@ -1,8 +1,13 @@
-//! Direct Agent-identity Resource. Proof and token checks precede host policy.
+//! Agent-identity and PS-authorization Resources. Verification precedes host policy.
 #![deny(missing_docs)]
+mod ps_authorization;
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
+pub use ps_authorization::{
+    AuthAuthorized, AuthDecision, PsAuthorizationConfig, PsAuthorizationResource,
+    PsConfigurationError,
+};
 
 /// Invalid host configuration, separate from a caller's proof or token failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

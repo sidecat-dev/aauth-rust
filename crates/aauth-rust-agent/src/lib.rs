@@ -1,5 +1,7 @@
-//! One signed request at a time. Transport and challenge handling belong to hosts.
+//! Buffered request signing and immediate PS credential-context verification.
+//! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
+mod credentials;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
@@ -21,14 +23,23 @@ impl Agent {
     pub fn new(key: SigningKey, token: String) -> Result<Self, TokenError> {
         Self::from_shared_key(Arc::new(key), token)
     }
-    /// Retain a refreshed token with the existing proof key. Earlier Agent values
-    /// remain usable for in-flight requests; secret seed bytes are never exported.
+    /// Retain an Agent, Person or Auth token with the existing proof key. Earlier
+    /// values remain usable for in-flight requests; secret bytes are never exported.
+    /// Parsing and matching cnf are not issuer authentication. Use the credential
+    /// verification helpers or let the accepting role authenticate the issuer.
     ///
     /// # Errors
     /// Rejects malformed tokens or a new cnf.jwk that differs from this Agent key.
     /// Issuer authentication still belongs to the caller or receiving Resource.
     pub fn with_token(&self, token: String) -> Result<Self, TokenError> {
-        Self::from_shared_key(self.key.clone(), token)
+        let confirmation = credentials::credential_key(&token)?;
+        if confirmation.thumbprint()? != self.key.public_jwk().thumbprint()? {
+            return Err(TokenError::ConfirmationKeyMismatch);
+        }
+        Ok(Self {
+            key: self.key.clone(),
+            token,
+        })
     }
     fn from_shared_key(key: Arc<SigningKey>, token: String) -> Result<Self, TokenError> {
         let parsed = AgentToken::parse(&token)?;
