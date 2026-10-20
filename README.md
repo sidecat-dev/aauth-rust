@@ -160,7 +160,8 @@ The application chooses trusted Agent Providers. It obtains metadata and public
 keys over admitted, verified HTTPS, then gives the library those bytes as an
 immutable snapshot. `from_documents` checks issuer equality and key selection;
 it does not decide to trust an arbitrary issuer or fetch anything. A foreign
-issuer yields terminal `UntrustedIssuer`; only an unknown kid on a configured,
+issuer yields terminal `UntrustedIssuer` (`invalid_key` on the wire); only an
+unknown kid on a configured,
 trusted issuer yields `UnknownKey`. Refresh the configured JWKS source after
 checking issuer trust; never follow a token-supplied issuer on that error. Production
 hosts own destination admission, timeouts, cache lifetime and refresh (including

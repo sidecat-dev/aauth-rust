@@ -135,7 +135,7 @@ fn inline_key_cannot_carry_a_kid_or_infer_an_algorithm() {
 }
 
 #[test]
-fn body_and_ambiguous_header_instances_are_refused() {
+fn nonempty_body_and_malformed_selected_key_are_refused() {
     let (mut req, _) = signed();
     *req.body_mut() = b"unprotected".to_vec();
     assert!(PreparedRequest::prepare(&req, "sig", 1000, 60).is_err());
@@ -413,5 +413,31 @@ fn oversized_non_ascii_and_non_integer_signature_fields_get_invalid_signature() 
             .unwrap()
             .code(),
         "invalid_signature"
+    );
+}
+
+#[test]
+fn repeated_signature_input_lines_use_the_last_member_and_verify_its_base() {
+    let (mut req, key) = signed();
+    let input = req.headers()["signature-input"].clone();
+    req.headers_mut().append("signature-input", input.clone());
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    // Repetition itself changes nothing; changing the selected last member does.
+    req.headers_mut().append(
+        "signature-input",
+        input
+            .to_str()
+            .unwrap()
+            .replace("created=1000", "created=1001")
+            .parse()
+            .unwrap(),
+    );
+    let proof = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    assert_eq!(
+        proof.verify(&key.public_jwk()),
+        Err(Error::InvalidSignature)
     );
 }

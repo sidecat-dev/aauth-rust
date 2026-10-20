@@ -20,6 +20,7 @@ pub enum TokenError {
         "issuer is not trusted by this key snapshot: do not refresh or fetch keys from this issuer"
     )]
     /// Issuer is outside the configured trust snapshot; do not fetch or refresh it.
+    /// Maps to `invalid_key` because the key does not meet server trust requirements.
     UntrustedIssuer,
     #[error(
         "Agent token expired: obtain a fresh token; exp and the verifier clock use Unix seconds with no expiry leeway"
@@ -96,7 +97,6 @@ impl TokenError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidJwt
-            | Self::UntrustedIssuer
             | Self::InvalidServerIdentifier
             | Self::InvalidAgentIdentifier
             | Self::InvalidDiscoveryDocument
@@ -111,7 +111,7 @@ impl TokenError {
             Self::IssuerMissing => "issuer_missing",
             Self::IssuerMismatch => "issuer_mismatch",
             Self::UnsupportedAlgorithm => "unsupported_algorithm",
-            Self::InvalidKey => "invalid_key",
+            Self::InvalidKey | Self::UntrustedIssuer => "invalid_key",
         }
     }
 }

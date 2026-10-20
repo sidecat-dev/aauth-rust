@@ -387,3 +387,68 @@ fn a_post_body_added_after_signing_is_refused_before_policy() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn future_iat_accepts_exactly_sixty_seconds_and_refuses_sixty_one() {
+    let (agent, resource) = composition();
+    let mut claims = aauth_rust_core::AgentToken::parse(agent.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    let provider =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    for (iat, accepted) in [(1060, true), (1061, false)] {
+        claims.iat = iat;
+        let agent = Agent::new(
+            SigningKey::from_seed([2; 32]),
+            provider.issue(&claims).unwrap(),
+        )
+        .unwrap();
+        let mut req = request();
+        agent.sign(&mut req, 1000).unwrap();
+        let decision = resource.authorize(&req, 1000);
+        assert_eq!(
+            matches!(decision, Decision::Granted(_)),
+            accepted,
+            "iat={iat}"
+        );
+        if !accepted {
+            let response = decision.into_response();
+            assert_eq!(response.status(), 401);
+            assert_eq!(response.headers()["signature-error"], "error=clock_skew");
+        }
+    }
+}
+
+#[test]
+fn foreign_issuer_is_a_terminal_trust_failure_on_the_wire() {
+    let (agent, resource) = composition();
+    let mut claims = aauth_rust_core::AgentToken::parse(agent.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    claims.iss = "https://attacker.example".into();
+    claims.sub = "aauth:Agent@attacker.example".into();
+    let foreign_provider =
+        AgentProvider::new(&claims.iss, "ap-1", SigningKey::from_seed([8; 32])).unwrap();
+    let agent = Agent::new(
+        SigningKey::from_seed([2; 32]),
+        foreign_provider.issue(&claims).unwrap(),
+    )
+    .unwrap();
+    let mut req = request();
+    agent.sign(&mut req, 1000).unwrap();
+    let decision = resource.authorize(&req, 1000);
+    assert!(matches!(
+        decision,
+        Decision::SignatureFailure(aauth_rust_resource::SignatureFailure::Token(
+            aauth_rust_core::TokenError::UntrustedIssuer
+        ))
+    ));
+    let response = decision.into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(response.headers()["signature-error"], "error=invalid_key");
+    let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(problem["type"], "urn:ietf:params:sig-error:invalid_key");
+    assert_eq!(problem["error"], "invalid_key");
+}
