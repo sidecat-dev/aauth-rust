@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 mod credentials;
 pub use credentials::FederatedContext;
+mod subagents;
+pub use subagents::Subagent;
 
 mod polling;
 pub use polling::{PollError, PollSession};

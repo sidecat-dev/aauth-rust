@@ -102,9 +102,9 @@ pub enum TokenError {
     /// Issuance fields or required timestamps are outside the supported profile.
     InvalidTokenLifetime,
     #[error(
-        "this Agent Provider issues top-level agents only: sub must not contain + and parent_agent must be absent"
+        "top-level issuance requires sub without + and no parent_agent; use authenticated sub-agent issuance for a child"
     )]
-    /// This AP does not issue sub-agents.
+    /// Top-level issuance was requested with a sub-agent profile.
     UnsupportedAgentProfile,
     /// expected typ aa-agent+jwt: present an Agent token rather than another JWT type.
     #[error("expected typ aa-agent+jwt: present an Agent token rather than another JWT type")]
@@ -176,7 +176,8 @@ pub struct AgentClaims {
         skip_serializing_if = "Option::is_none"
     )]
     pub ps: Option<String>,
-    /// Explicit sub-agent marker. Issuing/delegating sub-agents is not implemented.
+    /// Authoritative sub-agent marker naming the top-level parent Agent.
+    /// Use `verify_subagent` to authenticate the relationship to that parent.
     #[serde(
         default,
         deserialize_with = "present_claim",
@@ -340,4 +341,44 @@ impl std::fmt::Debug for AgentToken {
             .field("unverified_subject", &self.claims.sub)
             .finish_non_exhaustive()
     }
+}
+
+/// Authenticate a child Agent token and its one-level relationship to a verified
+/// top-level parent. The `parent_agent` claim supplies authority; subject naming
+/// is checked only as profile validation. Optional PS binding is a role duty.
+///
+/// # Errors
+/// Rejects signature, trust, time, provider, parent, naming, depth or key-profile
+/// mismatches. Expired inputs preserve `ExpiredJwt` for role-specific mapping.
+pub fn verify_subagent(
+    compact: &str,
+    parent: &VerifiedAgentToken,
+    keys: &dyn AgentKeyResolver,
+    now: i64,
+) -> Result<VerifiedAgentToken, TokenError> {
+    // A retained verified parent can be stale; authenticate its exact bytes
+    // against the current key snapshot and clock before admitting a child.
+    let parent = AgentToken::parse(parent.compact())?.verify(keys, now)?;
+    let child = AgentToken::parse(compact)?.verify(keys, now)?;
+    let p = parent.claims();
+    let c = child.claims();
+    if p.parent_agent.is_some()
+        || c.parent_agent.as_deref() != Some(p.sub.as_str())
+        || c.iss != p.iss
+        || c.cnf.jwk.thumbprint()? == p.cnf.jwk.thumbprint()?
+    {
+        return Err(TokenError::InvalidJwt);
+    }
+    // Authority was established from authenticated parent_agent above. Naming
+    // is a separate profile check, never a source of delegation authority.
+    let parent_local = p.sub.rsplit_once('@').ok_or(TokenError::InvalidJwt)?.0;
+    let child_local = c.sub.rsplit_once('@').ok_or(TokenError::InvalidJwt)?.0;
+    let discriminator = child_local
+        .strip_prefix(parent_local)
+        .and_then(|suffix| suffix.strip_prefix('+'))
+        .ok_or(TokenError::InvalidJwt)?;
+    if parent_local.contains('+') || discriminator.is_empty() || discriminator.contains('+') {
+        return Err(TokenError::InvalidJwt);
+    }
+    Ok(child)
 }
