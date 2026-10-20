@@ -2,6 +2,9 @@
 //! Each invocation uses fresh disposable stores; never run on production state.
 use crate::{AgentIdentity, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie};
 use std::sync::Arc;
+mod issuance;
+mod persistence;
+pub use persistence::check_persistence_contract;
 
 fn record(jti: &str, person: &str) -> TokenRecord {
     TokenRecord {
@@ -36,7 +39,8 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 }
 
 /// Check namespacing, round-trip, exact replay, conflicting commits, binding
-/// revocation, directed identity consistency and concurrent first-claim atomicity.
+/// revocation, directed identity consistency, fully populated Auth lineage,
+/// and concurrent first-claim / same-token retry atomicity.
 /// `factory` must return a fresh empty store every time; no cleanup is performed.
 ///
 /// # Errors
@@ -106,8 +110,16 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
     let mut collision = record("person-4", "another-person");
     collision.agent.subject = "aauth:Other@ap.example".into();
     collision.principal = collision.agent.clone();
+    let collision_agent = collision.principal.clone();
     if store.commit(collision, true) != Err(StoreError::Conflict) {
         return Err("different people received the same directed identity".into());
+    }
+    if store
+        .binding("https://ps.example", &collision_agent)
+        .map_err(|e| e.to_string())?
+        .is_some()
+    {
+        return Err("refused directed identity collision created a binding".into());
     }
     let mut renewed = record("renewed-tenant", "internal-person");
     renewed.tenant = Some("tenant-2".into());
@@ -123,13 +135,17 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
     }
 
     let concurrent = Arc::new(factory());
+    let barrier = Arc::new(std::sync::Barrier::new(8));
     let attempts: Vec<_> = (0..8)
         .map(|i| {
             let store = concurrent.clone();
+            let barrier = barrier.clone();
             std::thread::spawn(move || {
                 let mut candidate = record(&format!("competing-{i}"), &format!("person-{i}"));
                 candidate.subject = format!("directed-{i}");
-                store.commit(candidate, true)
+                barrier.wait();
+                let result = store.commit(candidate.clone(), true);
+                (candidate, result)
             })
         })
         .collect();
@@ -140,12 +156,30 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
                 .map_err(|_| "concurrent store call panicked".to_owned())
         })
         .collect::<Result<_, _>>()?;
-    if results.iter().filter(|r| r.is_ok()).count() != 1
+    if results.iter().filter(|r| r.1.is_ok()).count() != 1
         || results
             .iter()
-            .any(|r| r.is_err() && *r != Err(StoreError::Conflict))
+            .any(|r| r.1.is_err() && r.1 != Err(StoreError::Conflict))
     {
         return Err("concurrent Agent claims were not atomic".into());
+    }
+    for (candidate, result) in &results {
+        let expected = result.is_ok().then(|| candidate.clone());
+        if concurrent
+            .token(&candidate.token.reference)
+            .map_err(|e| e.to_string())?
+            != expected
+        {
+            return Err("concurrent losing Agent claim left an issuance".into());
+        }
+        if result.is_ok()
+            && concurrent
+                .binding(&candidate.token.reference.issuer, &candidate.principal)
+                .map_err(|e| e.to_string())?
+                .is_none_or(|b| b.person_id != candidate.person_id || b.revoked)
+        {
+            return Err("concurrent binding does not identify the winning person".into());
+        }
     }
     let empty = factory();
     let mut invalid = record("invalid", "person");
@@ -163,5 +197,8 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
     if empty.commit(auth, false) != Err(StoreError::MissingBinding) {
         return Err("authorization created a missing person binding".into());
     }
+    issuance::check_complete_auth_records(factory())?;
+    issuance::check_concurrent_token_commit(factory())?;
+    persistence::check_refusal_atomicity(&factory(), "logical")?;
     Ok(())
 }
