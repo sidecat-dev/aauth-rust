@@ -555,8 +555,9 @@ label it as Agent-asserted content.
 
 The direct constructor implements immediate, missionless PS authorization.
 Explicit AS federation is described below. Missions, R3 vocabulary, Budget
-semantics, sub-agent delegation, deferred consent/polling,
-revocation transport and automatic step-up orchestration remain outside it.
+semantics, deferred consent/polling, revocation transport and automatic step-up
+orchestration remain outside that direct configuration. One-level parent-mediated
+child issuance is described in the sub-agent section below.
 The PS rejects unsupported parameters explicitly. Its discovery publishes only
 implemented endpoints, with one active public key; it provides no key-overlap
 lifecycle. Core token verification alone does not establish application consent,
@@ -692,8 +693,8 @@ cache. Single terminal delivery applies to each continuation. Hosts own operatio
 replay protection and application idempotency.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
-Missions, AS call chaining and subagents remain named gaps of this Core-scope
-profile. Deferred federation requires the explicit configuration below. See the complete
+Missions, AS call chaining and recursive sub-agent delegation remain named gaps
+of this Core-scope profile. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 
@@ -780,6 +781,103 @@ routing hint and an unknown audience: both fail, without another AS call. In an
 async HTTP service, run the selected federated `handle` in a blocking worker
 because its adapter performs synchronous outbound I/O. Direct handling requires
 no outbound AS call.
+
+## Obtain credentials for a one-level sub-agent
+
+Run the complete [parent/child example](crates/aauth-rust-resource/examples/subagent.rs):
+
+```sh
+cargo test --locked -p aauth-rust-resource --example subagent
+cargo run --locked -p aauth-rust-resource --example subagent
+```
+
+It executes immediate PS authorization, immediate AS federation, and AS Payment
+then Approval using actual native AP/PS/AS/Resource handlers. Requests and responses
+are buffered and routed in process. There are no sockets, TLS exchange, identity
+provider or payment provider. The fixture supplies an already authenticated person,
+generated keys, fixed Unix time and explicit host settlement/approval decisions.
+The existing `four-party` example separately demonstrates certificate-verified TLS.
+
+The parent retains its Agent token and proof key. The child has a distinct key and
+an AP-issued token carrying authoritative `parent_agent`. Call
+`provider.issue_subagent(&claims, parent.token(), now)` only after host enrollment
+policy approves the child. The AP independently checks the actual parent using
+its configured issuer/key. Subject naming is validated for readability and depth;
+parsing a `+` never supplies delegation authority. The child and parent must share
+an AP issuer. This path permits one top-level parent and one level of children.
+
+The parent's host uses `Subagent` to verify returned credentials from public data.
+This excerpt is copied exactly from the compiled example; `trust` is the host's
+admitted issuer/role snapshot, `person_endpoint` comes from admitted PS metadata,
+and `response_token` extracts a token only from an actual successful response:
+
+```rust
+let admitted_child = Subagent::verify(parent.token(), &child_compact, &trust, NOW)?;
+let request =
+    admitted_child.person_request(&parent, &person_endpoint, RESOURCE, &trust, NOW)?;
+let delivered_person = person_server.handle(&request);
+let person_compact = response_token(&delivered_person, "person_token")?;
+let verified_person =
+    admitted_child.verify_person_delivery(&person_compact, RESOURCE, PS, &trust, NOW)?;
+```
+
+`person_server.handle` is the example's explicit native dispatch. A network host
+sends the helper's exact signed bytes through its admitted PS transport and uses
+that actual response. It supplies certificate verification, routing, bounded
+collection, deadlines and redirect policy. Admit issuers before key lookup, verify
+metadata issuer equality, and admit endpoint destinations before any network I/O.
+Do not infer trust from a token-named URL or rewrite the target after signing.
+The helper performs no discovery fetch, transport, sleep or retry. The excerpt
+does not use the child's private key. `Agent::new` and `with_token` alone check
+local key binding; they do not replace this issuer and context verification.
+
+Pass the verified Person token to the child out of band. The child presents it
+at the Resource with its own proof, then returns the Resource challenge to the
+parent. The parent checks it with `Subagent::verify_resource_challenge`, or the
+federated variant with an explicit `FederatedContext`, and calls
+`Subagent::auth_request` with the exact presented Person/Auth token. The request
+uses the parent's proof and includes the exact `subagent_token`, `resource_token`
+and `presented_token` bytes. PS and AS policy still see the parent in `.agent`
+and the verified child in `.subagent`; the resulting Person/Auth `cnf` belongs to
+the child. A child's optional `ps` may be absent; when present, the owning PS must
+match. The AS's existing parent Agent PS profile still applies.
+
+For a deferred result, retain the parent's original Agent for `PollSession`.
+Parent GETs read PS custody and never advance the AS. The PS host inspects
+`federation_pending`, confirms settlement or approval from its own admitted host
+evidence, then makes one explicit `advance_federation(..., FederationInput::Poll)`
+call per allowed stage. AS Payment remains between the AS and PS host; the parent
+sees PS Approval. The example changes fixture state explicitly and never pays a
+bill. Production settlement needs authenticated provider evidence and idempotent
+billing controls, as described under continuation configuration below. Keep PS
+and AS continuation stores separate and respect both Retry-After and finite
+deadlines; the example's zero intervals are for controlled fixture execution.
+
+Before delivering a final grant to the child, the parent checks it with
+`Subagent::verify_auth_delivery` or `verify_federated_auth_delivery` against the
+actual verified challenge and presented credential. The child then uses
+`with_token` and signs its Resource request. The example asserts one protected
+handler call, refusal of child-signed PS requests and child pending polls, exact
+forwarded compact bytes, and a single terminal PS delivery followed by `410 Gone`.
+This continuation guarantee does not provide application-request replay protection.
+
+Current checks reauthenticate both Agent tokens and enforce their expiry on
+each helper call. Person/Auth expiry cannot exceed either Agent token; Auth also
+cannot exceed its presented credential. A Resource challenge must be current
+when exchanged but does not shorten an issued grant's lifetime. Pending custody
+also expires with its original challenge and credentials. Long-running host work
+must decide whether to recheck before its eventual effect; admission does not
+freeze time. Revoking the parent's local PS binding prevents later child
+authorization and pending delivery. An existing Auth token normally expires at
+the Resource unless a separately implemented revocation channel withdraws it.
+Local PS binding revocation does not revoke the AP's Agent token. AP token
+revocation, key lifecycle and live snapshot refresh remain host responsibilities.
+
+This supported path is missionless Core, with immediate direct/federated grants
+and bounded AS approval/payment. Missions, R3, child chaining, remote AP enrollment
+and durable continuation recovery remain gaps. The example's memory stores have
+no process-restart recovery; retained issuance storage and continuation durability
+are separate host concerns.
 
 ## Prepare explicit Agent polls
 

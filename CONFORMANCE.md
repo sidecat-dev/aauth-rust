@@ -4,11 +4,13 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-This development branch carries `bc5336efa3c29e9f604c9a4dbd9df7d7dba941a9`
-as the explicit Access Server/four-party prerequisite. Rust05 passed its gates and merged into sprint main. The prerequisite is now
-history; Rust06 is rebased onto that sprint main and remains a separate candidate.
+This branch implements Rust 07 on sprint main `7c0992f`, which includes the
+merged Rust 05 Access Server and Rust 06 deferred profiles. The one-level
+parent-mediated sub-agent profile below is a candidate until its independent
+gates and merge. Earlier shared-wire results remain attributed to their exact
+revisions; new sub-agent measurements are recorded separately.
 
-Current engineer evidence: **248 integration tests and 5 backend unit tests
+Current engineer evidence: **293 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -18,13 +20,16 @@ run those same compositions. A wire check is not counted as a separate Rust test
 Four additional rustdoc tests execute an unsigned Resource challenge, the PS
 and AS constructor/metadata examples and durable-store open/reopen. One ignored backend
 test is a subprocess entry point, executed by its two parent recovery tests.
+The buffered `subagent` example separately passes three workflow tests and its
+executable scenes; those tests are outside the workspace test total.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
+| One-level sub-agents | Actual parent and child AP signatures, authoritative parent_agent, same provider, single depth and distinct proof keys; parent signs PS requests, owns consent/binding/polls, child holds Person/Auth and signs Resource requests; local and immediate/deferred AS grants; exact retained parent/child identity and parent revocation | Core `subagents.rs` (7), AP `subagents.rs` (4), Agent `subagents.rs` (8), PS/AS endpoint cases, memory/redb contracts and buffered native `subagent` example (3 separate example tests) |
 | Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits, 429 linear backoff, 503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (10 tests) |
-| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (45 tests, including 20 deferred cases), deferred TLS journey |
-| AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (23 tests, including 16 deferred cases and omitted presented_token) |
+| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (58 tests, including 28 deferred cases), deferred TLS journey |
+| AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (34 tests, including child approval/payment, trust/expiry fences and omitted presented_token) |
 | Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
@@ -36,7 +41,7 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (25 tests, plus the mixed-grants composition test), `store.rs` (4 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (30 non-deferred tests, plus the mixed-grants composition test), `store.rs` (6 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
 | Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (10 tests), `service_restart.rs` (2 tests), crate rustdoc |
 | Page corruption / bounded records | Exact data-byte checksum failure and 28 page-prefix bit flips/zeroings never escape open as a panic or bad record; 1 MiB accepted, one-byte overflow and 64 MiB refused without table writes; empty binding refused on read/commit/revoke | `aauth-rust-person-server-redb/tests/corruption.rs` (2 tests), backend tests |
 | Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
@@ -61,8 +66,8 @@ turn an `hwk` key into an AAuth identity.
 
 ## Immediate Access Server federation
 
-The optional `aauth-rust-access-server` role executes immediate top-level,
-missionless Core-scope grants. It verifies a PS `jwks_uri` HTTP proof, Agent,
+The optional `aauth-rust-access-server` role executes immediate top-level and
+one-level parent-mediated, missionless Core-scope grants. It verifies a PS `jwks_uri` HTTP proof, Agent,
 Resource and actual presented Person/Auth credentials before resource policy;
 checks lineage/key/target/role, scope narrowing and parent lifetimes; and publishes
 AS metadata/JWKS. `aauth-rust-access-server/tests/endpoint.rs` pins refusals before
@@ -84,12 +89,59 @@ one test at a time; full compliance remains unclaimed. Application-specific
 formats belong to the application. Unsupported R3 claims fail closed in this
 profile rather than conferring scope authority.
 
+## One-level parent-mediated sub-agents
+
+`AgentProvider::issue_subagent` verifies the actual parent token using the AP's
+configured signing key before issuing a child. `core::verify_subagent` verifies
+both actual tokens and the authoritative `parent_agent` relationship. A `+` in an
+Agent identifier grants no authority. This profile requires one child naming
+segment and a distinct child proof key. Parent and child AP-token lifetimes are
+independent; every issued Person/Auth credential and pending deadline is bounded
+by both. The child's optional `ps` may be absent; when present it must match the
+owning PS. The authenticated parent's PS binding remains mandatory.
+
+PS and AS policy contexts keep `.agent` as the parent and expose the independently
+verified child as `.subagent`. Parent proofs authorize the PS exchange; child
+proofs are refused there with the existing `401 invalid_jwt` role error. Person
+and Auth `cnf` belong to the child. `agent::Subagent` lets the parent prepare signed
+requests and verify child-bound deliveries without holding the child's private
+key. The Resource admits the child's protected request with the resulting Auth.
+The buffered example executes direct PS, immediate AS and AS Payment→Approval
+flows through actual native handlers; it does not demonstrate child TLS or a real
+identity/payment provider.
+
+`TokenRecord.agent` is the credential holder; optional `parent_agent` retains the
+verified parent and `principal` names its binding. First-child Person issuance
+atomically creates only that parent binding. Memory/redb logical and reopen
+contracts preserve the parent field, holder, exact presented lineage and sticky
+parent revocation. Old serialized records default the new field to `None`.
+Custom adapters must preserve it and pass the expanded contracts before child use.
+Revoking the parent binding blocks new child credentials and pending delivery.
+Already delivered credentials retain their signed expiry; AP-token revocation
+transport, per-child token revocation, cascades and automatic Resource revocation
+are absent. No `revoked_subagent_token` result is claimed without such a source.
+
+PS custody belongs to the exact retained parent's identity and key; a child or
+another poller gets `403 wrong_poller`. Exact parent/child compact bytes survive
+role recomposition and are reverified before advancement and terminal release.
+Expiry, trust and parent binding are checked after final host I/O; a pure time
+fence computes remaining lifetime without another resolver callback. Parent-only
+cancellation, concurrent single delivery and child/parent expiry are exercised.
+The existing pending-reference existence and signed-poll replay limits below
+also apply to child flows. Nonterminal PS pending publication may cross expiry
+or a trust change during its storage callback; a later poll/advance rechecks it
+and withholds credentials. Hosts still own durable continuation recovery.
+
+This subset excludes grandchildren, child-signed PS endpoints, child/upstream
+chaining, mission/R3 delegation and remote AP enrollment. It does not establish
+a general delegation lifecycle or automatic sub-agent process supervision.
+
 ## Limits and choices
 
 - Direct Agent identity and immediate missionless PS/AS authorization execute.
-  Session tokens, enrollment, revocation transport/cascades, sub-agent
-  issuance/delegation, missions and permission/interaction/audit endpoints
-  do not execute. Unsupported PS parameters are refused explicitly.
+  Local AP sub-agent issuance and parent-mediated child credentials also execute.
+  Session tokens, enrollment, revocation transport/cascades, recursive delegation,
+  missions and permission/interaction/audit endpoints do not execute. Unsupported PS parameters are refused explicitly.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
 - Ed25519 only. Other algorithms, private/HSM signer adapters and remaining
@@ -202,16 +254,16 @@ profile rather than conferring scope authority.
 
 | Named limit | Pinned Core clause | Behavior and boundary |
 | --- | --- | --- |
-| **AS-IMMEDIATE-PROFILE** | [AS Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-token-endpoint) | Immediate top-level missionless Core-scope grants only. Subagent/upstream parameters, mission and unsupported companion claims fail closed. PS-issued three-party chaining remains available in direct mode; no AS call-chaining or parent-mediated AS authorization is claimed. |
+| **AS-IMMEDIATE-PROFILE** | [AS Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-token-endpoint) | Immediate top-level and one-level parent-mediated missionless Core-scope grants. An optional verified subagent_token binds the grant to the child; policy still receives the parent. Upstream parameters, missions and unsupported companion claims fail closed. PS-issued three-party chaining remains available in direct mode; AS call chaining is absent. |
 | **AS-DEFERRED-PROFILE** | [AS Response](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-response) | AS opt-in claims/clarification/interaction/approval and WWW-Authenticate payment continuations execute with authenticated PS polls. Opt-in PS stores its own continuation, exposes actual AS details to the trusted host and signs one explicit advancement; Agent GET never polls the AS. Default immediate PS still rejects continuation with 502 as_unreachable. Settlement, billing cache and interaction UI/code consumption belong to host policy. |
 | **AS-HOST-TRANSPORT** | [PS-AS Federation](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-as-federation), [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | Host admits AS discovery and verifies metadata issuer, bounded HTTPS/certificates, DNS/egress/deadlines/no credential redirects. PS validates endpoint syntax, signed exact body and complete returned grant. The example executes genuine admitted TLS; no general Internet transport is supplied. |
-| **AS-AGENT-PS-PROFILE** | [Agent Token](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-token), [PS-to-AS Token Request](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-to-as-token-request) | AS requires the Agent token's optional ps claim to be present and equal the signing PS; absent/different ps is 400 invalid_agent_token before policy. This is a tighter shared Go/Rust profile, not a general claim that ps is mandatory in every Agent token. |
+| **AS-AGENT-PS-PROFILE** | [Agent Token](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-token), [PS-to-AS Token Request](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-to-as-token-request) | AS requires the authenticated parent/top-level Agent token's optional ps claim to be present and equal the signing PS; absent/different ps is 400 invalid_agent_token before policy. A child's optional ps may be absent but, when present, must equal that PS. This is a tighter shared Go/Rust profile, not a general claim that ps is mandatory in every Agent token. |
 | **AS-RETAINED-PROFILE** | [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | PS retains every delivered AS Auth in its local exact-lineage policy before release. Optional TokenRecord.person_server preserves PS namespace separately from AS token identity. Older local JSON records remain unchanged; custom adapters must pass the extended contract before federation use. AS retains only explicit pending state in this profile, with no issued-JWT audit/revocation or replay cache. |
 
 ## Deferred profile boundaries
 
 Both roles require separate explicit continuation stores. Pending deadlines are
-capped by the original Agent, presented and Resource expiry; long-wait request
+capped by the original parent Agent, optional child Agent, presented and Resource expiry; long-wait request
 refresh/decision reuse and clarification `updated_request` are not implemented.
 The supported chat action is `clarification_response`, bounded to five rounds,
 plus signed cancellation. AS and PS each retain their own round counter and
@@ -238,8 +290,8 @@ local consent refusal before AS discovery/transport attaches
 `FederationFailureReason::ConsentRefused(PolicyError)` with no AS status.
 The Agent retains the ordinary refusal status/error.
 Response extensions are not serialized into the stored Agent wire response.
-Missions, delegation, upstream AS authorization, R3 and companion continuation
-remain named gaps. Native tests and the real-TLS journey do not imply a shared
+Missions, recursive delegation, child/upstream chaining, upstream AS authorization,
+R3 and companion continuation remain named gaps. Native tests and the real-TLS journey do not imply a shared
 deferred harness result; shared measurements are recorded separately.
 
 Authenticated callers that do not own a pending reference receive

@@ -19,6 +19,8 @@ variables:
     - cargo run --locked -p aauth-rust-resource --example three-party
     - cargo run --locked -p aauth-rust-resource --example four-party
     - cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
+    - cargo test --locked -p aauth-rust-resource --example subagent
+    - cargo run --locked -p aauth-rust-resource --example subagent
     - cargo run --locked -p aauth-rust-person-server --example mixed-grants
     - cargo run --locked -p aauth-rust-person-server-redb --example contracts
     - cargo build --locked --release -p aauth-rust-resource --example direct-identity
@@ -89,6 +91,10 @@ windows:
       cargo run --locked -p aauth-rust-resource --example four-party
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      cargo test --locked -p aauth-rust-resource --example subagent
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      cargo run --locked -p aauth-rust-resource --example subagent
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo run --locked -p aauth-rust-person-server --example mixed-grants
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

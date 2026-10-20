@@ -134,3 +134,19 @@ own issuance policy, lifetime bounds and retained state where required.
 Core owns claim syntax and common verification, including
 the draft's distinction between `iat` and token validity. These boundaries
 support independently usable Rust crates without importing a server runtime.
+
+A one-level parent-mediated child uses two authenticated identities. Policy and
+PS consent keep the parent in `.agent`; `.subagent` is the verified child, whose
+key receives Person/Auth `cnf`. The parent signs PS requests and owns PS pending
+polls, while the PS signs AS requests and owns AS pending polls. Exact parent and
+child compact tokens remain retained across those transitions. Child proofs are
+used at the Resource. `Subagent` verifies child-bound deliveries using public key
+material, so the parent needs no child private key.
+
+Retained child records name the holder in `agent`, the authoritative parent in
+optional `parent_agent`, and the parent binding in `principal`. First-child Person
+issuance establishes that binding atomically; revocation blocks new issuance and
+pending delivery without invalidating credentials already delivered. Both memory
+and redb stores execute the expanded logical and consuming reopen contracts.
+Local AP issuance verifies the actual parent token; no identifier parsing grants
+authority. This profile refuses recursive delegation and child/upstream chaining.

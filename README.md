@@ -6,6 +6,8 @@ Agent prove its identity directly to a Resource, or obtain a Person token and
 scoped Auth token from a Person Server for three-party authorization, or use a
 Person Server and Access Server for immediate four-party federation. A Resource
 can act as an Agent for an immediate downstream call on that person's behalf.
+A parent can obtain child-bound Person/Auth credentials for a one-level sub-agent,
+including opt-in AS payment and approval, while retaining consent and polling.
 [CONFORMANCE.md](CONFORMANCE.md) names
 the tested behavior and limits.
 
@@ -13,6 +15,13 @@ The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aaut
 is the project home. Development forks may carry changes before upstream accepts
 them. The commands below start in a development checkout containing this README
 and `Cargo.toml`. No crate or release binary has been published yet.
+
+For a parent/child integration, see [the service guide](USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent)
+and [executable native example](crates/aauth-rust-resource/examples/subagent.rs).
+The parent signs PS requests and verifies child-bound deliveries without the
+child's private key; the child signs protected Resource calls. That example uses
+buffered native handlers and explicit fixture identity/payment/approval decisions.
+The separate examples below exercise certificate-verified TLS.
 
 ## Run the local example
 
@@ -28,6 +37,8 @@ cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
 cargo run --locked -p aauth-rust-resource --example four-party
 cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
+cargo test --locked -p aauth-rust-resource --example subagent
+cargo run --locked -p aauth-rust-resource --example subagent
 ```
 
 The direct-identity example generates fresh keys and certificates, starts an Agent Provider
