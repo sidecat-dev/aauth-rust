@@ -85,7 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resource = AgentIdentityResource::new(
         "https://resource.example/whoami",
         keys,
-        |token: &VerifiedAgentToken| token.claims().sub == "aauth:Agent@ap.example",
+        |token: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            token.claims().sub == "aauth:Agent@ap.example"
+        },
     )?;
     let agent = Agent::new(agent_key, token)?;
     let mut request = Request::builder()
@@ -123,7 +125,19 @@ values afterward invalidates the signature. Signing never sends or retries.
 Configure each Resource with its own HTTPS endpoint (authority and path);
 never copy that configuration from the client Host header. The library refuses
 requests for another endpoint before invoking policy, even if their signatures
-are valid. Signed query values may vary at the configured path.
+are valid. Signed query values may vary at the configured path. Frameworks such as
+axum usually give servers an origin-form URI (`/path?query`). Before verification,
+reconstruct its absolute URI using your configured external HTTPS origin and
+the original path/query. Keep the receiving method and covered header values.
+Behind a TLS proxy, trust forwarded authority/scheme only under an explicitly
+configured proxy trust boundary, not arbitrary client headers.
+
+Policy receives both `&VerifiedAgentToken` and `&Request<Vec<u8>>`, after target,
+token and proof checks, so it can decide from the authenticated method, query
+and covered headers. For state stored in a server, use the named `BoxedPolicy`
+type with `AgentIdentityResource<AgentProviderKeys, BoxedPolicy>`; a boxed closure
+can capture application state. `VerifiedAgentToken` is Clone for handler state;
+its Debug output omits the compact credential.
 
 All times are **Unix seconds**, not milliseconds. Expiry has no leeway; the
 Resource accepts signature `created` within ±60 seconds and refuses `iat` more
@@ -131,16 +145,29 @@ than 60 seconds ahead. Core JWT verification alone does not use `iat` as a
 validity check. The AP issues tokens lasting at most 24 hours; verification
 does not turn that recommendation into a mandatory lifetime ceiling for other
 issuers. This request profile requires a bodyless absolute HTTPS URI.
+It signs method, authority, path, Signature-Key, query when present, and
+Authorization when present. It **does not compute or verify Content-Digest**.
+A nonempty body is refused at signing and verification, including one added to
+a signed empty POST. A host adapter must supply the actual body bytes or reject
+bodies before verification; passing an empty Vec while forwarding an unread
+body would defeat that check. An empty-body proof does not authorize a body
+operation. Body-bearing support needs digest verification before application
+handling and is outside this profile.
 
 ## Trust and vocabulary
 
 The application chooses trusted Agent Providers. It obtains metadata and public
 keys over admitted, verified HTTPS, then gives the library those bytes as an
 immutable snapshot. `from_documents` checks issuer equality and key selection;
-it does not decide to trust an arbitrary issuer or fetch anything. Production
+it does not decide to trust an arbitrary issuer or fetch anything. A foreign
+issuer yields terminal `UntrustedIssuer`; only an unknown kid on a configured,
+trusted issuer yields `UnknownKey`. Refresh the configured JWKS source after
+checking issuer trust; never follow a token-supplied issuer on that error. Production
 hosts own destination admission, timeouts, cache lifetime and refresh (including
 the draft's once-per-minute fetch floor), key storage, enrollment, revocation,
-replay policy and clocks. See [SECURITY.md](SECURITY.md).
+replay policy and clocks. This profile supplies no nonce: if you require replay
+refusal, key the replay cache on the proof bytes within the accepted time window.
+See [SECURITY.md](SECURITY.md).
 
 | Name | Meaning here |
 | --- | --- |
@@ -156,7 +183,9 @@ A `Decision` grants verified identity, requests an Agent token (`401` with
 `AAuth-Requirement`), reports a signature failure (`401` with `Signature-Error`),
 or denies host policy (`403`). Algorithm/scheme failures include
 `Accept-Signature-Alg`/`Accept-Signature-Scheme`. Failures have Problem Details
-bodies; policy denials contain no signature diagnostics. Local Rust error
+bodies; policy denials contain no signature diagnostics. The successful
+`into_response()` convenience mapping writes the verified `sub` as its body;
+match `Granted` directly to call your own handler instead. Local Rust error
 messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute

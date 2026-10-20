@@ -2,14 +2,12 @@ use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
 use aauth_rust_jose::SigningKey;
-use aauth_rust_resource::{AgentIdentityResource, Decision};
+use aauth_rust_resource::{AgentIdentityResource, BoxedPolicy, Decision};
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 
-fn composition() -> (
-    Agent,
-    AgentIdentityResource<AgentProviderKeys, impl Fn(&aauth_rust_core::VerifiedAgentToken) -> bool>,
-) {
+type TestResource = AgentIdentityResource<AgentProviderKeys, BoxedPolicy>;
+fn composition() -> (Agent, TestResource) {
     let ap =
         AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
     let key = SigningKey::from_seed([2; 32]);
@@ -40,7 +38,8 @@ fn composition() -> (
         AgentIdentityResource::new(
             "https://resource.example/whoami",
             keys,
-            |_: &aauth_rust_core::VerifiedAgentToken| true,
+            Box::new(|_: &aauth_rust_core::VerifiedAgentToken, _request: &Request<Vec<u8>>| true)
+                as BoxedPolicy,
         )
         .unwrap(),
     )
@@ -102,10 +101,12 @@ fn verification_failure_never_invokes_host_policy() {
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let resource = resource.with_policy(move |_: &aauth_rust_core::VerifiedAgentToken| {
-        seen.fetch_add(1, Ordering::SeqCst);
-        false
-    });
+    let resource = resource.with_policy(
+        move |_: &aauth_rust_core::VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            false
+        },
+    );
     let mut req = request();
     agent.sign(&mut req, 1000).unwrap();
     *req.uri_mut() = "https://resource.example/tampered".parse().unwrap();
@@ -238,10 +239,11 @@ fn resource_binds_valid_proofs_to_its_configured_authority_and_path() {
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
-    let resource = resource.with_policy(move |_: &VerifiedAgentToken| {
-        seen.fetch_add(1, Ordering::SeqCst);
-        true
-    });
+    let resource =
+        resource.with_policy(move |_: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        });
     for uri in [
         "https://other.example/whoami",
         "https://resource.example/admin",
@@ -292,4 +294,96 @@ fn decision_debug_support_does_not_print_the_compact_credential() {
     let output = format!("{:?}", resource.authorize(&req, 1000));
     assert!(output.contains("Granted"));
     assert!(!output.contains(agent.token()));
+    let parsed = aauth_rust_core::AgentToken::parse(agent.token()).unwrap();
+    assert!(!format!("{parsed:?}").contains(agent.token()));
+    let prepared =
+        aauth_rust_signature_key::PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    assert!(!format!("{prepared:?}").contains(agent.token()));
+}
+
+#[test]
+fn admission_policy_sees_the_authenticated_method_and_query() {
+    let (agent, resource) = composition();
+    use aauth_rust_resource::BoxedPolicy;
+    use std::sync::Arc;
+    let policy: BoxedPolicy = Box::new(|_: &VerifiedAgentToken, req: &Request<Vec<u8>>| {
+        req.method() == http::Method::GET && req.uri().query() == Some("scope=read")
+    });
+    let resource: Arc<AgentIdentityResource<AgentProviderKeys, BoxedPolicy>> =
+        Arc::new(resource.with_policy(policy));
+    for (method, query, allowed) in [
+        ("GET", "scope=read", true),
+        ("POST", "scope=read", false),
+        ("GET", "scope=write", false),
+    ] {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(format!("https://resource.example/whoami?{query}"))
+            .body(Vec::new())
+            .unwrap();
+        agent.sign(&mut req, 1000).unwrap();
+        let decision = resource.authorize(&req, 1000);
+        assert_eq!(matches!(decision, Decision::Granted(_)), allowed);
+        if !allowed {
+            assert!(matches!(decision, Decision::Forbidden));
+        }
+    }
+}
+
+#[test]
+fn verified_identity_can_be_cloned_into_handler_state() {
+    let (agent, resource) = composition();
+    let mut req = request();
+    agent.sign(&mut req, 1000).unwrap();
+    let Decision::Granted(token) = resource.authorize(&req, 1000) else {
+        panic!("valid identity refused")
+    };
+    let owned: VerifiedAgentToken = (*token).clone();
+    assert_eq!(owned.compact(), agent.token());
+    assert_eq!(owned.claims().sub, token.claims().sub);
+}
+
+#[test]
+fn origin_form_refusal_explains_the_absolute_https_integration_requirement() {
+    let (_, resource) = composition();
+    let request = Request::builder().uri("/whoami").body(Vec::new()).unwrap();
+    let Decision::SignatureFailure(error) = resource.authorize(&request, 1000) else {
+        panic!("relative target accepted")
+    };
+    assert!(error.to_string().contains("absolute HTTPS"), "{error}");
+    assert_eq!(error.code(), "invalid_signature");
+}
+
+#[test]
+fn a_post_body_added_after_signing_is_refused_before_policy() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, resource) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = resource.with_policy(move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        true
+    });
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())
+        .unwrap();
+    agent.sign(&mut req, 1000).unwrap();
+    *req.body_mut() = br#"{"operation":"tampered"}"#.to_vec();
+    let Decision::SignatureFailure(error) = resource.authorize(&req, 1000) else {
+        panic!("body accepted")
+    };
+    assert!(error.to_string().contains("body"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(agent.sign(&mut req, 1000).is_err());
+    req.body_mut().clear();
+    assert!(matches!(
+        resource.authorize(&req, 1000),
+        Decision::Granted(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

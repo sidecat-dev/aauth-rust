@@ -93,7 +93,9 @@ pub fn run() -> Result<Vec<Observation>> {
     let resource = AgentIdentityResource::new(
         "https://resource.example/whoami",
         keys,
-        |token: &VerifiedAgentToken| token.claims().sub != "aauth:Denied@ap.example",
+        |token: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            token.claims().sub != "aauth:Denied@ap.example"
+        },
     )?;
     let resource_tls = tls::TlsServer::start("resource.example", move |req| {
         if req.uri().path() == "/proof" {

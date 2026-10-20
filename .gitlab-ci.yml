@@ -12,6 +12,7 @@ variables:
   script:
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
     - cargo test --locked
     - cargo run --locked -p aauth-rust-resource --example library
     - cargo build --locked --release -p aauth-rust-resource --example direct-identity
@@ -67,6 +68,9 @@ windows:
       cargo fmt --all -- --check
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo clippy --workspace --all-targets --locked -- -D warnings
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      $env:RUSTDOCFLAGS = "-D warnings"
+      cargo doc --workspace --no-deps --locked
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo test --locked
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

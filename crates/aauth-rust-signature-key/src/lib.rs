@@ -1,5 +1,6 @@
 //! Bodyless RFC 9421 request proofs with the Ed25519 `hwk` and `jwt` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
+#![deny(missing_docs)]
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http::Request;
@@ -7,46 +8,58 @@ use sfv::{BareItem, Dictionary, FieldType, InnerList, List, ListEntry, Parameter
 use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+/// Proof failure with an actionable local explanation and stable protocol code.
 pub enum Error {
     #[error(
         "invalid request signature: check selected labels, Signature-Input syntax, created time in Unix seconds, covered values and signing key"
     )]
+    /// Malformed framing, stale proof, unsupported component or failed signature.
     InvalidSignature,
     #[error(
         "signature coverage is incomplete: include method, authority, path, Signature-Key, plus query and Authorization when present"
     )]
+    /// The selected signature omits required covered components.
     InvalidInput,
     #[error(
         "created is too far in the future: synchronize the clock and use Unix seconds rather than milliseconds"
     )]
+    /// Signature creation is too far ahead of the verifier clock.
     ClockSkew,
     #[error(
         "invalid Signature-Key: check the selected scheme's parameter types, public-only OKP/Ed25519 key, and that the signer owns that key"
     )]
+    /// Selected key material is malformed, private or inconsistent.
     InvalidKey,
     #[error(
         "unsupported Signature-Key scheme: use a scheme accepted by this verifier; Direct Agent Identity requires jwt"
     )]
+    /// The selected key-conveyance scheme is not accepted.
     UnsupportedScheme,
     #[error(
         "unsupported or missing key alg: set alg to the string Ed25519; algorithms are not inferred from key shape"
     )]
+    /// The key algorithm is absent or unsupported.
     UnsupportedAlgorithm,
+    /// request body is unsupported: this profile signs bodyless requests only.
     #[error("request body is unsupported: this profile signs bodyless requests only")]
     UnsupportedBody,
     #[error(
         "request URI must be an absolute HTTPS URI with a valid authority and port, without userinfo"
     )]
+    /// Request URI is not an absolute HTTPS target with a usable authority.
     InvalidUri,
     #[error(
         "invalid clock: supply non-negative Unix seconds and a non-negative verification window"
     )]
+    /// Clock or verification window is outside the nonnegative Unix-second profile.
     InvalidClock,
+    /// keyid is unsupported by this profile: identify the key in Signature-Key instead.
     #[error("keyid is unsupported by this profile: identify the key in Signature-Key instead")]
     UnsupportedKeyId,
     #[error(
         "request target differs from this Resource endpoint: sign for its configured HTTPS authority and path"
     )]
+    /// Signed request target differs from the configured Resource endpoint.
     TargetMismatch,
 }
 impl Error {
@@ -69,8 +82,11 @@ impl Error {
 }
 
 #[derive(Clone, Debug)]
+/// Unverified selected key conveyance; extraction alone establishes no identity.
 pub enum KeyMaterial {
+    /// Header Web Key: inline public key, sufficient for pseudonymous proof only.
     Hwk(Jwk),
+    /// Compact JWT carrying a confirmation key; the accepting role verifies it.
     Jwt(String),
 }
 
@@ -180,6 +196,9 @@ fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
 }
 /// RFC 9421 authority for an absolute HTTPS URI: lowercase host, omit port 443.
 /// Hosts use this same normalization when binding proofs to a configured target.
+///
+/// # Errors
+/// Rejects non-HTTPS/relative URIs, empty hosts, userinfo and invalid ports.
 pub fn canonical_authority(uri: &http::Uri) -> Result<String, Error> {
     if uri.scheme_str() != Some("https") {
         return Err(Error::InvalidUri);
@@ -252,6 +271,11 @@ pub struct PreparedRequest {
     signature: Vec<u8>,
 }
 impl PreparedRequest {
+    /// Capture a selected hwk/jwt assertion at `now` with a window in Unix seconds.
+    ///
+    /// # Errors
+    /// Returns profile, syntax, coverage, time or key-conveyance errors. No proof
+    /// is authenticated until [`PreparedRequest::verify`] succeeds.
     pub fn prepare(
         req: &Request<Vec<u8>>,
         label: &str,
@@ -261,6 +285,10 @@ impl PreparedRequest {
         Self::prepare_with_schemes(req, label, now, window, &["hwk", "jwt"])
     }
     /// Apply the accepting protocol's scheme profile before key resolution.
+    ///
+    /// # Errors
+    /// As for [`PreparedRequest::prepare`], also rejects a selected scheme outside
+    /// `accepted`. Unselected dictionary members do not impose scheme support.
     pub fn prepare_with_schemes(
         req: &Request<Vec<u8>>,
         label: &str,
@@ -333,12 +361,18 @@ impl PreparedRequest {
             signature: bytes.clone(),
         })
     }
+    /// Selected unverified material for role-specific token/key resolution.
     pub fn key(&self) -> &KeyMaterial {
         &self.key
     }
+    /// Exact RFC 9421 base reconstructed from the captured request components.
     pub fn signature_base(&self) -> &[u8] {
         &self.base
     }
+    /// Verify the captured request proof with the resolved public key.
+    ///
+    /// # Errors
+    /// Returns algorithm/key errors or `InvalidSignature` for a bad proof.
     pub fn verify(&self, key: &Jwk) -> Result<(), Error> {
         key.verify(&self.base, &self.signature)
             .map_err(|e| match e {
@@ -350,6 +384,12 @@ impl PreparedRequest {
 }
 
 /// Sign once, without sending, retrying or obtaining credentials.
+/// `now` is Unix seconds. This replaces signature headers; call after URI and
+/// other headers are final.
+///
+/// # Errors
+/// Rejects unsupported bodies, non-HTTPS/invalid targets, invalid clocks, malformed
+/// JWT/key material or an inline public key that differs from the signer.
 pub fn sign_request(
     req: &mut Request<Vec<u8>>,
     key: &SigningKey,
@@ -417,4 +457,17 @@ pub fn sign_request(
             .map_err(|_| Error::InvalidInput)?,
     );
     Ok(())
+}
+
+impl std::fmt::Debug for PreparedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scheme = match &self.key {
+            KeyMaterial::Hwk(_) => "hwk",
+            KeyMaterial::Jwt(_) => "jwt",
+        };
+        f.debug_struct("PreparedRequest")
+            .field("scheme", &scheme)
+            .field("base_length", &self.base.len())
+            .finish_non_exhaustive()
+    }
 }

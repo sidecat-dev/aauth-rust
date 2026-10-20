@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **48 integration tests passed, 0 failed**, 47 protocol/role tests plus one TLS
+Current engineer evidence: **53 integration tests passed, 0 failed**, 52 protocol/role tests plus one TLS
 integration test with **14 wire/TLS checks**. The executable example runs that
 same composition. A wire check is not counted as a separate Rust test. One additional rustdoc test
 executes the unsigned Resource challenge.
@@ -15,9 +15,9 @@ executes the unsigned Resource challenge.
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (15 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Bodyless requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window | Proof tests, independently stated signature-base fixture |
-| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (13 tests) |
-| AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
-| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; configured authority/path binding before policy; denial after valid authentication | `aauth-rust-resource/tests/identity.rs` (10 tests), TLS journey |
+| Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (14 tests) |
+| AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location; reject foreign issuer separately from rotation; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
+| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; configured authority/path binding before policy; denial after valid authentication | `aauth-rust-resource/tests/identity.rs` (14 tests), TLS journey |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
 
 The 14 checks are AP metadata, AP JWKS, unsigned challenge, accepted identity,
@@ -41,6 +41,11 @@ turn an `hwk` key into an AAuth identity.
   Content-Digest, component parameters, general field canonicalization, nonce
   replay storage, `keyid` and complete negotiation are absent. `keyid` is refused
   explicitly rather than guessed. The `alg` signature parameter is ignored.
+  No Content-Digest is computed or verified; a nonempty POST body added after
+  signing is refused before policy. Hosts must pass actual body bytes or reject
+  bodies at transport, never authenticate an empty placeholder then forward a body.
+  The Resource fixes label `sig`, a 60-second window and the jwt scheme; hosts
+  needing a different profile compose the underlying Signature-Key API.
 - The AP follows the Agent-token 24-hour lifetime SHOULD as an issuance limit.
   Core/Resource verification does not impose that recommendation as a hard
   ceiling on other issuers. Hosts can enforce a stricter lifetime in policy.

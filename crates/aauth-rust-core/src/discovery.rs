@@ -6,9 +6,20 @@ use serde_json::Value;
 pub trait AgentKeyResolver: Send + Sync {
     /// Resolve `kid` for a trusted issuer and discovery well-known document
     /// name (`dwk`). An implementation must apply host trust before fetching.
+    ///
+    /// # Errors
+    /// Implementations must reject untrusted issuers before network access.
+    /// Reserve `UnknownKey` for missing kid on a trusted issuer, so a host may
+    /// refresh only its configured source after checking the issuer allowlist.
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError>;
 }
 
+/// Validate issuer binding and return the HTTPS JWKS location from metadata.
+/// URLs may contain queries or use a different host; network admission is a host duty.
+///
+/// # Errors
+/// Rejects oversized/malformed metadata, missing/mismatched issuer, or a missing
+/// or invalid HTTPS location (userinfo and fragments are forbidden).
 pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, TokenError> {
     crate::validate_server_identifier(expected_issuer)?;
     if bytes.len() > 65536 {
@@ -26,12 +37,21 @@ pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, 
         .get("jwks_uri")
         .and_then(Value::as_str)
         .ok_or(TokenError::UnknownKey)?;
-    let parsed = url::Url::parse(uri).map_err(|_| TokenError::UnknownKey)?;
-    if parsed.scheme() != "https"
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.fragment().is_some()
+    let parsed: http::Uri = uri.parse().map_err(|_| TokenError::UnknownKey)?;
+    let authority = parsed.authority().ok_or(TokenError::UnknownKey)?;
+    if parsed.scheme_str() != Some("https")
+        || authority.host().is_empty()
+        || authority.as_str().contains('@')
+        || uri.contains('#')
+    {
+        return Err(TokenError::UnknownKey);
+    }
+    let suffix = &authority.as_str()[authority.host().len()..];
+    if !suffix.is_empty()
+        && suffix
+            .strip_prefix(':')
+            .and_then(|port| port.parse::<u16>().ok())
+            .is_none()
     {
         return Err(TokenError::UnknownKey);
     }
@@ -49,6 +69,10 @@ impl AgentProviderKeys {
     /// Retain metadata/JWKS bytes for an issuer the host already trusts.
     /// Checks exact metadata issuer equality and bounds document sizes. Fetching,
     /// destination admission, cache lifetime and refresh belong to the host.
+    ///
+    /// # Errors
+    /// Returns metadata validation errors or `InvalidKey` for malformed/oversized
+    /// JWKS. Unselected key algorithms are checked only if selected later.
     pub fn from_documents(issuer: &str, metadata: &[u8], jwks: &[u8]) -> Result<Self, TokenError> {
         let jwks_uri = metadata_jwks_uri(issuer, metadata)?;
         if jwks.len() > 65536 {
@@ -67,17 +91,35 @@ impl AgentProviderKeys {
             keys,
         })
     }
+    /// Original validated JWKS URL; this snapshot never fetches it.
     pub fn jwks_uri(&self) -> &str {
         &self.jwks_uri
     }
+    /// Resolve one issuer-named key from this already trusted snapshot.
+    ///
+    /// # Errors
+    /// `UntrustedIssuer` is terminal: never fetch a token-named foreign issuer.
+    /// `UnknownKey` means a missing kid on this trusted issuer; host-controlled
+    /// refresh may help. Malformed/ambiguous selected keys return `InvalidKey`.
     pub fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         <Self as AgentKeyResolver>::key(self, issuer, dwk, kid)
     }
 }
 impl AgentKeyResolver for AgentProviderKeys {
+    ///
+    /// # Errors
+    /// Implementations must reject untrusted issuers before network access.
+    /// Reserve `UnknownKey` for missing kid on a trusted issuer, so a host may
+    /// refresh only its configured source after checking the issuer allowlist.
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
-        if issuer != self.issuer || dwk != "aauth-agent.json" || kid.is_empty() {
-            return Err(TokenError::UnknownKey);
+        if issuer != self.issuer {
+            return Err(TokenError::UntrustedIssuer);
+        }
+        if dwk != "aauth-agent.json" {
+            return Err(TokenError::InvalidDiscoveryDocument);
+        }
+        if kid.is_empty() {
+            return Err(TokenError::InvalidKeyId);
         }
         let mut matches = self
             .keys

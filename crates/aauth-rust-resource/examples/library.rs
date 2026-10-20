@@ -31,7 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resource = AgentIdentityResource::new(
         "https://resource.example/whoami",
         keys,
-        |token: &VerifiedAgentToken| token.claims().sub == "aauth:Agent@ap.example",
+        |token: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            token.claims().sub == "aauth:Agent@ap.example"
+        },
     )?;
     let agent = Agent::new(agent_key, token)?;
     let mut request = Request::builder()

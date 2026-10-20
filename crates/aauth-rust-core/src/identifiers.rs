@@ -1,5 +1,9 @@
 use crate::TokenError;
 
+/// Validate a lowercase HTTPS DNS origin without port, path or userinfo.
+///
+/// # Errors
+/// Returns `InvalidServerIdentifier` for any spelling outside that profile.
 pub fn validate_server_identifier(s: &str) -> Result<(), TokenError> {
     let host = s
         .strip_prefix("https://")
@@ -24,6 +28,10 @@ pub fn validate_server_identifier(s: &str) -> Result<(), TokenError> {
     }
     Ok(())
 }
+/// Validate `aauth:local@domain` syntax without inferring delegation authority.
+///
+/// # Errors
+/// Returns `InvalidAgentIdentifier` for invalid local characters/length or domain.
 pub fn validate_agent_identifier(s: &str) -> Result<(), TokenError> {
     let (local, domain) = s
         .strip_prefix("aauth:")

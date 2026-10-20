@@ -59,6 +59,10 @@ impl<'de> Deserialize<'de> for Strict {
 }
 
 /// Reject ambiguous JSON before any typed token or metadata deserialization.
+///
+/// # Errors
+/// Rejects malformed JSON, duplicate members at any nesting depth, and values
+/// beyond the JSON parser's nesting/number bounds.
 pub fn strict_json(bytes: &[u8]) -> Result<Value, serde_json::Error> {
     let Strict(v) = serde_json::from_slice(bytes)?;
     Ok(v)

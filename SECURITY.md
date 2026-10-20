@@ -29,7 +29,10 @@ Keep signing keys in application-controlled storage, use fresh unique token
 identifiers, and supply the correct Unix clock. A valid signature proves a key
 and signed claims; the application's Resource policy decides access. Replay
 storage, enrollment, revocation and sub-agent delegation are outside the
-current implementation. The generated certificates and small HTTP codec in
+current implementation. This profile rejects nonempty bodies and does not
+verify Content-Digest. Adapters must pass the actual body bytes or refuse bodies
+at the transport; verifying an empty placeholder and then forwarding an unread
+body defeats the profile's body check. The generated certificates and small HTTP codec in
 the loopback example are test infrastructure.
 
 ## Supported code

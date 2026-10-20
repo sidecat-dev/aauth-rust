@@ -150,7 +150,7 @@ fn discovery_binds_exact_issuer_and_selects_only_the_named_key() {
         keys.key("https://other.example", "aauth-agent.json", "ap-1")
             .err()
             .unwrap(),
-        TokenError::UnknownKey
+        TokenError::UntrustedIssuer
     );
     assert_eq!(
         keys.key("https://ap.example", "aauth-agent.json", "absent")
@@ -337,6 +337,9 @@ fn jwks_endpoints_are_https_urls_not_server_identifiers_and_empty_sets_are_valid
 fn discovery_refuses_non_https_jwks_locations() {
     for uri in [
         "http://ap.example/keys",
+        "https://ap.example:notaport/keys",
+        "https://ap.example:65536/keys",
+        "https://:443/keys",
         "file:///keys",
         "https://user:secret@ap.example/keys",
         "https://ap.example/keys#fragment",
@@ -349,4 +352,20 @@ fn discovery_refuses_non_https_jwks_locations() {
             "{uri}"
         );
     }
+}
+
+#[test]
+fn a_foreign_issuer_does_not_look_like_a_rotated_key() {
+    let (_, _, _, keys) = fixture();
+    let foreign = keys
+        .key("https://attacker.example", "aauth-agent.json", "ap-1")
+        .err()
+        .unwrap();
+    assert_ne!(foreign, TokenError::UnknownKey);
+    assert_eq!(
+        keys.key("https://ap.example", "aauth-agent.json", "rotated")
+            .err()
+            .unwrap(),
+        TokenError::UnknownKey
+    );
 }

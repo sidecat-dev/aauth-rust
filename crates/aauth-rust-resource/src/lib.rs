@@ -1,12 +1,17 @@
 //! Direct Agent-identity Resource. Proof and token checks precede host policy.
+#![deny(missing_docs)]
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
 
 #[derive(Debug)]
+/// Failed proof/token verification or the required coverage needed to retry.
 pub enum SignatureFailure {
+    /// HTTP proof or target binding failed.
     Proof(Error),
+    /// Issuer JWT or trusted discovery failed.
     Token(TokenError),
+    /// Missing coverage, with the complete request-specific component list.
     Input(Vec<&'static str>),
 }
 impl SignatureFailure {
@@ -44,6 +49,8 @@ pub enum Decision {
 }
 impl Decision {
     /// HTTP mapping with safe RFC 9457 Problem Details for failures.
+    /// Granted writes the authenticated subject as the response body. Match
+    /// Granted directly when handing control to an application handler instead.
     pub fn into_response(self) -> Response<Vec<u8>> {
         let mut response = Response::new(Vec::new());
         match self {
@@ -133,6 +140,10 @@ fn problem(response: &mut Response<Vec<u8>>, kind: &str, title: &str, status: u1
     .expect("fixed Problem Details fields are serializable");
 }
 
+/// A named policy type for Resource values stored in application state.
+/// A boxed closure can capture application state while remaining Send + Sync.
+pub type BoxedPolicy = Box<dyn Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
+
 /// Direct Agent identity: trusted issuer token, holder proof, then host policy.
 pub struct AgentIdentityResource<K, P> {
     keys: K,
@@ -140,10 +151,16 @@ pub struct AgentIdentityResource<K, P> {
     authority: String,
     path: String,
 }
-impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken) -> bool> AgentIdentityResource<K, P> {
+impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>
+    AgentIdentityResource<K, P>
+{
     /// Bind this Resource to one HTTPS endpoint, plus trusted keys and policy.
     /// Configure authority/path from server configuration, never from client Host.
     /// Queries vary per request and are covered by the request signature.
+    ///
+    /// # Errors
+    /// Rejects non-HTTPS/relative targets, userinfo, invalid ports, queries and
+    /// fragments. The endpoint authority/path must come from server configuration.
     pub fn new(endpoint: &str, keys: K, policy: P) -> Result<Self, Error> {
         let uri: http::Uri = endpoint.parse().map_err(|_| Error::InvalidUri)?;
         if uri.query().is_some() || endpoint.contains('#') {
@@ -156,7 +173,8 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken) -> bool> AgentIdentityResou
             path: uri.path().to_owned(),
         })
     }
-    pub fn with_policy<Q: Fn(&VerifiedAgentToken) -> bool>(
+    /// Replace admission policy while retaining the configured target and keys.
+    pub fn with_policy<Q: Fn(&VerifiedAgentToken, &Request<Vec<u8>>) -> bool>(
         self,
         policy: Q,
     ) -> AgentIdentityResource<K, Q> {
@@ -169,25 +187,29 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken) -> bool> AgentIdentityResou
     }
     /// Check a bodyless absolute HTTPS request at `now` in Unix seconds.
     /// The proof window is ±60 seconds. Token expiry has no leeway; future
-    /// `iat` beyond 60 seconds is refused. Policy runs only after verification.
+    /// `iat` beyond 60 seconds is refused. Policy receives token and request only
+    /// after verification. Supply actual body bytes or reject bodies at transport;
+    /// an empty placeholder does not authenticate an unread downstream body.
     ///
     /// ```
     /// use aauth_rust_core::{AgentProviderKeys, VerifiedAgentToken};
     /// use aauth_rust_resource::{AgentIdentityResource, Decision};
+    /// use http::Request;
     /// let keys = AgentProviderKeys::from_documents("https://ap.example",
     ///     br#"{"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}"#,
     ///     br#"{"keys":[]}"#)?;
-    /// let resource = AgentIdentityResource::new("https://resource.example/", keys, |_: &VerifiedAgentToken| true)?;
+    /// let resource = AgentIdentityResource::new("https://resource.example/", keys, |_: &VerifiedAgentToken, _request: &Request<Vec<u8>>| true)?;
     /// let request = http::Request::builder().uri("https://resource.example/")
     ///     .body(Vec::new())?;
     /// assert!(matches!(resource.authorize(&request, 1000), Decision::AgentTokenRequired));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn authorize(&self, request: &Request<Vec<u8>>, now: i64) -> Decision {
-        if aauth_rust_signature_key::canonical_authority(request.uri()).as_deref()
-            != Ok(self.authority.as_str())
-            || request.uri().path() != self.path
-        {
+        let authority = match aauth_rust_signature_key::canonical_authority(request.uri()) {
+            Ok(authority) => authority,
+            Err(error) => return Decision::SignatureFailure(SignatureFailure::Proof(error)),
+        };
+        if authority != self.authority || request.uri().path() != self.path {
             return Decision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
         }
         if ["signature-key", "signature-input", "signature"]
@@ -218,7 +240,7 @@ impl<K: AgentKeyResolver, P: Fn(&VerifiedAgentToken) -> bool> AgentIdentityResou
         if let Err(e) = proof.verify(&token.claims().cnf.jwk) {
             return Decision::SignatureFailure(SignatureFailure::Proof(e));
         }
-        if !(self.policy)(&token) {
+        if !(self.policy)(&token, request) {
             return Decision::Forbidden;
         }
         Decision::Granted(Box::new(token))
