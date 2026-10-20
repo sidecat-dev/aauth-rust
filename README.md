@@ -3,7 +3,8 @@
 Rust libraries for [AAuth](https://github.com/dickhardt/AAuth), developed alongside
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go). The current subset lets an
 Agent prove its identity directly to a Resource, or obtain a Person token and
-scoped Auth token from a Person Server for three-party authorization. A Resource
+scoped Auth token from a Person Server for three-party authorization, or use a
+Person Server and Access Server for immediate four-party federation. A Resource
 can act as an Agent for an immediate downstream call on that person's behalf.
 [CONFORMANCE.md](CONFORMANCE.md) names
 the tested behavior and limits.
@@ -25,6 +26,7 @@ toolchain, rustfmt and clippy (several hundred MB), and Cargo downloads crates.
 cargo test --workspace --locked
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
+cargo run --locked -p aauth-rust-resource --example four-party
 ```
 
 The direct-identity example generates fresh keys and certificates, starts an Agent Provider
@@ -57,6 +59,19 @@ either application runs. Its output includes:
 unsigned=401 person-challenge=401 tampered=401 authorized=200
 orders=1 inventory=1 directed-subjects-differ=true downstream-within-upstream=true intermediary-binding=false untrusted-TLS-refused=true
 ```
+
+The four-party example adds a separate Access Server. The Agent obtains a Person
+credential, verifies the Resource's AS-directed challenge, and asks its PS for
+consent. The PS signs a service request with `jwks_uri`, the AS verifies all three
+credentials and issues its grant, and the PS verifies and retains that exact
+grant before returning it. The Agent verifies delivery and signs a POST that
+produces one effect. The example also refuses changed content, AS denial,
+malformed delivery, an untrusted PS and an untrusted TLS certificate. Run the
+[complete four-party source](crates/aauth-rust-resource/examples/four_party/mod.rs)
+without accounts, public DNS, privileged ports or external services. It owns and
+closes temporary listeners; its memory store and fixed demo person are disposable.
+See [run an Access Server](USE-IN-YOUR-SERVICE.md#run-an-access-server-and-federated-person-server)
+for the library integration and transport boundary.
 
 See the [three-party source](crates/aauth-rust-resource/examples/three_party/mod.rs)
 and the [Person Server service guide](USE-IN-YOUR-SERVICE.md#run-a-person-server).
@@ -230,15 +245,16 @@ See [SECURITY.md](SECURITY.md).
 
 | Name | Meaning here |
 | --- | --- |
-| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (binds a person and issues Person/Auth tokens), Access Server (federated authorization role, not implemented). |
+| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (binds a person and issues Person/Auth tokens), Access Server (evaluates Resource policy and issues federated Auth grants). |
 | `dwk` | Discovery well-known document name; for example, `aauth-agent.json` locates AP metadata at `{iss}/.well-known/aauth-agent.json`. PS and Resource keys use their own role documents. |
 | JWK, JWKS, JWS | JSON Web Key, set of public JWKs, JSON Web Signature. `kid` selects an issuer key from its JWKS. |
 | `hwk`, `jwt`, `cnf.jwk` | Signature-Key schemes conveying an inline public key or a compact token; the token's confirmation JWK binds its holder's request-signing key. |
+| `jwks_uri` | Service proof referring to an admitted signer origin, role document and exact key ID; the PS uses it to authenticate to the AS. Resolution is host-owned and precedes trust attribution. |
 | `sig`, coverage, SFV | The selected signature label, the request values bound by its signature, and Structured Field Values used to encode signature headers. The same label correlates Signature-Key, Signature-Input and Signature. |
 | Direct Agent identity | An Agent proves itself directly to a Resource, without a Person Server in the exchange. The loopback example executes this complete exchange. |
-| Person, Resource, Auth tokens | A PS-signed identity for one Resource; a Resource-signed authorization challenge; and a PS-signed scoped authorization. Each binds its intended audience and holder key. |
+| Person, Resource, Auth tokens | A PS-signed identity for one Resource; a Resource-signed authorization challenge; and a PS- or AS-signed scoped authorization. Each binds its intended audience and holder key. |
 | `presented_token`, `upstream_token` | The actual Person/Auth credential being exchanged; the caller's credential supplied by an intermediary for a downstream chain. Exact retained ties prevent replacement or omission. |
-| R3 | Rich Resource Requests, an AAuth companion outside the implemented subset. |
+| R3 | Rich Resource Requests. Full compliance is postponed by vocabulary; general media/service vocabularies can grow on demand in both libraries. None executes in this Core-scope profile. |
 
 A `Decision` grants verified identity, requests an Agent token (`401` with
 `AAuth-Requirement`), reports a signature failure (`401` with `Signature-Error`),
@@ -252,7 +268,7 @@ messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute
 
-[ARCHITECTURE.md](ARCHITECTURE.md) explains the eight crate boundaries;
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the nine crate boundaries;
 [SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
 [CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
 

@@ -50,7 +50,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 #![deny(missing_docs)]
+mod federation;
 mod policy;
+pub use federation::{BoxedFederation, Federation, FederationError};
 mod server;
 mod store;
 pub mod storetest;

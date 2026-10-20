@@ -25,7 +25,7 @@ pub struct Binding {
 /// Issuer-qualified token identifier; JTI alone is not globally unique.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TokenReference {
-    /// Person Server that issued this retained token.
+    /// Actual PS or AS issuer of this retained credential.
     pub issuer: String,
     /// Issuer-local unique token identifier.
     pub jti: String,
@@ -45,7 +45,7 @@ pub struct TokenTie {
 pub enum TokenKind {
     /// PS-issued identity credential for one Resource.
     Person,
-    /// PS-issued scoped authorization credential for one Resource.
+    /// PS-issued or PS-retained AS scoped authorization for one Resource.
     Auth,
 }
 
@@ -53,6 +53,11 @@ pub enum TokenKind {
 /// Hosts retain every field until retain_until and return owned snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenRecord {
+    /// Explicit PS namespace for a retained AS-issued Auth token. None preserves
+    /// local issuance: the credential issuer also owns the binding. Older rows
+    /// decode as None. Hosts/adapters must preserve this field on federated records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_server: Option<String>,
     /// Exact issued token reference and compact digest.
     pub token: TokenTie,
     /// Person identity or scoped authorization.
@@ -86,6 +91,35 @@ pub struct TokenRecord {
 }
 
 impl TokenRecord {
+    /// Namespace owning this credential's Agent/person binding and directed identity.
+    pub fn binding_issuer(&self) -> &str {
+        self.person_server
+            .as_deref()
+            .unwrap_or(&self.token.reference.issuer)
+    }
+    /// Check the exact retained parent of a federated Auth receipt. Adapters run
+    /// this atomically with commit, after exact existing-record comparison.
+    ///
+    /// # Errors
+    /// InvalidRecord on a changed/missing PS namespace, parent, holder or identity.
+    pub fn validate_federated_parent(&self, parent: &TokenRecord) -> Result<(), StoreError> {
+        if self.person_server.is_none()
+            || self.presented.as_ref() != Some(&parent.token)
+            || self.binding_issuer() != parent.binding_issuer()
+            || self.person_id != parent.person_id
+            || self.principal != parent.principal
+            || self.agent != parent.agent
+            || self.agent_jkt != parent.agent_jkt
+            || self.resource != parent.resource
+            || self.subject != parent.subject
+            || self.tenant != parent.tenant
+            || self.expires_at > parent.expires_at
+            || parent.upstream.is_some()
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        Ok(())
+    }
     /// Validate complete record shape and whether this issuance may establish a
     /// binding. Storage adapters must still check retained-token equality first,
     /// then validate, and atomically enforce binding and directed identities.
@@ -107,7 +141,12 @@ impl TokenRecord {
             aauth_rust_core::validate_server_identifier(&identity.issuer).is_ok()
                 && aauth_rust_core::validate_agent_identifier(&identity.subject).is_ok()
         };
-        if !valid_tie(&self.token)
+        if self.person_server.as_ref().is_some_and(|ps| {
+            aauth_rust_core::validate_server_identifier(ps).is_err()
+                || self.kind != TokenKind::Auth
+                || establish_binding
+                || self.upstream.is_some()
+        }) || !valid_tie(&self.token)
             || !valid_identity(&self.agent)
             || !valid_identity(&self.principal)
             || self.presented.as_ref().is_some_and(|tie| !valid_tie(tie))
@@ -234,8 +273,20 @@ impl Store for MemoryStore {
             };
         }
         record.validate_for_commit(establish_binding)?;
-        let issuer = &record.token.reference.issuer;
-        let binding_key = (issuer.clone(), record.principal.clone());
+        if record.person_server.is_some() {
+            let reference = &record
+                .presented
+                .as_ref()
+                .ok_or(StoreError::InvalidRecord)?
+                .reference;
+            let parent = state
+                .tokens
+                .get(reference)
+                .ok_or(StoreError::InvalidRecord)?;
+            record.validate_federated_parent(parent)?;
+        }
+        let issuer = record.binding_issuer();
+        let binding_key = (issuer.to_owned(), record.principal.clone());
         match state.bindings.get(&binding_key) {
             Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
             Some(binding) if binding.person_id != record.person_id => {
@@ -245,13 +296,13 @@ impl Store for MemoryStore {
             _ => {}
         }
         let directed_key = (
-            issuer.clone(),
+            issuer.to_owned(),
             record.person_id.clone(),
             record.resource.clone(),
         );
         let identity = record.subject.clone();
         let subject_key = (
-            issuer.clone(),
+            issuer.to_owned(),
             record.resource.clone(),
             record.subject.clone(),
         );

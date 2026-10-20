@@ -91,6 +91,24 @@ upstream public subject into a different Resource's identity namespace. The
 three-party TLS example uses one pre-authenticated demo account; it is not a
 login, enrollment or durable-storage service.
 
+For federation, an admitted PS service proof is distinct from Agent person
+identity. The AS verifies both, the Resource challenge and its actual presented
+credential before resource policy. The PS independently verifies the returned
+AS grant and commits exact retained ancestry before release. Use explicit
+federated Resource/Agent APIs to pin AS issuer and `aauth-access.json`, including
+when PS=AS. An AS 401 concerns the PS service proof; it becomes `as_unreachable`,
+not an Agent signature failure. Other well-formed terminal AS errors relay their
+status/error in a new PS problem body. The PS does not return unverified grants.
+
+The host `Federation` adapter must admit the AS before discovery, validate exact
+metadata issuer, enforce HTTPS certificates/SNI, bound request/response collection,
+set deadlines, constrain DNS/egress and refuse credential-bearing redirects.
+The library validates endpoint syntax and delivery but cannot enforce callback
+network behavior. Consent is explicit and defaults to denial. AS grants and PS
+retention do not prevent request replay or deduplicate application effects.
+Merged JWKS and explicit dispatch are required when roles share an origin; do
+not infer AS authority solely because an issuer string equals the PS identifier.
+
 ## Supported code
 
 Security fixes target the current development line. The crates are alpha code

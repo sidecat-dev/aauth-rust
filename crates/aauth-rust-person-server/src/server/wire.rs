@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 pub(super) struct Failure {
     status: StatusCode,
-    code: &'static str,
+    code: String,
     signature: Option<String>,
     date: Option<i64>,
 }
@@ -14,7 +14,7 @@ impl Failure {
     pub(super) fn parameter(code: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code,
+            code: code.into(),
             signature: None,
             date: None,
         }
@@ -26,10 +26,10 @@ impl Failure {
             PolicyError::Unavailable => Self::internal(),
         }
     }
-    pub(super) fn status(status: StatusCode, code: &'static str) -> Self {
+    pub(super) fn status(status: StatusCode, code: &str) -> Self {
         Self {
             status,
-            code,
+            code: code.into(),
             signature: None,
             date: None,
         }
@@ -70,7 +70,7 @@ impl Failure {
         }
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code,
+            code: code.into(),
             signature: Some(signature),
             date: matches!(error, ProofError::ClockSkew).then_some(now),
         }
@@ -79,7 +79,7 @@ impl Failure {
         let code = error.code();
         Self {
             status: StatusCode::UNAUTHORIZED,
-            code,
+            code: code.into(),
             signature: Some(format!("error={code}")),
             date: None,
         }
@@ -87,7 +87,7 @@ impl Failure {
     pub(super) fn clock(now: i64) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
-            code: "clock_skew",
+            code: "clock_skew".into(),
             signature: None,
             date: Some(now),
         }

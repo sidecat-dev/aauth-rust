@@ -40,7 +40,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .and_then(|token| token.verify(&self.resolver(), now))
                     .map_err(|error| Failure::token(error, parameter, now))?;
                 let c = token.claims();
-                if c.dwk != "aauth-person.json" || unsupported(&c.extra) {
+                let valid_role = if self.federation.is_some() {
+                    c.dwk == "aauth-access.json" && c.ps == self.config.issuer
+                } else {
+                    c.dwk == "aauth-person.json"
+                };
+                if !valid_role || unsupported(&c.extra) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
                 }
                 Presented {
@@ -106,7 +111,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .token(&reference)
             .map_err(|_| Failure::internal())?
             .ok_or_else(|| Failure::token(TokenError::InvalidJwt, parameter, now))?;
-        if record.token.reference != reference
+        if record.binding_issuer() != self.config.issuer
+            || record.token.reference != reference
             || record.token.compact_sha256 != digest(compact)
             || record.kind != p.kind
             || record.resource != p.aud
@@ -132,6 +138,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         issuance: Issuance<'_>,
     ) -> Result<TokenRecord, Failure> {
         Ok(TokenRecord {
+            person_server: None,
             token: TokenTie {
                 reference: TokenReference {
                     issuer: self.config.issuer.clone(),

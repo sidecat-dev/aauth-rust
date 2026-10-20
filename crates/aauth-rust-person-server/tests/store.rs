@@ -63,6 +63,7 @@ fn record() -> TokenRecord {
         compact_sha256: "digest".into(),
     };
     TokenRecord {
+        person_server: None,
         token: tie.clone(),
         kind: TokenKind::Auth,
         resource: "https://resource.example".into(),

@@ -44,10 +44,15 @@ pub enum PsConfigurationError {
     InvalidKeyId,
     /// Scope profile is empty, duplicated or contains malformed values.
     InvalidScopes,
+    /// Expected Access Server identifier is malformed.
+    InvalidAccessServer,
 }
 impl std::fmt::Display for PsConfigurationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::InvalidAccessServer => {
+                "Access Server must be a canonical HTTPS server identifier"
+            }
             Self::InvalidIssuer => {
                 "Resource issuer must be a canonical HTTPS DNS origin without port or path"
             }
@@ -182,6 +187,7 @@ pub struct PsAuthorizationResource<K, P> {
     authority: String,
     keys: K,
     policy: P,
+    access_server: Option<String>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -228,7 +234,26 @@ where
             authority,
             keys,
             policy,
+            access_server: None,
         })
+    }
+    /// Construct a Resource that trusts the named AS's policy verdict. Challenges
+    /// target this AS; only its aauth-access.json Auth tokens may grant access,
+    /// including when PS and AS share one identifier. Existing new remains PS-only.
+    ///
+    /// # Errors
+    /// As for new, also rejects an invalid Access Server identifier.
+    pub fn new_federated(
+        config: PsAuthorizationConfig,
+        access_server: &str,
+        keys: K,
+        policy: P,
+    ) -> Result<Self, PsConfigurationError> {
+        validate_server_identifier(access_server)
+            .map_err(|_| PsConfigurationError::InvalidAccessServer)?;
+        let mut resource = Self::new(config, keys, policy)?;
+        resource.access_server = Some(access_server.into());
+        Ok(resource)
     }
     /// Accurate public metadata; serve at the published Resource well-known path.
     /// This profile publishes no AS, revocation or explicit authorization endpoint.
@@ -325,7 +350,10 @@ where
                 let challenge = ResourceClaims {
                     iss: self.config.issuer.clone(),
                     dwk: "aauth-resource.json".into(),
-                    aud: claims.iss.clone(),
+                    aud: self
+                        .access_server
+                        .clone()
+                        .unwrap_or_else(|| claims.iss.clone()),
                     ps: claims.iss.clone(),
                     sub: claims.sub.clone(),
                     jti: challenge_jti.into(),
@@ -362,8 +390,11 @@ where
                 if claims.aud != self.config.issuer {
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                 }
-                if claims.dwk != "aauth-person.json"
-                    || claims.iss != claims.ps
+                let valid_role = match &self.access_server {
+                    Some(issuer) => claims.dwk == "aauth-access.json" && &claims.iss == issuer,
+                    None => claims.dwk == "aauth-person.json" && claims.iss == claims.ps,
+                };
+                if !valid_role
                     || claims.mission_s256.is_some()
                     || unsupported_companion(&claims.extra)
                 {

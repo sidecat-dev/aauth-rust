@@ -34,6 +34,9 @@ impl AgentKeyResolver for Keys {
             (INVENTORY, "aauth-resource.json", "inventory-key") => {
                 Ok(SigningKey::from_seed([5; 32]).public_jwk())
             }
+            ("https://as.example", "aauth-access.json", "as-key") => {
+                Ok(SigningKey::from_seed([7; 32]).public_jwk())
+            }
             (PS, "aauth-person.json", "ps-key") => Ok(SigningKey::from_seed([3; 32]).public_jwk()),
             _ => Err(TokenError::UntrustedIssuer),
         }
@@ -166,6 +169,9 @@ impl Host {
     }
 }
 impl Policy for Host {
+    fn consent(&self, request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        self.grant(request).map(|_| ())
+    }
     fn bind_person(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
         self.bind_calls.fetch_add(1, Ordering::SeqCst);
         self.person(request)
@@ -917,4 +923,252 @@ fn user_unreachable_is_explicit_at_both_token_endpoints() {
         assert!(output(&response).get("person_token").is_none());
         assert!(output(&response).get("auth_token").is_none());
     }
+}
+
+struct AccessTransport {
+    mode: usize,
+    calls: Arc<AtomicUsize>,
+    now: Arc<AtomicI64>,
+}
+impl aauth_rust_person_server::Federation for AccessTransport {
+    fn endpoint(&self, issuer: &str) -> Result<String, aauth_rust_person_server::FederationError> {
+        if issuer != "https://as.example" {
+            return Err(aauth_rust_person_server::FederationError);
+        }
+        Ok(if self.mode == 11 {
+            "http://as.example/token"
+        } else {
+            "https://as.example/token"
+        }
+        .into())
+    }
+    fn send(
+        &self,
+        request: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let server = aauth_rust_access_server::AccessServer::new(
+            aauth_rust_access_server::Config::new(
+                "https://as.example",
+                "as-key",
+                SigningKey::from_seed([7; 32]),
+            ),
+            Keys,
+            |_: &aauth_rust_access_server::AuthorizationRequest| {
+                Ok(aauth_rust_access_server::Decision {
+                    scopes: vec!["read".into()],
+                    lifetime: 600,
+                })
+            },
+            || 1000,
+            || format!("access-auth-{call}"),
+        )
+        .unwrap();
+        let mut response = server.handle(request);
+        assert_eq!(
+            response.status(),
+            200,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        match self.mode {
+            1 => *response.body_mut() = b"not json".to_vec(),
+            2 | 3 | 5 | 6 | 15..=22 => {
+                let compact = output(&response)["auth_token"].as_str().unwrap().to_owned();
+                let parsed = AuthToken::parse(&compact).unwrap();
+                let mut claims = parsed.unverified_claims().clone();
+                match self.mode {
+                    2 => claims.cnf.jwk = SigningKey::from_seed([9; 32]).public_jwk(),
+                    3 => claims.scope = Some("admin".into()),
+                    5 => claims.exp = 4000,
+                    15 => claims.sub = "different-person".into(),
+                    16 => claims.aud = PS.into(),
+                    17 => claims.ps = "https://other-ps.example".into(),
+                    18 => claims.tenant = Some("different-tenant".into()),
+                    19 => claims.account = Some("invented-account".into()),
+                    20 => claims.iss = "https://foreign-as.example".into(),
+                    21 => claims.iat = 1061,
+                    22 => {
+                        claims
+                            .extra
+                            .insert("r3_uri".into(), json!("https://resource.example/classes"));
+                    }
+                    _ => {
+                        claims.iss = PS.into();
+                        claims.dwk = "aauth-person.json".into();
+                    }
+                }
+                let (key, kid) = if self.mode == 6 {
+                    (3, "ps-key")
+                } else {
+                    (7, "as-key")
+                };
+                let compact = aauth_rust_core::mint_auth_token(
+                    &SigningKey::from_seed([key; 32]),
+                    kid,
+                    &claims,
+                )
+                .unwrap();
+                *response.body_mut() = json!({"auth_token":compact}).to_string().into_bytes();
+            }
+            4 | 7 => {
+                *response.status_mut() = if self.mode == 4 {
+                    http::StatusCode::FORBIDDEN
+                } else {
+                    http::StatusCode::INTERNAL_SERVER_ERROR
+                };
+                response
+                    .headers_mut()
+                    .insert("content-type", "application/problem+json".parse().unwrap());
+                *response.body_mut() =
+                    json!({"error":if self.mode==4 {"access_denied"}else{"server_error"}})
+                        .to_string()
+                        .into_bytes();
+            }
+            13 | 14 => {
+                *response.status_mut() = if self.mode == 13 {
+                    http::StatusCode::UNAUTHORIZED
+                } else {
+                    http::StatusCode::BAD_REQUEST
+                };
+                response
+                    .headers_mut()
+                    .insert("content-type", "application/problem+json".parse().unwrap());
+                response
+                    .headers_mut()
+                    .insert("date", "Thu, 01 Jan 1970 00:16:40 GMT".parse().unwrap());
+                *response.body_mut() = json!({"error": "clock_skew"}).to_string().into_bytes();
+            }
+            8 => *response.status_mut() = http::StatusCode::ACCEPTED,
+            9 => self.now.store(4000, Ordering::SeqCst),
+            _ => {}
+        }
+        Ok(response)
+    }
+}
+#[test]
+fn federated_delivery_verifies_as_result_and_retains_exact_step_up_ancestry() {
+    // Core ps-as-federation, auth-token-delivery and resource-token-verification.
+    let f = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = f.server(2000).with_federation(AccessTransport {
+        mode: 0,
+        calls: calls.clone(),
+        now: f.host.now.clone(),
+    });
+    let holder = agent(false);
+    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let challenge = resource(&holder, &person, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    let response = f.exchange(&server, &holder, &challenge, &person, None);
+    let auth = compact(&response, "auth_token");
+    let token = AuthToken::parse(&auth)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().dwk, "aauth-access.json");
+    let record = f
+        .store
+        .token(&TokenReference {
+            issuer: "https://as.example".into(),
+            jti: token.claims().jti.clone(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.person_server.as_deref(), Some(PS));
+    let step = resource(&holder, &auth, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    let second = compact(
+        &f.exchange(&server, &holder, &step, &auth, None),
+        "auth_token",
+    );
+    let second = AuthToken::parse(&second)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    let step_record = f
+        .store
+        .token(&TokenReference {
+            issuer: "https://as.example".into(),
+            jti: second.claims().jti.clone(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(step_record.presented, Some(record.token.clone()));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        f.store
+            .binding("https://as.example", &record.principal)
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+fn federation_never_releases_unverified_or_unretained_as_tokens() {
+    for mode in [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    ] {
+        let f = Fixture::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = f.server(2000).with_federation(AccessTransport {
+            mode,
+            calls: calls.clone(),
+            now: f.host.now.clone(),
+        });
+        let holder = agent(false);
+        let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+        let challenge = resource(&holder, &person, "read", |r| {
+            r.aud = "https://as.example".into()
+        });
+        if mode == 12 {
+            f.store.fail.store(true, Ordering::SeqCst);
+        }
+        let response = f.exchange(&server, &holder, &challenge, &person, None);
+        let v = output(&response);
+        assert!(v.get("auth_token").is_none(), "mode{mode}");
+        let (status, code) = match mode {
+            4 => (403, "access_denied"),
+            7 | 12 => (500, "server_error"),
+            9 => (400, "expired_resource_token"),
+            14 => (400, "clock_skew"),
+            _ => (502, "as_unreachable"),
+        };
+        assert_eq!(
+            (response.status().as_u16(), v["error"].as_str().unwrap()),
+            (status, code),
+            "mode{mode}"
+        );
+        if mode == 14 {
+            assert_eq!(
+                response.headers().get("date").map(|v| v.to_str().unwrap()),
+                Some("Thu, 01 Jan 1970 00:16:40 GMT")
+            );
+        }
+        if mode == 11 {
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
+#[test]
+fn federated_consent_denial_prevents_any_as_dispatch() {
+    let f = Fixture::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = f.server(2000).with_federation(AccessTransport {
+        mode: 0,
+        calls: calls.clone(),
+        now: f.host.now.clone(),
+    });
+    let holder = agent(false);
+    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let challenge = resource(&holder, &person, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    f.host.mode.store(1, Ordering::SeqCst);
+    let response = f.exchange(&server, &holder, &challenge, &person, None);
+    assert_eq!(response.status(), 403);
+    assert_eq!(output(&response)["error"], "access_denied");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

@@ -2,6 +2,7 @@
 //! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
 mod credentials;
+pub use credentials::FederatedContext;
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};

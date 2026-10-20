@@ -27,7 +27,7 @@ impl AgentKeyResolver for Keys {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         for snapshot in &self.0 {
             match snapshot.key(issuer, dwk, kid) {
-                Err(TokenError::UntrustedIssuer) => continue,
+                Err(TokenError::UntrustedIssuer | TokenError::InvalidDiscoveryDocument) => continue,
                 other => return other,
             }
         }
@@ -562,4 +562,74 @@ fn wrong_audience_has_a_specific_diagnostic_without_challenge_or_policy() {
         assert!(!String::from_utf8_lossy(response.body()).contains(&compact));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn explicit_federation_pins_as_and_role_even_when_collocated() {
+    // Core PS-AS Collapse / Auth Token Verification: issuer alone is insufficient.
+    let mut snapshots = keys().0;
+    snapshots.push(issuer_key(PS, "aauth-access.json", 3, "ps-1"));
+    let keys = Keys(snapshots);
+    let resource = PsAuthorizationResource::new_federated(
+        config(),
+        PS,
+        keys.clone(),
+        |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    let person = person();
+    let response = resource
+        .authorize(&signed(&person), NOW, "challenge")
+        .into_response();
+    let challenge = ResourceToken::parse(challenge_token(&response))
+        .unwrap()
+        .verify(&keys, NOW)
+        .unwrap();
+    assert_eq!(challenge.claims().aud, PS);
+    assert_eq!(challenge.claims().ps, PS);
+    let mut claims = auth_claims();
+    assert!(
+        resource
+            .authorize(&signed(&auth(&claims)), NOW, "unused")
+            .into_result()
+            .is_err()
+    );
+    claims.dwk = "aauth-access.json".into();
+    assert!(
+        resource
+            .authorize(&signed(&auth(&claims)), NOW, "unused")
+            .into_result()
+            .is_ok()
+    );
+    let direct = PsAuthorizationResource::new(
+        config(),
+        keys.clone(),
+        |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    assert!(
+        direct
+            .authorize(&signed(&auth(&claims)), NOW, "unused")
+            .into_result()
+            .is_err()
+    );
+    let context = aauth_rust_agent::FederatedContext {
+        resource: RESOURCE,
+        person_server: PS,
+        access_server: PS,
+        presented_token: &person,
+    };
+    let holder = agent();
+    holder
+        .verify_federated_resource_challenge(challenge_token(&response), &context, &keys, NOW)
+        .unwrap();
+    holder
+        .verify_federated_auth_delivery(&auth(&claims), &challenge, &context, &keys, NOW)
+        .unwrap();
+    claims.iss = "https://foreign.example".into();
+    assert!(
+        holder
+            .verify_federated_auth_delivery(&auth(&claims), &challenge, &context, &keys, NOW)
+            .is_err()
+    );
 }

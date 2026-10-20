@@ -8,20 +8,21 @@ unimplemented role surfaces as empty Rust crates.
 | Crate | Owns | Depends on |
 | --- | --- | --- |
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
-| `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
+| `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
 | `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
 | `aauth-rust-agent` | One signed request using caller-owned credentials | Core, Signature-Key, JOSE |
-| `aauth-rust-resource` | Direct Agent identity, PS authorization and signed Resource challenges, proof before policy, HTTP decisions | Core, Signature-Key, JOSE |
-| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants and immediate call chaining | Core, Signature-Key, JOSE |
+| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions | Core, Signature-Key, JOSE |
+| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and immediate direct call chaining | Core, Signature-Key, JOSE |
+| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants | Core, Signature-Key, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
 Normal role dependencies never import one another; Resource dev-dependencies
 compose the roles for tests and examples. Examples import the roles and compose
 them without a cross-role lifecycle abstraction. The storage adapter imports the
-PS role; the role never imports a database engine. Access
-Server, Bootstrap, R3, Events and Budgets will get their own boundaries as
-executing journeys require them; their absence is recorded in CONFORMANCE.md.
+PS role; the role never imports a database engine. Bootstrap, R3, Events and
+Budgets get boundaries as executing journeys require them; unsupported
+vocabularies and the full-R3 gap are recorded in CONFORMANCE.md.
 
 ## Facts before policy
 
@@ -43,7 +44,8 @@ before supplying these snapshots or their own resolver.
 
 `PsAuthorizationResource` separates Person identity from authorization. It turns
 a verified Person token into a signed Resource challenge, then admits only a
-verified PS-issued Auth token with the right audience, holder key and route
+verified PS-issued Auth token, or the explicitly configured AS role/issuer,
+with the right audience, holder key and route
 scopes. Its origin-wide value has one fixed scope profile; the host router owns
 route selection. Policy receives verified Auth claims and the actual request.
 
@@ -66,12 +68,24 @@ tests are distinct from the protocol contract. Separate upstream hooks default t
 uses its own self-issued Agent token while the retained upstream ties preserve
 the original accountable Agent/person; it never acquires the caller's key.
 
+`PersonServer::with_federation` selects an AS exchange for every token request,
+including collocated PS=AS. Host consent precedes dispatch. The PS signs exact
+Agent/Resource/presented credential bytes with its `jwks_uri` proof. Its host
+adapter owns admitted metadata discovery and bounded HTTPS. The independent AS
+verifies that service proof and all three credentials before resource policy,
+then caps a scope grant at the Agent and presented credential expiries. The PS
+verifies AS role/issuer, every context binding, scope and lifetime before commit
+and release. A federated retained record keeps AS issuer/JTI token identity and
+an explicit PS binding namespace. Old local records omit that optional field.
+The memory/redb contracts check ancestry, exact retries, revocation and reopen.
+
 ## Bytes and consequences
 
 JWS verification uses the original protected-header and payload segments. The
 verified Agent token retains the original compact string. Unknown additive Agent
 claims remain available to host policy; they are not rewritten as authority.
-Protocol functions never send, poll, sleep, refresh credentials or retry effects.
+Protocol functions perform no network I/O themselves. The explicit PS federation
+path invokes one host transport callback; it never polls or retries effects.
 
 The Resource HTTP profile accepts absolute HTTPS requests with buffered actual content,
 up to 1 MiB. It covers the four AAuth base components, query and Authorization
@@ -81,7 +95,7 @@ compares the digest with the actual bytes before policy, then verifies the proof
 Ordinary empty requests retain their previous coverage; a supplied empty-content
 digest is checked, while Content-Type on empty content remains outside that
 conditional rule. Hosts bound collection and supply bytes before decompression.
-PS POST endpoints additionally require covered Content-Type and Content-Digest
+PS and AS POST endpoints additionally require covered Content-Type and Content-Digest
 on their JSON content, as Core requires. General component processing,
 streaming/trailers and application body interpretation remain outside this
 buffered profile.
@@ -102,9 +116,9 @@ enabled target rather than inferring that a library cross-build ran the journey.
 Discovery snapshots live in Core because they implement the AAuth token
 profiles: an expected `dwk`, exact issuer identity and a host trust boundary.
 Signature-Key remains generic: it extracts key material and verifies a proof
-with the supplied key. Supporting `jwks_uri` or `self-jwt` later may warrant a
-shared discovery crate; they do not execute today. Core's minting helpers encode
-and sign claims; they do not authorize issuance. The AP, PS and Resource roles
+with the supplied key. The explicit `jwks_uri` scheme exposes unverified service references and
+requires host-admitted resolution. `self-jwt` remains unsupported. Core's minting helpers encode
+and sign claims; they do not authorize issuance. The AP, PS, AS and Resource roles
 own issuance policy, lifetime bounds and retained state where required.
 Core owns claim syntax and common verification, including
 the draft's distinction between `iat` and token validity. These boundaries

@@ -58,6 +58,9 @@ pub(super) fn check_complete_auth_records(store: impl Store) -> Result<(), Strin
         .commit(auth.clone(), false)
         .map_err(|e| format!("Auth identical retry: {e}"))?;
     let mutations: &[Mutation] = &[
+        ("PS namespace", |r| {
+            r.person_server = Some("https://other-ps.example".into())
+        }),
         ("compact digest", |r| r.token.compact_sha256.push('x')),
         ("kind", |r| r.kind = TokenKind::Person),
         ("resource", |r| r.resource = "https://other.example".into()),

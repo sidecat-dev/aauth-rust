@@ -5,6 +5,33 @@
 //! transport. Hosts admit issuers before key resolution and bound request collection.
 //! Full R3, missions, subagents, call chaining and deferred federation are outside
 //! this profile and are refused rather than interpreted as scope authorization.
+//! A complete configuration that publishes metadata and refuses grants until
+//! application trust and resource policy are supplied:
+//!
+//! ```
+//! use aauth_rust_access_server::{AccessServer, AuthorizationRequest, Config, PolicyError};
+//! use aauth_rust_core::{AgentKeyResolver, TokenError};
+//! use aauth_rust_jose::{Jwk, SigningKey};
+//! use http::Request;
+//! struct AdmittedKeys;
+//! impl AgentKeyResolver for AdmittedKeys {
+//!     fn key(&self, _: &str, _: &str, _: &str) -> Result<Jwk, TokenError> {
+//!         Err(TokenError::UntrustedIssuer)
+//!     }
+//! }
+//! let server = AccessServer::new(
+//!     Config::new("https://as.example", "as-1", SigningKey::generate()),
+//!     AdmittedKeys,
+//!     |_: &AuthorizationRequest| Err(PolicyError::Denied),
+//!     || 1_792_526_400, // Host trusted clock: Unix seconds.
+//!     || "unique-host-generated-token-id".to_owned(),
+//! )?;
+//! let request = Request::builder()
+//!     .uri("https://as.example/.well-known/aauth-access.json")
+//!     .body(Vec::new())?;
+//! assert_eq!(server.handle(&request).status(), 200);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 #![deny(missing_docs)]
 mod wire;
 use aauth_rust_core::{

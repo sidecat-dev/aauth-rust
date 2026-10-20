@@ -44,6 +44,15 @@ pub fn check_persistence_contract<S: Store>(
     store
         .commit(other_auth.clone(), false)
         .map_err(|e| e.to_string())?;
+    let mut federated = parent.clone();
+    federated.kind = crate::TokenKind::Auth;
+    federated.token.reference.issuer = "https://as.example".into();
+    federated.token.reference.jti = "federated-auth".into();
+    federated.person_server = Some(parent.token.reference.issuer.clone());
+    federated.presented = Some(parent.token.clone());
+    store
+        .commit(federated.clone(), false)
+        .map_err(|e| format!("federated commit: {e}"))?;
     check_refusal_atomicity(&store, "before-reopen")?;
     let mut changed = auth.clone();
     changed.upstream.as_mut().unwrap().compact_sha256.push('x');
@@ -51,7 +60,7 @@ pub fn check_persistence_contract<S: Store>(
         return Err("changed retained Auth accepted before reopening".into());
     }
     let store = reopen(store).map_err(|e| format!("first reopen: {e}"))?;
-    for expected in [&parent, &auth, &other_parent, &other_auth] {
+    for expected in [&parent, &auth, &other_parent, &other_auth, &federated] {
         assert_retained(&store, expected)?;
     }
     let binding = store
@@ -97,7 +106,7 @@ pub fn check_persistence_contract<S: Store>(
     store
         .commit(independent, false)
         .map_err(|e| format!("revocation escaped issuer namespace: {e}"))?;
-    for expected in [&parent, &auth, &other_parent, &other_auth] {
+    for expected in [&parent, &auth, &other_parent, &other_auth, &federated] {
         assert_retained(&store, expected)?;
     }
     Ok(())

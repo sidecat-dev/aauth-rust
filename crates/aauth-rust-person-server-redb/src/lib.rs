@@ -262,7 +262,18 @@ fn stage_issuance(
     }
     record.validate_for_commit(establish_binding)?;
     let encoded = encode_record(record)?;
-    let issuer = &reference.issuer;
+    if record.person_server.is_some() {
+        let parent = &record
+            .presented
+            .as_ref()
+            .ok_or(StoreError::InvalidRecord)?
+            .reference;
+        let parent_key = key(&(&parent.issuer, &parent.jti))?;
+        let value =
+            get_bytes(transaction, TOKENS, &parent_key)?.ok_or(StoreError::InvalidRecord)?;
+        record.validate_federated_parent(&decode_record(&value, parent)?)?;
+    }
+    let issuer = record.binding_issuer();
     let binding_key = key(&(issuer, &record.principal.issuer, &record.principal.subject))?;
     let binding: Option<Binding> = get_bytes(transaction, BINDINGS, &binding_key)?
         .map(|v| decode_binding(&v))

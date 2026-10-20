@@ -1,3 +1,4 @@
+mod federation;
 mod lineage;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -72,6 +73,7 @@ pub struct PersonServer<K, S, P, C, I> {
     policy: P,
     clock: C,
     ids: I,
+    federation: Option<crate::BoxedFederation>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -171,7 +173,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             policy,
             clock,
             ids,
+            federation: None,
         })
+    }
+    /// Enable immediate AS federation for every /token request, including
+    /// collocated PS=AS. No direct-issuance fallback; consent defaults denied.
+    /// Host adapter owns discovery, safe HTTPS, bounds, deadlines and egress.
+    pub fn with_federation(mut self, adapter: impl crate::Federation + 'static) -> Self {
+        self.federation = Some(Box::new(adapter));
+        self
     }
     /// Public PS metadata; only implemented Person/Auth endpoints are advertised.
     pub fn metadata(&self) -> Vec<u8> {
@@ -507,7 +517,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let r = resource.claims();
         check_parameter_iat(r.iat, verified_at)?;
         if r.ps != self.config.issuer
-            || r.aud != self.config.issuer
+            || (self.federation.is_none() && r.aud != self.config.issuer)
             || r.exp - r.iat > self.config.max_resource_lifetime
             || r.agent_jkt
                 != agent
@@ -570,6 +580,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             upstream: upstream.as_ref().map(|up| up.context.clone()),
             parameters,
         };
+        if self.federation.is_some() {
+            if upstream.is_some() {
+                return Err(Failure::parameter("invalid_request"));
+            }
+            return self.federate(&agent, &resource, &presented, &retained, &context);
+        }
         let grant = if upstream.is_some() {
             self.policy.authorize_upstream(&context)
         } else {

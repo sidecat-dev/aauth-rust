@@ -314,7 +314,7 @@ Person/Auth issuance in exchanges and chains. A valid JWT without its record is
 refused, so retain state and preserve token bytes rather than reconstructing JWTs.
 
 For named application state, the PS exports `BoxedPolicy = Box<dyn Policy>`,
-`BoxedClock` and `BoxedTokenIds`. Boxed policy forwards all four direct/upstream
+`BoxedClock` and `BoxedTokenIds`. Boxed policy forwards direct/upstream and federation-consent
 hooks; clock and ID closures can capture state and are Send + Sync. For example,
 `PersonServer<K, S, BoxedPolicy, BoxedClock, BoxedTokenIds>` names the service type
 without naming closures. The constructor rustdoc uses these aliases.
@@ -434,8 +434,9 @@ an abandoned real transaction, one injected native write failure, parent-directo
 sync refusal and reconstructed
 direct/chained PS exchanges. These are separate backend checks, not evidence of
 physical power loss, every disk failure, distributed operation or other database
-engines. Missions, AS federation and token-revocation delivery stay outside the
-PS profile; adding persistence does not add those protocol roles.
+engines. The contract also retains AS Auth receipts in an explicit PS namespace;
+this is not AS audit storage. Missions and token-revocation delivery remain
+outside the supported PS profile; persistence does not add those roles.
 
 ## Protect a Resource with PS authorization
 
@@ -544,10 +545,93 @@ presentation and distinct-resource-per-Agent rate limits belong to host policy.
 If displaying `justification` or other Agent-provided Markdown, sanitize it and
 label it as Agent-asserted content.
 
-This profile implements immediate, missionless PS authorization. AS federation,
-missions, R3, Budget semantics, sub-agent delegation, deferred consent/polling,
+The direct constructor implements immediate, missionless PS authorization.
+Explicit AS federation is described below. Missions, R3 vocabulary, Budget
+semantics, sub-agent delegation, deferred consent/polling,
 revocation transport and automatic step-up orchestration remain outside it.
 The PS rejects unsupported parameters explicitly. Its discovery publishes only
 implemented endpoints, with one active public key; it provides no key-overlap
 lifecycle. Core token verification alone does not establish application consent,
 account admission or exactly-once effects.
+
+
+## Run an Access Server and federated Person Server
+
+Add the independent `aauth-rust-access-server` crate. It has no HTTP client,
+database, TLS provider or application dependency. `AccessServer::new` accepts
+`Config`, an admitted issuer/role resolver, a resource-policy closure, a trusted
+Unix-second clock and a unique ID source. Its [module rustdoc](crates/aauth-rust-access-server/src/lib.rs)
+contains a complete constructor. `BoxedPolicy`, `BoxedClock` and `BoxedTokenIds`
+name captured dependencies in application state. The AS serves:
+
+| Method and path | Purpose |
+| --- | --- |
+| GET `/.well-known/aauth-access.json` | Issuer, JWKS and Auth endpoint |
+| GET `/.well-known/jwks.json` | Public active AS signing key |
+| POST `/token` | Verify PS service proof and three credentials, then evaluate Resource policy |
+
+Set published `issuer` separately from `signed_origin` for a listener with a port.
+The AS policy sees verified PS identity, Agent posture, Resource claims and Core
+scopes after independent presented-token verification. Return `Decision` with a
+nonempty requested-scope subset and lifetime1..3600 seconds. Denied is403,
+Unavailable or an invalid grant is500. Issued Auth uses `aauth-access.json`, is
+bound to the intended Resource/person/Agent key and cannot outlive the Agent or
+presented credential. The challenge must be current but does not cap a
+missionless grant's lifetime. The host supplies authorization policy; accepting
+a valid PS proof alone does not grant access.
+
+For the PS, construct the ordinary PersonServer then call
+`server.with_federation(adapter)`. Implement `Policy::consent` explicitly; its
+default is denied. It receives the complete verified exchange before dispatch.
+The `Federation` adapter exposes:
+
+```rust
+fn endpoint(&self, access_server: &str) -> Result<String, FederationError>;
+fn send(&self, request: &http::Request<Vec<u8>>)
+    -> Result<http::Response<Vec<u8>>, FederationError>;
+```
+
+Admit the verified Resource token's AS audience before discovery. Check AS
+metadata's exact issuer and obtain its HTTPS auth_token_endpoint; enforce size,
+timeout, certificate, DNS/egress and redirect policy before network access.
+The PS gives `send` already signed exact bytes: do not rewrite target, content,
+Content-Type or signature headers, and do not follow redirects carrying the
+credentials. The library imposes the 1 MiB buffered response check; the adapter
+must bound collection before allocation. Use blocking workers for this synchronous
+callback in an async server. Terminal AS error/status relays in the PS's own
+problem body; AS401 is a service-proof failure mapped to502 as_unreachable.
+Malformed/unverifiable results and unsupported deferred responses also yield
+as_unreachable; automatic polling/payment/retry is not supplied. Parameter
+clock_skew relays the AS Date so clients can judge that verifier's clock.
+
+A federated PS always uses its adapter for `/token`, including AS=PS; it never
+falls back to PS signing. Use a separate direct instance for three-party grants.
+When PS and AS share an origin, publish distinct role metadata and one merged
+JWKS with unique key IDs, or explicitly admitted separate JWKS URLs. A host may
+route JWT Agent proofs to PS handling and jwks_uri PS proofs to AS handling;
+both handlers still independently enforce their own accepted scheme and target.
+Do not route the PS's own AS request back to the PS token handler.
+
+Construct the Resource with
+`PsAuthorizationResource::new_federated(config, expected_as, keys, policy)`.
+It issues an AS-addressed challenge preserving the actual PS/person, then admits
+only that AS issuer and discovery role, even under role collocation. Direct
+`new` remains PS-only. The Agent uses `FederatedContext` with the intended
+Resource, PS, AS and exact presented bytes, then
+`verify_federated_resource_challenge` and `verify_federated_auth_delivery` before
+exchanging/using credentials. These checks support AS Auth step-up. Keep the
+Agent's original Agent credential for PS requests; `with_token` retains the same
+proof key while switching Person/Auth credentials at the Resource.
+
+Federated retention uses `TokenRecord.person_server=Some(PS)` to separate the
+AS token's issuer/JTI from the PS binding namespace. None retains old local
+behavior; old schema1 JSON rows decode unchanged. MemoryStore and RedbStore
+validate the exact retained presented parent and commit the receipt atomically
+before release. Custom adapters must honor this field and the updated storetest
+contract; an older adapter is not federation-qualified. The PS's internal
+accountable person and directed identity remain stable across this exchange.
+Full R3 compliance remains a named vocabulary gap: general media/service
+vocabularies grow in R3 and both libraries on demand, one test at a time.
+Missions, AS call chaining, subagents and deferred federation remain named gaps
+of this immediate Core-scope profile. See the complete
+[four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).

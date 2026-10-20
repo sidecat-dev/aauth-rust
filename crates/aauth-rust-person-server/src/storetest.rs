@@ -2,6 +2,7 @@
 //! Each invocation uses fresh disposable stores; never run on production state.
 use crate::{AgentIdentity, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie};
 use std::sync::Arc;
+mod federation;
 mod issuance;
 mod persistence;
 mod validation;
@@ -9,6 +10,7 @@ pub use persistence::check_persistence_contract;
 
 fn record(jti: &str, person: &str) -> TokenRecord {
     TokenRecord {
+        person_server: None,
         token: TokenTie {
             reference: TokenReference {
                 issuer: "https://ps.example".into(),
@@ -48,6 +50,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 /// # Errors
 /// Returns an explanation when a store violates the contract or is unavailable.
 pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Result<(), String> {
+    federation::check_federation(factory())?;
     let store = factory();
     let original = record("person-1", "internal-person");
     store

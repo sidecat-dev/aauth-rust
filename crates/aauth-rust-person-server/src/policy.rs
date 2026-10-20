@@ -88,6 +88,11 @@ pub trait Policy: Send + Sync {
     fn bind_person(&self, request: &PersonRequest) -> Result<Person, PolicyError>;
     /// Authorize a verified direct exchange, returning only requested scopes.
     fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError>;
+    /// Consent to an already verified four-party exchange before the PS contacts
+    /// the AS. Default denial keeps existing direct policies closed to federation.
+    fn consent(&self, _request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        Err(PolicyError::Denied)
+    }
     /// Explicitly permit a downstream identity for the original caller's person.
     /// Default refusal prevents existing direct policies from granting delegation.
     fn bind_upstream(&self, _request: &PersonRequest) -> Result<Person, PolicyError> {
@@ -101,6 +106,9 @@ pub trait Policy: Send + Sync {
 }
 
 impl<P: Policy + ?Sized> Policy for Box<P> {
+    fn consent(&self, request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        (**self).consent(request)
+    }
     fn bind_person(&self, request: &PersonRequest) -> Result<Person, PolicyError> {
         (**self).bind_person(request)
     }
