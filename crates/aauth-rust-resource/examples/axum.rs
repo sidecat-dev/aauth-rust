@@ -53,7 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?);
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let address = listener.local_addr()?;
-    let app = framework::router("https://resource.example".parse()?, resource);
+    let app = framework::router(
+        "https://resource.example".parse()?,
+        "https://resource.example",
+        resource,
+    )?;
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)

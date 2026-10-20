@@ -32,6 +32,12 @@ trailer-based digests need a different adapter/profile; they are not implemented
 Terminate TLS before this private hop. Take the external origin from service
 configuration; accept forwarded scheme/authority only through an explicitly
 trusted proxy boundary. An arbitrary Host or Forwarded header is not configuration.
+Configure proxies to preserve the signed method, authority, path/query, body,
+Content-Digest and Content-Type. Automatic Content-Type coverage means a proxy
+that rewrites the media type after signing (for example, adding `charset=utf-8`)
+breaks nonempty requests with a 401 signature failure. Make content and media
+type decisions before the Agent signs, then preserve them through the proxy.
+
 AgentIdentityResource::new(endpoint, keys, policy) retains exact authority/path
 binding. For one gate shared by a router, use
 AgentIdentityResource::for_origin(origin, keys, policy). Every request must still
@@ -39,8 +45,21 @@ use that configured authority and carry a valid proof over its actual path.
 The router/policy decides which routes are allowed; origin mode is not a prefix
 or route whitelist. The axum example shares one Arc<Resource> across /whoami and
 /orders; keys are shared too, without fetching once per route.
-Resource discovery metadata is available through resource.metadata(); the host
-serves it at /.well-known/aauth-resource.json (the axum example does this).
+Resource discovery metadata is available through
+`resource.metadata_for("https://resource.example")?`; the host serves it at
+`/.well-known/aauth-resource.json` (the axum example does this). Configure that
+published issuer separately from the signed request authority and listener
+socket. For example, a Resource bound to `https://resource.example:8443` can
+publish `https://resource.example` while still requiring `resource.example:8443`
+in every signed request. The host supplies routing and TLS for both addresses;
+publishing metadata does not change the verifier's authority/path binding.
+The issuer must be a lowercase HTTPS DNS origin without port, path or trailing
+slash. Invalid publication settings return `ConfigurationError::InvalidIssuer`
+with local code `invalid_configuration`; fix the service configuration rather
+than asking callers to refresh a token. Validate metadata at startup, as the
+axum adapter does. The no-argument `metadata()` convenience uses the configured
+request authority when it is also a valid published identity.
+
 It reports agent-token access and the actual 60-second window. This verifier
 publishes no signing keys, so no JWKS URL or authorization endpoint is invented.
 The conditional nonempty-content coverage default is reported by required_input;
@@ -127,7 +146,8 @@ The host owns retention, refresh and retirement policy. Go shares this AP gap.
 `metadata()` supplies minimal issuer/JWKS-location bytes. A host can publish its
 own metadata with the same exact issuer and admitted HTTPS JWKS URL, plus the
 draft's branding/policy fields. No AP branding builder is provided.
-AgentIdentityResource::metadata() is a separate verifier-only Resource document. Server identifiers have no port or path. In local deployments,
+`AgentIdentityResource::metadata_for(issuer)` is a separate verifier-only Resource
+document. Server identifiers have no port or path. In local deployments,
 map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.

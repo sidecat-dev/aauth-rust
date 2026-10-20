@@ -713,6 +713,88 @@ fn resource_metadata_describes_only_the_implemented_verifier_profile() {
     }
 }
 
+#[test]
+fn metadata_failure_is_a_local_configuration_error() {
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example:8443",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    let error = resource.metadata().unwrap_err();
+    assert_eq!(error.code(), "invalid_configuration");
+    assert!(error.to_string().contains("metadata_for"));
+}
+
+#[test]
+fn published_identity_is_independent_of_the_signed_request_authority() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, _) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example:8443/",
+        resource_keys(),
+        move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
+    .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&resource.metadata_for("https://resource.example").unwrap())
+            .unwrap();
+    assert_eq!(metadata["issuer"], "https://resource.example");
+    for (authority, accepted) in [
+        ("resource.example:8443", true),
+        ("resource.example", false),
+        ("resource.example:8444", false),
+        ("foreign.example:8443", false),
+    ] {
+        let mut request = Request::builder()
+            .uri(format!("https://{authority}/orders"))
+            .body(Vec::new())
+            .unwrap();
+        agent.sign(&mut request, 1000).unwrap();
+        assert_eq!(
+            matches!(resource.authorize(&request, 1000), Decision::Granted(_)),
+            accepted,
+            "authority {authority}"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn explicit_metadata_issuer_is_validated_without_normalizing_server_identifiers() {
+    // A root slash is convenient transport syntax, but is not a server identifier.
+    let resource = AgentIdentityResource::for_origin(
+        "https://127.0.0.1:8443/",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    assert!(resource.metadata_for("https://resource.example").is_ok());
+    for issuer in [
+        "http://resource.example",
+        "https://Resource.example",
+        "https://resource.example/",
+        "https://resource.example:443",
+        "https://resource.example:8443",
+        "https://resource.example/api",
+        "https://resource.example?x=1",
+        "https://resource.example#part",
+        "https://user@resource.example",
+        "https://127.0.0.1",
+    ] {
+        let error = resource.metadata_for(issuer).unwrap_err();
+        assert_eq!(error.code(), "invalid_configuration", "issuer {issuer}");
+    }
+}
+
 fn resource_keys() -> AgentProviderKeys {
     let ap =
         AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();

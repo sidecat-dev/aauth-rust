@@ -4,6 +4,29 @@ use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentTok
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
 
+/// Invalid host configuration, separate from a caller's proof or token failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationError {
+    /// The published Resource issuer is not a canonical HTTPS DNS identifier.
+    InvalidIssuer,
+}
+impl ConfigurationError {
+    /// Local configuration code; this is not a `Signature-Error` response code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidIssuer => "invalid_configuration",
+        }
+    }
+}
+impl std::fmt::Display for ConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "invalid Resource metadata issuer: configure a lowercase HTTPS DNS origin without port or path; use metadata_for(issuer) when the published identity differs from the request authority",
+        )
+    }
+}
+impl std::error::Error for ConfigurationError {}
+
 #[derive(Debug)]
 /// Failed proof/token verification or the required coverage needed to retry.
 pub enum SignatureFailure {
@@ -280,12 +303,25 @@ where
     /// this document does not declare them unconditional for every empty request.
     ///
     /// # Errors
-    /// Returns `InvalidServerIdentifier` if the configured authority is not a
-    /// canonical DNS server identity (for example an IP or nondefault port).
-    /// Local transport ports belong in the host's logical-to-socket mapping.
-    pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
-        let issuer = format!("https://{}", self.authority);
-        aauth_rust_core::validate_server_identifier(&issuer)?;
+    /// Returns [`ConfigurationError::InvalidIssuer`] if the configured request
+    /// authority cannot also serve as a canonical DNS server identity.
+    /// Use [`Self::metadata_for`] to configure publication separately when the
+    /// request authority includes a nondefault port or IP address.
+    pub fn metadata(&self) -> Result<Vec<u8>, ConfigurationError> {
+        self.metadata_for(&format!("https://{}", self.authority))
+    }
+    /// Metadata with an explicitly configured published HTTPS server identity.
+    /// The issuer comes from host configuration, never a request Host header.
+    /// This does not change request authority/path binding: a configured port
+    /// remains part of the signed authority. The host owns discovery routing,
+    /// socket mapping and TLS for the published identity.
+    ///
+    /// # Errors
+    /// Returns [`ConfigurationError::InvalidIssuer`] unless `issuer` is a
+    /// canonical lowercase HTTPS DNS origin without port, path or trailing slash.
+    pub fn metadata_for(&self, issuer: &str) -> Result<Vec<u8>, ConfigurationError> {
+        aauth_rust_core::validate_server_identifier(issuer)
+            .map_err(|_| ConfigurationError::InvalidIssuer)?;
         Ok(serde_json::json!({
             "issuer":issuer, "access_mode":"agent-token", "signature_window":60
         })

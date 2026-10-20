@@ -42,9 +42,6 @@ pub enum Error {
     )]
     /// The key algorithm is absent or unsupported.
     UnsupportedAlgorithm,
-    /// Legacy bodyless-profile refusal; retained for callers matching old errors.
-    #[error("request body is unsupported: this profile signs bodyless requests only")]
-    UnsupportedBody,
     /// Actual buffered content exceeds the shared local 1 MiB profile.
     #[error(
         "request body exceeds 1048576 bytes: bound and collect actual content before signing or verification"
@@ -77,7 +74,6 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidSignature
-            | Self::UnsupportedBody
             | Self::BodyTooLarge
             | Self::InvalidDigest
             | Self::InvalidUri

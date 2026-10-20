@@ -1,6 +1,6 @@
 //! Example-specific axum adapter for a trusted private proxy hop.
 use aauth_rust_core::AgentProviderKeys;
-use aauth_rust_resource::{AgentIdentityResource, BoxedAdmissionPolicy};
+use aauth_rust_resource::{AgentIdentityResource, BoxedAdmissionPolicy, ConfigurationError};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -19,6 +19,7 @@ pub type Resource = AgentIdentityResource<Arc<AgentProviderKeys>, BoxedAdmission
 struct Gate {
     origin: Uri,
     resource: Arc<Resource>,
+    metadata: Vec<u8>,
 }
 
 /// Wall clock in Unix seconds, used only by this example.
@@ -29,13 +30,23 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
-/// Two routes share one Resource bound to the external origin, behind a trusted proxy.
-pub fn router(origin: Uri, resource: Arc<Resource>) -> Router {
-    Router::new()
+/// Two routes share one Resource behind a trusted proxy. The published identity
+/// is separate from the signed origin and is validated before serving requests.
+pub fn router(
+    origin: Uri,
+    issuer: &str,
+    resource: Arc<Resource>,
+) -> Result<Router, ConfigurationError> {
+    let metadata_bytes = resource.metadata_for(issuer)?;
+    Ok(Router::new()
         .route("/whoami", any(gate))
         .route("/orders", any(gate))
         .route("/.well-known/aauth-resource.json", get(metadata))
-        .with_state(Arc::new(Gate { origin, resource }))
+        .with_state(Arc::new(Gate {
+            origin,
+            resource,
+            metadata: metadata_bytes,
+        })))
 }
 
 async fn gate(State(state): State<Arc<Gate>>, request: Request<Body>) -> Response<Body> {
@@ -73,16 +84,8 @@ async fn gate(State(state): State<Arc<Gate>>, request: Request<Body>) -> Respons
 }
 
 async fn metadata(State(state): State<Arc<Gate>>) -> Response<Body> {
-    match state.resource.metadata() {
-        Ok(bytes) => Response::builder()
-            .header("content-type", "application/json")
-            .body(Body::from(bytes))
-            .unwrap(),
-        Err(_) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(Body::from(
-                "configure a canonical external Resource identity",
-            ))
-            .unwrap(),
-    }
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(Body::from(state.metadata.clone()))
+        .unwrap()
 }

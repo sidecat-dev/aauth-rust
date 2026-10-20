@@ -15,6 +15,9 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn fixture() -> (Agent, Router) {
+    fixture_for("https://resource.example")
+}
+fn fixture_for(origin: &str) -> (Agent, Router) {
     let ap =
         AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
     let key = SigningKey::from_seed([2; 32]);
@@ -52,12 +55,15 @@ fn fixture() -> (Agent, Router) {
                 Err(Deny)
             }
         });
-    let resource = Arc::new(
-        AgentIdentityResource::for_origin("https://resource.example", keys, policy).unwrap(),
-    );
+    let resource = Arc::new(AgentIdentityResource::for_origin(origin, keys, policy).unwrap());
     (
         Agent::new(key, token).unwrap(),
-        framework::router("https://resource.example".parse().unwrap(), resource),
+        framework::router(
+            origin.parse().unwrap(),
+            "https://resource.example",
+            resource,
+        )
+        .unwrap(),
     )
 }
 fn proxy_request(agent: &Agent, uri: &str, body: Vec<u8>) -> Request<Body> {
@@ -171,6 +177,36 @@ async fn axum_publishes_resource_metadata_without_requiring_an_agent() {
         document,
         serde_json::json!({"issuer":"https://resource.example","access_mode":"agent-token","signature_window":60})
     );
+}
+
+#[tokio::test]
+async fn axum_publishes_a_canonical_identity_while_verifying_a_port_bound_target() {
+    let (agent, app) = fixture_for("https://resource.example:8443");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/aauth-resource.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let content = to_bytes(response.into_body(), 1024).await.unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&content).unwrap();
+    assert_eq!(document["issuer"], "https://resource.example");
+    for (uri, status) in [
+        ("https://resource.example:8443/whoami", 200),
+        ("https://resource.example/whoami", 401),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(proxy_request(&agent, uri, Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "target {uri}");
+    }
 }
 
 #[tokio::test]
