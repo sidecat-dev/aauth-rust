@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **158 integration tests and 5 backend unit tests
+Current engineer evidence: **164 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. Executable examples
@@ -17,7 +17,7 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (26 tests), TLS journey |
+| Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
 | Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (17 tests) |
 | Person, Resource and Auth tokens | Role-specific typ/dwk, required and forbidden claims, public confirmation keys, exact signed bytes, Person/Auth one-hour ceiling and expiry/nbf; Core verification does not grant application access | `aauth-rust-core/tests/role_tokens.rs` (10 tests) |
@@ -47,6 +47,24 @@ confirmation key, policy denial without signature diagnostics, and untrusted TLS
 certificate refusal. The proof endpoint is example infrastructure; it does not
 turn an `hwk` key into an AAuth identity.
 
+## Access Server increment
+
+The optional `aauth-rust-access-server` role executes immediate top-level,
+missionless Core-scope grants. It verifies a PS `jwks_uri` HTTP proof, Agent,
+Resource and actual presented Person/Auth credentials before resource policy;
+checks lineage/key/target/role, scope narrowing and parent lifetimes; and publishes
+AS metadata/JWKS. `aauth-rust-access-server/tests/endpoint.rs` pins refusals before
+policy, typed policy outcomes, time resampling and listener/issuer separation.
+PS federation and the four-party TLS composition are still in progress in this
+increment; no end-to-end or cross-implementation result is claimed yet.
+
+**R3-FULL-COMPLIANCE:** postponed by vocabulary. The current Rust Core-scope
+profile has no R3 authorization vocabulary. General-purpose media/service
+vocabularies may be defined in R3 and implemented in both Go and Rust on demand,
+one test at a time; full compliance remains unclaimed. Application-specific
+formats belong to the application. Unsupported R3 claims fail closed in this
+profile rather than conferring scope authority.
+
 ## Limits and choices
 
 - Direct Agent identity and immediate missionless PS authorization execute.
@@ -55,7 +73,7 @@ turn an `hwk` key into an AAuth identity.
   AS federation do not execute. Unsupported PS parameters are refused explicitly.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
-- Ed25519 only. Other algorithms, private/HSM signer adapters and other
+- Ed25519 only. Other algorithms, private/HSM signer adapters and remaining
   Signature-Key schemes are absent. Verifiers select the configured `sig` label;
   this is not general multiple-signature policy. Combined field lines and
   repeated dictionary/parameter names use RFC 9651 last-wins parsing. An identical

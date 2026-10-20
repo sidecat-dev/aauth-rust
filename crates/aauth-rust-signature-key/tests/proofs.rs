@@ -741,3 +741,82 @@ fn an_empty_digest_does_not_make_content_type_a_body_requirement() {
         .verify(&key.public_jwk())
         .unwrap();
 }
+
+#[test]
+fn jwks_uri_service_proof_is_explicit_and_binds_identity_and_body() {
+    // Signature-Key jwks-uri-scheme; Core ps-to-as-token-request.
+    let key = SigningKey::from_seed([8; 32]);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("https://as.example/token")
+        .header("content-type", "application/json")
+        .body(b"{}".to_vec())
+        .unwrap();
+    let material = KeyMaterial::JwksUri {
+        id: "https://ps.example".into(),
+        dwk: "aauth-person.json".into(),
+        kid: "ps-key".into(),
+    };
+    sign_request(&mut req, &key, material, 1000).unwrap();
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    let proof =
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks_uri"]).unwrap();
+    proof.verify(&key.public_jwk()).unwrap();
+    assert!(matches!(proof.key(), KeyMaterial::JwksUri { id, dwk, kid }
+        if id == "https://ps.example" && dwk == "aauth-person.json" && kid == "ps-key"));
+    assert!(
+        proof
+            .verify(&SigningKey::from_seed([9; 32]).public_jwk())
+            .is_err()
+    );
+    let header = req.headers()["signature-key"]
+        .to_str()
+        .unwrap()
+        .replace("ps.example", "foreign.example");
+    req.headers_mut()
+        .insert("signature-key", header.parse().unwrap());
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks_uri"])
+            .unwrap()
+            .verify(&key.public_jwk()),
+        Err(Error::InvalidSignature)
+    );
+    req.body_mut().push(b' ');
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks_uri"]).unwrap_err(),
+        Error::InvalidDigest
+    );
+}
+
+#[test]
+fn jwks_uri_parameters_cannot_inject_headers_or_discovery_paths() {
+    let key = SigningKey::from_seed([8; 32]);
+    for (id, dwk, kid) in [
+        ("http://ps.example", "aauth-person.json", "k"),
+        ("https://ps.example/path", "aauth-person.json", "k"),
+        ("https://ps.example", "../private", "k"),
+        ("https://ps.example", "aauth-person.json", ""),
+        (
+            "https://ps.example",
+            "aauth-person.json",
+            "k\nInjected: value",
+        ),
+    ] {
+        assert_eq!(
+            sign_request(
+                &mut request(),
+                &key,
+                KeyMaterial::JwksUri {
+                    id: id.into(),
+                    dwk: dwk.into(),
+                    kid: kid.into()
+                },
+                1000
+            ),
+            Err(Error::InvalidKey)
+        );
+    }
+}

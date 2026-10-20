@@ -1,4 +1,4 @@
-//! Buffered RFC 9421 request proofs with the Ed25519 `hwk` and `jwt` schemes.
+//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt` and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod content_digest;
@@ -96,6 +96,16 @@ pub enum KeyMaterial {
     Hwk(Jwk),
     /// Compact JWT carrying a confirmation key; the accepting role verifies it.
     Jwt(String),
+    /// Unverified service identity/key reference. Host must admit the identity
+    /// before resolving metadata/JWKS; this value alone grants no authority.
+    JwksUri {
+        /// HTTPS signer origin; the AAuth role further restricts server identifiers.
+        id: String,
+        /// Safe dot-well-known document name, without path separators.
+        dwk: String,
+        /// Nonempty exact key identifier in the admitted issuer's JWKS.
+        kid: String,
+    },
 }
 
 /// Maximum actual content bytes signed or verified by this buffered profile.
@@ -200,8 +210,46 @@ fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
             Ok(KeyMaterial::Hwk(key))
         }
         "jwt" => Ok(KeyMaterial::Jwt(text(&item.params, "jwt")?.into())),
+        "jwks_uri" => {
+            let id = text(&item.params, "id")?;
+            let dwk = text(&item.params, "dwk")?;
+            let kid = text(&item.params, "kid")?;
+            validate_reference(id, dwk, kid)?;
+            Ok(KeyMaterial::JwksUri {
+                id: id.into(),
+                dwk: dwk.into(),
+                kid: kid.into(),
+            })
+        }
         _ => Err(Error::UnsupportedScheme),
     }
+}
+fn quoted(value: &str) -> Result<String, Error> {
+    if value.is_empty() || !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Err(Error::InvalidKey);
+    }
+    Ok(format!(
+        "\"{}\"",
+        value.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+fn validate_reference(id: &str, dwk: &str, kid: &str) -> Result<(), Error> {
+    let uri: http::Uri = id.parse().map_err(|_| Error::InvalidKey)?;
+    canonical_authority(&uri).map_err(|_| Error::InvalidKey)?;
+    if uri.query().is_some()
+        || id.contains('#')
+        || id != format!("https://{}", uri.authority().ok_or(Error::InvalidKey)?)
+        || dwk.is_empty()
+        || dwk == "."
+        || dwk == ".."
+        || !dwk
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    {
+        return Err(Error::InvalidKey);
+    }
+    quoted(kid)?;
+    Ok(())
 }
 fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
     let mut result = Vec::new();
@@ -451,6 +499,15 @@ pub fn sign_request(
                 jwk.x
             )
         }
+        KeyMaterial::JwksUri { id, dwk, kid } => {
+            validate_reference(&id, &dwk, &kid)?;
+            format!(
+                "sig=jwks_uri;id={};dwk={};kid={}",
+                quoted(&id)?,
+                quoted(&dwk)?,
+                quoted(&kid)?
+            )
+        }
         KeyMaterial::Jwt(jwt) => {
             aauth_rust_jose::Jws::parse(&jwt).map_err(|_| Error::InvalidKey)?;
             format!("sig=jwt;jwt=\"{jwt}\"")
@@ -510,6 +567,7 @@ impl std::fmt::Debug for PreparedRequest {
         let scheme = match &self.key {
             KeyMaterial::Hwk(_) => "hwk",
             KeyMaterial::Jwt(_) => "jwt",
+            KeyMaterial::JwksUri { .. } => "jwks_uri",
         };
         f.debug_struct("PreparedRequest")
             .field("scheme", &scheme)

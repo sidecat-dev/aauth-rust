@@ -3,6 +3,24 @@
 version = 4
 
 [[package]]
+name = "aauth-rust-access-server"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
+ "base64",
+ "http",
+ "httpdate",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "aauth-rust-agent"
 version = "0.1.0-alpha.1"
 dependencies = [

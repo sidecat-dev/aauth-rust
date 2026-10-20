@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Buffered HTTP Message Signatures with inline Ed25519 keys and JWT key conveyance"
+description = "Buffered HTTP Message Signatures with Ed25519 inline, JWT and explicit JWKS-URI key conveyance"
 
 [dependencies]
 aauth-rust-jose.workspace = true
