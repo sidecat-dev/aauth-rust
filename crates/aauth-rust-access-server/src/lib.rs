@@ -1,10 +1,11 @@
-//! Immediate Core-scope Access Server with host-supplied issuer trust and policy.
+//! Core-scope Access Server with host-supplied issuer trust and policy.
 //!
 //! This buffered role verifies a PS service proof plus Agent, Resource and actual
 //! presented credentials before policy. It performs no discovery fetch or HTTP
 //! transport. Hosts admit issuers before key resolution and bound request collection.
-//! Full R3, missions, subagents, call chaining and deferred federation are outside
-//! this profile and are refused rather than interpreted as scope authorization.
+//! Explicit `with_deferred` adds bounded claims, clarification, interaction,
+//! approval and payment continuations. Full R3, missions, subagents and call
+//! chaining remain outside this profile and are refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
 //!
@@ -33,6 +34,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 #![deny(missing_docs)]
+mod continuation;
 mod wire;
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
@@ -43,6 +45,7 @@ use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
     Error as ProofError, KeyMaterial, PreparedRequest, canonical_authority,
 };
+pub use continuation::{DeferredConfig, DeferredContext};
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json};
 use wire::{Failure, bytes_response, token_response};
@@ -130,6 +133,7 @@ pub struct AccessServer<K, P, C, I> {
     policy: P,
     clock: C,
     ids: I,
+    deferred: Option<continuation::Deferred>,
 }
 struct Resolver<'a, K> {
     config: &'a Config,
@@ -185,6 +189,7 @@ impl<
             policy,
             clock,
             ids,
+            deferred: None,
         })
     }
     /// Metadata served at /.well-known/aauth-access.json. No unsupported endpoints
@@ -217,6 +222,9 @@ impl<
         if canonical_authority(request.uri()).ok().as_deref() != Some(&self.authority) {
             return Err(Failure::proof(ProofError::TargetMismatch, request, now));
         }
+        if request.uri().path().starts_with("/token/pending/") && self.deferred.is_some() {
+            return self.pending(request, now);
+        }
         match (request.method().as_str(), request.uri().path()) {
             ("GET", "/.well-known/aauth-access.json") => {
                 return Ok(bytes_response(self.metadata()));
@@ -225,15 +233,33 @@ impl<
             ("POST", "/token") => {}
             _ => return Err(Failure::status(StatusCode::NOT_FOUND, "not_found")),
         }
+        let id = self.verify_ps(request, now, true)?;
+        let body =
+            strict_json(request.body()).map_err(|_| Failure::parameter("invalid_request"))?;
+        let (context, presented) = self.authorize_body(&body, &id, now)?;
+        if self.deferred.is_some() {
+            self.begin_deferred(context, presented, body, now)
+        } else {
+            self.issue(context, presented)
+        }
+    }
+    fn verify_ps(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        body_required: bool,
+    ) -> Result<String, Failure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
             .map_err(|e| Failure::proof(e, request, now))?;
         let base = std::str::from_utf8(proof.signature_base())
             .map_err(|_| Failure::parameter("invalid_request"))?;
-        if ["content-type", "content-digest"].iter().any(|name| {
-            !base
-                .lines()
-                .any(|line| line.starts_with(&format!("\"{name}\":")))
-        }) {
+        if body_required
+            && ["content-type", "content-digest"].iter().any(|name| {
+                !base
+                    .lines()
+                    .any(|line| line.starts_with(&format!("\"{name}\":")))
+            })
+        {
             return Err(Failure::proof(ProofError::InvalidInput, request, now));
         }
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
@@ -248,18 +274,25 @@ impl<
         proof
             .verify(&ps_key)
             .map_err(|e| Failure::proof(e, request, now))?;
-        if request
-            .headers()
-            .get("content-type")
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.split(';').next())
-            .map(str::trim)
-            .is_none_or(|h| !h.eq_ignore_ascii_case("application/json"))
+        if body_required
+            && request
+                .headers()
+                .get("content-type")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.split(';').next())
+                .map(str::trim)
+                .is_none_or(|h| !h.eq_ignore_ascii_case("application/json"))
         {
             return Err(Failure::parameter("invalid_request"));
         }
-        let body =
-            strict_json(request.body()).map_err(|_| Failure::parameter("invalid_request"))?;
+        Ok(id.clone())
+    }
+    fn authorize_body(
+        &self,
+        body: &Value,
+        id: &str,
+        now: i64,
+    ) -> Result<(AuthorizationRequest, Presented), Failure> {
         let object = body
             .as_object()
             .ok_or_else(|| Failure::parameter("invalid_request"))?;
@@ -269,20 +302,20 @@ impl<
         {
             return Err(Failure::parameter("invalid_request"));
         }
-        let agent = AgentToken::parse(required(&body, "agent_token")?)
+        let agent = AgentToken::parse(required(body, "agent_token")?)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|e| Failure::token(e, "agent", now))?;
         check_iat(agent.claims().iat, now)?;
         if agent.claims().ps.as_deref() != Some(id) || agent.claims().parent_agent.is_some() {
             return Err(Failure::parameter("invalid_agent_token"));
         }
-        let resource = ResourceToken::parse(required(&body, "resource_token")?)
+        let resource = ResourceToken::parse(required(body, "resource_token")?)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|e| Failure::token(e, "resource", now))?;
         let r = resource.claims();
         check_iat(r.iat, now)?;
         if r.aud != self.config.issuer
-            || r.ps != *id
+            || r.ps != id
             || r.exp - r.iat > self.config.max_resource_lifetime
             || r.agent_jkt
                 != agent
@@ -296,16 +329,26 @@ impl<
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
-        let presented = presented(required(&body, "presented_token")?, &self.resolver(), now)?;
+        let presented = presented(required(body, "presented_token")?, &self.resolver(), now)?;
         presented.matches(r)?;
         let requested_scopes = scopes(r.scope.as_deref().unwrap_or(""))
             .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
         let context = AuthorizationRequest {
-            person_server: id.clone(),
+            person_server: id.to_owned(),
             agent: agent.clone(),
             resource: resource.clone(),
             scopes: requested_scopes,
         };
+        Ok((context, presented))
+    }
+    fn issue(
+        &self,
+        context: AuthorizationRequest,
+        presented: Presented,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let agent = context.agent.clone();
+        let r = context.resource.claims();
+        let id = context.person_server.clone();
         let decision = (self.policy)(&context).map_err(Failure::policy)?;
         if !(1..=3600).contains(&decision.lifetime)
             || scopes(&decision.scopes.join(" ")).is_none()

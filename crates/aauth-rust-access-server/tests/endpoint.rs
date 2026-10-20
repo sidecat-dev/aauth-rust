@@ -390,3 +390,35 @@ fn agent_expiry_is_the_tightest_auth_lifetime_bound() {
         "challenge is not a grant-lifetime cap"
     );
 }
+
+#[path = "support/deferred.rs"]
+mod deferred;
+
+#[test]
+fn missing_presented_token_is_invalid_request_before_policy() {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let calls = seen.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        move |_: &aauth_rust_access_server::AuthorizationRequest| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Decision {
+                scopes: vec!["read".into()],
+                lifetime: 60,
+            })
+        },
+        || 1000,
+        || "unused".into(),
+    )
+    .unwrap();
+    let mut value = good();
+    value.as_object_mut().unwrap().remove("presented_token");
+    let response = server.handle(&request(value));
+    assert_eq!(response.status(), 400);
+    assert_eq!(
+        serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
+        "invalid_request"
+    );
+    assert_eq!(seen.load(Ordering::SeqCst), 0);
+}

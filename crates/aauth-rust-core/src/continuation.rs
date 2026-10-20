@@ -2,6 +2,7 @@
 //! These values do not authenticate a peer or authorize network access. Hosts
 //! admit endpoints, authenticate each poll and supply unpredictable unique IDs.
 use http::{Response, StatusCode, Uri};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sfv::{BareItem, Dictionary, ListEntry, Parser};
 use std::{
@@ -10,7 +11,7 @@ use std::{
 };
 
 /// Requirement raised by an authenticated deferred endpoint.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     /// Processing continues without an additional requirement.
     Waiting,
@@ -49,7 +50,7 @@ pub struct PendingError;
 
 /// Parsed bounded response. It remains untrusted until authenticated transport
 /// and role policy have admitted its origin. Construction also validates inputs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingResponse {
     /// Absolute same-origin HTTPS pending URL; no query, fragment or encoded path.
     pub location: String,
