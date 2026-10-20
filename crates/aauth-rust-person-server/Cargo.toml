@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "AAuth Person binding and direct authorization with host policy and retained state"
+description = "AAuth Person binding, authorization and immediate call chaining with host policy and retained state"
 
 [dependencies]
 aauth-rust-core.workspace = true

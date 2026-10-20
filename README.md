@@ -2,9 +2,10 @@
 
 Rust libraries for [AAuth](https://github.com/dickhardt/AAuth), developed alongside
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go). The current subset lets an
-Agent prove its identity directly to a Resource, using an Agent Provider's
-signed token and an HTTP request signature. Person-mediated authorization and
-the other AAuth roles are future work. [CONFORMANCE.md](CONFORMANCE.md) names
+Agent prove its identity directly to a Resource, or obtain a Person token and
+scoped Auth token from a Person Server for three-party authorization. A Resource
+can act as an Agent for an immediate downstream call on that person's behalf.
+[CONFORMANCE.md](CONFORMANCE.md) names
 the tested behavior and limits.
 
 The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
@@ -23,9 +24,10 @@ toolchain, rustfmt and clippy (several hundred MB), and Cargo downloads crates.
 ```sh
 cargo test --workspace --locked
 cargo run --locked -p aauth-rust-resource --example direct-identity
+cargo run --locked -p aauth-rust-resource --example three-party
 ```
 
-This example generates fresh keys and certificates, starts an Agent Provider
+The direct-identity example generates fresh keys and certificates, starts an Agent Provider
 and Resource on random loopback ports, retrieves public discovery documents,
 and runs 14 wire/TLS checks. It needs no account, DNS change, privileged port,
 existing certificate or external service. It uses a fixed clock for repeatable
@@ -44,6 +46,22 @@ untrusted-tls: 0 certificate refused
 The proof-only endpoint accepts an inline public key; the identity endpoint
 requires an Agent token. Thus `hwk-proof` and `hwk-identity` have different
 outcomes. Status `0` means the TLS handshake failed before any HTTP response.
+
+The three-party example runs an AP, Person Server, Orders and Inventory over
+certificate-verified TLS. One pre-authenticated demo account obtains Person and
+Auth tokens, posts an order, and lets Orders call Inventory with its own Agent
+key and the original caller's upstream token. A changed body is refused before
+either application runs. Its output includes:
+
+```text
+unsigned=401 person-challenge=401 tampered=401 authorized=200
+orders=1 inventory=1 directed-subjects-differ=true downstream-within-upstream=true intermediary-binding=false untrusted-TLS-refused=true
+```
+
+See the [three-party source](crates/aauth-rust-resource/examples/three_party/mod.rs)
+and the [Person Server service guide](USE-IN-YOUR-SERVICE.md#run-a-person-server).
+The example supplies volatile state and one explicit demo policy. A real host
+supplies person authentication, durable storage and consent policy.
 
 ## Use the libraries
 
@@ -148,8 +166,9 @@ work. Use `Decision::into_result()` to obtain `(verified_token, admitted_value)`
 or a boxed refusal response, instead of mapping a granted request to a demo body.
 `Agent::with_token(new_token)` reuses its key for refresh without handling seed
 bytes. Resolvers can be borrowed, boxed or shared with Arc; snapshots are Clone.
-The [service guide](USE-IN-YOUR-SERVICE.md) covers trust, refresh, rotation,
-replay and local ports. Run the [axum example](crates/aauth-rust-resource/examples/axum.rs)
+The [service guide](USE-IN-YOUR-SERVICE.md) covers request adaptation, Person
+Server integration, trust, refresh, rotation, replay and local ports.
+Run the [axum example](crates/aauth-rust-resource/examples/axum.rs)
 with `cargo run --locked -p aauth-rust-resource --example axum` to see request
 adaptation and a handler using typed policy context.
 
@@ -202,12 +221,14 @@ See [SECURITY.md](SECURITY.md).
 
 | Name | Meaning here |
 | --- | --- |
-| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (represents a person), Access Server (authorizes access); only AP and direct Resource identity execute. |
-| `dwk` | Discovery well-known document name; `aauth-agent.json` locates AP metadata at `{iss}/.well-known/aauth-agent.json`. |
+| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (binds a person and issues Person/Auth tokens), Access Server (federated authorization role, not implemented). |
+| `dwk` | Discovery well-known document name; for example, `aauth-agent.json` locates AP metadata at `{iss}/.well-known/aauth-agent.json`. PS and Resource keys use their own role documents. |
 | JWK, JWKS, JWS | JSON Web Key, set of public JWKs, JSON Web Signature. `kid` selects an issuer key from its JWKS. |
 | `hwk`, `jwt`, `cnf.jwk` | Signature-Key schemes conveying an inline public key or a compact token; the token's confirmation JWK binds its holder's request-signing key. |
 | `sig`, coverage, SFV | The selected signature label, the request values bound by its signature, and Structured Field Values used to encode signature headers. The same label correlates Signature-Key, Signature-Input and Signature. |
 | Direct Agent identity | An Agent proves itself directly to a Resource, without a Person Server in the exchange. The loopback example executes this complete exchange. |
+| Person, Resource, Auth tokens | A PS-signed identity for one Resource; a Resource-signed authorization challenge; and a PS-signed scoped authorization. Each binds its intended audience and holder key. |
+| `presented_token`, `upstream_token` | The actual Person/Auth credential being exchanged; the caller's credential supplied by an intermediary for a downstream chain. Exact retained ties prevent replacement or omission. |
 | R3 | Rich Resource Requests, an AAuth companion outside the implemented subset. |
 
 A `Decision` grants verified identity, requests an Agent token (`401` with
@@ -222,7 +243,7 @@ messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute
 
-[ARCHITECTURE.md](ARCHITECTURE.md) explains the six crate boundaries;
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the seven crate boundaries;
 [SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
 [CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
 

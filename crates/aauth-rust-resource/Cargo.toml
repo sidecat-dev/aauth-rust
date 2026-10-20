@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Verify direct AAuth Agent identity before applying host admission policy"
+description = "AAuth Resource identity and Person Server authorization before host admission policy"
 
 [dependencies]
 aauth-rust-jose.workspace = true

@@ -15,9 +15,11 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 | interop-demo-profile | `70d67375deb0bb002af7da0711fc58f6e8926e7e` | [interop-demo-profile.md](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/interop-demo-profile.md) | `596c7d2c952d8ec6cdfd66a91c2d123705f3e4ed75fa581b4e3ac20404971545` |
 | draft-hardt-httpbis-signature-key | `69f5ba2647be848feed043fb6d8b0790e43cd0b6` | [draft-hardt-httpbis-signature-key.md](https://github.com/dickhardt/signature-key/blob/69f5ba2647be848feed043fb6d8b0790e43cd0b6/draft-hardt-httpbis-signature-key.md) | `b2b43db67a1aa5249d1166589834d44f81e97ea2e6375a07b475115efa196b7d` |
 
-Only Agent tokens, identifiers, the direct Agent-identity Resource path and the
-Ed25519 `hwk`/`jwt` proof subset execute. Supervision and the other pinned
-companions are future inputs. See [CONFORMANCE.md](CONFORMANCE.md).
+Agent, Person, Resource and direct PS Auth tokens execute, with person binding,
+three-party authorization and an immediate downstream call chain. The proof
+subset is Ed25519 `hwk`/`jwt`. AS federation, missions, interactive/deferred
+authorization, Supervision and the other pinned companions remain outside this
+subset. See [CONFORMANCE.md](CONFORMANCE.md).
 
 Underlying standards: RFC 7515 (compact JWS), RFC 7517 (JWK), RFC 7638
 (thumbprints), RFC 8032/8037 (Ed25519), RFC 9421 (HTTP Message Signatures),

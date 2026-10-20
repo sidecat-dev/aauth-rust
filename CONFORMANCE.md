@@ -4,10 +4,12 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **90 integration tests passed, 0 failed**, 89 protocol/role/adapter tests plus one TLS
-integration test with **14 wire/TLS checks**. The executable example runs that
-same composition. A wire check is not counted as a separate Rust test. One additional rustdoc test
-executes the unsigned Resource challenge.
+Current engineer evidence: **125 integration tests passed, 0 failed**, including
+the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
+that executes Orders→Inventory authorization and POST effects. Executable examples
+run those same compositions. A wire check is not counted as a separate Rust test.
+Two additional rustdoc tests execute an unsigned Resource challenge and the PS
+constructor/metadata example.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
@@ -16,11 +18,15 @@ executes the unsigned Resource challenge.
 | Signature-Key | `hwk`, `jwt`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (26 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
 | Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (17 tests) |
+| Person, Resource and Auth tokens | Role-specific typ/dwk, required and forbidden claims, public confirmation keys, exact signed bytes, Person/Auth one-hour ceiling and expiry/nbf; Core verification does not grant application access | `aauth-rust-core/tests/role_tokens.rs` (10 tests) |
 | AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location with terminal invalid_key for unusable metadata; reject foreign issuer with invalid_key separately from rotation; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
 | Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk` receives defined scheme rejection; wrong key refusal; exact endpoint or explicit origin binding before policy; denial after valid authentication; Date from verifier time on clock_skew | `aauth-rust-resource/tests/identity.rs` (30 tests), `response_mapping.rs` (2 tests), TLS journey |
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; scope narrowing; expiry bounds rechecked after policy/storage; no release before commit | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (11 tests), `store.rs` (1 executable store contract) |
+| Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context | `aauth-rust-resource/tests/ps_authorization.rs` (10 tests) |
+| Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (1 full application/TLS test) |
 
 Snapshot ownership and absence of network fetching are architecture properties
 checked by source inspection of `aauth-rust-core/src/discovery.rs`; they are not
@@ -36,9 +42,10 @@ turn an `hwk` key into an AAuth identity.
 
 ## Limits and choices
 
-- Agent tokens and direct Agent identity only. Person/auth/resource tokens,
-  session tokens, enrollment, revocation, sub-agent issuance/delegation, missions,
-  permission, interaction, audit, call chaining and federation do not execute.
+- Direct Agent identity and immediate missionless PS authorization execute.
+  Session tokens, enrollment, revocation transport/cascades, sub-agent
+  issuance/delegation, missions, permission/interaction/audit endpoints and
+  AS federation do not execute. Unsupported PS parameters are refused explicitly.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
 - Ed25519 only. Other algorithms, private/HSM signer adapters and other
@@ -81,6 +88,27 @@ turn an `hwk` key into an AAuth identity.
   The resolver accepts supplied multi-key JWKS and selects by kid; tests prove
   old/new verification during overlap and old-key refusal after removal. This
   resolver behavior is not an AP rotation lifecycle.
+- **PS-STATE-PROFILE:** PS exchanges and chains require the exact retained
+  Person/Auth issuance, not just a valid signed JWT. This is a local retained-state
+  policy; it does not claim Core common JWT verification requires a database.
+  The PS retains compact hashes and lineage without publishing internal person
+  IDs. `MemoryStore` is volatile and retains records indefinitely; durable store,
+  crash recovery and retention/cleanup through `retain_until` belong to the host.
+  `storetest` exercises atomic conflicts, concurrency, revocation and exact records,
+  not a production database's durability.
+- **PS-DIRECT-PROFILE:** Immediate PS-issued Auth only, with Core scope strings,
+  explicit direct/upstream host policy and Resource-directed identity. PS JSON
+  requires covered Content-Type and Content-Digest. PS issuance caps Person/Auth
+  at one hour and all required parent expiries; Resource challenges default to
+  five minutes. No AS federation, deferred consent/polling, interaction chaining,
+  mission or Budget semantics are inferred from an upstream token.
+- **RESOURCE-SCOPE-PROFILE:** One PS authorization Resource value admits one
+  nonempty fixed scope profile across its origin; its host router admits paths.
+  Scope-free profiles and automatic step-up negotiation are absent. The PS does
+  verify an authentic Auth token used as `presented_token` for a later grant.
+- PS and signing-Resource helpers also publish one active key. Their multi-key
+  overlap/retirement lifecycle is absent, as with AP-KEY-ROLLOVER. Metadata
+  advertises only implemented endpoints; branding extensions belong to the host.
 - The AP follows the Agent-token 24-hour lifetime SHOULD as an issuance limit.
   Core/Resource verification does not impose that recommendation as a hard
   ceiling on other issuers. Hosts can enforce a stricter lifetime in policy.
@@ -90,8 +118,14 @@ turn an `hwk` key into an AAuth identity.
   Query coverage is an additional local requirement when a query is present.
 - Hosts must supply trusted issuer resolution, DNS/redirect egress admission,
   JWKS cache lifetime, once-per-minute fetch floor and refresh policy. The local
-  journey fetches one configured AP snapshot and reuses it; it is not an open
-  Internet discovery/cache client.
+  journeys fetch configured role snapshots and reuse them; they are not open
+  Internet discovery/cache clients. Host person authentication and consent policy
+  are application responsibilities, not established by a valid Agent proof.
+- The real TLS journey demonstrates one immediate downstream hop, not arbitrary
+  deployment topology or a general multi-hop interoperability claim. PS release
+  checks do not cover time elapsed between later Resource admission and an
+  application's eventual effect. Replay, idempotency and rate/capacity policy
+  remain host responsibilities.
 - These cases do not establish full cross-implementation compatibility or a
   general security audit. Review findings are conformance evidence only when
   executed by cited tests. Cross-check draft findings in other implementations
