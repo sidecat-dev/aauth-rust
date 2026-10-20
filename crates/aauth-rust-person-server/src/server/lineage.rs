@@ -138,6 +138,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         issuance: Issuance<'_>,
     ) -> Result<TokenRecord, Failure> {
         Ok(TokenRecord {
+            parent_agent: issuance.parent_agent,
             person_server: None,
             token: TokenTie {
                 reference: TokenReference {

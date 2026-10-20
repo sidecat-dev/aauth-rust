@@ -5,7 +5,7 @@ use aauth_rust_core::continuation::{
 use aauth_rust_person_server::{DeferredConfig, FederationInput};
 use std::sync::Mutex;
 #[derive(Clone)]
-struct NativeTransport {
+pub(super) struct NativeTransport {
     stage: Arc<AtomicUsize>,
     pending: Arc<MemoryContinuations>,
     ids: Arc<AtomicUsize>,
@@ -15,7 +15,7 @@ struct NativeTransport {
     fault: usize,
 }
 impl NativeTransport {
-    fn new(f: &Fixture, stage: usize, fault: usize) -> Self {
+    pub(super) fn new(f: &Fixture, stage: usize, fault: usize) -> Self {
         Self {
             stage: Arc::new(AtomicUsize::new(stage)),
             pending: Arc::new(MemoryContinuations::new(16)),
@@ -110,8 +110,8 @@ fn config(store: Arc<MemoryContinuations>) -> DeferredConfig {
     c.retry_after = 0;
     c
 }
-fn poll(
-    server: &Server,
+fn poll<K: AgentKeyResolver>(
+    server: &Server<K>,
     holder: &Agent,
     location: &str,
     method: &str,
@@ -1022,3 +1022,6 @@ fn forwarded_answer_survives_agent_polls_after_its_old_question_timeout() {
 
 #[path = "post_gate.rs"]
 mod post_gate;
+
+#[path = "subagent_deferred.rs"]
+mod subagent_deferred;

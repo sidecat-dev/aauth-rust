@@ -6,6 +6,7 @@ pub fn record(jti: &str) -> TokenRecord {
         subject: "aauth:Agent@ap.example".into(),
     };
     TokenRecord {
+        parent_agent: None,
         person_server: None,
         token: TokenTie {
             reference: TokenReference {

@@ -5,11 +5,13 @@ use std::sync::Arc;
 mod federation;
 mod issuance;
 mod persistence;
+mod subagents;
 mod validation;
 pub use persistence::check_persistence_contract;
 
 fn record(jti: &str, person: &str) -> TokenRecord {
     TokenRecord {
+        parent_agent: None,
         person_server: None,
         token: TokenTie {
             reference: TokenReference {
@@ -50,6 +52,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 /// # Errors
 /// Returns an explanation when a store violates the contract or is unavailable.
 pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Result<(), String> {
+    subagents::check_subagents(factory())?;
     federation::check_federation(factory())?;
     let store = factory();
     let original = record("person-1", "internal-person");

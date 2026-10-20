@@ -8,6 +8,36 @@ fn memory_store_passes_the_public_atomic_binding_and_issuance_contract() {
     storetest::check_store_contract(MemoryStore::default).unwrap();
 }
 
+#[test]
+fn child_person_retains_authoritative_parent_and_establishes_only_parent_binding() {
+    let mut value = serde_json::to_value(record()).unwrap();
+    value["kind"] = serde_json::json!("Person");
+    value["presented"] = serde_json::Value::Null;
+    value["upstream"] = serde_json::Value::Null;
+    value["parent_agent"] = value["principal"].clone();
+    value["agent"]["subject"] = serde_json::json!("aauth:Agent+worker@ap.example");
+    let child: TokenRecord = serde_json::from_value(value).unwrap();
+    let store = MemoryStore::default();
+    assert_eq!(store.commit(child.clone(), true), Ok(()));
+    let retained = store.token(&child.token.reference).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&retained).unwrap()["parent_agent"]["subject"],
+        "aauth:Agent@ap.example"
+    );
+    assert!(
+        store
+            .binding("https://ps.example", &child.agent)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .revoke_binding("https://ps.example", &child.principal)
+        .unwrap();
+    let mut another = child;
+    another.token.reference.jti = "another-child-credential".into();
+    assert_eq!(store.commit(another, true), Err(StoreError::RevokedBinding));
+}
+
 // A host adapter can accidentally omit fields from its Auth-row serializer even
 // when Person records round-trip correctly. The public contract must catch it.
 #[derive(Default)]
@@ -63,6 +93,7 @@ fn record() -> TokenRecord {
         compact_sha256: "digest".into(),
     };
     TokenRecord {
+        parent_agent: None,
         person_server: None,
         token: tie.clone(),
         kind: TokenKind::Auth,
@@ -133,4 +164,30 @@ fn store_adapters_share_complete_record_serialization_and_shape_validation() {
             Err(StoreError::InvalidRecord)
         );
     }
+}
+
+#[derive(Default)]
+struct DropsChildParent(MemoryStore);
+impl Store for DropsChildParent {
+    fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
+        self.0.binding(issuer, agent)
+    }
+    fn token(&self, reference: &TokenReference) -> Result<Option<TokenRecord>, StoreError> {
+        self.0.token(reference).map(|record| {
+            record.map(|mut r| {
+                r.parent_agent = None;
+                r
+            })
+        })
+    }
+    fn commit(&self, record: TokenRecord, establish: bool) -> Result<(), StoreError> {
+        self.0.commit(record, establish)
+    }
+    fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
+        self.0.revoke_binding(issuer, agent)
+    }
+}
+#[test]
+fn public_contract_detects_lost_parent_identity_on_child_records() {
+    assert!(storetest::check_store_contract(DropsChildParent::default).is_err());
 }

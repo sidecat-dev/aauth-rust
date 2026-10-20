@@ -30,6 +30,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         })?;
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
+        self.subagent_current(agent, context.subagent.as_ref(), now)?;
         self.binding(&retained.principal, BindingContext::Presented)?
             .ok_or_else(Failure::internal)?;
         let adapter = self.federation.as_ref().ok_or_else(Failure::internal)?;
@@ -44,9 +45,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let resource_compact = required_string(&context.parameters, "resource_token")?;
         let presented_compact = required_string(&context.parameters, "presented_token")?;
-        let mut request=Request::builder().method("POST").uri(uri).header("content-type","application/json")
-            .body(json!({"agent_token":agent.compact(),"resource_token":resource_compact,"presented_token":presented_compact}).to_string().into_bytes())
-            .map_err(|_|Failure::internal())?;
+        let mut body = json!({"agent_token":agent.compact(),"resource_token":resource_compact,"presented_token":presented_compact});
+        if let Some(child) = &context.subagent {
+            body["subagent_token"] = json!(child.compact());
+        }
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes())
+            .map_err(|_| Failure::internal())?;
         sign_request(
             &mut request,
             &self.config.signing_key,
@@ -85,6 +93,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
+        self.subagent_current(agent, context.subagent.as_ref(), current)?;
+        let holder = context.subagent.as_ref().unwrap_or(agent);
         let failed = |reason| unreachable(&r.aud, Some(response.status()), reason);
         if response.body().len() > MAX_BODY_BYTES {
             return Err(failed(Reason::ResponseTooLarge));
@@ -177,12 +187,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.aud != r.iss
             || c.ps != self.config.issuer
             || c.sub != r.sub
-            || c.cnf.jwk.thumbprint().ok() != agent.claims().cnf.jwk.thumbprint().ok()
+            || c.cnf.jwk.thumbprint().ok() != holder.claims().cnf.jwk.thumbprint().ok()
             || c.tenant != r.tenant
             || c.account != r.account
             || c.mission_s256 != r.mission_s256
             || unsupported(&c.extra)
             || c.exp > agent.claims().exp
+            || c.exp > holder.claims().exp
             || c.exp > presented.exp
             || c.iat > current.saturating_add(60)
             || granted.iter().any(|s| !context.scopes.contains(s))
@@ -191,10 +202,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let mut record = self.record(
             compact,
-            agent,
+            holder,
             &retained.principal,
             &retained.person_id,
             Issuance {
+                parent_agent: context.subagent.as_ref().map(|_| Self::identity(agent)),
                 kind: TokenKind::Auth,
                 jti: &c.jti,
                 resource: &c.aud,
@@ -212,10 +224,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             StoreError::Conflict => failed(Reason::InvalidGrant),
             other => store_issuance_failure(other, BindingContext::Presented),
         })?;
+        self.subagent_current(agent, context.subagent.as_ref(), (self.clock)())?;
         self.binding(&retained.principal, BindingContext::Presented)?
             .ok_or_else(Failure::internal)?;
         let released = (self.clock)();
         self.inputs_current(agent, resource, presented, released)?;
+        check_subagent_current(context.subagent.as_ref(), released)?;
         if c.exp <= released {
             return Err(Failure::internal().with_federation(FederationFailure {
                 access_server: r.aud.clone(),

@@ -151,6 +151,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             })?;
             let current = (self.clock)();
             self.inputs_current(&agent, &prepared.resource, &prepared.presented, current)?;
+            self.subagent_current(&agent, prepared.context.subagent.as_ref(), current)?;
             if cancel {
                 if response.status() != StatusCode::OK && response.status() != StatusCode::GONE {
                     return Err(super::federation::unreachable(

@@ -35,6 +35,10 @@ pub fn check_persistence_contract<S: Store>(
     store
         .commit(auth.clone(), false)
         .map_err(|e| e.to_string())?;
+    let child = super::subagents::child_record("persisted-child");
+    store
+        .commit(child.clone(), true)
+        .map_err(|e| e.to_string())?;
     let mut other_parent = parent.clone();
     other_parent.token.reference.issuer = "https://other-ps.example".into();
     let other_auth = auth_record("retained-auth", &other_parent);
@@ -60,7 +64,14 @@ pub fn check_persistence_contract<S: Store>(
         return Err("changed retained Auth accepted before reopening".into());
     }
     let store = reopen(store).map_err(|e| format!("first reopen: {e}"))?;
-    for expected in [&parent, &auth, &other_parent, &other_auth, &federated] {
+    for expected in [
+        &parent,
+        &auth,
+        &other_parent,
+        &other_auth,
+        &federated,
+        &child,
+    ] {
         assert_retained(&store, expected)?;
     }
     let binding = store
@@ -106,7 +117,14 @@ pub fn check_persistence_contract<S: Store>(
     store
         .commit(independent, false)
         .map_err(|e| format!("revocation escaped issuer namespace: {e}"))?;
-    for expected in [&parent, &auth, &other_parent, &other_auth, &federated] {
+    for expected in [
+        &parent,
+        &auth,
+        &other_parent,
+        &other_auth,
+        &federated,
+        &child,
+    ] {
         assert_retained(&store, expected)?;
     }
     Ok(())

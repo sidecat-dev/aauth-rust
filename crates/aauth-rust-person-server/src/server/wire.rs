@@ -42,6 +42,8 @@ impl Failure {
     }
     pub(super) fn token(error: TokenError, parameter: &'static str, now: i64) -> Self {
         let code = match (parameter, error) {
+            ("subagent", TokenError::ExpiredJwt) => "expired_subagent_token",
+            ("subagent", _) => "invalid_subagent_token",
             ("resource", TokenError::ExpiredJwt) => "expired_resource_token",
             ("presented", TokenError::ExpiredJwt) => "expired_presented_token",
             ("upstream", TokenError::ExpiredJwt) => "expired_upstream_token",

@@ -53,6 +53,11 @@ pub enum TokenKind {
 /// Hosts retain every field until retain_until and return owned snapshots.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenRecord {
+    /// Authoritative parent of a child holder, verified before issuance. The
+    /// principal is this parent; it owns consent and binding revocation. None
+    /// preserves older direct/chained records. Never infer this from a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<AgentIdentity>,
     /// Explicit PS namespace for a retained AS-issued Auth token. None preserves
     /// local issuance: the credential issuer also owns the binding. Older rows
     /// decode as None. Hosts/adapters must preserve this field on federated records.
@@ -72,9 +77,9 @@ pub struct TokenRecord {
     pub tenant: Option<String>,
     /// Agent that holds this token's confirmation key.
     pub agent: AgentIdentity,
-    /// Original calling Agent whose person binding authorizes the chain.
+    /// Top-level Agent whose person binding authorizes this credential or chain.
     pub principal: AgentIdentity,
-    /// JTI of the Agent token used to obtain this credential.
+    /// JTI of the holder's Agent token used to obtain this credential.
     pub agent_token_jti: String,
     /// Thumbprint of the recipient Agent's confirmation key.
     pub agent_jkt: String,
@@ -109,6 +114,7 @@ impl TokenRecord {
             || self.person_id != parent.person_id
             || self.principal != parent.principal
             || self.agent != parent.agent
+            || self.parent_agent != parent.parent_agent
             || self.agent_jkt != parent.agent_jkt
             || self.resource != parent.resource
             || self.subject != parent.subject
@@ -130,7 +136,8 @@ impl TokenRecord {
     ///
     /// # Errors
     /// Returns InvalidRecord for incomplete identity, digest, target or lifetime
-    /// fields, or when a non-direct Person issuance tries to establish a binding.
+    /// fields, or when anything other than a direct or parent-mediated Person
+    /// issuance tries to establish its principal's binding.
     pub fn validate_for_commit(&self, establish_binding: bool) -> Result<(), StoreError> {
         let valid_tie = |tie: &TokenTie| {
             !tie.reference.jti.is_empty()
@@ -141,6 +148,15 @@ impl TokenRecord {
             aauth_rust_core::validate_server_identifier(&identity.issuer).is_ok()
                 && aauth_rust_core::validate_agent_identifier(&identity.subject).is_ok()
         };
+        if self.parent_agent.as_ref().is_some_and(|parent| {
+            !valid_identity(parent)
+                || parent != &self.principal
+                || parent == &self.agent
+                || parent.issuer != self.agent.issuer
+                || self.upstream.is_some()
+        }) {
+            return Err(StoreError::InvalidRecord);
+        }
         if self.person_server.as_ref().is_some_and(|ps| {
             aauth_rust_core::validate_server_identifier(ps).is_err()
                 || self.kind != TokenKind::Auth
@@ -163,7 +179,7 @@ impl TokenRecord {
             || aauth_rust_core::validate_server_identifier(&self.resource).is_err()
             || (establish_binding
                 && (self.kind != TokenKind::Person
-                    || self.agent != self.principal
+                    || (self.agent != self.principal && self.parent_agent.is_none())
                     || self.upstream.is_some()))
         {
             return Err(StoreError::InvalidRecord);

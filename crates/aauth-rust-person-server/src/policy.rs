@@ -35,6 +35,8 @@ pub struct UpstreamContext {
 pub struct PersonRequest {
     /// Authenticated requesting Agent, whose HTTP proof also verified.
     pub agent: VerifiedAgentToken,
+    /// Verified child receiving the credential; the parent in agent owns consent.
+    pub subagent: Option<VerifiedAgentToken>,
     /// Canonical Resource audience requested in the signed JSON.
     pub resource: String,
     /// Existing direct binding; upstream requests do not use intermediary bindings.
@@ -49,6 +51,8 @@ pub struct PersonRequest {
 pub struct AuthorizationRequest {
     /// Authenticated requesting Agent and verified HTTP proof holder.
     pub agent: VerifiedAgentToken,
+    /// Verified child holder, independently bound to Resource and presented token.
+    pub subagent: Option<VerifiedAgentToken>,
     /// Authenticated Resource challenge with matched presented-token lineage.
     pub resource: VerifiedResourceToken,
     /// Exact retained presented issuance, including internal accountable person.

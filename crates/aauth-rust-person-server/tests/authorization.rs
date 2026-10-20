@@ -82,6 +82,7 @@ struct TestStore {
     stall: Arc<AtomicI64>,
     fail: Arc<AtomicBool>,
     revoke_after_commit: Arc<AtomicBool>,
+    after_commit: Arc<AtomicBool>,
 }
 impl Store for TestStore {
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
@@ -99,6 +100,7 @@ impl Store for TestStore {
         }
         let principal = record.principal.clone();
         self.inner.commit(record, establish)?;
+        self.after_commit.store(true, Ordering::SeqCst);
         if self.revoke_after_commit.swap(false, Ordering::SeqCst) {
             self.inner.revoke_binding(PS, &principal)?;
         }
@@ -214,6 +216,7 @@ impl Fixture {
                 stall: Arc::new(AtomicI64::new(0)),
                 fail: Arc::new(AtomicBool::new(false)),
                 revoke_after_commit: Arc::new(AtomicBool::new(false)),
+                after_commit: Arc::new(AtomicBool::new(false)),
             },
             host: Host {
                 mode: Arc::new(AtomicUsize::new(0)),
@@ -1469,3 +1472,6 @@ fn delivery_rejects_foreign_as_issuer_even_when_its_resigned_token_verifies() {
 
 #[path = "support/deferred.rs"]
 mod deferred;
+
+#[path = "support/subagents.rs"]
+mod subagents;

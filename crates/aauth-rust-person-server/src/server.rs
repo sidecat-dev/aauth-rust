@@ -2,6 +2,7 @@ mod continuation;
 mod federation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
 mod lineage;
+mod subagents;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
 
@@ -116,6 +117,7 @@ struct PreparedAuthorization {
     binding_context: BindingContext,
 }
 struct Issuance<'a> {
+    parent_agent: Option<AgentIdentity>,
     kind: TokenKind,
     jti: &'a str,
     resource: &'a str,
@@ -259,6 +261,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         } else {
             None
         };
+        if upstream.is_some() && parameters.contains_key("subagent_token") {
+            return Err(Failure::parameter("invalid_request"));
+        }
         if request.uri().path() == "/person" {
             if upstream.is_none() && agent.claims().ps.as_deref() != Some(&self.config.issuer) {
                 return Err(Failure::credential(TokenError::InvalidJwt));
@@ -327,6 +332,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         person: bool,
     ) -> Result<(), Failure> {
         let common = [
+            "subagent_token",
             "upstream_token",
             "justification",
             "login_hint",
@@ -443,6 +449,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         };
         let policy_request = PersonRequest {
             agent: agent.clone(),
+            subagent: self.subagent(&agent, &parameters, (self.clock)())?,
             resource: resource.into(),
             binding: binding.clone(),
             upstream: upstream.as_ref().map(|up| up.context.clone()),
@@ -470,10 +477,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let now = (self.clock)();
         check_agent_current(&agent, now)?;
+        self.subagent_current(&agent, policy_request.subagent.as_ref(), now)?;
         check_upstream_current(upstream.as_ref(), now)?;
         let mut expires_at = now
             .saturating_add(self.config.person_lifetime)
             .min(agent.claims().exp);
+        let holder = policy_request.subagent.as_ref().unwrap_or(&agent);
+        expires_at = expires_at.min(holder.claims().exp);
         if let Some(up) = &upstream {
             expires_at = expires_at.min(up.token.exp);
         }
@@ -483,7 +493,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             aud: policy_request.resource,
             sub: person.subject,
             cnf: Confirmation {
-                jwk: agent.claims().cnf.jwk.clone(),
+                jwk: holder.claims().cnf.jwk.clone(),
             },
             jti: (self.ids)(),
             iat: now,
@@ -497,10 +507,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|_| Failure::internal())?;
         let record = self.record(
             &compact,
-            &agent,
+            holder,
             &principal,
             &person.id,
             Issuance {
+                parent_agent: policy_request
+                    .subagent
+                    .as_ref()
+                    .map(|_| Self::identity(&agent)),
                 kind: TokenKind::Person,
                 jti: &claims.jti,
                 resource: &claims.aud,
@@ -515,10 +529,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.store
             .commit(record, upstream.is_none())
             .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.subagent_current(&agent, policy_request.subagent.as_ref(), (self.clock)())?;
         self.binding(&principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
         check_agent_current(&agent, released_at)?;
+        check_subagent_current(policy_request.subagent.as_ref(), released_at)?;
         check_upstream_current(upstream.as_ref(), released_at)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
@@ -536,6 +552,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         verified_at: i64,
         upstream: Option<&Upstream>,
     ) -> Result<PreparedAuthorization, Failure> {
+        let subagent = self.subagent(agent, &parameters, verified_at)?;
+        let holder = subagent.as_ref().unwrap_or(agent);
         let resource_compact = required_string(&parameters, "resource_token")?;
         let presented_compact = required_string(&parameters, "presented_token")?;
         let resource = ResourceToken::parse(resource_compact)
@@ -547,7 +565,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || (self.federation.is_none() && r.aud != self.config.issuer)
             || r.exp - r.iat > self.config.max_resource_lifetime
             || r.agent_jkt
-                != agent
+                != holder
                     .claims()
                     .cnf
                     .jwk
@@ -567,7 +585,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let presented = self.verify_presented(presented_compact, verified_at, "presented")?;
         self.match_resource(&presented, r)?;
         let retained = self.load_record(&presented, presented_compact, verified_at, "presented")?;
-        if retained.agent != Self::identity(agent) {
+        if retained.agent != Self::identity(holder)
+            || retained.parent_agent != subagent.as_ref().map(|_| Self::identity(agent))
+            || (subagent.is_some() && retained.principal != Self::identity(agent))
+        {
             return Err(Failure::parameter("invalid_presented_token"));
         }
         if retained.upstream != upstream.map(|up| up.context.record.token.clone()) {
@@ -601,6 +622,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         let context = AuthorizationRequest {
             agent: agent.clone(),
+            subagent,
             resource: resource.clone(),
             presented: retained.clone(),
             scopes,
@@ -647,11 +669,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         validate_grant(&grant, &context.scopes)?;
         let now = (self.clock)();
         self.inputs_current(&agent, &resource, &presented, now)?;
+        self.subagent_current(&agent, context.subagent.as_ref(), now)?;
         check_upstream_current(upstream.as_ref(), now)?;
         let mut expires_at = now
             .saturating_add(grant.lifetime)
             .min(agent.claims().exp)
             .min(presented.exp);
+        let holder = context.subagent.as_ref().unwrap_or(&agent);
+        expires_at = expires_at.min(holder.claims().exp);
         if let Some(up) = &upstream {
             expires_at = expires_at.min(up.token.exp);
         }
@@ -662,7 +687,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             ps: self.config.issuer.clone(),
             sub: r.sub.clone(),
             cnf: Confirmation {
-                jwk: agent.claims().cnf.jwk.clone(),
+                jwk: holder.claims().cnf.jwk.clone(),
             },
             jti: (self.ids)(),
             iat: now,
@@ -678,10 +703,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|_| Failure::internal())?;
         let record = self.record(
             &compact,
-            &agent,
+            holder,
             &retained.principal,
             &retained.person_id,
             Issuance {
+                parent_agent: context.subagent.as_ref().map(|_| Self::identity(&agent)),
                 kind: TokenKind::Auth,
                 jti: &claims.jti,
                 resource: &claims.aud,
@@ -696,10 +722,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.store
             .commit(record, false)
             .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.subagent_current(&agent, context.subagent.as_ref(), (self.clock)())?;
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
         self.inputs_current(&agent, &resource, &presented, released_at)?;
+        check_subagent_current(context.subagent.as_ref(), released_at)?;
         check_upstream_current(upstream.as_ref(), released_at)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
@@ -770,6 +798,14 @@ fn check_agent_current(agent: &VerifiedAgentToken, now: i64) -> Result<(), Failu
     }
     if agent.claims().exp <= now {
         return Err(Failure::credential(TokenError::ExpiredJwt));
+    }
+    Ok(())
+}
+// The final time fence performs no host I/O. Resolver and store callbacks must
+// finish before callers sample the release clock and compute expires_in.
+fn check_subagent_current(child: Option<&VerifiedAgentToken>, now: i64) -> Result<(), Failure> {
+    if child.is_some_and(|child| child.claims().exp <= now) {
+        return Err(Failure::parameter("expired_subagent_token"));
     }
     Ok(())
 }

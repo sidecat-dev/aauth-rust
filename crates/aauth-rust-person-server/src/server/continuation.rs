@@ -97,9 +97,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         })?;
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
+        self.subagent_current(agent, context.subagent.as_ref(), now)?;
         let deadline = now
             .saturating_add(d.lifetime)
             .min(agent.claims().exp)
+            .min(
+                context
+                    .subagent
+                    .as_ref()
+                    .map_or(i64::MAX, |child| child.claims().exp),
+            )
             .min(resource.claims().exp)
             .min(presented.exp);
         if now >= deadline {
@@ -200,11 +207,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|_| Failure::internal())?;
         let prepared =
             self.prepare_authorization(&original, value["parameters"].clone(), now, None)?;
+        self.subagent_current(
+            &original,
+            prepared.context.subagent.as_ref(),
+            (self.clock)(),
+        )?;
+        self.binding(&prepared.retained.principal, BindingContext::Presented)?
+            .ok_or_else(Failure::internal)?;
         let released = (self.clock)();
         if released >= number(value, "deadline")? {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
         self.inputs_current(&original, &prepared.resource, &prepared.presented, released)?;
+        check_subagent_current(prepared.context.subagent.as_ref(), released)?;
         if auth.claims().exp <= released {
             return Err(Failure::internal());
         }
