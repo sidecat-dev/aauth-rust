@@ -221,7 +221,7 @@ fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
 /// Hosts use this same normalization when binding proofs to a configured target.
 ///
 /// # Errors
-/// Rejects non-HTTPS/relative URIs, empty hosts, userinfo and invalid ports.
+/// Rejects non-HTTPS/relative URIs, empty hosts, userinfo and ports outside 1..=65535.
 pub fn canonical_authority(uri: &http::Uri) -> Result<String, Error> {
     if uri.scheme_str() != Some("https") {
         return Err(Error::InvalidUri);
@@ -247,6 +247,9 @@ pub fn canonical_authority(uri: &http::Uri) -> Result<String, Error> {
         )
     };
     let host = raw_host.to_ascii_lowercase();
+    if port == Some(0) {
+        return Err(Error::InvalidUri);
+    }
     let normalized = match port {
         None | Some(443) => host,
         Some(port) => format!("{host}:{port}"),

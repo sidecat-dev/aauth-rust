@@ -682,6 +682,16 @@ fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
             "error=invalid_signature"
         );
     }
+    let mut changed_type = request.clone();
+    changed_type
+        .headers_mut()
+        .insert("content-type", "text/plain".parse().unwrap());
+    let response = resource.authorize(&changed_type, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=invalid_signature"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -891,6 +901,8 @@ fn an_origin_constructor_rejects_endpoint_paths_queries_and_invalid_origins() {
         "https://resource.example#part",
         "https://user@resource.example",
         "https://resource.example:99999",
+        "https://resource.example:0",
+        "https://resource.example:0000",
     ] {
         assert!(
             AgentIdentityResource::for_origin(

@@ -194,6 +194,21 @@ fn authority_normalizes_case_and_default_port_per_rfc9421() {
 }
 
 #[test]
+fn port_zero_is_refused_as_an_unusable_request_target() {
+    for uri in [
+        "https://resource.example:0/",
+        "https://resource.example:0000/",
+        "https://[::1]:0/",
+    ] {
+        let uri: http::Uri = uri.parse().unwrap();
+        assert_eq!(
+            aauth_rust_signature_key::canonical_authority(&uri),
+            Err(Error::InvalidUri)
+        );
+    }
+}
+
+#[test]
 fn malformed_fields_are_not_missing_coverage_errors() {
     for (field, value, code) in [
         ("signature-input", "sig=(", "invalid_signature"),

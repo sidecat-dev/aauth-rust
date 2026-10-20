@@ -48,6 +48,11 @@ use that configured authority and carry a valid proof over its actual path.
 The router/policy decides which routes are allowed; origin mode is not a prefix
 or route whitelist. The axum example shares one Arc<Resource> across /whoami and
 /orders; keys are shared too, without fetching once per route.
+The request-origin constructor accepts an optional root slash, so
+`https://resource.example/` and `https://resource.example` configure the same
+authority. Ports must be in 1..=65535; port zero is refused. This is transport
+configuration; published server identifiers are separately validated below and
+must have no trailing slash or port.
 Resource discovery metadata is available through
 `resource.metadata_for("https://resource.example")?`; the host serves it at
 `/.well-known/aauth-resource.json` (the axum example does this). Configure that
