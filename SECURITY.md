@@ -56,9 +56,13 @@ a valid signature alone does not reconstruct missing state.
 The optional `aauth-rust-person-server-redb` adapter durably retains bindings,
 internal person IDs, tenant/Agent identity, credential hashes and lineage in a
 local database file. It stores no signing keys or complete compact tokens and
-provides no file encryption. Protect the parent directory and backups; retain
+provides no file encryption. Durably provision and protect the parent directory
+and backups; retain
 the issuer signing key and unique token-ID source separately across restart.
-One process owns each file; cloned handles share that owner. Close every handle
+The adapter requires Unix and filesystem directory-sync support. Open
+synchronizes the parent after file initialization and refuses a usable handle
+if that step fails; non-Unix open is refused before file creation. One process
+owns each file; cloned handles share that owner. Close every handle
 before copying/restoring a database backup. The adapter has no cleanup API and
 keeps records indefinitely, including after `retain_until`; plan storage capacity.
 Logical refusals leave state unchanged. An operational I/O error can leave a

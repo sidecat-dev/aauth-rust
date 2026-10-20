@@ -89,14 +89,31 @@ impl TokenRecord {
     /// Validate complete record shape and whether this issuance may establish a
     /// binding. Storage adapters must still check retained-token equality first,
     /// then validate, and atomically enforce binding and directed identities.
+    /// Checks identifier syntax, nonempty token references/digests, and Person
+    /// (no presented parent) / Auth (presented parent required) shape. Digest
+    /// contents and parent authenticity belong to credential verification.
     /// This performs no lookup or current-time/credential verification.
     ///
     /// # Errors
     /// Returns InvalidRecord for incomplete identity, digest, target or lifetime
     /// fields, or when a non-direct Person issuance tries to establish a binding.
     pub fn validate_for_commit(&self, establish_binding: bool) -> Result<(), StoreError> {
-        if self.token.reference.jti.is_empty()
-            || self.token.compact_sha256.is_empty()
+        let valid_tie = |tie: &TokenTie| {
+            !tie.reference.jti.is_empty()
+                && !tie.compact_sha256.is_empty()
+                && aauth_rust_core::validate_server_identifier(&tie.reference.issuer).is_ok()
+        };
+        let valid_identity = |identity: &AgentIdentity| {
+            aauth_rust_core::validate_server_identifier(&identity.issuer).is_ok()
+                && aauth_rust_core::validate_agent_identifier(&identity.subject).is_ok()
+        };
+        if !valid_tie(&self.token)
+            || !valid_identity(&self.agent)
+            || !valid_identity(&self.principal)
+            || self.presented.as_ref().is_some_and(|tie| !valid_tie(tie))
+            || self.upstream.as_ref().is_some_and(|tie| !valid_tie(tie))
+            || (self.kind == TokenKind::Person && self.presented.is_some())
+            || (self.kind == TokenKind::Auth && self.presented.is_none())
             || self.person_id.is_empty()
             || self.subject.is_empty()
             || self.agent_jkt.is_empty()
@@ -104,7 +121,6 @@ impl TokenRecord {
             || self.issued_at < 0
             || self.expires_at <= self.issued_at
             || self.retain_until < self.expires_at
-            || aauth_rust_core::validate_server_identifier(&self.token.reference.issuer).is_err()
             || aauth_rust_core::validate_server_identifier(&self.resource).is_err()
             || (establish_binding
                 && (self.kind != TokenKind::Person

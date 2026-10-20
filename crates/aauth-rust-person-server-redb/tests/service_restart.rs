@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{

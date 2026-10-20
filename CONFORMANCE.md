@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **153 integration tests and 3 backend unit tests
+Current engineer evidence: **153 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. Executable examples
@@ -29,6 +29,7 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (18 tests), `store.rs` (4 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
 | Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (7 tests), `service_restart.rs` (2 tests), crate rustdoc |
 | Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
+| Durable file creation / record shape | Parent directory synchronized after file/schema initialization; sync failure refuses open; bare filenames use current directory. Both stores reject malformed Agent identities, parent ties and Person/Auth lineage without leaking state; durable decoder refuses malformed rows | `aauth-rust-person-server-redb/src/open_tests.rs` (2 Unix tests), shared store contract/validation and backend row tests; Linux syscall witness |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
@@ -196,6 +197,11 @@ Rust also checks its stricter atomic Agent-person binding and stable directed
 identity profile, both private indexes after refused commits, and losing token
 absence in an eight-caller first-binding race. Mission state is not present in
 Rust's supported record profile; no Go mission-store parity is claimed.
+The shared shape validator checks identifier syntax and nonempty references/
+digests, requires a presented parent for Auth and forbids one for Person. It
+does not authenticate parent credentials or verify digest contents. Existing-
+record comparison still precedes validation, so a differing malformed retry is
+Conflict and cannot rewrite retained state.
 
 **DURABLE-STORE-PROFILE:** one redb4.4 database owner per file, shared by clones;
 five typed schema tables, keyed operations, immediate durability. Schema1 only;
@@ -205,6 +211,16 @@ No encryption, migrations, garbage collection, distributed ownership, live-backu
 API, database-independent durability proof or other concrete backend is supplied.
 Records remain indefinitely, even past retain_until. The host preserves separate
 signing keys/unique token IDs and controls filesystem/backups/capacity.
+
+**DURABLE-STORE-PLATFORM:** this optional adapter requires Unix and a filesystem
+supporting directory synchronization. Every open synchronizes the parent after
+file/schema initialization, before returning; failure is a typed local
+store_unavailable. The host must durably provision the private parent directory.
+Linux syscall evidence checks file-before-directory synchronization; relative-
+filename and injected directory-sync refusal tests execute. Non-Unix open is
+refused before creating a database. Linux x86_64/ARM64 are the native CI targets;
+macOS runtime remains unverified. Other protocol crates and custom Store
+implementations do not depend on this adapter's platform restriction.
 
 **DURABLE-STORE-IO:** logical refusal leaves all state unchanged. Operational
 I/O failure can make a whole transaction's outcome uncertain; PS commit errors

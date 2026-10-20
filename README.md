@@ -65,7 +65,8 @@ supplies person authentication, durable storage and consent policy.
 For local durable storage, the separate
 [`aauth-rust-person-server-redb`](crates/aauth-rust-person-server-redb) crate
 implements the PS `Store` with transactional file-backed bindings and exact
-issuance lineage. See [durable PS storage](USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
+issuance lineage on Unix filesystems supporting directory synchronization.
+See [durable PS storage](USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
 for setup, restart and retention boundaries. The TLS example continues to use
 disposable `MemoryStore` state.
 `Requirement::from_headers` in the Agent crate extracts the challenge as

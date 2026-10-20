@@ -5,8 +5,13 @@
 //! use immediate durability. Files retain internal person identity and all token
 //! lineage indefinitely; hosts own filesystem permissions, backup and capacity.
 //! No signing keys or compact credential bytes are stored.
+//! This adapter requires Unix and a filesystem supporting directory `sync_all`.
+//! Open synchronizes the database's parent after initializing its file; the host
+//! must durably provision that directory. Other platforms fail closed at open.
 //!
 //! ```
+//! # #[cfg(unix)]
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use aauth_rust_person_server_redb::RedbStore;
 //! let database_path = std::path::Path::new("person.redb");
 //! # let directory = tempfile::tempdir()?;
@@ -18,11 +23,16 @@
 //! let reopened = RedbStore::open(path)?;
 //! # drop(reopened);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # }
+//! # #[cfg(not(unix))]
+//! # fn main() {}
 //! ```
 #![deny(missing_docs)]
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod failure_tests;
+#[cfg(test)]
+mod open_tests;
 mod schema;
 use aauth_rust_person_server::{
     AgentIdentity, Binding, Store, StoreError, TokenRecord, TokenReference,
@@ -33,6 +43,7 @@ use redb::{
 use schema::{BINDINGS, DIRECTED, SUBJECTS, TOKENS};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -50,6 +61,11 @@ pub enum OpenError {
         "store_unavailable: cannot initialize Person Server database; check storage health and write permissions"
     )]
     Unavailable,
+    /// The platform or filesystem cannot durably synchronize the parent entry.
+    #[error(
+        "store_unavailable: cannot synchronize the database parent directory; use Unix with a filesystem supporting directory sync and check permissions/health: {0}"
+    )]
+    DirectoryDurability(#[source] io::Error),
     /// The database belongs to another application or an unsupported schema.
     #[error(
         "unsupported_store_schema: use an empty database or this adapter's schema version; preserve the existing file for supported migration"
@@ -75,17 +91,38 @@ pub struct RedbStore {
 }
 impl RedbStore {
     /// Open an existing supported database, or create one at an absent/empty file.
-    /// The parent directory must exist; the database file must have one process
-    /// owner. Ordinary startup checks the schema, not all retained records.
+    /// The host must durably provision the parent directory; the database file
+    /// must have one process owner. After initializing the file, every open
+    /// synchronizes its parent before returning. A bare filename uses `.`.
+    /// Ordinary startup checks the schema, not all retained records.
+    /// Unix with directory-sync support is required; other platforms are refused
+    /// before database creation. The rest of the protocol workspace remains
+    /// independent of this optional adapter's platform support.
     ///
     /// # Errors
     /// Returns a typed local failure for unavailable storage or a foreign schema.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        if !cfg!(unix) {
+            return Err(OpenError::DirectoryDurability(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this adapter requires Unix directory synchronization",
+            )));
+        }
         let path = path.as_ref().to_owned();
         Self::from_database(Database::create(&path)?, path)
     }
     fn from_database(database: Database, path: PathBuf) -> Result<Self, OpenError> {
+        Self::from_database_with_sync(database, path, |parent| {
+            std::fs::File::open(parent)?.sync_all()
+        })
+    }
+    fn from_database_with_sync(
+        database: Database,
+        path: PathBuf,
+        sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<Self, OpenError> {
         schema::initialize(&database)?;
+        sync_parent(parent_directory(&path)).map_err(OpenError::DirectoryDurability)?;
         Ok(Self {
             database: Arc::new(database),
             path,
@@ -95,6 +132,12 @@ impl RedbStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+fn parent_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn unavailable<E>(_: E) -> StoreError {

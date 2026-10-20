@@ -104,6 +104,22 @@ fn store_adapters_share_complete_record_serialization_and_shape_validation() {
         |r| r.retain_until = r.expires_at - 1,
         |r| r.resource = "http://resource.example".into(),
         |r| r.token.reference.issuer = "http://ps.example".into(),
+        |r| r.agent.issuer.clear(),
+        |r| r.agent.subject.clear(),
+        |r| r.principal.issuer.clear(),
+        |r| r.principal.subject.clear(),
+        |r| r.agent.issuer = "http://ap.example".into(),
+        |r| r.agent.subject = "not-an-agent".into(),
+        |r| r.principal.issuer = "http://ap.example".into(),
+        |r| r.principal.subject = "not-an-agent".into(),
+        |r| r.presented.as_mut().unwrap().reference.issuer.clear(),
+        |r| r.presented.as_mut().unwrap().reference.jti.clear(),
+        |r| r.presented.as_mut().unwrap().compact_sha256.clear(),
+        |r| r.upstream.as_mut().unwrap().reference.issuer.clear(),
+        |r| r.upstream.as_mut().unwrap().reference.jti.clear(),
+        |r| r.upstream.as_mut().unwrap().compact_sha256.clear(),
+        |r| r.kind = TokenKind::Person,
+        |r| r.presented = None,
     ] {
         let mut invalid = valid.clone();
         change(&mut invalid);

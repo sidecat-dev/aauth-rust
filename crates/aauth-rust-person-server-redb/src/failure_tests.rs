@@ -164,7 +164,8 @@ fn run_unclean_child(mode: &str) {
             "failure_tests::unclean_worker",
             "--nocapture",
         ])
-        .env("AAUTH_REDB_CHILD_PATH", &path)
+        .current_dir(directory.path())
+        .env("AAUTH_REDB_CHILD_PATH", "person.redb")
         .env("AAUTH_REDB_CHILD_MODE", mode)
         .output()
         .unwrap();

@@ -4,6 +4,7 @@ use crate::{AgentIdentity, Store, StoreError, TokenKind, TokenRecord, TokenRefer
 use std::sync::Arc;
 mod issuance;
 mod persistence;
+mod validation;
 pub use persistence::check_persistence_contract;
 
 fn record(jti: &str, person: &str) -> TokenRecord {
@@ -40,7 +41,8 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 
 /// Check namespacing, round-trip, exact replay, conflicting commits, binding
 /// revocation, directed identity consistency, fully populated Auth lineage,
-/// and concurrent first-claim / same-token retry atomicity.
+/// malformed identity/parent refusal without state changes, and concurrent
+/// first-claim / same-token retry atomicity.
 /// `factory` must return a fresh empty store every time; no cleanup is performed.
 ///
 /// # Errors
@@ -194,11 +196,13 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
     }
     let mut auth = record("auth", "person");
     auth.kind = TokenKind::Auth;
+    auth.presented = Some(record("parent", "person").token);
     if empty.commit(auth, false) != Err(StoreError::MissingBinding) {
         return Err("authorization created a missing person binding".into());
     }
     issuance::check_complete_auth_records(factory())?;
     issuance::check_concurrent_token_commit(factory())?;
     persistence::check_refusal_atomicity(&factory(), "logical")?;
+    validation::check_invalid_records(factory)?;
     Ok(())
 }

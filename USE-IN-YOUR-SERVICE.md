@@ -334,8 +334,16 @@ use aauth_rust_person_server_redb::RedbStore;
 let store = RedbStore::open("/var/lib/my-service/person.redb")?;
 ```
 
-Create the private parent directory first. `open` creates an absent/empty file
-or reopens the supported schema. A locked, unreadable or invalid database has
+Durably provision the private parent directory first. This adapter requires
+Unix and a filesystem supporting directory synchronization. `open` creates an
+absent/empty file or reopens the supported schema, then synchronizes its parent
+after initializing the database file and before returning a usable store. A
+bare filename uses the current directory. A directory-sync failure returns
+`OpenError::DirectoryDurability` with local code `store_unavailable`; non-Unix
+platforms are refused before file creation. This restriction belongs to the
+optional adapter; other platforms can supply a custom `Store`.
+
+A locked, unreadable or invalid database has
 local code `store_unavailable`; an unrelated schema or unsupported version has
 `unsupported_store_schema`. These are configuration/storage errors, never
 Signature-Error codes. Unreadable stored records return `StoreError::Unavailable`,
@@ -366,6 +374,10 @@ Custom adapters run `storetest::check_store_contract` with a fresh empty store
 on every factory call. Its checks match the Go issued-token contract's exact
 round-trip, issuer namespace, every-field conflict and concurrent winner/retry
 guarantees, plus Rust's atomic binding/directed-identity rules. Run
+the shared `TokenRecord::validate_for_commit` shape checks in custom adapters,
+after the existing-record comparison. They check identifier syntax, nonempty
+references/digests and Person/Auth parent shape; credential verification remains
+the PS role's duty. Run
 `storetest::check_persistence_contract` separately with a consuming callback
 that drops the sole handle before reopening the same storage. Returning a live
 object or leaving a clone open does not test persistence. Both contracts mutate
@@ -378,7 +390,8 @@ cargo run --locked -p aauth-rust-person-server-redb --example contracts
 
 It prints `logical-store=pass reopen-store=pass` and removes its disposable files.
 The adapter's tests additionally cover process exit without Rust destructors,
-an abandoned real transaction, one injected native write failure and reconstructed
+an abandoned real transaction, one injected native write failure, parent-directory
+sync refusal and reconstructed
 direct/chained PS exchanges. These are separate backend checks, not evidence of
 physical power loss, every disk failure, distributed operation or other database
 engines. Missions, AS federation and token-revocation delivery stay outside the

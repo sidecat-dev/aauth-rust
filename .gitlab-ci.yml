@@ -83,8 +83,7 @@ windows:
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo run --locked -p aauth-rust-resource --example three-party
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-person-server-redb --example contracts
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The optional redb adapter requires Unix directory synchronization.
       cargo build --locked --release -p aauth-rust-resource --example direct-identity
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       & target\release\examples\direct-identity.exe

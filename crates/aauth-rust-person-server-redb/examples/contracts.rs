@@ -1,8 +1,8 @@
-use aauth_rust_person_server::storetest;
-use aauth_rust_person_server_redb::RedbStore;
-use std::cell::Cell;
-
+#[cfg(unix)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use aauth_rust_person_server::storetest;
+    use aauth_rust_person_server_redb::RedbStore;
+    use std::cell::Cell;
     // Only disposable databases: these contracts intentionally change state.
     let directory = tempfile::tempdir()?;
     let sequence = Cell::new(0);
@@ -20,4 +20,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(std::io::Error::other)?;
     println!("logical-store=pass reopen-store=pass");
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!(
+        "This durable adapter requires Unix directory synchronization; contracts were not run."
+    );
+    std::process::exit(1);
 }

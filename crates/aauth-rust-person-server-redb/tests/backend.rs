@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 mod support;
 use aauth_rust_person_server::{Store, StoreError, storetest};
 use aauth_rust_person_server_redb::RedbStore;
@@ -169,7 +171,14 @@ fn future_version_of_an_otherwise_complete_schema_is_refused() {
 fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
     use redb::{Database, TableDefinition};
     let directory = tempfile::tempdir().unwrap();
-    for case in ["malformed-token", "miskeyed-token", "malformed-binding"] {
+    for case in [
+        "malformed-token",
+        "miskeyed-token",
+        "malformed-binding",
+        "empty-identity",
+        "person-with-presented",
+        "empty-upstream-tie",
+    ] {
         let path = directory.path().join(case);
         let expected = record("retained");
         let store = RedbStore::open(&path).unwrap();
@@ -199,6 +208,22 @@ fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
                 let mut different = expected.clone();
                 different.token.reference.jti.push_str("-other");
                 serde_json::to_vec(&different).unwrap()
+            } else if case == "empty-identity" {
+                let mut invalid = expected.clone();
+                invalid.agent.issuer.clear();
+                invalid.agent.subject.clear();
+                invalid.principal = invalid.agent.clone();
+                serde_json::to_vec(&invalid).unwrap()
+            } else if case == "person-with-presented" {
+                let mut invalid = expected.clone();
+                invalid.presented = Some(invalid.token.clone());
+                serde_json::to_vec(&invalid).unwrap()
+            } else if case == "empty-upstream-tie" {
+                let mut invalid = expected.clone();
+                let mut tie = invalid.token.clone();
+                tie.compact_sha256.clear();
+                invalid.upstream = Some(tie);
+                serde_json::to_vec(&invalid).unwrap()
             } else {
                 b"{}".to_vec()
             };
