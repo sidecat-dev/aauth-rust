@@ -127,7 +127,7 @@ enum BindingContext {
 impl BindingContext {
     fn revoked(self) -> Failure {
         match self {
-            Self::NewPerson => Failure::policy(PolicyError::Denied),
+            Self::NewPerson => Failure::status(StatusCode::FORBIDDEN, "denied"),
             Self::Presented => Failure::parameter("revoked_presented_token"),
             Self::Upstream => Failure::parameter("revoked_upstream_token"),
         }

@@ -21,7 +21,7 @@ impl Failure {
     }
     pub(super) fn policy(error: PolicyError) -> Self {
         match error {
-            PolicyError::Denied => Self::status(StatusCode::FORBIDDEN, "denied"),
+            PolicyError::Denied => Self::status(StatusCode::FORBIDDEN, "access_denied"),
             PolicyError::UserUnreachable => Self::status(StatusCode::FORBIDDEN, "user_unreachable"),
             PolicyError::Unavailable => Self::internal(),
         }

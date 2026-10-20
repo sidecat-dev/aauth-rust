@@ -479,7 +479,7 @@ fn token_parameter_lineage_failures_are_typed_and_precede_policy() {
 #[test]
 fn refusal_bad_grants_and_policy_expiry_never_release_credentials() {
     for (mode, status, code) in [
-        (1, 403, "denied"),
+        (1, 403, "access_denied"),
         (2, 500, "server_error"),
         (3, 500, "server_error"),
         (4, 400, "expired_resource_token"),

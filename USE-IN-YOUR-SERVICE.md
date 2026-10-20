@@ -273,7 +273,7 @@ evidence. If the host lacks the evidence or needs fresh interaction, refuse;
 `Policy::authorize` receives verified Agent and Resource claims, the exact
 retained presented issuance, requested scopes and signed parameters. Return a
 nonempty subset of those scopes and a positive lifetime up to one hour. Intentional
-PS policy denial returns 403 with `denied`; an unavailable policy/store returns 500. Invalid token
+PS host-policy denial returns 403 with `access_denied`; an unavailable policy/store returns 500. Invalid token
 parameters return typed 400 errors; HTTP proof/credential failures return 401
 Signature-Error. The PS checks lineage before policy, caps parent lifetimes,
 commits retained state, resamples its trusted clock and only then releases tokens.
