@@ -71,5 +71,6 @@ example uses rustls/ring as a development-only exception to pure Rust crypto;
 cross-building the TLS executable needs the target C toolchain and linker.
 [CI](.gitlab-ci.yml) defines native Linux x86_64/ARM64 test and executable-artifact
 jobs. macOS and Windows jobs are available when `AAUTH_NATIVE_RUNNERS=1` and the
-corresponding runners are enabled. Only host Linux execution and the ARM64
-library cross-build have been verified in this cycle. No release is published.
+corresponding runners are enabled. Native Linux x86_64 and ARM64 tests and
+optimized examples pass in [pipeline 2966578100](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/pipelines/2966578100).
+macOS and Windows execution remains unverified. No release is published.

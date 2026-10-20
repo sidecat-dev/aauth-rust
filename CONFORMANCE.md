@@ -47,14 +47,23 @@ turn an `hwk` key into an AAuth identity.
   JWKS cache lifetime, once-per-minute fetch floor and refresh policy. The local
   journey fetches one configured AP snapshot and reuses it; it is not an open
   Internet discovery/cache client.
-- No remote or cross-implementation run, general security audit,
+- No external-peer or cross-implementation run, general security audit,
   different-vendor review or cold QA has passed yet. Findings must be checked in
   aauth-go before being filed with editors.
 
 ## Build evidence
 
-Host: Linux x86_64, Rust 1.99.1. `cargo test --locked`, the runnable TLS example,
-formatting and clippy are the engineer checks. ARM64 libraries are cross-built
-with `cargo build --locked --target aarch64-unknown-linux-gnu`; that is not ARM64
-execution or a linked ARM64 TLS executable. CI defines native builds and demo
-artifacts per enabled target; a definition is not a successful CI run.
+Local host: Linux x86_64, Rust 1.99.1. `cargo test --locked`, the optimized TLS
+example, formatting and clippy with warnings denied pass. The library workspace
+also cross-builds with `cargo build --locked --target aarch64-unknown-linux-gnu`.
+
+[Pipeline 2966578100](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/pipelines/2966578100)
+passed at code commit `8dbf5c958d35b82576cf568349bb0cabc315da7f`:
+
+| Native platform | Job | Evidence |
+| --- | --- | --- |
+| Linux x86_64 | [17308800499](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/jobs/17308800499) | Formatting, clippy, 26 tests, optimized executable build and 14-check run; binary archive uploaded |
+| Linux ARM64 | [17308800500](https://gitlab.com/sidecat-dev/sprint-gen6-20261020/wc-aauth-rust-01/aauth-rust/-/jobs/17308800500) | Same checks run natively; ARM64 binary archive uploaded |
+
+Artifacts expire in 14 days. These are demo build artifacts, not a published
+release. macOS and Windows jobs remain opt-in and have not executed.

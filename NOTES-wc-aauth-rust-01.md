@@ -4,8 +4,8 @@
 
 Implement the first direct Agent-identity journey in the assigned fork. The
 long-term project is a full Rust sibling of aauth-go; this cycle demonstrates
-only the slice stated in CONFORMANCE.md. No independent review or cold QA has
-run yet.
+only the slice stated in CONFORMANCE.md. Different-vendor review and cold QA
+remain pending.
 
 Use six crates: `aauth-jose`, `aauth-signature-key`, `aauth-core`, `aauth-agent`,
 `aauth-agent-provider`, and `aauth-resource`. Role crates depend on protocol
@@ -28,7 +28,7 @@ disables certificate verification or relaxes production identifier syntax.
 - [x] Signature-Key and Core: tests first for `hwk`, `jwt`, RFC 9421 signature
   bases, label correlation, time, token type, issuer and confirmation key;
   implement the bounded profile and run the workspace suite.
-- [ ] Roles and journey: tests first for unsigned challenge, valid identity,
+- [x] Roles and journey: tests first for unsigned challenge, valid identity,
   tampering, expiry, coverage, future time and policy denial over loopback TLS;
   expose the same composition as a runnable example. Verify host tests, ARM64
   build, formatting and clippy; document exact results and push.
@@ -92,3 +92,24 @@ configuration alone is not execution evidence. Artifacts expire in 14 days.
 Cross-check: aauth-go already normalizes authority in
 `signaturekey/request.go:normalizedRequestAuthority`. Other feedback findings
 are local implementation defects, not editor issues. No upstream feedback filed.
+
+## Final engineer verification
+
+Code commit **8dbf5c958d35b82576cf568349bb0cabc315da7f**, pushed to the assigned
+workcycle branch. The final authority test also rejects a missing host,
+nonnumeric/out-of-range ports and userinfo; failure was reproduced before the
+fix. The local workspace is formatted, 26/26 tests pass, clippy is clean, the
+ARM64 library build passes, and the optimized example runs all 14 checks.
+
+**Native CI passed** in pipeline **2966578100**, for that exact code commit:
+
+- Linux x86_64 job **17308800499**: success, 26 tests, optimized example executes;
+  artifact `aauth-demo-x86_64-unknown-linux-gnu-8dbf5c95.zip`.
+- Linux ARM64 job **17308800500**: success, the same suite and example execute
+  natively; artifact `aauth-demo-aarch64-unknown-linux-gnu-8dbf5c95.zip`.
+
+Both artifacts were uploaded and expire after 14 days. macOS and Windows have
+not run. This status-only follow-up does not change the tested source.
+The same-vendor review agent has returned and ended; no owned test listener or
+worker thread remains. Different-vendor review, muse cold QA and the sprint MR
+remain pending. No full-protocol or release claim is made.
