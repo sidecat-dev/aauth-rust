@@ -227,7 +227,7 @@ pub struct AgentIdentityResource<K, P> {
     keys: K,
     policy: P,
     authority: String,
-    path: String,
+    path: Option<String>,
 }
 impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
 where
@@ -250,8 +250,26 @@ where
             keys,
             policy,
             authority: aauth_rust_signature_key::canonical_authority(&uri)?,
-            path: uri.path().to_owned(),
+            path: Some(uri.path().to_owned()),
         })
+    }
+    /// Bind one Resource to an HTTPS origin across all router paths.
+    /// Every request must still be signed over its actual path and use this
+    /// configured authority. The host router and policy own route admission;
+    /// this constructor is not a path-prefix or route whitelist.
+    /// Use [`Self::new`] for an exact endpoint binding instead.
+    ///
+    /// # Errors
+    /// Rejects non-HTTPS/invalid authorities, non-root paths, query or fragment.
+    /// A trailing root slash is accepted; queries vary on signed requests only.
+    pub fn for_origin(origin: &str, keys: K, policy: P) -> Result<Self, Error> {
+        let uri: http::Uri = origin.parse().map_err(|_| Error::InvalidUri)?;
+        if !uri.path().is_empty() && uri.path() != "/" {
+            return Err(Error::InvalidUri);
+        }
+        let mut resource = Self::new(origin, keys, policy)?;
+        resource.path = None;
+        Ok(resource)
     }
     /// Minimal metadata for this verifier, served by the host at
     /// `/.well-known/aauth-resource.json` as application/json over HTTPS.
@@ -313,7 +331,12 @@ where
             Ok(authority) => authority,
             Err(error) => return Decision::SignatureFailure(SignatureFailure::Proof(error)),
         };
-        if authority != self.authority || request.uri().path() != self.path {
+        if authority != self.authority
+            || self
+                .path
+                .as_deref()
+                .is_some_and(|path| request.uri().path() != path)
+        {
             return Decision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
         }
         if ["signature-key", "signature-input", "signature"]

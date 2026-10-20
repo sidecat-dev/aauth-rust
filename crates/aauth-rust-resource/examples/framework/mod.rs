@@ -29,10 +29,11 @@ pub fn now() -> i64 {
         .as_secs() as i64
 }
 
-/// One route bound to its configured external HTTPS origin, behind a trusted proxy.
+/// Two routes share one Resource bound to the external origin, behind a trusted proxy.
 pub fn router(origin: Uri, resource: Arc<Resource>) -> Router {
     Router::new()
         .route("/whoami", any(gate))
+        .route("/orders", any(gate))
         .route("/.well-known/aauth-resource.json", get(metadata))
         .with_state(Arc::new(Gate { origin, resource }))
 }

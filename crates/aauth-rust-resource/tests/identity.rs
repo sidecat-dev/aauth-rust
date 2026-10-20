@@ -723,3 +723,85 @@ fn resource_keys() -> AgentProviderKeys {
     )
     .unwrap()
 }
+
+#[test]
+fn one_origin_resource_and_its_replaced_policy_serve_distinct_signed_paths() {
+    let (agent, _) = composition();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    let resource = resource.with_policy(|_: &VerifiedAgentToken, request: &Request<Vec<u8>>| {
+        Ok::<_, aauth_rust_resource::Deny>(
+            request.uri().path_and_query().unwrap().as_str().to_owned(),
+        )
+    });
+    for path in ["/whoami", "/orders/123?sku=cat%2Ftree"] {
+        let mut request = Request::builder()
+            .uri(format!("https://resource.example{path}"))
+            .body(Vec::new())
+            .unwrap();
+        agent.sign(&mut request, 1000).unwrap();
+        let (_, admitted) = resource.authorize(&request, 1000).into_result().unwrap();
+        assert_eq!(admitted, path);
+    }
+}
+
+#[test]
+fn origin_binding_still_requires_the_actual_signed_path_and_configured_authority() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, _) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example/",
+        resource_keys(),
+        move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
+    .unwrap();
+    let mut request = request();
+    agent.sign(&mut request, 1000).unwrap();
+    *request.uri_mut() = "https://resource.example/orders/123".parse().unwrap();
+    assert!(matches!(
+        resource.authorize(&request, 1000),
+        Decision::SignatureFailure(_)
+    ));
+    *request.uri_mut() = "https://foreign.example/whoami".parse().unwrap();
+    agent.sign(&mut request, 1000).unwrap();
+    assert!(matches!(
+        resource.authorize(&request, 1000),
+        Decision::SignatureFailure(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_origin_constructor_rejects_endpoint_paths_queries_and_invalid_origins() {
+    for origin in [
+        "/whoami",
+        "http://resource.example",
+        "https://resource.example/api",
+        "https://resource.example?x=1",
+        "https://resource.example#part",
+        "https://user@resource.example",
+        "https://resource.example:99999",
+    ] {
+        assert!(
+            AgentIdentityResource::for_origin(
+                origin,
+                resource_keys(),
+                |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true
+            )
+            .is_err(),
+            "accepted {origin}"
+        );
+    }
+}

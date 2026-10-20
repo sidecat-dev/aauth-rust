@@ -175,6 +175,13 @@ Vec while forwarding unread content defeats body authentication. Missing require
 coverage returns invalid_input with required_input; malformed/mismatched digest
 or proof returns invalid_signature. Body integrity does not prevent replay.
 
+For a multi-route service, `AgentIdentityResource::for_origin(origin, keys,
+policy)` shares one verifier across paths; the exact-endpoint `new` constructor
+remains available. Both verify the actual signed path before policy. The host
+router/policy admits routes. `resource.metadata()` returns the verifier's
+minimal `/.well-known/aauth-resource.json` document; the axum example serves it
+publicly. See [service integration](USE-IN-YOUR-SERVICE.md).
+
 ## Trust and vocabulary
 
 The application chooses trusted Agent Providers. It obtains metadata and public

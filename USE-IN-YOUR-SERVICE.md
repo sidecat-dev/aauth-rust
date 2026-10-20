@@ -23,7 +23,7 @@ its configured external origin, and reads the actual body with a 1 KiB limit.
 An oversized body gets 413 before verification. Within that adapter limit,
 nonempty content reaches the gate and needs covered SHA-256 Content-Digest, plus
 covered Content-Type when present. The Agent generates these from actual bytes;
-the Resource verifies them before policy. The library itself permits up to1MiB.
+the Resource verifies them before policy. The library itself permits up to 1 MiB.
 Missing coverage gets invalid_input with the required fields; a malformed or
 mismatched digest gets invalid_signature. Never verify an empty placeholder while
 forwarding unread content, and verify content before decompression. Streaming or
@@ -32,16 +32,26 @@ trailer-based digests need a different adapter/profile; they are not implemented
 Terminate TLS before this private hop. Take the external origin from service
 configuration; accept forwarded scheme/authority only through an explicitly
 trusted proxy boundary. An arbitrary Host or Forwarded header is not configuration.
-One Resource binds one exact authority/path. Construct one per protected route
-and share an `Arc<AgentKeyResolver>`; this does not fetch keys once per route.
+AgentIdentityResource::new(endpoint, keys, policy) retains exact authority/path
+binding. For one gate shared by a router, use
+AgentIdentityResource::for_origin(origin, keys, policy). Every request must still
+use that configured authority and carry a valid proof over its actual path.
+The router/policy decides which routes are allowed; origin mode is not a prefix
+or route whitelist. The axum example shares one Arc<Resource> across /whoami and
+/orders; keys are shared too, without fetching once per route.
 Resource discovery metadata is available through resource.metadata(); the host
 serves it at /.well-known/aauth-resource.json (the axum example does this).
-It reports agent-token access and the actual60-second window. This verifier
+It reports agent-token access and the actual 60-second window. This verifier
 publishes no signing keys, so no JWKS URL or authorization endpoint is invented.
 The conditional nonempty-content coverage default is reported by required_input;
 metadata does not falsely require digest/type on every empty call. A host may
 add name/logo/documentation fields to its owned document while preserving the
-configured issuer and actual protocol fields. Path-wide binding follows below.
+configured issuer and actual protocol fields. A host that also signs server
+calls or issues Resource tokens must add its actual required jwks_uri and role
+metadata; the verifier helper does not supply those roles. Point agents at this document from landing/API pages with a Link header such as:
+`Link: <https://resource.example/.well-known/aauth-resource.json>; rel="aauth-resource"`.
+Use the configured canonical HTTPS identity; a caller-supplied Host is not that
+identity. The Rust Agent does not fetch metadata automatically.
 
 Covered header fields use RFC 9421 canonicalization: trim outer spaces/tabs and
 combine field lines with `, `. Outer whitespace changes alone preserve a proof.

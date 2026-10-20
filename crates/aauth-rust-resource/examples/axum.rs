@@ -46,8 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(str::to_owned)
                 .ok_or(Deny)
         });
-    let resource = Arc::new(AgentIdentityResource::new(
-        "https://resource.example/whoami",
+    let resource = Arc::new(AgentIdentityResource::for_origin(
+        "https://resource.example",
         keys,
         policy,
     )?);

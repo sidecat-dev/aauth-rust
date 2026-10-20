@@ -53,7 +53,7 @@ fn fixture() -> (Agent, Router) {
             }
         });
     let resource = Arc::new(
-        AgentIdentityResource::new("https://resource.example/whoami", keys, policy).unwrap(),
+        AgentIdentityResource::for_origin("https://resource.example", keys, policy).unwrap(),
     );
     (
         Agent::new(key, token).unwrap(),
@@ -171,4 +171,21 @@ async fn axum_publishes_resource_metadata_without_requiring_an_agent() {
         document,
         serde_json::json!({"issuer":"https://resource.example","access_mode":"agent-token","signature_window":60})
     );
+}
+
+#[tokio::test]
+async fn axum_reuses_one_resource_for_several_router_paths() {
+    let (agent, app) = fixture();
+    for path in ["/whoami", "/orders?sku=cat%2Ftree"] {
+        let response = app
+            .clone()
+            .oneshot(proxy_request(
+                &agent,
+                &format!("https://resource.example{path}"),
+                Vec::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "path {path}");
+    }
 }
