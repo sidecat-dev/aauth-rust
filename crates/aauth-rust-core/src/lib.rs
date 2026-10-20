@@ -1,9 +1,16 @@
-//! AAuth Agent-token wire semantics. No enrollment, HTTP or admission policy.
+//! AAuth Agent, Person, Resource and Auth JWT trust verification.
+//! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
 mod discovery;
 mod identifiers;
-pub use discovery::{AgentKeyResolver, AgentProviderKeys, metadata_jwks_uri};
+mod tokens;
+pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};
+pub use tokens::{
+    AuthClaims, AuthToken, PersonClaims, PersonToken, ResourceClaims, ResourceToken,
+    VerifiedAuthToken, VerifiedPersonToken, VerifiedResourceToken, mint_auth_token,
+    mint_person_token, mint_resource_token,
+};
 
 use aauth_rust_jose::{Jwk, Jws, strict_json};
 use serde::{Deserialize, Serialize};

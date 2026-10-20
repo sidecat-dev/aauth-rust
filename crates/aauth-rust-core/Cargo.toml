@@ -10,10 +10,11 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "AAuth Agent identifiers, token verification and trusted issuer key snapshots"
+description = "AAuth identifiers, token verification and trusted issuer key snapshots"
 
 [dependencies]
 aauth-rust-jose.workspace = true
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 http.workspace = true

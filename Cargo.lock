@@ -26,6 +26,7 @@ name = "aauth-rust-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "aauth-rust-jose",
+ "base64",
  "http",
  "serde",
  "serde_json",
@@ -39,6 +40,24 @@ dependencies = [
  "base64",
  "ed25519-dalek",
  "rand_core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "aauth-rust-person-server"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
+ "base64",
+ "http",
+ "httpdate",
  "serde",
  "serde_json",
  "sha2",
