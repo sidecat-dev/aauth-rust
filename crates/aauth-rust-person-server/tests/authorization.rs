@@ -1039,6 +1039,20 @@ impl aauth_rust_person_server::Federation for AccessTransport {
                     .insert("date", "Thu, 01 Jan 1970 00:16:40 GMT".parse().unwrap());
                 *response.body_mut() = json!({"error": "clock_skew"}).to_string().into_bytes();
             }
+            23 => {
+                *response.status_mut() = http::StatusCode::PAYMENT_REQUIRED;
+                response
+                    .headers_mut()
+                    .insert("content-type", "application/problem+json".parse().unwrap());
+                response.headers_mut().insert(
+                    "location",
+                    "https://as.example/pending/payment".parse().unwrap(),
+                );
+                response
+                    .headers_mut()
+                    .insert("www-authenticate", "Payment id=demo".parse().unwrap());
+                *response.body_mut() = json!({"error":"payment_required"}).to_string().into_bytes();
+            }
             8 => *response.status_mut() = http::StatusCode::ACCEPTED,
             9 => self.now.store(4000, Ordering::SeqCst),
             _ => {}
@@ -1108,7 +1122,7 @@ fn federated_delivery_verifies_as_result_and_retains_exact_step_up_ancestry() {
 #[test]
 fn federation_never_releases_unverified_or_unretained_as_tokens() {
     for mode in [
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
     ] {
         let f = Fixture::new();
         let calls = Arc::new(AtomicUsize::new(0));

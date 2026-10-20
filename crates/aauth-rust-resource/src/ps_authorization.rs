@@ -256,7 +256,8 @@ where
         Ok(resource)
     }
     /// Accurate public metadata; serve at the published Resource well-known path.
-    /// This profile publishes no AS, revocation or explicit authorization endpoint.
+    /// This Resource publishes no revocation or explicit authorization endpoint;
+    /// AS selection is carried by its signed challenge audience.
     ///
     /// # Errors
     /// Returns a serialization error as InvalidJwt.
@@ -276,8 +277,9 @@ where
     /// Verify one actual buffered request, then challenge or invoke Auth policy.
     /// Host supplies trusted Unix seconds and a fresh challenge identifier. Proof
     /// coverage/body bounds follow Signature-Key's 1 MiB buffered profile and
-    /// 60-second window. Missions, AS-issued Auth and known companion authority
-    /// claims are refused by this immediate Core profile.
+    /// 60-second window. Direct mode accepts PS Auth; new_federated accepts only
+    /// its configured AS issuer and discovery role. Missions and known companion
+    /// authority claims are refused by this immediate Core-scope profile.
     pub fn authorize(
         &self,
         request: &Request<Vec<u8>>,

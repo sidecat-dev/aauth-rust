@@ -60,6 +60,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or_else(unreachable)?;
         if response.status() != StatusCode::OK {
             if response.status() != StatusCode::UNAUTHORIZED
+                && response.status() != StatusCode::PAYMENT_REQUIRED
                 && (response.status().is_client_error() || response.status().is_server_error())
                 && content_type.eq_ignore_ascii_case("application/problem+json")
             {
