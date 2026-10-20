@@ -1,67 +1,216 @@
-use aauth_core::{AgentClaims, AgentToken, AgentProviderKeys, TokenError, validate_server_identifier, validate_agent_identifier};
-use aauth_jose::{SigningKey,Jws};
+use aauth_core::{
+    AgentClaims, AgentProviderKeys, AgentToken, TokenError, validate_agent_identifier,
+    validate_server_identifier,
+};
+use aauth_jose::{Jws, SigningKey};
 use serde_json::json;
 
-fn fixture() -> (SigningKey,SigningKey,AgentClaims,AgentProviderKeys) {
-    let ap=SigningKey::from_seed([1;32]); let agent=SigningKey::from_seed([2;32]);
-    let claims=AgentClaims{iss:"https://ap.example".into(),dwk:"aauth-agent.json".into(),sub:"aauth:Agent.7@ap.example".into(),jti:"token-1".into(),iat:1000,exp:2000,cnf:aauth_core::Confirmation{jwk:agent.public_jwk()},ps:None,parent_agent:None,nbf:None,extra:Default::default()};
-    let mut jwk=serde_json::to_value(ap.public_jwk()).unwrap();jwk["kid"]=json!("ap-1");
-    let keys=AgentProviderKeys::from_documents("https://ap.example",&serde_json::to_vec(&json!({"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"})).unwrap(),&serde_json::to_vec(&json!({"keys":[{"kid":"future","kty":"AKP","alg":"ML-DSA-44"},jwk]})).unwrap()).unwrap();
-    (ap,agent,claims,keys)
+fn fixture() -> (SigningKey, SigningKey, AgentClaims, AgentProviderKeys) {
+    let ap = SigningKey::from_seed([1; 32]);
+    let agent = SigningKey::from_seed([2; 32]);
+    let claims = AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent.7@ap.example".into(),
+        jti: "token-1".into(),
+        iat: 1000,
+        exp: 2000,
+        cnf: aauth_core::Confirmation {
+            jwk: agent.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    };
+    let mut jwk = serde_json::to_value(ap.public_jwk()).unwrap();
+    jwk["kid"] = json!("ap-1");
+    let keys = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        &serde_json::to_vec(
+            &json!({"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}),
+        )
+        .unwrap(),
+        &serde_json::to_vec(&json!({"keys":[{"kid":"future","kty":"AKP","alg":"ML-DSA-44"},jwk]}))
+            .unwrap(),
+    )
+    .unwrap();
+    (ap, agent, claims, keys)
 }
-fn mint(ap:&SigningKey,claims:&AgentClaims,typ:&str)->String {
-    Jws::sign(&json!({"alg":"Ed25519","kid":"ap-1","typ":typ}),&serde_json::to_vec(claims).unwrap(),ap).unwrap()
+fn mint(ap: &SigningKey, claims: &AgentClaims, typ: &str) -> String {
+    Jws::sign(
+        &json!({"alg":"Ed25519","kid":"ap-1","typ":typ}),
+        &serde_json::to_vec(claims).unwrap(),
+        ap,
+    )
+    .unwrap()
 }
 
 #[test]
 fn agent_token_checks_type_key_and_expiry_without_losing_bytes() {
-    let (ap,agent,claims,keys)=fixture();let raw=mint(&ap,&claims,"aa-agent+jwt");
-    let token=AgentToken::parse(&raw).unwrap();
-    let verified=token.verify(&keys,1000).unwrap();
-    assert_eq!(verified.claims().sub,"aauth:Agent.7@ap.example");
-    assert_eq!(verified.compact(),raw);
-    assert_eq!(verified.claims().cnf.jwk.thumbprint().unwrap(),agent.public_jwk().thumbprint().unwrap());
-    assert_eq!(token.verify(&keys,2000).err().unwrap(),TokenError::ExpiredJwt);
-    assert!(AgentToken::parse(&mint(&ap,&claims,"aa-auth+jwt")).is_err());
-    let impostor=SigningKey::from_seed([8;32]);
-    assert!(AgentToken::parse(&mint(&impostor,&claims,"aa-agent+jwt")).unwrap().verify(&keys,1000).is_err());
+    let (ap, agent, claims, keys) = fixture();
+    let raw = mint(&ap, &claims, "aa-agent+jwt");
+    let token = AgentToken::parse(&raw).unwrap();
+    let verified = token.verify(&keys, 1000).unwrap();
+    assert_eq!(verified.claims().sub, "aauth:Agent.7@ap.example");
+    assert_eq!(verified.compact(), raw);
+    assert_eq!(
+        verified.claims().cnf.jwk.thumbprint().unwrap(),
+        agent.public_jwk().thumbprint().unwrap()
+    );
+    assert_eq!(
+        token.verify(&keys, 2000).err().unwrap(),
+        TokenError::ExpiredJwt
+    );
+    assert!(AgentToken::parse(&mint(&ap, &claims, "aa-auth+jwt")).is_err());
+    let impostor = SigningKey::from_seed([8; 32]);
+    assert!(
+        AgentToken::parse(&mint(&impostor, &claims, "aa-agent+jwt"))
+            .unwrap()
+            .verify(&keys, 1000)
+            .is_err()
+    );
 }
 
 #[test]
 fn required_claims_issuer_and_confirmation_are_not_inferred() {
-    let (ap,_,claims,keys)=fixture();
-    for field in ["iss","dwk","sub","jti","iat","exp","cnf"] {
-        let mut value=serde_json::to_value(&claims).unwrap();value.as_object_mut().unwrap().remove(field);
-        let raw=Jws::sign(&json!({"alg":"Ed25519","kid":"ap-1","typ":"aa-agent+jwt"}),&serde_json::to_vec(&value).unwrap(),&ap).unwrap();
-        assert!(AgentToken::parse(&raw).is_err(),"missing {field}");
+    let (ap, _, claims, keys) = fixture();
+    for field in ["iss", "dwk", "sub", "jti", "iat", "exp", "cnf"] {
+        let mut value = serde_json::to_value(&claims).unwrap();
+        value.as_object_mut().unwrap().remove(field);
+        let raw = Jws::sign(
+            &json!({"alg":"Ed25519","kid":"ap-1","typ":"aa-agent+jwt"}),
+            &serde_json::to_vec(&value).unwrap(),
+            &ap,
+        )
+        .unwrap();
+        assert!(AgentToken::parse(&raw).is_err(), "missing {field}");
     }
-    for (field,value) in [("iss",json!("https://other.example")),("dwk",json!("aauth-person.json")),("sub",json!("aauth:x@other.example")),("ps",json!("http://ps.example")),("nbf",json!(1500))] {
-        let mut value_claims=serde_json::to_value(&claims).unwrap();value_claims[field]=value;
-        let raw=Jws::sign(&json!({"alg":"Ed25519","kid":"ap-1","typ":"aa-agent+jwt"}),&serde_json::to_vec(&value_claims).unwrap(),&ap).unwrap();
-        assert!(AgentToken::parse(&raw).and_then(|t|t.verify(&keys,1000)).is_err(),"accepted {field}");
+    for (field, value) in [
+        ("iss", json!("https://other.example")),
+        ("dwk", json!("aauth-person.json")),
+        ("sub", json!("aauth:x@other.example")),
+        ("ps", json!("http://ps.example")),
+        ("nbf", json!(1500)),
+    ] {
+        let mut value_claims = serde_json::to_value(&claims).unwrap();
+        value_claims[field] = value;
+        let raw = Jws::sign(
+            &json!({"alg":"Ed25519","kid":"ap-1","typ":"aa-agent+jwt"}),
+            &serde_json::to_vec(&value_claims).unwrap(),
+            &ap,
+        )
+        .unwrap();
+        assert!(
+            AgentToken::parse(&raw)
+                .and_then(|t| t.verify(&keys, 1000))
+                .is_err(),
+            "accepted {field}"
+        );
     }
 }
 
 #[test]
 fn identifiers_are_exact_and_do_not_accept_url_normalization() {
-    for good in ["https://ap.example","https://xn--nxasmq6b.example"]{validate_server_identifier(good).unwrap();}
-    for bad in ["https://AP.example","https://ap.example/","https://ap.example:443","https://ap.example:8443","http://ap.example","https://user@ap.example","https://ap.example?x=1","https://ap.example#x","https://127.0.0.1","https://ap_example","https://-ap.example"] {assert!(validate_server_identifier(bad).is_err(),"{bad}");}
-    for good in ["aauth:A_b-7.8@ap.example","aauth:parent+child@ap.example"]{validate_agent_identifier(good).unwrap();}
-    for bad in ["aauth:@ap.example","aauth:a b@ap.example","agent@ap.example","aauth:a@AP.example"]{assert!(validate_agent_identifier(bad).is_err(),"{bad}");}
+    for good in ["https://ap.example", "https://xn--nxasmq6b.example"] {
+        validate_server_identifier(good).unwrap();
+    }
+    for bad in [
+        "https://AP.example",
+        "https://ap.example/",
+        "https://ap.example:443",
+        "https://ap.example:8443",
+        "http://ap.example",
+        "https://user@ap.example",
+        "https://ap.example?x=1",
+        "https://ap.example#x",
+        "https://127.0.0.1",
+        "https://ap_example",
+        "https://-ap.example",
+    ] {
+        assert!(validate_server_identifier(bad).is_err(), "{bad}");
+    }
+    for good in ["aauth:A_b-7.8@ap.example", "aauth:parent+child@ap.example"] {
+        validate_agent_identifier(good).unwrap();
+    }
+    for bad in [
+        "aauth:@ap.example",
+        "aauth:a b@ap.example",
+        "agent@ap.example",
+        "aauth:a@AP.example",
+    ] {
+        assert!(validate_agent_identifier(bad).is_err(), "{bad}");
+    }
 }
 
 #[test]
 fn discovery_binds_exact_issuer_and_selects_only_the_named_key() {
-    let (_,_,_,keys)=fixture();
-    assert_eq!(keys.key("https://other.example","aauth-agent.json","ap-1").err().unwrap(),TokenError::UnknownKey);
-    assert_eq!(keys.key("https://ap.example","aauth-agent.json","absent").err().unwrap(),TokenError::UnknownKey);
-    assert!(AgentProviderKeys::from_documents("https://ap.example",br#"{"issuer":"https://other.example","jwks_uri":"https://ap.example/keys"}"#,br#"{"keys":[]}"#).is_err());
-    assert!(AgentProviderKeys::from_documents("https://ap.example",br#"{"jwks_uri":"https://ap.example/keys"}"#,br#"{"keys":[]}"#).is_err());
+    let (_, _, _, keys) = fixture();
+    assert_eq!(
+        keys.key("https://other.example", "aauth-agent.json", "ap-1")
+            .err()
+            .unwrap(),
+        TokenError::UnknownKey
+    );
+    assert_eq!(
+        keys.key("https://ap.example", "aauth-agent.json", "absent")
+            .err()
+            .unwrap(),
+        TokenError::UnknownKey
+    );
+    assert!(
+        AgentProviderKeys::from_documents(
+            "https://ap.example",
+            br#"{"issuer":"https://other.example","jwks_uri":"https://ap.example/keys"}"#,
+            br#"{"keys":[]}"#
+        )
+        .is_err()
+    );
+    assert!(
+        AgentProviderKeys::from_documents(
+            "https://ap.example",
+            br#"{"jwks_uri":"https://ap.example/keys"}"#,
+            br#"{"keys":[]}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn iat_is_retained_and_future_refusal_is_explicit_resource_policy() {
-    let (ap,_,mut claims,keys)=fixture();claims.iat=1800;
-    let verified=AgentToken::parse(&mint(&ap,&claims,"aa-agent+jwt")).unwrap().verify(&keys,1000).unwrap();
-    assert_eq!(verified.claims().iat,1800);
+    let (ap, _, mut claims, keys) = fixture();
+    claims.iat = 1800;
+    let verified = AgentToken::parse(&mint(&ap, &claims, "aa-agent+jwt"))
+        .unwrap()
+        .verify(&keys, 1000)
+        .unwrap();
+    assert_eq!(verified.claims().iat, 1800);
+}
+
+#[test]
+fn selected_unknown_key_algorithm_has_defined_feedback() {
+    let (_, _, _, keys) = fixture();
+    assert_eq!(
+        keys.key("https://ap.example", "aauth-agent.json", "future")
+            .err()
+            .unwrap(),
+        TokenError::UnsupportedAlgorithm
+    );
+}
+
+#[test]
+fn missing_confirmation_algorithm_is_not_inferred_or_misclassified() {
+    let (ap, _, claims, _) = fixture();
+    let mut value = serde_json::to_value(claims).unwrap();
+    value["cnf"]["jwk"].as_object_mut().unwrap().remove("alg");
+    let raw = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-1"}),
+        &serde_json::to_vec(&value).unwrap(),
+        &ap,
+    )
+    .unwrap();
+    assert_eq!(
+        AgentToken::parse(&raw).err().unwrap(),
+        TokenError::UnsupportedAlgorithm
+    );
 }

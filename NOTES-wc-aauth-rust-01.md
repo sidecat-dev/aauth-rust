@@ -23,9 +23,9 @@ disables certificate verification or relaxes production identifier syntax.
 
 ## Implementation plan
 
-- [ ] JOSE: write RFC 8037 vectors and rejection cases first, run red, implement
+- [x] JOSE: write RFC 8037 vectors and rejection cases first, run red, implement
   Ed25519 JWK/thumbprint and compact JWS with exact bytes retained, then green.
-- [ ] Signature-Key and Core: tests first for `hwk`, `jwt`, RFC 9421 signature
+- [x] Signature-Key and Core: tests first for `hwk`, `jwt`, RFC 9421 signature
   bases, label correlation, time, token type, issuer and confirmation key;
   implement the bounded profile and run the workspace suite.
 - [ ] Roles and journey: tests first for unsigned challenge, valid identity,
@@ -53,3 +53,42 @@ the direct operator assignment supplies this Gen6 fork and publication scope.
 Verified clean branch wc-aauth-rust-01, origin the assigned workcycle fork.
 Rust 1.99.1, host x86_64-unknown-linux-gnu; ARM64 standard library not installed
 at start. Implementation not yet verified.
+
+Engineering checkpoints: c05e504 JOSE (5 tests); 3dee630 proof/Core (12 more);
+9ea7c0b roles (4 more). Tests were added before the new APIs, with initial
+compilation failures for missing implementation, followed by passing runs.
+Corrected one mistyped RFC 8032 signature fixture (an extra hex digit).
+The loopback journey now executes 14 wire/TLS checks in one integration test.
+The first ARM64 library build passed; final rerun follows the role changes.
+Installed rustfmt/clippy because the host initially lacked them.
+
+Resource register before creation: one read-only harness review agent, owned by
+this cycle and ending when its findings return; it is an additional code review,
+not the required different-vendor review. Local build artifacts stay in ignored
+target/; loopback listeners and threads are owned by a per-run RAII guard,
+joined and closed before the example/test returns. No remote services created.
+
+## Engineer handoff, 02:23 MDT
+
+Additional same-vendor review returned three concrete findings, all reproduced
+before fixing: RFC 9421 authority normalization, defined rejection feedback for
+non-jwt Agent requests, and unsupported selected-key algorithm feedback. The
+fixes pass their regression tests. Also reproduced and fixed incomplete
+`required_input` feedback for query/Authorization coverage. No critical proof
+bypass was reported; this is not a security certification.
+
+Current suite: **26 passed, 0 failed**, with **14 checks** in the loopback TLS
+integration test. `cargo clippy --workspace --all-targets --locked -- -D warnings`
+passes. ARM64 library build passed; final build and release-profile example
+checks are being retained below. Eight current source SHA-256 values match the
+retained snapshot; the seven Go baseline rows are preserved exactly in the main
+manifest as well as the verbatim sibling snapshot.
+
+Different-vendor review and muse cold QA remain the lead's gates before an MR
+into the sprint fork. No merge or release has occurred. CI defines Linux x86_64
+and ARM64 native jobs with executable artifacts, plus opt-in macOS/Windows jobs;
+configuration alone is not execution evidence. Artifacts expire in 14 days.
+
+Cross-check: aauth-go already normalizes authority in
+`signaturekey/request.go:normalizedRequestAuthority`. Other feedback findings
+are local implementation defects, not editor issues. No upstream feedback filed.
