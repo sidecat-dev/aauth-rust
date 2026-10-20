@@ -304,3 +304,49 @@ fn metadata_and_signed_listener_origin_are_separate() {
     assert_eq!(v["issuer"], AS);
     assert_eq!(v["auth_token_endpoint"], format!("{AS}/token"));
 }
+
+#[test]
+fn ps_service_proof_failures_are_key_or_proof_errors_before_policy() {
+    // Signature-Key jwks-uri-scheme/errors and Core server-identifiers: this is
+    // a service-key assertion, so invalid PS identifiers are not invalid JWTs.
+    let seen = Arc::new(AtomicUsize::new(0));
+    let calls = seen.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        move |_: &aauth_rust_access_server::AuthorizationRequest| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(PolicyError::Denied)
+        },
+        || 1000,
+        || "unused".into(),
+    )
+    .unwrap();
+    for (id, dwk, kid) in [
+        ("https://PS.example", "aauth-person.json", "ps"),
+        ("https://ps.example:9443", "aauth-person.json", "ps"),
+        ("https://attacker.example", "aauth-person.json", "ps"),
+        (PS, "aauth-access.json", "ps"),
+    ] {
+        let mut req = request(good());
+        sign_request(
+            &mut req,
+            &SigningKey::from_seed([3; 32]),
+            KeyMaterial::JwksUri {
+                id: id.into(),
+                dwk: dwk.into(),
+                kid: kid.into(),
+            },
+            1000,
+        )
+        .unwrap();
+        let response = server.handle(&req);
+        assert_eq!(response.status(), 401);
+        assert_eq!(
+            response.headers()["signature-error"],
+            "error=invalid_key",
+            "{id} {dwk}"
+        );
+    }
+    assert_eq!(seen.load(Ordering::SeqCst), 0);
+}

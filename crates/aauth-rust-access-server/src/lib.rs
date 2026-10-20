@@ -239,7 +239,8 @@ impl<
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
             return Err(Failure::proof(ProofError::UnsupportedScheme, request, now));
         };
-        validate_server_identifier(id).map_err(Failure::credential)?;
+        validate_server_identifier(id)
+            .map_err(|_| Failure::proof(ProofError::InvalidKey, request, now))?;
         if dwk != "aauth-person.json" {
             return Err(Failure::proof(ProofError::InvalidKey, request, now));
         }

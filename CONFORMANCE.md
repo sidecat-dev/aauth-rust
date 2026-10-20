@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **169 integration tests and 5 backend unit tests
+Current engineer evidence: **170 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -35,7 +35,7 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Durable file creation / record shape | Parent directory synchronized after file/schema initialization; sync failure refuses open; bare filenames use current directory. Both stores reject malformed Agent identities, parent ties and Person/Auth lineage without leaking state; durable decoder refuses malformed rows | `aauth-rust-person-server-redb/src/open_tests.rs` (2 Unix tests), shared store contract/validation and backend row tests; Linux syscall witness |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
-| Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint tests (4), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (1 test,15 assertions) |
+| Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint tests (5), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (1 test,15 assertions) |
 | Federated retained namespace | AS issuer/JTI identifies the credential; explicit PS namespace owns binding/directed identity; exact presented ancestry, conflicts/revocation and reopen | Updated public storetest and persistence contract, MemoryStore and RedbStore |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
 
@@ -58,7 +58,8 @@ missionless Core-scope grants. It verifies a PS `jwks_uri` HTTP proof, Agent,
 Resource and actual presented Person/Auth credentials before resource policy;
 checks lineage/key/target/role, scope narrowing and parent lifetimes; and publishes
 AS metadata/JWKS. `aauth-rust-access-server/tests/endpoint.rs` pins refusals before
-policy, typed policy outcomes, time resampling and listener/issuer separation.
+policy, typed policy outcomes, time resampling, listener/issuer separation and
+invalid service identities reported as invalid_key before policy.
 PS federation and the four-party TLS composition execute in the same checkout.
 The PS verifies AS role/issuer, recipient/key/person, tenant/account, scope and
 parent expiry before storing/releasing the exact credential. AS401 maps to
