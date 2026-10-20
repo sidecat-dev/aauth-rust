@@ -4,7 +4,7 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **184 integration tests and 5 backend unit tests
+Current engineer evidence: **192 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -18,7 +18,8 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
-| Deferred wire and state primitives | Bounded202 claims/clarification/interaction/approval and402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; role orchestration not yet implemented | `aauth-rust-core/tests/continuation.rs` (8 tests) |
+| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (6 tests) |
+| Deferred wire and state primitives | Bounded202 claims/clarification/interaction/approval and402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; role orchestration not yet implemented | `aauth-rust-core/tests/continuation.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
@@ -159,9 +160,12 @@ profile rather than conferring scope authority.
   policy and per-operation Resource profiles; partial grants do not trigger
   automatic step-up negotiation.
 - **AGENT-REQUIREMENT-PROFILE:** Agent parses immediate Agent/Person/Auth
-  requirements with a 64 KiB combined-field limit. Other requirement values are
-  explicit unsupported errors. Extraction is not JWT verification, automatic
-  retry, polling, interaction or deferred-delivery support.
+  requirements with a 64 KiB combined-field limit. Other values remain
+  explicit unsupported errors in that immediate parser. The separate
+  `PollSession` helper parses complete202/402 responses and prepares signed GET,
+  clarification POST and DELETE without transport or sleeps. It enforces finite
+  deadlines and Retry-After/backoff. Final credentials still require verification.
+  These client/wire primitives do not establish server-side deferred support.
 - PS, AS and signing-Resource helpers also publish one active key. Their multi-key
   overlap/retirement lifecycle is absent, as with AP-KEY-ROLLOVER. Metadata
   advertises only implemented endpoints; branding extensions belong to the host.

@@ -24,6 +24,7 @@ dependencies = [
  "aauth-rust-jose",
  "aauth-rust-signature-key",
  "http",
+ "serde_json",
  "sfv",
  "thiserror",
 ]

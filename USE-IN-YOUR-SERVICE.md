@@ -749,3 +749,43 @@ routing hint and an unknown audience: both fail, without another AS call. In an
 async HTTP service, run the selected federated `handle` in a blocking worker
 because its adapter performs synchronous outbound I/O. Direct handling requires
 no outbound AS call.
+
+## Prepare explicit Agent polls
+
+`aauth_rust_agent::PollSession::new(endpoint, &response, now, deadline)` parses
+an authenticated 202/402 response from a host-admitted HTTPS endpoint. It accepts
+absolute or root-relative same-origin pending locations, rejects changes of
+Location during the session, and bounds the host deadline to one hour. Missing
+Retry-After uses five seconds;429 increases the interval by five seconds.
+The host supplies trusted Unix seconds, schedules work and sends the request
+returned by `session.request(&agent, now)`. That request is a signed GET with no
+original POST body. Calling early returns `PollError::TooEarly { at }`.
+
+Pass the actual response to `session.accept(response, now)`. `None` keeps the
+session pending; `Some(response)` returns the terminal wire response and closes
+the session. Verify a final Auth token with the existing Agent context helpers
+before presenting it to a Resource. The polling helper does not authenticate
+response bytes or broaden issuer trust. Use a fresh admitted transport response
+for each call; never follow redirects with credentials.
+
+For a clarification, `session.answer(&agent, answer, now)` creates the signed
+`action=clarification_response` POST. The question's timeout also bounds this
+session. `session.cancel(&agent, now)` creates a signed DELETE; observe the
+server's result before reporting cancellation. Interaction URLs and codes are
+host inputs for directing a person; sanitize untrusted Markdown before display.
+Payment details are opaque host input. The current parser supports the
+WWW-Authenticate payment profile with an empty or JSON body; other payment
+protocol encodings need a separate parser. It never settles a bill.
+
+The shared `aauth_rust_core::continuation::ContinuationStore` contract exposes
+atomic insert/load/conditional replace or remove. AS and PS hosts must use
+separate stores or namespaces. `MemoryContinuations::new(capacity)` is a bounded
+process-memory fixture with a 1 MiB encoded row limit; share an Arc across role
+recomposition. Process restart durability and expiry collection belong to a
+host adapter. Revision values change across deletion/reinsertion so a stale
+consumer cannot remove a replacement record.
+
+These helpers and fixtures are independently tested primitives. The current
+server profile still lacks AS deferred-response orchestration, payment
+settlement, claims exchange and interaction handlers; no complete deferred
+four-party journey is claimed by these additions.

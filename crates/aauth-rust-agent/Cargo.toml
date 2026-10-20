@@ -19,3 +19,4 @@ aauth-rust-signature-key.workspace = true
 http.workspace = true
 sfv.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true

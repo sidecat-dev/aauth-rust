@@ -80,21 +80,37 @@ impl PendingResponse {
                 .ok_or(PendingError)
         };
         let location = same_origin_location(endpoint, header("location")?)?;
-        let retry_after = header("retry-after")?
-            .parse::<u64>()
-            .map_err(|_| PendingError)?;
-        if retry_after > 3600
-            || !header("cache-control")?
+        let retry_after = if response.headers().contains_key("retry-after") {
+            header("retry-after")?
+                .parse::<u64>()
+                .map_err(|_| PendingError)?
+        } else {
+            5
+        };
+        let payment = response.status() == StatusCode::PAYMENT_REQUIRED;
+        if retry_after > 3600 {
+            return Err(PendingError);
+        }
+        if !payment
+            && !header("cache-control")?
                 .split(',')
                 .any(|v| v.trim().eq_ignore_ascii_case("no-store"))
-            || !header("content-type")?
+        {
+            return Err(PendingError);
+        }
+        if (!payment || !response.body().is_empty())
+            && !header("content-type")?
                 .split(';')
                 .next()
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
         {
             return Err(PendingError);
         }
-        let body = aauth_rust_jose::strict_json(response.body()).map_err(|_| PendingError)?;
+        let body = if payment && response.body().is_empty() {
+            json!({})
+        } else {
+            aauth_rust_jose::strict_json(response.body()).map_err(|_| PendingError)?
+        };
         let object = body.as_object().ok_or(PendingError)?;
         if object.contains_key("auth_token") {
             return Err(PendingError);

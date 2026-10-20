@@ -3,6 +3,9 @@
 #![deny(missing_docs)]
 mod credentials;
 pub use credentials::FederatedContext;
+
+mod polling;
+pub use polling::{PollError, PollSession};
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};

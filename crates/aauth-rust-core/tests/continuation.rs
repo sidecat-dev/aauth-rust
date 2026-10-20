@@ -99,7 +99,7 @@ fn pending_urls_and_framing_fail_closed() {
             "{location}"
         );
     }
-    for header in ["location", "retry-after", "cache-control", "content-type"] {
+    for header in ["location", "cache-control", "content-type"] {
         let mut r = response(202, "requirement=approval", json!({"status":"pending"}));
         r.headers_mut().remove(header);
         assert!(
@@ -203,4 +203,31 @@ fn store_revisions_prevent_delete_reinsert_aba_and_bound_record_size() {
         Err(StoreError::Capacity)
     );
     assert_eq!(store.load("same").unwrap().unwrap().value, json!({"v":2}));
+}
+
+#[test]
+fn minimal_payment_challenge_only_requires_location_and_payment_details() {
+    let r = Response::builder()
+        .status(402)
+        .header("location", "/pending/bill")
+        .header(
+            "www-authenticate",
+            "Payment id=\"invoice-1\", method=\"example\"",
+        )
+        .body(Vec::new())
+        .unwrap();
+    let pending = PendingResponse::parse("https://as.example/token", &r).unwrap();
+    assert_eq!(pending.retry_after, 5);
+    assert_eq!(pending.location, "https://as.example/pending/bill");
+}
+#[test]
+fn absent_retry_after_uses_the_protocol_default() {
+    let mut r = response(202, "requirement=approval", json!({"status":"pending"}));
+    r.headers_mut().remove("retry-after");
+    assert_eq!(
+        PendingResponse::parse("https://as.example/token", &r)
+            .unwrap()
+            .retry_after,
+        5
+    );
 }

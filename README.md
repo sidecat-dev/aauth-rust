@@ -87,6 +87,9 @@ disposable `MemoryStore` state.
 `Requirement::from_headers` in the Agent crate extracts the challenge as
 Structured Fields; the Agent then verifies it before exchanging credentials.
 
+For explicit client polling helpers and their current server-side limits, see
+[prepare Agent polls](USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls).
+
 ## Use the libraries
 
 The following complete program issues a token, signs a request, verifies it,
