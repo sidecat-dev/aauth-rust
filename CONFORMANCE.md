@@ -8,7 +8,7 @@ This development branch carries `bc5336efa3c29e9f604c9a4dbd9df7d7dba941a9`
 as the explicit Access Server/four-party prerequisite. Rust05 passed its gates and merged into sprint main. The prerequisite is now
 history; Rust06 is rebased onto that sprint main and remains a separate candidate.
 
-Current engineer evidence: **219 integration tests and 5 backend unit tests
+Current engineer evidence: **223 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -22,9 +22,9 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
-| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (8 tests) |
-| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (38 tests, including13 deferred cases), deferred TLS journey |
-| AS deferred authorization | Explicit policy for202 claims/clarification/interaction/approval or402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (17 tests, including10 deferred cases and omitted presented_token) |
+| Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits,429 linear backoff,503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (9 tests) |
+| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (40 tests, including15 deferred cases), deferred TLS journey |
+| AS deferred authorization | Explicit policy for202 claims/clarification/interaction/approval or402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (18 tests, including11 deferred cases and omitted presented_token) |
 | Deferred wire and state primitives | Bounded202 claims/clarification/interaction/approval and402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
 | Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors | `aauth-rust-signature-key/tests/proofs.rs` (28 tests), TLS journey |
@@ -216,7 +216,9 @@ refresh/decision reuse and clarification `updated_request` are not implemented.
 The supported chat action is `clarification_response`, bounded to five rounds,
 plus signed cancellation. AS and PS each retain their own round counter and
 absolute question deadline; repeating an unanswered question never restarts it,
-and the wire timeout reports remaining seconds. AS429 intervals accumulate five
+and the wire timeout reports remaining seconds. The PS acknowledges a queued
+answer with approval while awaiting host advancement, so an identical question
+in a subsequent round remains distinguishable. AS429 intervals accumulate five
 seconds per refusal. A queued answer or manual answer cannot bypass a429/503
 retry deadline. Terminal grant checks run after final custody writes/removals,
 including current trust, PS binding, pending expiry and remaining token lifetime;

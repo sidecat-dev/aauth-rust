@@ -77,6 +77,23 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 }
             }
         };
+        value["answering"] = json!(
+            method == "POST" && matches!(pending.requirement, Requirement::Clarification { .. })
+        );
+        if value["answering"] == true {
+            let own: PendingResponse = serde_json::from_value(value["ps_pending"].clone())
+                .map_err(|_| AdvanceError::Unavailable)?;
+            value["ps_pending"] = serde_json::to_value(
+                PendingResponse::new(
+                    &self.config.signed_origin,
+                    &own.location,
+                    d.retry_after,
+                    Requirement::Approval,
+                )
+                .map_err(|_| AdvanceError::Unavailable)?,
+            )
+            .map_err(|_| AdvanceError::Unavailable)?;
+        }
         value["state"] = json!("advancing");
         if !d
             .store
@@ -272,6 +289,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if !waiting {
             value["question_deadline"] = Value::Null;
         }
+        value["answering"] = json!(false);
         // The lease is checked again at publication; no terminal response is
         // available to the Agent until this conditional write succeeds.
         if !d

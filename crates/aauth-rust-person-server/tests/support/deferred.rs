@@ -906,3 +906,110 @@ fn expires_in_uses_the_clock_after_final_custody_io() {
         assert_eq!(output(&result)["expires_in"], 595);
     }
 }
+
+#[test]
+fn queued_answer_ack_allows_an_identical_question_in_the_next_as_round() {
+    let f = Fixture::new();
+    let transport = ScriptedTransport::new(vec![question("Why?", 10), question("Why?", 10)]);
+    let server = f
+        .server(2000)
+        .with_federation(transport)
+        .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+        .unwrap();
+    let holder = agent(false);
+    let (_, _, first) = initial(&f, &server, &holder);
+    let mut session =
+        aauth_rust_agent::PollSession::new(&format!("{PS}/token"), &first, 1000, 1060).unwrap();
+    f.host.now.store(1001, Ordering::SeqCst);
+    let acknowledgement = server.handle(&session.answer(&holder, "first answer", 1001).unwrap());
+    let acknowledged = PendingResponse::parse(&format!("{PS}/token"), &acknowledgement).unwrap();
+    assert!(matches!(acknowledged.requirement, Requirement::Approval));
+    session.accept(acknowledgement, 1001).unwrap();
+    f.host.now.store(1005, Ordering::SeqCst);
+    assert_eq!(
+        server
+            .advance_federation(&session.pending().location, FederationInput::Poll)
+            .unwrap()
+            .status(),
+        202
+    );
+    let next = server.handle(&session.request(&holder, 1005).unwrap());
+    session.accept(next, 1005).unwrap();
+    f.host.now.store(1014, Ordering::SeqCst);
+    let response = server.handle(&session.answer(&holder, "second answer", 1014).unwrap());
+    assert_eq!(response.status(), 202);
+}
+
+#[test]
+fn forwarded_answer_survives_agent_polls_after_its_old_question_timeout() {
+    #[derive(Clone)]
+    struct Blocking {
+        inner: ScriptedTransport,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+    }
+    impl aauth_rust_person_server::Federation for Blocking {
+        fn endpoint(&self, i: &str) -> Result<String, aauth_rust_person_server::FederationError> {
+            aauth_rust_person_server::Federation::endpoint(&self.inner, i)
+        }
+        fn send(
+            &self,
+            r: &Request<Vec<u8>>,
+        ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
+            if r.uri().path().starts_with("/token/pending/") {
+                self.entered.wait();
+                self.release.wait();
+            }
+            aauth_rust_person_server::Federation::send(&self.inner, r)
+        }
+    }
+    let f = Fixture::new();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let transport = Blocking {
+        inner: ScriptedTransport::new(vec![question("Why?", 10), question("Why?", 10)]),
+        entered: entered.clone(),
+        release: release.clone(),
+    };
+    let server = Arc::new(
+        f.server(2000)
+            .with_federation(transport)
+            .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+            .unwrap(),
+    );
+    let holder = agent(false);
+    let (_, _, first) = initial(&f, &server, &holder);
+    let p = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+    f.host.now.store(1001, Ordering::SeqCst);
+    assert_eq!(
+        poll(
+            &server,
+            &holder,
+            &p.location,
+            "POST",
+            Some(json!({"action":"clarification_response","clarification_response":"on time"})),
+            1001
+        )
+        .status(),
+        202
+    );
+    f.host.now.store(1005, Ordering::SeqCst);
+    let worker = server.clone();
+    let location = p.location.clone();
+    let thread =
+        std::thread::spawn(move || worker.advance_federation(&location, FederationInput::Poll));
+    entered.wait();
+    f.host.now.store(1010, Ordering::SeqCst);
+    let competing = poll(&server, &holder, &p.location, "GET", None, 1010);
+    release.wait();
+    let completed = thread.join().unwrap();
+    assert_eq!(competing.status(), 202);
+    assert_eq!(completed.unwrap().status(), 202);
+    let latest = poll(&server, &holder, &p.location, "GET", None, 1010);
+    assert!(matches!(
+        PendingResponse::parse(&p.location, &latest)
+            .unwrap()
+            .requirement,
+        Requirement::Clarification { .. }
+    ));
+}

@@ -220,3 +220,41 @@ fn an_answer_can_start_a_new_round_with_identical_question_text() {
     assert!(session.answer(&a, "second answer", 1014).is_ok());
     assert!(matches!(session.request(&a, 1015), Err(PollError::Expired)));
 }
+
+#[test]
+fn on_time_answer_accepts_a_delayed_response_within_the_session_lifetime() {
+    let a = agent();
+    let question = || {
+        pending(Requirement::Clarification {
+            question: "Why?".into(),
+            timeout: Some(10),
+            options: vec![],
+        })
+    };
+    for status in [200, 202, 403, 408] {
+        let mut session =
+            PollSession::new("https://ps.example/token", &question(), 1000, 1100).unwrap();
+        session.answer(&a, "on time", 1009).unwrap();
+        let terminal = status != 202;
+        let response = if terminal {
+            Response::builder()
+                .status(status)
+                .body(b"actual response".to_vec())
+                .unwrap()
+        } else {
+            pending(Requirement::Approval)
+        };
+        let result = session.accept(response, 1011).unwrap();
+        assert_eq!(result.is_some(), terminal);
+        if !terminal {
+            assert!(session.request(&a, 1016).is_ok());
+        }
+    }
+    let mut session =
+        PollSession::new("https://ps.example/token", &question(), 1000, 1100).unwrap();
+    session.answer(&a, "on time", 1009).unwrap();
+    assert!(matches!(
+        session.accept(pending(Requirement::Approval), 1100),
+        Err(PollError::Expired)
+    ));
+}

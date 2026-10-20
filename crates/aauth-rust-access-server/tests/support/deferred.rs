@@ -564,3 +564,65 @@ fn unchanged_clarification_get_does_not_extend_its_timeout() {
         410
     );
 }
+
+#[test]
+fn accepted_answer_retires_its_question_deadline_during_policy_processing() {
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock = now.clone();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let (e, r) = (entered.clone(), release.clone());
+    let server = Arc::new(
+        AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            grant,
+            move || clock.load(Ordering::SeqCst),
+            || "opaque".into(),
+        )
+        .unwrap()
+        .with_deferred(
+            config(Arc::new(MemoryContinuations::new(4))),
+            move |c: &DeferredContext| {
+                if c.clarifications.is_empty() {
+                    Ok(Some(Requirement::Clarification {
+                        question: "Why?".into(),
+                        timeout: Some(10),
+                        options: vec![],
+                    }))
+                } else {
+                    e.wait();
+                    r.wait();
+                    Ok(None)
+                }
+            },
+        )
+        .unwrap(),
+    );
+    let first = server.handle(&request(good()));
+    let p = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+    now.store(1005, Ordering::SeqCst);
+    let worker = server.clone();
+    let location = p.location.clone();
+    let thread = std::thread::spawn(move || {
+        worker.handle(&poll(
+            &location,
+            "POST",
+            Some(json!({"action":"clarification_response","clarification_response":"on time"})),
+            1005,
+        ))
+    });
+    entered.wait();
+    now.store(1010, Ordering::SeqCst);
+    let competing = server.handle(&poll(&p.location, "GET", None, 1010));
+    release.wait();
+    let completed = thread.join().unwrap();
+    assert_eq!(competing.status(), 429);
+    assert_eq!(completed.status(), 200);
+    assert_eq!(
+        server
+            .handle(&poll(&p.location, "GET", None, 1010))
+            .status(),
+        410
+    );
+}

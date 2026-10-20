@@ -67,11 +67,18 @@ impl PollSession {
     pub fn pending(&self) -> &PendingResponse {
         &self.pending
     }
-    fn current(&self, now: i64) -> Result<(), PollError> {
+    fn current_lifetime(&self, now: i64) -> Result<(), PollError> {
         if self.finished {
             return Err(PollError::Finished);
         }
-        if now < 0 || now >= self.deadline || self.question_deadline.is_some_and(|at| now >= at) {
+        if now < 0 || now >= self.deadline {
+            return Err(PollError::Expired);
+        }
+        Ok(())
+    }
+    fn current(&self, now: i64) -> Result<(), PollError> {
+        self.current_lifetime(now)?;
+        if self.question_deadline.is_some_and(|at| now >= at) {
             return Err(PollError::Expired);
         }
         Ok(())
@@ -146,7 +153,20 @@ impl PollSession {
         response: Response<Vec<u8>>,
         now: i64,
     ) -> Result<Option<Response<Vec<u8>>>, PollError> {
-        self.current(now)?;
+        if self.answering
+            && ![
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ]
+            .contains(&response.status())
+        {
+            // The question deadline bounds preparing the answer. Its actual
+            // completed response may arrive after the old question
+            // expires; the overall session deadline still bounds all delivery.
+            self.current_lifetime(now)?;
+        } else {
+            self.current(now)?;
+        }
         if response.body().len() > 1_048_576 {
             self.finished = true;
             return Err(PollError::InvalidResponse);
@@ -179,6 +199,7 @@ impl PollSession {
                 Ok(None)
             }
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE => {
+                self.answering = false;
                 let interval = if response.status() == StatusCode::TOO_MANY_REQUESTS {
                     self.pending.retry_after.saturating_add(5)
                 } else {

@@ -303,6 +303,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .filter(|s| !s.is_empty() && s.len() <= 65536)
                 .ok_or_else(|| Failure::parameter("invalid_request"))?;
             value["queued"] = json!(answer);
+            // This POST only queues the answer; it is not the AS's next round.
+            // Stop presenting the answered question until explicit host advance
+            // publishes a fresh AS requirement, even if its text is identical.
+            let acknowledgement = PendingResponse::new(
+                &self.config.signed_origin,
+                &pending.location,
+                d.retry_after,
+                Requirement::Approval,
+            )
+            .map_err(|_| Failure::internal())?;
+            value["ps_pending"] =
+                serde_json::to_value(&acknowledgement).map_err(|_| Failure::internal())?;
             if !d
                 .store
                 .replace(&id, snapshot.revision, Some(value.clone()))
@@ -310,7 +322,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Ok(throttled());
             }
-            return pending_wire(&pending, &value, (self.clock)());
+            return pending_wire(&acknowledgement, &value, (self.clock)());
         }
         if value["state"] == "ready" {
             value["state"] = json!("delivering");
@@ -394,9 +406,10 @@ fn same_question(left: &Requirement, right: &Requirement) -> bool {
 }
 fn expired(value: &Value, now: i64) -> Result<bool, Failure> {
     Ok(now >= number(value, "deadline")?
-        || value["question_deadline"]
-            .as_i64()
-            .is_some_and(|at| now >= at))
+        || (!(value["state"] == "advancing" && value["answering"] == true)
+            && value["question_deadline"]
+                .as_i64()
+                .is_some_and(|at| now >= at)))
 }
 fn pending_wire(
     pending: &PendingResponse,
@@ -404,7 +417,9 @@ fn pending_wire(
     now: i64,
 ) -> Result<Response<Vec<u8>>, Failure> {
     let mut pending = pending.clone();
-    if let Some(at) = value["question_deadline"].as_i64() {
+    if let Some(at) = value["question_deadline"].as_i64()
+        && !(value["state"] == "advancing" && value["answering"] == true)
+    {
         if now >= at {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }

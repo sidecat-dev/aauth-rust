@@ -773,7 +773,10 @@ For a clarification, `session.answer(&agent, answer, now)` mutably prepares the
 signed `action=clarification_response` POST. Send those exact bytes and give its
 actual response to the next `accept`; discard the session if the prepared answer
 is abandoned. This lets a subsequent identical question start a new round.
-An unanswered question keeps its original absolute timeout across repeated polls. `session.cancel(&agent, now)` creates a signed DELETE; observe the
+An unanswered question keeps its original absolute timeout across repeated polls.
+A successful reply to an on-time answer may arrive after the old question timeout;
+the overall session deadline still bounds accepting that reply. A429/503 refusal
+preserves the old question deadline for any answer retry. `session.cancel(&agent, now)` creates a signed DELETE; observe the
 server's result before reporting cancellation. Interaction URLs and codes are
 host inputs for directing a person; sanitize untrusted Markdown before display.
 Payment details are opaque host input. The current parser supports the
@@ -830,7 +833,10 @@ Use `FederationInput::Claims(map)` to POST requested claims from a trusted sourc
 `sub` is forbidden because the presented token already identifies the person.
 Use `FederationInput::Clarification(answer)` for a host/user answer. If the PS
 relays a question to the Agent, its signed `clarification_response` POST queues
-one answer without AS I/O; the host explicitly advances it. Interaction URL/code
+one answer without AS I/O; the host explicitly advances it. The queue
+acknowledgement and subsequent waiting Agent polls show approval rather than the
+answered question. The PS retains the AS question deadline independently until
+advancement, and a later AS question starts a new round even with identical text. Interaction URL/code
 lifecycle belongs to the host that serves that interaction. Only that host can
 confirm completion; an Agent poll does not approve an interaction or a payment.
 

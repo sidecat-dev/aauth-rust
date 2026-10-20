@@ -224,6 +224,11 @@ impl<
         } else {
             false
         };
+        if answered {
+            // The recipient answered on time. Processing that accepted answer
+            // remains bounded by the overall request, not its old question.
+            value["question_deadline"] = Value::Null;
+        }
         value["state"] = json!("busy");
         if !d
             .config
