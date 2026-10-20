@@ -4,12 +4,12 @@ As of 2026-10-20. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-Current engineer evidence: **170 integration tests and 5 backend unit tests
+Current engineer evidence: **176 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
-test executes PS service proof, AS grant/delivery and one POST effect with15
-wire/application assertions. Executable examples
+test executes PS service proof, AS grant/delivery and one POST effect, compares
+forwarded compact bytes at the TLS receiver and asserts wire problem codes. Executable examples
 run those same compositions. A wire check is not counted as a separate Rust test.
 Four additional rustdoc tests execute an unsigned Resource challenge, the PS
 and AS constructor/metadata examples and durable-store open/reopen. One ignored backend
@@ -28,14 +28,14 @@ test is a subprocess entry point, executed by its two parent recovery tests.
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (21 tests), `store.rs` (4 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (25 tests, plus the mixed-grants composition test), `store.rs` (4 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
 | Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (10 tests), `service_restart.rs` (2 tests), crate rustdoc |
 | Page corruption / bounded records | Exact data-byte checksum failure and 28 page-prefix bit flips/zeroings never escape open as a panic or bad record; 1 MiB accepted, one-byte overflow and 64 MiB refused without table writes; empty binding refused on read/commit/revoke | `aauth-rust-person-server-redb/tests/corruption.rs` (2 tests), backend tests |
 | Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
 | Durable file creation / record shape | Parent directory synchronized after file/schema initialization; sync failure refuses open; bare filenames use current directory. Both stores reject malformed Agent identities, parent ties and Person/Auth lineage without leaking state; durable decoder refuses malformed rows | `aauth-rust-person-server-redb/src/open_tests.rs` (2 Unix tests), shared store contract/validation and backend row tests; Linux syscall witness |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` (12 tests) |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug | `aauth-rust-agent/tests/requirements.rs` (6 tests), used by the three-party TLS scene |
-| Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint tests (5), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (1 test,15 assertions) |
+| Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint tests (6), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (1 test, including exact forwarded bytes and problem codes) |
 | Federated retained namespace | AS issuer/JTI identifies the credential; explicit PS namespace owns binding/directed identity; exact presented ancestry, conflicts/revocation and reopen | Updated public storetest and persistence contract, MemoryStore and RedbStore |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
 
@@ -62,9 +62,11 @@ policy, typed policy outcomes, time resampling, listener/issuer separation and
 invalid service identities reported as invalid_key before policy.
 PS federation and the four-party TLS composition execute in the same checkout.
 The PS verifies AS role/issuer, recipient/key/person, tenant/account, scope and
-parent expiry before storing/releasing the exact credential. AS401 maps to
-as_unreachable; other well-formed terminal problems relay status/error, including
-Date for parameter clock_skew. No shared four-party harness result or full
+parent expiry before storing/releasing the exact credential. Well-formed terminal
+AS problems, including401, relay their status/error in the PS's own problem body;
+AS Signature-Error/detail remain host-only FederationFailure response extensions.
+Terminal clock_skew at400 or401 preserves AS Date. Endpoint/transport/malformed,
+unverifiable grants and unsupported continuations remain as_unreachable. No shared four-party harness result or full
 cross-implementation equivalence is claimed by these native tests.
 
 **R3-FULL-COMPLIANCE:** postponed by vocabulary. The current Rust Core-scope
@@ -151,6 +153,10 @@ profile rather than conferring scope authority.
   nonempty fixed scope profile across its origin; its host router admits paths.
   Scope-free profiles and automatic step-up negotiation are absent. The PS does
   verify an authentic Auth token used as `presented_token` for a later grant.
+  AS/PS policy may issue a proper scope subset, but this Resource helper then
+  refuses403 if that subset lacks any configured scope. Host must align its AS
+  policy and per-operation Resource profiles; partial grants do not trigger
+  automatic step-up negotiation.
 - **AGENT-REQUIREMENT-PROFILE:** Agent parses immediate Agent/Person/Auth
   requirements with a 64 KiB combined-field limit. Other requirement values are
   explicit unsupported errors. Extraction is not JWT verification, automatic
@@ -187,6 +193,7 @@ profile rather than conferring scope authority.
 | **AS-IMMEDIATE-PROFILE** | [AS Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-token-endpoint) | Immediate top-level missionless Core-scope grants only. Subagent/upstream parameters, mission and unsupported companion claims fail closed. PS-issued three-party chaining remains available in direct mode; no AS call-chaining or parent-mediated AS authorization is claimed. |
 | **AS-DEFERRED-PROFILE** | [AS Response](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#as-response) | No claims/clarification/interaction/approval polling or payment settlement. PS maps unsupported deferred responses to502 as_unreachable; it does not pretend an incomplete exchange succeeded. |
 | **AS-HOST-TRANSPORT** | [PS-AS Federation](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-as-federation), [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | Host admits AS discovery and verifies metadata issuer, bounded HTTPS/certificates, DNS/egress/deadlines/no credential redirects. PS validates endpoint syntax, signed exact body and complete returned grant. The example executes genuine admitted TLS; no general Internet transport is supplied. |
+| **AS-AGENT-PS-PROFILE** | [Agent Token](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-token), [PS-to-AS Token Request](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-to-as-token-request) | AS requires the Agent token's optional ps claim to be present and equal the signing PS; absent/different ps is400 invalid_agent_token before policy. This is a tighter shared Go/Rust profile, not a general claim that ps is mandatory in every Agent token. |
 | **AS-RETAINED-PROFILE** | [Auth Token Delivery](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#auth-token-delivery) | PS retains every delivered AS Auth in its local exact-lineage policy before release. Optional TokenRecord.person_server preserves PS namespace separately from AS token identity. Older local JSON records remain unchanged; custom adapters must pass the extended contract before federation use. AS is stateless, with no audit/revocation or replay cache. |
 
 ## Person Server clause limits
@@ -209,7 +216,7 @@ not claims that the cited clauses are fully implemented.
 | **PS-HOST-METADATA** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | First-use Resource metadata fetching/presentation and the distinct-resource-per-Agent rate-limit SHOULDs are host duties. The library has neither an outbound fetcher nor that limiter. Sanitize Agent-asserted justification before rendering; there is no library renderer. |
 | **PS-ACCOUNT-PROFILE** | [Account Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#account-binding) | PS copies account from a verified Resource challenge; the Resource helper emits none and has no explicit authorization endpoint/account selector. No application account linking, identity proofing or complete account-flow test claim is made. |
 | **PS-REISSUE** | [Auth Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#ps-token-endpoint) | The draft does not make a Resource token single-use. Repeating an identical valid exchange reruns policy and can release another independently retained Auth token with a fresh jti and the same parent bounds. This is not operation idempotency or exactly-once delivery. |
-| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. There is no rollback/delete API; host cleanup follows retain_until. Tests establish refusal to release, not rollback or absence of an internal write. |
+| **ISSUANCE-RELEASE** | [Person Token Endpoint retention](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint) | A committed record can remain after a final expiry/revocation check refuses to release its credential. If the newly issued token expires during the post-commit release window while its inputs remain valid, both direct and federated PS paths return500 server_error, release no token and retain the committed row. There is no rollback/delete API; host cleanup follows retain_until. Other parent-expiry/revocation failures keep their typed parameter errors. authorization.rs pins both post-commit modes and absence of AS Auth rows after unverified delivery. |
 
 The TLS application uses a fixed operation and demo admission policy. It does
 not establish general caller-body forwarding, a downstream account database or

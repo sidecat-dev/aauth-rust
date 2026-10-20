@@ -18,6 +18,7 @@ variables:
     - cargo run --locked -p aauth-rust-resource --example axum
     - cargo run --locked -p aauth-rust-resource --example three-party
     - cargo run --locked -p aauth-rust-resource --example four-party
+    - cargo run --locked -p aauth-rust-person-server --example mixed-grants
     - cargo run --locked -p aauth-rust-person-server-redb --example contracts
     - cargo build --locked --release -p aauth-rust-resource --example direct-identity
     - target/release/examples/direct-identity
@@ -85,6 +86,8 @@ windows:
       cargo run --locked -p aauth-rust-resource --example three-party
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       cargo run --locked -p aauth-rust-resource --example four-party
+      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      cargo run --locked -p aauth-rust-person-server --example mixed-grants
       if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # The optional redb adapter requires Unix directory synchronization.
       cargo build --locked --release -p aauth-rust-resource --example direct-identity

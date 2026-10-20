@@ -196,6 +196,7 @@ fn verified_lineage_and_proof_precede_policy() {
         (6, "clock_skew"),
         (7, "invalid_resource_token"),
         (8, "invalid_request"),
+        (9, "invalid_agent_token"),
     ] {
         let mut a = agent_claims();
         let mut p = person_claims();
@@ -211,6 +212,7 @@ fn verified_lineage_and_proof_precede_policy() {
                 p.exp = 1000
             }
             6 => r.iat = 1061,
+            9 => a.ps = None,
             7 => {
                 r.agent_jkt = SigningKey::from_seed([9; 32])
                     .public_jwk()
@@ -349,4 +351,42 @@ fn ps_service_proof_failures_are_key_or_proof_errors_before_policy() {
         );
     }
     assert_eq!(seen.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn agent_expiry_is_the_tightest_auth_lifetime_bound() {
+    let mut agent = agent_claims();
+    agent.exp = 1500;
+    agent.jti = "short-agent-credential".into();
+    // Presented Person expiry2000 and requested lifetime3600 both exceed Agent.
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |r: &aauth_rust_access_server::AuthorizationRequest| {
+            Ok(Decision {
+                scopes: r.scopes.clone(),
+                lifetime: 3600,
+            })
+        },
+        || 1000,
+        || "agent-bounded-auth".into(),
+    )
+    .unwrap();
+    let response = server.handle(&request(body(agent, person_claims(), resource_claims())));
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let value: Value = serde_json::from_slice(response.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().exp, 1500);
+    assert!(
+        token.claims().exp > resource_claims().exp,
+        "challenge is not a grant-lifetime cap"
+    );
 }

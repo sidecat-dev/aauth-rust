@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -34,6 +34,11 @@ const AS: &str = "https://as.example";
 const ORDERS: &str = "https://orders.example";
 /// Observed wire and application facts asserted by the integration test.
 pub struct Transcript {
+    pub original_tokens: ForwardedTokens,
+    pub forwarded_tokens: Vec<ForwardedTokens>,
+    pub denied_error: String,
+    pub bad_delivery_error: String,
+    pub untrusted_ps_error: String,
     pub unsigned_status: u16,
     pub challenge_status: u16,
     pub authorized_status: u16,
@@ -50,6 +55,13 @@ pub struct Transcript {
     pub ps_proof_verified: bool,
     pub as_token_retained: bool,
     pub untrusted_tls_refused: bool,
+}
+/// Exact compact bytes observed after actual PS-to-AS TLS delivery.
+#[derive(Clone)]
+pub struct ForwardedTokens {
+    pub agent_token: String,
+    pub presented_token: String,
+    pub resource_token: String,
 }
 // Only this fixed demonstration's explicitly admitted issuers are inserted.
 // An Internet service also supplies deadlines, egress admission and refresh.
@@ -238,6 +250,8 @@ pub fn run() -> Result<Transcript> {
     let mode = Arc::new(AtomicUsize::new(0));
     let selected = mode.clone();
     let as_policy = mode.clone();
+    let forwarded = Arc::new(Mutex::new(Vec::new()));
+    let captured = forwarded.clone();
     let proof_checks = Arc::new(AtomicUsize::new(0));
     let proof_count = proof_checks.clone();
     let proof_keys = trust.clone();
@@ -263,6 +277,19 @@ pub fn run() -> Result<Transcript> {
     )?;
     let as_tls = Arc::new(TlsServer::start("as.example", move |request| {
         if request.uri().path() == "/token" {
+            if let Ok(body) = serde_json::from_slice::<Value>(request.body())
+                && let (Some(agent), Some(presented), Some(resource)) = (
+                    body["agent_token"].as_str(),
+                    body["presented_token"].as_str(),
+                    body["resource_token"].as_str(),
+                )
+            {
+                captured.lock().unwrap().push(ForwardedTokens {
+                    agent_token: agent.into(),
+                    presented_token: presented.into(),
+                    resource_token: resource.into(),
+                });
+            }
             // Independent observer of actual incoming service proof and body coverage.
             if let Ok(proof) =
                 PreparedRequest::prepare_with_schemes(&request, "sig", now(), 60, &["jwks_uri"])
@@ -420,7 +447,23 @@ pub fn run() -> Result<Transcript> {
         now(),
     )?;
     let foreign = as_tls.send(&foreign)?;
+    let problem_error = |r: &Response<Vec<u8>>| -> Result<String> {
+        let body: Value = serde_json::from_slice(r.body())?;
+        Ok(body["error"]
+            .as_str()
+            .ok_or("missing problem error")?
+            .into())
+    };
     Ok(Transcript {
+        original_tokens: ForwardedTokens {
+            agent_token: agent.token().into(),
+            presented_token: person,
+            resource_token: resource,
+        },
+        forwarded_tokens: forwarded.lock().unwrap().clone(),
+        denied_error: problem_error(&denied)?,
+        bad_delivery_error: problem_error(&bad_delivery)?,
+        untrusted_ps_error: problem_error(&foreign)?,
         unsigned_status: unsigned.status().as_u16(),
         challenge_status: challenge.status().as_u16(),
         authorized_status: authorized.status().as_u16(),

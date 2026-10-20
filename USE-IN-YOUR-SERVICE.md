@@ -573,12 +573,20 @@ name captured dependencies in application state. The AS serves:
 Set published `issuer` separately from `signed_origin` for a listener with a port.
 The AS policy sees verified PS identity, Agent posture, Resource claims and Core
 scopes after independent presented-token verification. Return `Decision` with a
-nonempty requested-scope subset and lifetime1..3600 seconds. Denied is403,
+nonempty requested-scope subset and lifetime1..3600 seconds. The current
+`PsAuthorizationResource` helper requires every scope in its configured profile.
+A correctly narrowed AS grant can therefore be valid but still receive403 at that
+Resource. Keep the AS policy and the per-operation Resource profiles consistent;
+the helper does not turn a partial grant into a new challenge automatically.
+Denied is403,
 Unavailable or an invalid grant is500. Issued Auth uses `aauth-access.json`, is
 bound to the intended Resource/person/Agent key and cannot outlive the Agent or
 presented credential. The challenge must be current but does not cap a
 missionless grant's lifetime. The host supplies authorization policy; accepting
-a valid PS proof alone does not grant access.
+a valid PS proof alone does not grant access. This AS profile additionally requires
+the Agent token's optional `ps` claim to be present and equal to the signing PS.
+Missing/different `ps` is400 `invalid_agent_token` before policy; this is the named
+`AS-AGENT-PS-PROFILE` limit shared with the Go sibling.
 
 For the PS, construct the ordinary PersonServer then call
 `server.with_federation(adapter)`. Implement `Policy::consent` explicitly; its
@@ -594,20 +602,50 @@ fn send(&self, request: &http::Request<Vec<u8>>)
 Admit the verified Resource token's AS audience before discovery. Check AS
 metadata's exact issuer and obtain its HTTPS auth_token_endpoint; enforce size,
 timeout, certificate, DNS/egress and redirect policy before network access.
-The PS gives `send` already signed exact bytes: do not rewrite target, content,
+`endpoint` returns the URL the PS will sign for. Apply any admitted local
+listener/port map there, before signing; mapping the target later in `send`
+invalidates the PS proof. The PS gives `send` already signed exact bytes: do not rewrite target, content,
 Content-Type or signature headers, and do not follow redirects carrying the
 credentials. The library imposes the 1 MiB buffered response check; the adapter
 must bound collection before allocation. Use blocking workers for this synchronous
-callback in an async server. Terminal AS error/status relays in the PS's own
-problem body; AS401 is a service-proof failure mapped to502 as_unreachable.
-Malformed/unverifiable results and unsupported deferred responses also yield
-as_unreachable; automatic polling/payment/retry is not supplied. Parameter
-clock_skew relays the AS Date so clients can judge that verifier's clock.
+callback in an async server. Every well-formed terminal AS problem, including
+401, relays its AS status and `error` in the PS's own problem body. An AS401
+can refuse the PS service proof or another AS check; it is not automatically a
+transport failure. The PS does not copy AS Signature-Error/Accept-Signature headers
+onto the Agent response: they describe a different request and verifier.
+Malformed/unverifiable results, transport failure and unsupported deferred
+responses remain502 `as_unreachable`; automatic polling/payment/retry is absent.
+Terminal `clock_skew` at400 or401 preserves the AS Date.
+
+Inspect host-only diagnostics on the returned response before handing it to a
+framework. Response extensions are local Rust data and do not go on the wire:
+
+```rust
+let response = server.handle(&request);
+if let Some(failure) = response.extensions()
+    .get::<aauth_rust_person_server::FederationFailure>()
+{
+    // Your host logger can record failure.access_server, failure.status and
+    // failure.reason. TerminalError retains the AS error, Signature-Error and
+    // bounded problem detail. Decide how to log untrusted/private AS text.
+}
+// Return response to the Agent; extensions are not serialized into its body.
+```
+
+`FederationFailureReason` distinguishes endpoint admission, transport, malformed
+response, unsupported continuation, token verification, grant mismatch and
+terminal AS refusal. A token that expires after its successful retention but
+before release is a local500 `server_error` in both direct and federated paths.
+Neither path releases it or deletes its already committed receipt; cleanup must
+respect `retain_until`. The federated diagnostic is `ExpiredBeforeRelease`, with
+the AS's successful status retained for the operator.
 
 A federated PS always uses its adapter for `/token`, including AS=PS; it never
 falls back to PS signing. Use a separate direct instance for three-party grants.
 When PS and AS share an origin, publish distinct role metadata and one merged
-JWKS with unique key IDs, or explicitly admitted separate JWKS URLs. A host may
+JWKS with unique key IDs, or explicitly admitted separate JWKS URLs. Token IDs
+must also be unique across the collocated roles: retained identity is `(iss,jti)`,
+not `(iss,dwk,jti)`. Use a shared ID source or disjoint role prefixes. A host may
 route JWT Agent proofs to PS handling and jwks_uri PS proofs to AS handling;
 both handlers still independently enforce their own accepted scheme and target.
 Do not route the PS's own AS request back to the PS token handler.
@@ -635,3 +673,79 @@ vocabularies grow in R3 and both libraries on demand, one test at a time.
 Missions, AS call chaining, subagents and deferred federation remain named gaps
 of this immediate Core-scope profile. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
+
+
+## Serve direct and federated grants from one Person Server origin
+
+Run the complete [mixed-grants example](crates/aauth-rust-person-server/examples/mixed_grants/mod.rs):
+
+```sh
+cargo run --locked -p aauth-rust-person-server --example mixed-grants
+cargo test --locked -p aauth-rust-person-server --test mixed_grants_example
+```
+
+It executes real Agent/PS/AS signatures and JWT verification with an in-process AS
+adapter, fixed fixture time and public fixture keys. The four-party example
+above separately exercises TLS. One `ps.example` publishes one PS metadata/JWKS,
+one `/person` endpoint and one `/token` router. Orders asks for PS-signed
+`orders.quote` or AS-signed `orders.write` grants for the same directed person.
+
+The host builds two `PersonServer` values with the same issuer, signed origin,
+`kid`, key, shared store, person/consent policy and issuance-ID source. The example
+provisions one seed in host memory and uses `SigningKey::from_seed(ps_seed)` for
+each value; `SigningKey` itself is not Clone. Production code loads the same
+protected key for both values, never a fresh key under the same `kid`. Both must
+use the same lifetime limits and policy dependencies as well. Its construction
+is:
+
+```rust
+let store = MemoryStore::default();
+let ids = Arc::new(AtomicUsize::new(0));
+let make = || {
+    let ids = ids.clone();
+    PersonServer::new(
+        Config::new(PS, "ps", SigningKey::from_seed(ps_seed)),
+        Keys, store.clone(), HostPolicy, now as fn() -> i64,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)))
+            as BoxedTokenIds,
+    )
+};
+let direct = make()?;
+let federated = make()?.with_federation(adapter);
+```
+
+`MemoryStore::clone` shares its atomic state; a durable adapter must provide the
+same sharing/linearization. A shared ID source prevents PS-issued Person/Auth
+collisions. `HostPolicy::bind_person` in this example represents an already
+host-authenticated account; there is no invented interaction endpoint.
+
+The router reads the Resource token's **unverified** `aud` solely as a handler
+selection hint. Only the configured AS audience selects the federated instance:
+
+```rust
+let audience = if request.method() == "POST" && request.uri().path() == "/token" {
+    strict_json(request.body()).ok()
+        .and_then(|v| v.get("resource_token").and_then(Value::as_str).map(str::to_owned))
+        .and_then(|t| ResourceToken::parse(&t).ok())
+        .map(|t| t.unverified_claims().aud.clone())
+} else { None };
+let response = if audience.as_deref() == Some(AS) {
+    federated.handle(request)
+} else {
+    direct.handle(request)
+};
+```
+
+Both handlers still verify the Agent proof, challenge, presented token, target,
+retained lineage and policy. `/person` and discovery use `direct`; malformed or
+unknown audiences also reach its normal authenticated refusal (`aud` must equal
+PS in direct mode). This is a single selection, never a retry through direct
+issuance after an AS refusal. The adapter independently admits its AS before any
+network access. Bound request collection before routing.
+
+The executable/test verifies both grants, common person binding, exact shared
+JWKS and both retained receipts. It also submits a foreign-signed AS-directed
+routing hint and an unknown audience: both fail, without another AS call. In an
+async HTTP service, run the selected federated `handle` in a blocking worker
+because its adapter performs synchronous outbound I/O. Direct handling requires
+no outbound AS call.

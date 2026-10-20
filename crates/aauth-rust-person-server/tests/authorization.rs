@@ -203,7 +203,7 @@ struct Fixture {
     host: Host,
     ids: Arc<AtomicUsize>,
 }
-type Server = PersonServer<Keys, TestStore, BoxedPolicy, BoxedClock, BoxedTokenIds>;
+type Server<K = Keys> = PersonServer<K, TestStore, BoxedPolicy, BoxedClock, BoxedTokenIds>;
 impl Fixture {
     fn new() -> Self {
         let now = Arc::new(AtomicI64::new(1000));
@@ -226,13 +226,16 @@ impl Fixture {
         }
     }
     fn server(&self, lifetime: i64) -> Server {
+        self.server_with_keys(lifetime, Keys)
+    }
+    fn server_with_keys<K: AgentKeyResolver>(&self, lifetime: i64, keys: K) -> Server<K> {
         let now = self.host.now.clone();
         let ids = self.ids.clone();
         let mut config = Config::new(PS, "ps-key", SigningKey::from_seed([3; 32]));
         config.person_lifetime = lifetime;
         PersonServer::new(
             config,
-            Keys,
+            keys,
             self.store.clone(),
             Box::new(self.host.clone()) as BoxedPolicy,
             Box::new(move || now.load(Ordering::SeqCst)) as BoxedClock,
@@ -241,7 +244,13 @@ impl Fixture {
         )
         .unwrap()
     }
-    fn call(&self, server: &Server, agent: &Agent, path: &str, body: Value) -> Response<Vec<u8>> {
+    fn call<K: AgentKeyResolver>(
+        &self,
+        server: &Server<K>,
+        agent: &Agent,
+        path: &str,
+        body: Value,
+    ) -> Response<Vec<u8>> {
         let mut request = Request::builder()
             .method("POST")
             .uri(format!("{PS}{path}"))
@@ -253,9 +262,9 @@ impl Fixture {
             .unwrap();
         server.handle(&request)
     }
-    fn person(
+    fn person<K: AgentKeyResolver>(
         &self,
-        server: &Server,
+        server: &Server<K>,
         agent: &Agent,
         resource: &str,
         upstream: Option<&str>,
@@ -266,9 +275,9 @@ impl Fixture {
         }
         self.call(server, agent, "/person", body)
     }
-    fn exchange(
+    fn exchange<K: AgentKeyResolver>(
         &self,
-        server: &Server,
+        server: &Server<K>,
         agent: &Agent,
         resource: &str,
         presented: &str,
@@ -947,6 +956,9 @@ impl aauth_rust_person_server::Federation for AccessTransport {
         request: &Request<Vec<u8>>,
     ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.mode == 25 {
+            return Err(aauth_rust_person_server::FederationError);
+        }
         let server = aauth_rust_access_server::AccessServer::new(
             aauth_rust_access_server::Config::new(
                 "https://as.example",
@@ -957,20 +969,46 @@ impl aauth_rust_person_server::Federation for AccessTransport {
             |_: &aauth_rust_access_server::AuthorizationRequest| {
                 Ok(aauth_rust_access_server::Decision {
                     scopes: vec!["read".into()],
-                    lifetime: 600,
+                    lifetime: if self.mode == 26 { 10 } else { 600 },
                 })
             },
             || 1000,
             || format!("access-auth-{call}"),
         )
         .unwrap();
-        let mut response = server.handle(request);
-        assert_eq!(
-            response.status(),
-            200,
-            "{}",
-            String::from_utf8_lossy(response.body())
-        );
+        let mut altered;
+        let incoming = if self.mode == 24 || self.mode == 27 {
+            altered = request.clone();
+            if self.mode == 24 {
+                *altered.uri_mut() = "https://as.example:9443/token".parse().unwrap();
+            } else {
+                let key = SigningKey::from_seed([3; 32]);
+                aauth_rust_signature_key::sign_request(
+                    &mut altered,
+                    &key,
+                    aauth_rust_signature_key::KeyMaterial::Hwk(key.public_jwk()),
+                    1000,
+                )
+                .unwrap();
+            }
+            &altered
+        } else {
+            request
+        };
+        let mut response = server.handle(incoming);
+        if self.mode != 24 && self.mode != 27 {
+            assert_eq!(
+                response.status(),
+                200,
+                "{}",
+                String::from_utf8_lossy(response.body())
+            );
+        } else {
+            assert_eq!(response.status(), 401);
+            let mut body = output(&response);
+            body["detail"] = json!("private AS proof diagnostic");
+            *response.body_mut() = body.to_string().into_bytes();
+        }
         match self.mode {
             1 => *response.body_mut() = b"not json".to_vec(),
             2 | 3 | 5 | 6 | 15..=22 => {
@@ -1146,6 +1184,7 @@ fn federation_never_releases_unverified_or_unretained_as_tokens() {
             4 => (403, "access_denied"),
             7 | 12 => (500, "server_error"),
             9 => (400, "expired_resource_token"),
+            13 => (401, "clock_skew"),
             14 => (400, "clock_skew"),
             _ => (502, "as_unreachable"),
         };
@@ -1154,7 +1193,7 @@ fn federation_never_releases_unverified_or_unretained_as_tokens() {
             (status, code),
             "mode{mode}"
         );
-        if mode == 14 {
+        if mode == 13 || mode == 14 {
             assert_eq!(
                 response.headers().get("date").map(|v| v.to_str().unwrap()),
                 Some("Thu, 01 Jan 1970 00:16:40 GMT")
@@ -1162,6 +1201,19 @@ fn federation_never_releases_unverified_or_unretained_as_tokens() {
         }
         if mode == 11 {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+        // Person issuance remains; no unverified/unretained AS Auth row exists.
+        for issuer in ["https://as.example", "https://foreign-as.example", PS] {
+            assert!(
+                f.store
+                    .token(&TokenReference {
+                        issuer: issuer.into(),
+                        jti: "access-auth-0".into()
+                    })
+                    .unwrap()
+                    .is_none(),
+                "mode{mode}: unexpected Auth receipt under {issuer}"
+            );
         }
     }
 }
@@ -1185,4 +1237,214 @@ fn federated_consent_denial_prevents_any_as_dispatch() {
     assert_eq!(response.status(), 403);
     assert_eq!(output(&response)["error"], "access_denied");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn terminal_as_service_proof_refusal_relays_status_error_without_federation_retry_code() {
+    // Core auth-token-delivery: a well-formed terminal AS error is relayed.
+    let f = Fixture::new();
+    let server = f.server(2000).with_federation(AccessTransport {
+        mode: 24,
+        calls: Arc::new(AtomicUsize::new(0)),
+        now: f.host.now.clone(),
+    });
+    let holder = agent(false);
+    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let challenge = resource(&holder, &person, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    let response = f.exchange(&server, &holder, &challenge, &person, None);
+    assert_eq!(
+        response.status(),
+        401,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    assert_eq!(output(&response)["error"], "invalid_signature");
+    assert!(
+        !response.headers().contains_key("signature-error"),
+        "the Agent proof at the PS did not fail"
+    );
+    assert!(!String::from_utf8_lossy(response.body()).contains("private AS proof diagnostic"));
+}
+
+#[test]
+fn federation_diagnostics_remain_host_visible_and_distinguish_failure_phases() {
+    use aauth_rust_person_server::{FederationFailure, FederationFailureReason as Reason};
+    for mode in [1, 2, 8, 11, 23, 24, 25, 27] {
+        let f = Fixture::new();
+        let server = f.server(2000).with_federation(AccessTransport {
+            mode,
+            calls: Arc::new(AtomicUsize::new(0)),
+            now: f.host.now.clone(),
+        });
+        let holder = agent(false);
+        let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+        let challenge = resource(&holder, &person, "read", |r| {
+            r.aud = "https://as.example".into()
+        });
+        let response = f.exchange(&server, &holder, &challenge, &person, None);
+        let diagnostic = response
+            .extensions()
+            .get::<FederationFailure>()
+            .expect("host diagnostic on federation failure");
+        assert_eq!(diagnostic.access_server, "https://as.example");
+        match mode {
+            1 => {
+                assert_eq!(diagnostic.status, Some(http::StatusCode::OK));
+                assert!(matches!(diagnostic.reason, Reason::MalformedResponse(_)));
+            }
+            2 => assert_eq!(diagnostic.reason, Reason::InvalidGrant),
+            8 | 23 => assert_eq!(diagnostic.reason, Reason::UnsupportedResponse),
+            11 => {
+                assert_eq!(diagnostic.status, None);
+                assert_eq!(diagnostic.reason, Reason::InvalidEndpoint);
+            }
+            25 => {
+                assert_eq!(diagnostic.status, None);
+                assert_eq!(diagnostic.reason, Reason::TransportUnavailable);
+            }
+            24 | 27 => {
+                assert_eq!(diagnostic.status, Some(http::StatusCode::UNAUTHORIZED));
+                let Reason::TerminalError {
+                    error,
+                    signature_error,
+                    detail,
+                } = &diagnostic.reason
+                else {
+                    panic!("terminal diagnostic expected")
+                };
+                let expected = if mode == 24 {
+                    "invalid_signature"
+                } else {
+                    "unsupported_scheme"
+                };
+                assert_eq!(error, expected);
+                assert_eq!(
+                    signature_error.as_deref(),
+                    Some(format!("error={expected}").as_str())
+                );
+                assert_eq!(detail.as_deref(), Some("private AS proof diagnostic"));
+            }
+            _ => unreachable!(),
+        }
+        assert!(output(&response).get("auth_token").is_none());
+        assert!(!String::from_utf8_lossy(response.body()).contains("private AS proof diagnostic"));
+        assert!(!response.headers().contains_key("signature-error"));
+        assert!(!response.headers().contains_key("accept-signature-scheme"));
+        assert!(!response.headers().contains_key("accept-signature-alg"));
+    }
+}
+
+#[test]
+fn direct_and_federated_expiry_after_commit_keep_the_row_and_report_local_failure() {
+    // Core auth-token-delivery; identical local issuance/release disposition.
+    for federated in [false, true] {
+        let f = Fixture::new();
+        let mut server = f.server(2000);
+        if federated {
+            server = server.with_federation(AccessTransport {
+                mode: 26,
+                calls: Arc::new(AtomicUsize::new(0)),
+                now: f.host.now.clone(),
+            });
+        }
+        let holder = agent(false);
+        let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+        let challenge = resource(&holder, &person, "read", |r| {
+            if federated {
+                r.aud = "https://as.example".into()
+            }
+        });
+        if !federated {
+            f.host.mode.store(5, Ordering::SeqCst);
+        }
+        f.store.stall.store(1010, Ordering::SeqCst);
+        let response = f.exchange(&server, &holder, &challenge, &person, None);
+        assert_eq!(
+            response.status(),
+            500,
+            "federated={federated}, {}",
+            String::from_utf8_lossy(response.body())
+        );
+        assert_eq!(output(&response)["error"], "server_error");
+        assert!(output(&response).get("auth_token").is_none());
+        let reference = TokenReference {
+            issuer: if federated { "https://as.example" } else { PS }.into(),
+            jti: if federated {
+                "access-auth-0"
+            } else {
+                "token-1"
+            }
+            .into(),
+        };
+        let retained = f
+            .store
+            .token(&reference)
+            .unwrap()
+            .expect("already committed row remains acknowledged");
+        assert_eq!(retained.expires_at, 1010);
+        if federated {
+            let diagnostic = response
+                .extensions()
+                .get::<aauth_rust_person_server::FederationFailure>()
+                .unwrap();
+            assert_eq!(
+                diagnostic.reason,
+                aauth_rust_person_server::FederationFailureReason::ExpiredBeforeRelease
+            );
+            assert_eq!(diagnostic.status, Some(http::StatusCode::OK));
+        }
+    }
+}
+
+struct AliasAccessKeys;
+impl AgentKeyResolver for AliasAccessKeys {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        if (issuer, dwk, kid) == ("https://foreign-as.example", "aauth-access.json", "as-key") {
+            Ok(SigningKey::from_seed([7; 32]).public_jwk())
+        } else {
+            Keys.key(issuer, dwk, kid)
+        }
+    }
+}
+#[test]
+fn delivery_rejects_foreign_as_issuer_even_when_its_resigned_token_verifies() {
+    use aauth_rust_person_server::{FederationFailure, FederationFailureReason};
+    let f = Fixture::new();
+    let server = f
+        .server_with_keys(2000, AliasAccessKeys)
+        .with_federation(AccessTransport {
+            mode: 20,
+            calls: Arc::new(AtomicUsize::new(0)),
+            now: f.host.now.clone(),
+        });
+    let holder = agent(false);
+    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let challenge = resource(&holder, &person, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    let response = f.exchange(&server, &holder, &challenge, &person, None);
+    assert_eq!(response.status(), 502);
+    assert_eq!(output(&response)["error"], "as_unreachable");
+    assert_eq!(
+        response
+            .extensions()
+            .get::<FederationFailure>()
+            .unwrap()
+            .reason,
+        FederationFailureReason::InvalidGrant,
+        "trusted foreign signature must reach the exact expected-issuer comparison"
+    );
+    for issuer in ["https://as.example", "https://foreign-as.example"] {
+        assert!(
+            f.store
+                .token(&TokenReference {
+                    issuer: issuer.into(),
+                    jti: "access-auth-0".into()
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
 }

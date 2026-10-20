@@ -52,7 +52,9 @@
 #![deny(missing_docs)]
 mod federation;
 mod policy;
-pub use federation::{BoxedFederation, Federation, FederationError};
+pub use federation::{
+    BoxedFederation, Federation, FederationError, FederationFailure, FederationFailureReason,
+};
 mod server;
 mod store;
 pub mod storetest;

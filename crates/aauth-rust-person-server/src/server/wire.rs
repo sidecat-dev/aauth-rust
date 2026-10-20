@@ -9,6 +9,7 @@ pub(super) struct Failure {
     code: String,
     signature: Option<String>,
     date: Option<i64>,
+    federation: Option<Box<crate::FederationFailure>>,
 }
 impl Failure {
     pub(super) fn parameter(code: &'static str) -> Self {
@@ -17,6 +18,7 @@ impl Failure {
             code: code.into(),
             signature: None,
             date: None,
+            federation: None,
         }
     }
     pub(super) fn policy(error: PolicyError) -> Self {
@@ -32,6 +34,7 @@ impl Failure {
             code: code.into(),
             signature: None,
             date: None,
+            federation: None,
         }
     }
     pub(super) fn internal() -> Self {
@@ -73,6 +76,7 @@ impl Failure {
             code: code.into(),
             signature: Some(signature),
             date: matches!(error, ProofError::ClockSkew).then_some(now),
+            federation: None,
         }
     }
     pub(super) fn credential(error: TokenError) -> Self {
@@ -82,6 +86,7 @@ impl Failure {
             code: code.into(),
             signature: Some(format!("error={code}")),
             date: None,
+            federation: None,
         }
     }
     pub(super) fn clock(now: i64) -> Self {
@@ -90,7 +95,16 @@ impl Failure {
             code: "clock_skew".into(),
             signature: None,
             date: Some(now),
+            federation: None,
         }
+    }
+    pub(super) fn with_federation(mut self, diagnostic: crate::FederationFailure) -> Self {
+        self.federation = Some(Box::new(diagnostic));
+        self
+    }
+    pub(super) fn with_date(mut self, date: i64) -> Self {
+        self.date = Some(date);
+        self
     }
     pub(super) fn response(self) -> Response<Vec<u8>> {
         let mut response = json_response(
@@ -100,23 +114,27 @@ impl Failure {
         response
             .headers_mut()
             .insert("content-type", "application/problem+json".parse().unwrap());
+        let local_signature_failure = self.signature.is_some();
         if let Some(signature) = self.signature {
             response
                 .headers_mut()
                 .insert("signature-error", signature.parse().unwrap());
         }
-        if self.code == "unsupported_scheme" {
+        if local_signature_failure && self.code == "unsupported_scheme" {
             response
                 .headers_mut()
                 .insert("accept-signature-scheme", "jwt".parse().unwrap());
         }
-        if self.code == "unsupported_algorithm" {
+        if local_signature_failure && self.code == "unsupported_algorithm" {
             response
                 .headers_mut()
                 .insert("accept-signature-alg", "Ed25519".parse().unwrap());
         }
         if let Some(now) = self.date {
             add_date(&mut response, now);
+        }
+        if let Some(diagnostic) = self.federation {
+            response.extensions_mut().insert(*diagnostic);
         }
         response
     }

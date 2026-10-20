@@ -13,6 +13,24 @@ fn real_tls_four_party_handoff_verifies_proofs_grants_and_one_post_effect() {
     assert_eq!(t.denied_status, 403);
     assert_eq!(t.bad_delivery_status, 502);
     assert_eq!(t.untrusted_ps_status, 401);
+    assert_eq!(t.denied_error, "access_denied");
+    assert_eq!(t.bad_delivery_error, "as_unreachable");
+    assert_eq!(t.untrusted_ps_error, "invalid_key");
+    assert_eq!(t.forwarded_tokens.len(), 3);
+    for actual in &t.forwarded_tokens {
+        assert_eq!(
+            actual.agent_token.as_bytes(),
+            t.original_tokens.agent_token.as_bytes()
+        );
+        assert_eq!(
+            actual.presented_token.as_bytes(),
+            t.original_tokens.presented_token.as_bytes()
+        );
+        assert_eq!(
+            actual.resource_token.as_bytes(),
+            t.original_tokens.resource_token.as_bytes()
+        );
+    }
     assert_eq!(t.effect_count, 1);
     assert_eq!(t.auth_issuer, "https://as.example");
     assert_eq!(t.auth_document, "aauth-access.json");

@@ -197,6 +197,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// Handle actual buffered bytes at configured HTTPS targets. Host transport
     /// must bound collection too. Policy and storage complete before token release;
     /// trusted time is resampled after policy and after durable commit.
+    /// Federation failures attach a host-only [`crate::FederationFailure`] in
+    /// response extensions. Inspect before framework conversion/serialization;
+    /// the wire problem relays terminal AS status/error but excludes private detail.
     pub fn handle(&self, request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         match self.handle_inner(request) {
             Ok(response) => response,

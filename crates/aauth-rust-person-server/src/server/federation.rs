@@ -1,4 +1,5 @@
 use super::*;
+use crate::{FederationFailure, FederationFailureReason as Reason};
 use aauth_rust_signature_key::{MAX_BODY_BYTES, sign_request};
 
 impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
@@ -22,11 +23,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.binding(&retained.principal, BindingContext::Presented)?
             .ok_or_else(Failure::internal)?;
         let adapter = self.federation.as_ref().ok_or_else(Failure::internal)?;
-        let endpoint = adapter.endpoint(&r.aud).map_err(|_| unreachable())?;
-        let uri: http::Uri = endpoint.parse().map_err(|_| unreachable())?;
-        canonical_authority(&uri).map_err(|_| unreachable())?;
+        let endpoint = adapter
+            .endpoint(&r.aud)
+            .map_err(|_| unreachable(&r.aud, None, Reason::EndpointUnavailable))?;
+        let invalid_endpoint = || unreachable(&r.aud, None, Reason::InvalidEndpoint);
+        let uri: http::Uri = endpoint.parse().map_err(|_| invalid_endpoint())?;
+        canonical_authority(&uri).map_err(|_| invalid_endpoint())?;
         if uri.query().is_some() || endpoint.contains('#') {
-            return Err(unreachable());
+            return Err(invalid_endpoint());
         }
         let resource_compact = required_string(&context.parameters, "resource_token")?;
         let presented_compact = required_string(&context.parameters, "presented_token")?;
@@ -44,23 +48,26 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             now,
         )
         .map_err(|_| Failure::internal())?;
-        let response = adapter.send(&request).map_err(|_| unreachable())?;
+        let response = adapter
+            .send(&request)
+            .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
+        let failed = |reason| unreachable(&r.aud, Some(response.status()), reason);
         if response.body().len() > MAX_BODY_BYTES {
-            return Err(unreachable());
+            return Err(failed(Reason::ResponseTooLarge));
         }
-        let value = strict_json(response.body()).map_err(|_| unreachable())?;
+        let value = strict_json(response.body())
+            .map_err(|_| failed(Reason::MalformedResponse("response is not strict JSON")))?;
         let content_type = response
             .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.split(';').next())
             .map(str::trim)
-            .ok_or_else(unreachable)?;
+            .ok_or_else(|| failed(Reason::MalformedResponse("missing or invalid Content-Type")))?;
         if response.status() != StatusCode::OK {
-            if response.status() != StatusCode::UNAUTHORIZED
-                && response.status() != StatusCode::PAYMENT_REQUIRED
+            if response.status() != StatusCode::PAYMENT_REQUIRED
                 && (response.status().is_client_error() || response.status().is_server_error())
                 && content_type.eq_ignore_ascii_case("application/problem+json")
             {
@@ -73,10 +80,33 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                             && s.bytes()
                                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
                     })
-                    .ok_or_else(unreachable)?;
+                    .ok_or_else(|| {
+                        failed(Reason::MalformedResponse("invalid terminal problem error"))
+                    })?;
+                let diagnostic = FederationFailure {
+                    access_server: r.aud.clone(),
+                    status: Some(response.status()),
+                    reason: Reason::TerminalError {
+                        error: error.into(),
+                        signature_error: response
+                            .headers()
+                            .get("signature-error")
+                            .and_then(|h| h.to_str().ok())
+                            .map(|s| bounded(s, 1024)),
+                        detail: value
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(|s| bounded(s, 4096)),
+                    },
+                };
+                let mut failure = Failure::status(response.status(), error);
                 if error == "clock_skew" {
-                    if response.status() != StatusCode::BAD_REQUEST {
-                        return Err(unreachable());
+                    if ![StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED]
+                        .contains(&response.status())
+                    {
+                        return Err(failed(Reason::MalformedResponse(
+                            "clock_skew has an invalid status",
+                        )));
                     }
                     let date = response
                         .headers()
@@ -85,26 +115,31 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         .and_then(|v| httpdate::parse_http_date(v).ok())
                         .and_then(|v| v.duration_since(std::time::UNIX_EPOCH).ok())
                         .and_then(|v| i64::try_from(v.as_secs()).ok())
-                        .ok_or_else(unreachable)?;
-                    return Err(Failure::clock(date));
+                        .ok_or_else(|| {
+                            failed(Reason::MalformedResponse("clock_skew has no valid Date"))
+                        })?;
+                    failure = failure.with_date(date);
                 }
-                return Err(Failure::status(response.status(), error));
+                return Err(failure.with_federation(diagnostic));
             }
-            return Err(unreachable());
+            return Err(failed(Reason::UnsupportedResponse));
         }
         if !content_type.eq_ignore_ascii_case("application/json") {
-            return Err(unreachable());
+            return Err(failed(Reason::MalformedResponse(
+                "Auth response is not application/json",
+            )));
         }
         let compact = value
             .get("auth_token")
             .and_then(Value::as_str)
             .filter(|v| !v.is_empty())
-            .ok_or_else(unreachable)?;
+            .ok_or_else(|| failed(Reason::MalformedResponse("missing Auth token")))?;
         let token = AuthToken::parse(compact)
             .and_then(|t| t.verify(&self.resolver(), current))
-            .map_err(|_| unreachable())?;
+            .map_err(|error| failed(Reason::TokenVerification(error)))?;
         let c = token.claims();
-        let granted = parse_scopes(c.scope.as_deref().unwrap_or("")).ok_or_else(unreachable)?;
+        let granted = parse_scopes(c.scope.as_deref().unwrap_or(""))
+            .ok_or_else(|| failed(Reason::InvalidGrant))?;
         if c.iss != r.aud
             || c.dwk != "aauth-access.json"
             || c.aud != r.iss
@@ -120,7 +155,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.iat > current.saturating_add(60)
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
-            return Err(unreachable());
+            return Err(failed(Reason::InvalidGrant));
         }
         let mut record = self.record(
             compact,
@@ -149,7 +184,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let released = (self.clock)();
         self.inputs_current(agent, resource, presented, released)?;
         if c.exp <= released {
-            return Err(unreachable());
+            return Err(Failure::internal().with_federation(FederationFailure {
+                access_server: r.aud.clone(),
+                status: Some(response.status()),
+                reason: Reason::ExpiredBeforeRelease,
+            }));
         }
         Ok(token_response(
             "auth_token",
@@ -158,6 +197,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         ))
     }
 }
-fn unreachable() -> Failure {
-    Failure::status(StatusCode::BAD_GATEWAY, "as_unreachable")
+fn unreachable(access_server: &str, status: Option<StatusCode>, reason: Reason) -> Failure {
+    Failure::status(StatusCode::BAD_GATEWAY, "as_unreachable").with_federation(FederationFailure {
+        access_server: access_server.into(),
+        status,
+        reason,
+    })
+}
+fn bounded(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
