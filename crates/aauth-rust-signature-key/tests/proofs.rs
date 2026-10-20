@@ -194,6 +194,21 @@ fn authority_normalizes_case_and_default_port_per_rfc9421() {
 }
 
 #[test]
+fn port_zero_is_refused_as_an_unusable_request_target() {
+    for uri in [
+        "https://resource.example:0/",
+        "https://resource.example:0000/",
+        "https://[::1]:0/",
+    ] {
+        let uri: http::Uri = uri.parse().unwrap();
+        assert_eq!(
+            aauth_rust_signature_key::canonical_authority(&uri),
+            Err(Error::InvalidUri)
+        );
+    }
+}
+
+#[test]
 fn malformed_fields_are_not_missing_coverage_errors() {
     for (field, value, code) in [
         ("signature-input", "sig=(", "invalid_signature"),
@@ -225,7 +240,7 @@ fn local_signing_errors_explain_body_uri_and_clock_units() {
     let key = SigningKey::from_seed([7; 32]);
     let material = || KeyMaterial::Hwk(key.public_jwk());
     let mut req = request();
-    *req.body_mut() = b"body".to_vec();
+    *req.body_mut() = vec![1; 1_048_577];
     assert!(
         sign_request(&mut req, &key, material(), 1000)
             .unwrap_err()
@@ -506,4 +521,223 @@ fn authorization_coverage_is_the_rfc9421_value_not_raw_outer_whitespace() {
             .contains("\"authorization\": AAuth, session\n")
     );
     assert!(combined.verify(&key.public_jwk()).is_err());
+}
+
+#[test]
+fn buffered_body_signing_covers_a_known_sha256_digest_and_content_type() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/whoami")
+        .header("content-type", "text/plain")
+        .header("content-digest", "stale")
+        .body(b"hello".to_vec())
+        .unwrap();
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    assert_eq!(
+        req.headers()["content-digest"],
+        "sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=:"
+    );
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    prepared.verify(&key.public_jwk()).unwrap();
+    let base = String::from_utf8(prepared.signature_base().to_vec()).unwrap();
+    assert!(
+        base.contains("\"content-digest\": sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=:")
+    );
+    assert!(base.contains("\"content-type\": text/plain"));
+    for body in [b"other".to_vec(), Vec::new()] {
+        let mut changed = req.clone();
+        *changed.body_mut() = body;
+        assert!(
+            PreparedRequest::prepare(&changed, "sig", 1000, 60).is_err(),
+            "body substitution accepted"
+        );
+    }
+    let mut changed = req.clone();
+    changed
+        .headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    assert!(
+        PreparedRequest::prepare(&changed, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .is_err()
+    );
+}
+
+#[test]
+fn bodies_and_supplied_empty_digests_require_covered_valid_sha256() {
+    let (mut req, _) = signed();
+    *req.body_mut() = b"hello".to_vec();
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidInput
+    );
+    let (mut req, _) = signed();
+    req.headers_mut().insert(
+        "content-digest",
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidInput
+    );
+    let key = SigningKey::from_seed([7; 32]);
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    for digest in [
+        "sha-256=\"bad\"",
+        "sha-256=:AAAA:",
+        "sha-512=:AAAA:",
+        "malformed",
+    ] {
+        let mut changed = req.clone();
+        changed
+            .headers_mut()
+            .insert("content-digest", digest.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare(&changed, "sig", 1000, 60)
+                .unwrap_err()
+                .code(),
+            "invalid_signature"
+        );
+    }
+    req.headers_mut().remove("content-digest");
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap_err()
+            .code(),
+        "invalid_signature"
+    );
+}
+
+#[test]
+fn buffered_body_limit_accepts_one_mib_and_refuses_more() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    *req.body_mut() = vec![1; 1_048_576];
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    req.body_mut().push(1);
+    assert!(
+        sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000)
+            .unwrap_err()
+            .to_string()
+            .contains("1048576")
+    );
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap_err()
+            .to_string()
+            .contains("1048576")
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap_err()
+            .code(),
+        "invalid_request"
+    );
+}
+
+#[test]
+fn empty_covered_field_values_are_signed_distinctly_from_missing_fields() {
+    let key = SigningKey::from_seed([7; 32]);
+    for empty in ["", " \t "] {
+        let mut req = request();
+        *req.body_mut() = b"hello".to_vec();
+        req.headers_mut()
+            .insert("content-type", empty.parse().unwrap());
+        sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+        let proof = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+        assert!(
+            std::str::from_utf8(proof.signature_base())
+                .unwrap()
+                .contains("\"content-type\": \n")
+        );
+        proof.verify(&key.public_jwk()).unwrap();
+        req.headers_mut().remove("content-type");
+        assert!(PreparedRequest::prepare(&req, "sig", 1000, 60).is_err());
+    }
+}
+
+#[test]
+fn empty_field_lines_keep_their_positions_in_the_canonical_combination() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    for value in ["", "AAuth credential", ""] {
+        req.headers_mut()
+            .append("authorization", value.parse().unwrap());
+    }
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    let proof = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    assert!(
+        std::str::from_utf8(proof.signature_base())
+            .unwrap()
+            .contains("\"authorization\": , AAuth credential, \n")
+    );
+    proof.verify(&key.public_jwk()).unwrap();
+    req.headers_mut().remove("authorization");
+    req.headers_mut()
+        .insert("authorization", "AAuth credential".parse().unwrap());
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .is_err()
+    );
+}
+
+#[test]
+fn replacing_both_body_and_matching_digest_still_requires_a_new_signature() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    *req.body_mut() = b"hello".to_vec();
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    req.body_mut().clear();
+    req.headers_mut().insert(
+        "content-digest",
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+            .parse()
+            .unwrap(),
+    );
+    let proof = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    assert_eq!(
+        proof.verify(&key.public_jwk()).unwrap_err(),
+        Error::InvalidSignature
+    );
+}
+
+#[test]
+fn an_empty_digest_does_not_make_content_type_a_body_requirement() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    req.headers_mut()
+        .insert("content-type", "text/plain".parse().unwrap());
+    req.headers_mut().insert(
+        "content-digest",
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+            .parse()
+            .unwrap(),
+    );
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    assert!(
+        !req.headers()["signature-input"]
+            .to_str()
+            .unwrap()
+            .contains("content-type")
+    );
+    req.headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
 }

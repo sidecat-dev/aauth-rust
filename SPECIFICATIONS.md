@@ -25,7 +25,12 @@ RFC 9651 (Structured Fields), RFC 9864 (fully specified `Ed25519`).
 
 The HTTP profile requires `@method`, `@authority`, `@path`, `signature-key` and
 `created`. This implementation additionally requires `@query` when present,
-and `authorization` when present. The first journey is bodyless: signed
-body-bearing requests are refused until Content-Digest verification exists.
+and `authorization` when present. The local buffered profile additionally
+requires covered SHA-256 Content-Digest for nonempty content or a supplied digest,
+plus Content-Type when present on nonempty content. Actual bytes are checked, with a
+1 MiB limit. Core Covered Components mandates body digest/type at PS/AS and
+revocation endpoints; ordinary Resource body requirements remain Resource policy.
+This implementation chooses the safe buffered default without changing that
+normative distinction. RFC 9530 section 2 defines the digest field.
 Production server identifiers remain HTTPS scheme and lowercase DNS host only;
 test TLS uses name-to-loopback routing without changing those identifiers.

@@ -2,7 +2,7 @@
 
 The current profile authenticates an Agent directly to a Resource. Your service
 supplies issuer trust, HTTPS transport, admission policy and state. It has no
-Person Server, delegated authorization, body digest verification or replay store.
+Person Server, delegated authorization or replay store.
 Start with the README's library program, then run the framework example:
 
 ```sh
@@ -20,19 +20,79 @@ All framework/runtime dependencies belong to examples/tests, not the libraries.
 The [axum adapter](crates/aauth-rust-resource/examples/framework/mod.rs) keeps
 the received method, path/query and headers, reconstructs the absolute URI from
 its configured external origin, and reads the actual body with a 1 KiB limit.
-An oversized body gets 413 before verification. Any nonempty body within the
-limit reaches the gate and is refused by this bodyless profile. Never verify an
-empty placeholder while forwarding an unread body.
+An oversized body gets 413 before verification. Within that adapter limit,
+nonempty content reaches the gate and needs covered SHA-256 Content-Digest, plus
+covered Content-Type when present. The Agent generates these from actual bytes;
+the Resource verifies them before policy. The library itself permits up to 1 MiB.
+Missing coverage gets invalid_input with the required fields; a malformed or
+mismatched digest gets invalid_signature. Never verify an empty placeholder while
+forwarding unread content, and verify content before decompression. Streaming or
+trailer-based digests need a different adapter/profile; they are not implemented.
+Direct library verification above its 1 MiB buffered ceiling reports
+`invalid_request`, rather than a bad signature. Bound collection before calling
+the library; the adapter's earlier 413 is preferable to allocating a large body.
 
 Terminate TLS before this private hop. Take the external origin from service
 configuration; accept forwarded scheme/authority only through an explicitly
 trusted proxy boundary. An arbitrary Host or Forwarded header is not configuration.
-One Resource binds one exact authority/path. Construct one per protected route
-and share an `Arc<AgentKeyResolver>`; this does not fetch keys once per route.
-Path predicates and Resource discovery metadata are not supplied yet.
+Configure proxies to preserve the signed method, authority, path/query, body,
+Content-Digest and Content-Type. Automatic Content-Type coverage means a proxy
+that rewrites the media type after signing (for example, adding `charset=utf-8`)
+breaks nonempty requests with a 401 signature failure. Make content and media
+type decisions before the Agent signs, then preserve them through the proxy.
+
+AgentIdentityResource::new(endpoint, keys, policy) retains exact authority/path
+binding. For one gate shared by a router, use
+AgentIdentityResource::for_origin(origin, keys, policy). Every request must still
+use that configured authority and carry a valid proof over its actual path.
+The router/policy decides which routes are allowed; origin mode is not a prefix
+or route whitelist. The axum example shares one Arc<Resource> across /whoami and
+/orders; keys are shared too, without fetching once per route.
+The request-origin constructor accepts an optional root slash, so
+`https://resource.example/` and `https://resource.example` configure the same
+authority. Ports must be in 1..=65535; port zero is refused. This is transport
+configuration; published server identifiers are separately validated below and
+must have no trailing slash or port.
+Resource discovery metadata is available through
+`resource.metadata_for("https://resource.example")?`; the host serves it at
+`/.well-known/aauth-resource.json` (the axum example does this). Configure that
+published issuer separately from the signed request authority and listener
+socket. For example, a Resource bound to `https://resource.example:8443` can
+publish `https://resource.example` while still requiring `resource.example:8443`
+in every signed request. The host supplies routing and TLS for both addresses;
+publishing metadata does not change the verifier's authority/path binding.
+The issuer must be a lowercase HTTPS DNS origin without port, path or trailing
+slash. Invalid publication settings return `ConfigurationError::InvalidIssuer`
+with local code `invalid_configuration`; fix the service configuration rather
+than asking callers to refresh a token. Validate metadata at startup, as the
+axum adapter does. The no-argument `metadata()` convenience uses the configured
+request authority when it is also a valid published identity.
+
+It reports agent-token access and the actual 60-second window. This verifier
+publishes no signing keys, so no JWKS URL or authorization endpoint is invented.
+The conditional nonempty-content coverage default is reported by required_input;
+metadata does not falsely require digest/type on every empty call. A host may
+add name/logo/documentation fields to its owned document while preserving the
+configured issuer and actual protocol fields. A host that also signs server
+calls or issues Resource tokens must add its actual required jwks_uri and role
+metadata; the verifier helper does not supply those roles. Point agents at this document from landing/API pages with a Link header such as:
+`Link: <https://resource.example/.well-known/aauth-resource.json>; rel="aauth-resource"`.
+Use the configured canonical HTTPS identity; a caller-supplied Host is not that
+identity. The Rust Agent does not fetch metadata automatically.
+
+Only the named fields are authenticated. Content-Encoding and other headers
+are not automatically covered. The library does not transform content; if your
+host interprets an encoding, reject unsupported encodings or use a profile that
+also authenticates those semantics. Verify raw content before decompression.
 
 Covered header fields use RFC 9421 canonicalization: trim outer spaces/tabs and
 combine field lines with `, `. Outer whitespace changes alone preserve a proof.
+Present empty fields are signed as empty values, distinctly from missing fields.
+This authenticates the field value without validating media type semantics;
+reject an empty or unsupported Content-Type before interpreting content if your
+application requires a media type. On empty content, Content-Type is not covered
+by this conditional profile, even if Content-Digest was supplied. Reject that
+form if the application would assign the unsigned type meaningful semantics.
 Interpret Authorization consistently, or reject forms your application does not
 support; do not treat signed coverage as a guarantee of raw header byte equality.
 
@@ -68,7 +128,9 @@ Retain the Agent and obtain a new token before expiry, using the same confirmati
 public key. `agent.with_token(new_token)` reuses the existing private key without
 exporting its seed; earlier Agent values remain usable for in-flight requests.
 If enrollment changes the confirmation key, create a new Agent with that key.
-No background enrollment or refresh loop runs inside the library.
+Use `agent.public_jwk()` for the renewed claims' `cnf.jwk`: it returns an owned
+public-only value, so the host need not parse the previous token or retain seed
+bytes. No background enrollment or refresh loop runs inside the library.
 
 `Agent::new` checks syntax and key binding; it does **not** authenticate the AP's
 signature. `AgentToken::parse(...).unverified_claims()` can inspect refresh hints,
@@ -97,8 +159,9 @@ The host owns retention, refresh and retirement policy. Go shares this AP gap.
 
 `metadata()` supplies minimal issuer/JWKS-location bytes. A host can publish its
 own metadata with the same exact issuer and admitted HTTPS JWKS URL, plus the
-draft's branding/policy fields. No AP branding builder or Resource metadata API
-is provided. Server identifiers have no port or path. In local deployments,
+draft's branding/policy fields. No AP branding builder is provided.
+`AgentIdentityResource::metadata_for(issuer)` is a separate verifier-only Resource
+document. Server identifiers have no port or path. In local deployments,
 map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.

@@ -29,11 +29,17 @@ Keep signing keys in application-controlled storage, use fresh unique token
 identifiers, and supply the correct Unix clock. A valid signature proves a key
 and signed claims; the application's Resource policy decides access. Replay
 storage, enrollment, revocation and sub-agent delegation are outside the
-current implementation. This profile rejects nonempty bodies and does not
-verify Content-Digest. Adapters must pass the actual body bytes or refuse bodies
-at the transport; verifying an empty placeholder and then forwarding an unread
-body defeats the profile's body check. The generated certificates and small HTTP codec in
-the loopback example are test infrastructure.
+current implementation. The buffered profile signs and verifies SHA-256
+Content-Digest for nonempty content or a supplied digest, up to 1 MiB. It also
+covers Content-Type when present on nonempty content. Adapters must bound
+collection and pass the actual bytes before decompression, or refuse bodies at
+transport; an empty placeholder cannot authenticate unread downstream content.
+Preserve covered field values through proxies. Content-Type on empty content is
+outside the conditional proof even when a digest is supplied; applications that
+assign it meaning must reject that form or use a different explicit profile.
+The digest does not prevent replay, and streaming/trailer digests are absent.
+The generated certificates and small HTTP codec in the loopback example are
+test infrastructure.
 
 ## Supported code
 

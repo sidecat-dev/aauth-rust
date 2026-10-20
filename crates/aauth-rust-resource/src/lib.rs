@@ -4,6 +4,29 @@ use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentTok
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
 
+/// Invalid host configuration, separate from a caller's proof or token failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationError {
+    /// The published Resource issuer is not a canonical HTTPS DNS identifier.
+    InvalidIssuer,
+}
+impl ConfigurationError {
+    /// Local configuration code; this is not a `Signature-Error` response code.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidIssuer => "invalid_configuration",
+        }
+    }
+}
+impl std::fmt::Display for ConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "invalid Resource metadata issuer: configure a lowercase HTTPS DNS origin without port or path; use metadata_for(issuer) when the published identity differs from the request authority",
+        )
+    }
+}
+impl std::error::Error for ConfigurationError {}
+
 #[derive(Debug)]
 /// Failed proof/token verification or the required coverage needed to retry.
 pub enum SignatureFailure {
@@ -227,7 +250,7 @@ pub struct AgentIdentityResource<K, P> {
     keys: K,
     policy: P,
     authority: String,
-    path: String,
+    path: Option<String>,
 }
 impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
 where
@@ -250,8 +273,60 @@ where
             keys,
             policy,
             authority: aauth_rust_signature_key::canonical_authority(&uri)?,
-            path: uri.path().to_owned(),
+            path: Some(uri.path().to_owned()),
         })
+    }
+    /// Bind one Resource to an HTTPS origin across all router paths.
+    /// Every request must still be signed over its actual path and use this
+    /// configured authority. The host router and policy own route admission;
+    /// this constructor is not a path-prefix or route whitelist.
+    /// Use [`Self::new`] for an exact endpoint binding instead.
+    ///
+    /// # Errors
+    /// Rejects non-HTTPS/invalid authorities, non-root paths, query or fragment.
+    /// A trailing root slash is accepted; queries vary on signed requests only.
+    pub fn for_origin(origin: &str, keys: K, policy: P) -> Result<Self, Error> {
+        let uri: http::Uri = origin.parse().map_err(|_| Error::InvalidUri)?;
+        if !uri.path().is_empty() && uri.path() != "/" {
+            return Err(Error::InvalidUri);
+        }
+        let mut resource = Self::new(origin, keys, policy)?;
+        resource.path = None;
+        Ok(resource)
+    }
+    /// Minimal metadata for this verifier, served by the host at
+    /// `/.well-known/aauth-resource.json` as application/json over HTTPS.
+    /// Advertises Agent-token access and the actual 60-second signature window.
+    /// No JWKS or token/authorization endpoint is invented for a verifying role.
+    /// Hosts may add branding to an owned copy without changing protocol fields.
+    /// Conditional body digest/type requirements are reported by `required_input`;
+    /// this document does not declare them unconditional for every empty request.
+    ///
+    /// # Errors
+    /// Returns [`ConfigurationError::InvalidIssuer`] if the configured request
+    /// authority cannot also serve as a canonical DNS server identity.
+    /// Use [`Self::metadata_for`] to configure publication separately when the
+    /// request authority includes a nondefault port or IP address.
+    pub fn metadata(&self) -> Result<Vec<u8>, ConfigurationError> {
+        self.metadata_for(&format!("https://{}", self.authority))
+    }
+    /// Metadata with an explicitly configured published HTTPS server identity.
+    /// The issuer comes from host configuration, never a request Host header.
+    /// This does not change request authority/path binding: a configured port
+    /// remains part of the signed authority. The host owns discovery routing,
+    /// socket mapping and TLS for the published identity.
+    ///
+    /// # Errors
+    /// Returns [`ConfigurationError::InvalidIssuer`] unless `issuer` is a
+    /// canonical lowercase HTTPS DNS origin without port, path or trailing slash.
+    pub fn metadata_for(&self, issuer: &str) -> Result<Vec<u8>, ConfigurationError> {
+        aauth_rust_core::validate_server_identifier(issuer)
+            .map_err(|_| ConfigurationError::InvalidIssuer)?;
+        Ok(serde_json::json!({
+            "issuer":issuer, "access_mode":"agent-token", "signature_window":60
+        })
+        .to_string()
+        .into_bytes())
     }
     /// Replace admission policy while retaining the configured target and keys.
     pub fn with_policy<Q, R>(self, policy: Q) -> AgentIdentityResource<K, Q>
@@ -266,10 +341,12 @@ where
             path: self.path,
         }
     }
-    /// Check a bodyless absolute HTTPS request at `now` in Unix seconds.
+    /// Check a buffered absolute HTTPS request at `now` in Unix seconds.
     /// The proof window is ±60 seconds. Token expiry has no leeway; future
     /// `iat` beyond 60 seconds is refused. Policy receives token and request only
-    /// after verification. Supply actual body bytes or reject bodies at transport;
+    /// after verification. Nonempty content requires covered SHA-256 Content-Digest
+    /// and covered Content-Type when present; actual content is limited to 1 MiB.
+    /// Supply actual bytes before decompression, or reject bodies at transport;
     /// an empty placeholder does not authenticate an unread downstream body.
     ///
     /// ```
@@ -290,7 +367,12 @@ where
             Ok(authority) => authority,
             Err(error) => return Decision::SignatureFailure(SignatureFailure::Proof(error)),
         };
-        if authority != self.authority || request.uri().path() != self.path {
+        if authority != self.authority
+            || self
+                .path
+                .as_deref()
+                .is_some_and(|path| request.uri().path() != path)
+        {
             return Decision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
         }
         if ["signature-key", "signature-input", "signature"]

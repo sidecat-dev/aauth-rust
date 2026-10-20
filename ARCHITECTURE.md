@@ -8,7 +8,7 @@ unimplemented role surfaces as empty Rust crates.
 | Crate | Owns | Depends on |
 | --- | --- | --- |
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
-| `aauth-rust-signature-key` | Bodyless HTTP signature bases, selected-label correlation, `hwk`/`jwt` key conveyance, proof time | JOSE, `http`, `sfv` |
+| `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
 | `aauth-rust-core` | Agent identifiers, Agent-token claims and verification, retained AP discovery snapshot | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
 | `aauth-rust-agent` | One signed request using caller-owned credentials | Core, Signature-Key, JOSE |
@@ -44,11 +44,16 @@ verified Agent token retains the original compact string. Unknown additive Agent
 claims remain available to host policy; they are not rewritten as authority.
 Protocol functions never send, poll, sleep, refresh credentials or retry effects.
 
-The first HTTP profile accepts only bodyless absolute HTTPS request values.
-It implements the four AAuth base components, query coverage when present and
-authorization coverage when present. Unsupported components or body-bearing
-requests fail explicitly. This keeps Content-Digest, general RFC 9421 component
-processing and application body semantics outside the current claim.
+The HTTP profile accepts absolute HTTPS requests with buffered actual content,
+up to 1 MiB. It covers the four AAuth base components, query and Authorization
+when present, and SHA-256 Content-Digest on nonempty content or a supplied digest.
+Content-Type is also covered when present on nonempty content. The verifier
+compares the digest with the actual bytes before policy, then verifies the proof.
+Ordinary empty requests retain their previous coverage; a supplied empty-content
+digest is checked, while Content-Type on empty content remains outside that
+conditional rule. Hosts bound collection and supply bytes before decompression.
+General component processing, streaming/trailers and application media-type or
+body interpretation remain outside this buffered profile.
 
 ## Rust choices
 

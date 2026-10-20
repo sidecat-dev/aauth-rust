@@ -46,14 +46,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(str::to_owned)
                 .ok_or(Deny)
         });
-    let resource = Arc::new(AgentIdentityResource::new(
-        "https://resource.example/whoami",
+    let resource = Arc::new(AgentIdentityResource::for_origin(
+        "https://resource.example",
         keys,
         policy,
     )?);
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
     let address = listener.local_addr()?;
-    let app = framework::router("https://resource.example".parse()?, resource);
+    let app = framework::router(
+        "https://resource.example".parse()?,
+        "https://resource.example",
+        resource,
+    )?;
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(listener, app)

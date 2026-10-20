@@ -377,9 +377,11 @@ fn a_post_body_added_after_signing_is_refused_before_policy() {
     let Decision::SignatureFailure(error) = resource.authorize(&req, 1000) else {
         panic!("body accepted")
     };
-    assert!(error.to_string().contains("body"));
+    assert_eq!(error.code(), "invalid_input");
+    assert!(
+        matches!(error, aauth_rust_resource::SignatureFailure::Input(ref fields) if fields.contains(&"content-digest"))
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(agent.sign(&mut req, 1000).is_err());
     req.body_mut().clear();
     assert!(matches!(
         resource.authorize(&req, 1000),
@@ -584,4 +586,332 @@ fn identical_proofs_are_accepted_twice_inside_the_window_without_host_replay_pol
         Decision::SignatureFailure(_)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn agent_public_jwk_supports_renewal_without_exposing_or_mutating_the_proof_key() {
+    let (agent, resource) = composition();
+    let public = agent.public_jwk();
+    public.validate().unwrap();
+    assert_eq!(
+        public.thumbprint().unwrap(),
+        SigningKey::from_seed([2; 32])
+            .public_jwk()
+            .thumbprint()
+            .unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&public)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["alg", "crv", "kty", "x"]
+    );
+    let mut caller_copy = agent.public_jwk();
+    caller_copy.x.clear();
+    assert_eq!(
+        agent.public_jwk().thumbprint().unwrap(),
+        public.thumbprint().unwrap()
+    );
+
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    let renewed_claims = AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent@ap.example".into(),
+        jti: "renewal-public-key".into(),
+        iat: 1000,
+        exp: 3000,
+        cnf: Confirmation {
+            jwk: agent.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    };
+    let renewed = agent
+        .with_token(ap.issue(&renewed_claims).unwrap())
+        .unwrap();
+    for signer in [&agent, &renewed] {
+        let mut request = request();
+        signer.sign(&mut request, 1000).unwrap();
+        assert!(matches!(
+            resource.authorize(&request, 1000),
+            Decision::Granted(_)
+        ));
+    }
+}
+
+#[test]
+fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, resource) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource =
+        resource.with_policy(move |_: &VerifiedAgentToken, request: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, aauth_rust_resource::Deny>(request.body().clone())
+        });
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/whoami")
+        .header("content-type", "application/json")
+        .body(br#"{"operation":"reserve"}"#.to_vec())
+        .unwrap();
+    agent.sign(&mut request, 1000).unwrap();
+    let (token, content) = resource.authorize(&request, 1000).into_result().unwrap();
+    assert_eq!(token.claims().sub, "aauth:Agent@ap.example");
+    assert_eq!(content, request.body().as_slice());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    for body in [br#"{"operation":"delete"}"#.to_vec(), Vec::new()] {
+        let mut changed = request.clone();
+        *changed.body_mut() = body;
+        let response = resource.authorize(&changed, 1000).into_response();
+        assert_eq!(response.status(), 401);
+        assert_eq!(
+            response.headers()["signature-error"],
+            "error=invalid_signature"
+        );
+    }
+    let mut changed_type = request.clone();
+    changed_type
+        .headers_mut()
+        .insert("content-type", "text/plain".parse().unwrap());
+    let response = resource.authorize(&changed_type, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=invalid_signature"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn resource_metadata_describes_only_the_implemented_verifier_profile() {
+    let (_, resource) = composition();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata,
+        serde_json::json!({
+            "issuer":"https://resource.example", "access_mode":"agent-token", "signature_window":60
+        })
+    );
+    for endpoint in [
+        "https://resource.example:8443/whoami",
+        "https://127.0.0.1/whoami",
+    ] {
+        let resource = AgentIdentityResource::new(
+            endpoint,
+            resource_keys(),
+            |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+        )
+        .unwrap();
+        assert!(
+            resource.metadata().is_err(),
+            "invalid server identifier published: {endpoint}"
+        );
+    }
+}
+
+#[test]
+fn metadata_failure_is_a_local_configuration_error() {
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example:8443",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    let error = resource.metadata().unwrap_err();
+    assert_eq!(error.code(), "invalid_configuration");
+    assert!(error.to_string().contains("metadata_for"));
+}
+
+#[test]
+fn published_identity_is_independent_of_the_signed_request_authority() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, _) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example:8443/",
+        resource_keys(),
+        move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
+    .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&resource.metadata_for("https://resource.example").unwrap())
+            .unwrap();
+    assert_eq!(metadata["issuer"], "https://resource.example");
+    for (authority, accepted) in [
+        ("resource.example:8443", true),
+        ("resource.example", false),
+        ("resource.example:8444", false),
+        ("foreign.example:8443", false),
+    ] {
+        let mut request = Request::builder()
+            .uri(format!("https://{authority}/orders"))
+            .body(Vec::new())
+            .unwrap();
+        agent.sign(&mut request, 1000).unwrap();
+        assert_eq!(
+            matches!(resource.authorize(&request, 1000), Decision::Granted(_)),
+            accepted,
+            "authority {authority}"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn explicit_metadata_issuer_is_validated_without_normalizing_server_identifiers() {
+    // A root slash is convenient transport syntax, but is not a server identifier.
+    let resource = AgentIdentityResource::for_origin(
+        "https://127.0.0.1:8443/",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    assert!(resource.metadata_for("https://resource.example").is_ok());
+    for issuer in [
+        "http://resource.example",
+        "https://Resource.example",
+        "https://resource.example/",
+        "https://resource.example:443",
+        "https://resource.example:8443",
+        "https://resource.example/api",
+        "https://resource.example?x=1",
+        "https://resource.example#part",
+        "https://user@resource.example",
+        "https://127.0.0.1",
+    ] {
+        let error = resource.metadata_for(issuer).unwrap_err();
+        assert_eq!(error.code(), "invalid_configuration", "issuer {issuer}");
+    }
+}
+
+#[test]
+fn oversized_buffered_content_is_a_request_failure_not_a_bad_signature() {
+    let (agent, resource) = composition();
+    let mut req = request();
+    agent.sign(&mut req, 1000).unwrap();
+    *req.body_mut() = vec![0; aauth_rust_signature_key::MAX_BODY_BYTES + 1];
+    let response = resource.authorize(&req, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=invalid_request"
+    );
+    let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(problem["type"], "urn:ietf:params:sig-error:invalid_request");
+}
+
+fn resource_keys() -> AgentProviderKeys {
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    AgentProviderKeys::from_documents(
+        "https://ap.example",
+        &ap.metadata().unwrap(),
+        &ap.jwks().unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn one_origin_resource_and_its_replaced_policy_serve_distinct_signed_paths() {
+    let (agent, _) = composition();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example",
+        resource_keys(),
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )
+    .unwrap();
+    let resource = resource.with_policy(|_: &VerifiedAgentToken, request: &Request<Vec<u8>>| {
+        Ok::<_, aauth_rust_resource::Deny>(
+            request.uri().path_and_query().unwrap().as_str().to_owned(),
+        )
+    });
+    for path in ["/whoami", "/orders/123?sku=cat%2Ftree"] {
+        let mut request = Request::builder()
+            .uri(format!("https://resource.example{path}"))
+            .body(Vec::new())
+            .unwrap();
+        agent.sign(&mut request, 1000).unwrap();
+        let (_, admitted) = resource.authorize(&request, 1000).into_result().unwrap();
+        assert_eq!(admitted, path);
+    }
+}
+
+#[test]
+fn origin_binding_still_requires_the_actual_signed_path_and_configured_authority() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, _) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource = AgentIdentityResource::for_origin(
+        "https://resource.example/",
+        resource_keys(),
+        move |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            true
+        },
+    )
+    .unwrap();
+    let mut request = request();
+    agent.sign(&mut request, 1000).unwrap();
+    *request.uri_mut() = "https://resource.example/orders/123".parse().unwrap();
+    assert!(matches!(
+        resource.authorize(&request, 1000),
+        Decision::SignatureFailure(_)
+    ));
+    *request.uri_mut() = "https://foreign.example/whoami".parse().unwrap();
+    agent.sign(&mut request, 1000).unwrap();
+    assert!(matches!(
+        resource.authorize(&request, 1000),
+        Decision::SignatureFailure(_)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_origin_constructor_rejects_endpoint_paths_queries_and_invalid_origins() {
+    for origin in [
+        "/whoami",
+        "http://resource.example",
+        "https://resource.example/api",
+        "https://resource.example?x=1",
+        "https://resource.example#part",
+        "https://user@resource.example",
+        "https://resource.example:99999",
+        "https://resource.example:0",
+        "https://resource.example:0000",
+    ] {
+        assert!(
+            AgentIdentityResource::for_origin(
+                origin,
+                resource_keys(),
+                |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true
+            )
+            .is_err(),
+            "accepted {origin}"
+        );
+    }
 }
