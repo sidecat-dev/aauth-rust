@@ -1,6 +1,7 @@
 //! AAuth Agent, Person, Resource and Auth JWT trust verification.
 //! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
+pub mod continuation;
 mod discovery;
 mod identifiers;
 mod tokens;
