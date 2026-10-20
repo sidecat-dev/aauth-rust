@@ -1,7 +1,7 @@
 //! One signed request at a time. Transport and challenge handling belong to hosts.
 #![deny(missing_docs)]
 use aauth_rust_core::{AgentToken, TokenError};
-use aauth_rust_jose::SigningKey;
+use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
 use http::Request;
 use std::sync::Arc;
@@ -36,6 +36,12 @@ impl Agent {
             return Err(TokenError::ConfirmationKeyMismatch);
         }
         Ok(Self { key, token })
+    }
+    /// Return an owned copy of the retained proof key's public JWK.
+    /// Use it for enrollment or renewed token claims without parsing an old token.
+    /// Mutating the returned public value never changes this Agent's signing key.
+    pub fn public_jwk(&self) -> Jwk {
+        self.key.public_jwk()
     }
     /// Retained compact token; treat it as a credential when logging.
     pub fn token(&self) -> &str {

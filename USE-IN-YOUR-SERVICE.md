@@ -68,7 +68,9 @@ Retain the Agent and obtain a new token before expiry, using the same confirmati
 public key. `agent.with_token(new_token)` reuses the existing private key without
 exporting its seed; earlier Agent values remain usable for in-flight requests.
 If enrollment changes the confirmation key, create a new Agent with that key.
-No background enrollment or refresh loop runs inside the library.
+Use `agent.public_jwk()` for the renewed claims' `cnf.jwk`: it returns an owned
+public-only value, so the host need not parse the previous token or retain seed
+bytes. No background enrollment or refresh loop runs inside the library.
 
 `Agent::new` checks syntax and key binding; it does **not** authenticate the AP's
 signature. `AgentToken::parse(...).unverified_claims()` can inspect refresh hints,

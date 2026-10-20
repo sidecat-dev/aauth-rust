@@ -585,3 +585,62 @@ fn identical_proofs_are_accepted_twice_inside_the_window_without_host_replay_pol
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[test]
+fn agent_public_jwk_supports_renewal_without_exposing_or_mutating_the_proof_key() {
+    let (agent, resource) = composition();
+    let public = agent.public_jwk();
+    public.validate().unwrap();
+    assert_eq!(
+        public.thumbprint().unwrap(),
+        SigningKey::from_seed([2; 32])
+            .public_jwk()
+            .thumbprint()
+            .unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&public)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        ["alg", "crv", "kty", "x"]
+    );
+    let mut caller_copy = agent.public_jwk();
+    caller_copy.x.clear();
+    assert_eq!(
+        agent.public_jwk().thumbprint().unwrap(),
+        public.thumbprint().unwrap()
+    );
+
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    let renewed_claims = AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent@ap.example".into(),
+        jti: "renewal-public-key".into(),
+        iat: 1000,
+        exp: 3000,
+        cnf: Confirmation {
+            jwk: agent.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    };
+    let renewed = agent
+        .with_token(ap.issue(&renewed_claims).unwrap())
+        .unwrap();
+    for signer in [&agent, &renewed] {
+        let mut request = request();
+        signer.sign(&mut request, 1000).unwrap();
+        assert!(matches!(
+            resource.authorize(&request, 1000),
+            Decision::Granted(_)
+        ));
+    }
+}
