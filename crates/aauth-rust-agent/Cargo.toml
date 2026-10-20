@@ -17,3 +17,5 @@ aauth-rust-jose.workspace = true
 aauth-rust-core.workspace = true
 aauth-rust-signature-key.workspace = true
 http.workspace = true
+sfv.workspace = true
+thiserror.workspace = true

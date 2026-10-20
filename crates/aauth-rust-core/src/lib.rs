@@ -1,9 +1,16 @@
-//! AAuth Agent-token wire semantics. No enrollment, HTTP or admission policy.
+//! AAuth Agent, Person, Resource and Auth JWT trust verification.
+//! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
 mod discovery;
 mod identifiers;
-pub use discovery::{AgentKeyResolver, AgentProviderKeys, metadata_jwks_uri};
+mod tokens;
+pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};
+pub use tokens::{
+    AuthClaims, AuthToken, PersonClaims, PersonToken, ResourceClaims, ResourceToken,
+    VerifiedAuthToken, VerifiedPersonToken, VerifiedResourceToken, mint_auth_token,
+    mint_person_token, mint_resource_token,
+};
 
 use aauth_rust_jose::{Jwk, Jws, strict_json};
 use serde::{Deserialize, Serialize};
@@ -11,11 +18,16 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-/// Agent-token, identifier or trusted discovery failure with a stable wire code.
+/// Token, identifier or trusted discovery failure with a stable wire code.
 pub enum TokenError {
     /// invalid Agent JWT: check compact encoding, required claim types and issuer signature.
     #[error("invalid Agent JWT: check compact encoding, required claim types and issuer signature")]
     InvalidJwt,
+    /// A verified token targets another recipient; maps to the draft's invalid_jwt.
+    #[error(
+        "token audience differs from the intended recipient: obtain a token for this Resource or Person Server"
+    )]
+    AudienceMismatch,
     #[error(
         "issuer is not trusted by this key snapshot: do not refresh or fetch keys from this issuer"
     )]
@@ -102,6 +114,7 @@ impl TokenError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidJwt
+            | Self::AudienceMismatch
             | Self::InvalidServerIdentifier
             | Self::InvalidAgentIdentifier
             | Self::InvalidDiscoveryDocument

@@ -10,6 +10,8 @@ dependencies = [
  "aauth-rust-jose",
  "aauth-rust-signature-key",
  "http",
+ "sfv",
+ "thiserror",
 ]
 
 [[package]]
@@ -26,6 +28,7 @@ name = "aauth-rust-core"
 version = "0.1.0-alpha.1"
 dependencies = [
  "aauth-rust-jose",
+ "base64",
  "http",
  "serde",
  "serde_json",
@@ -46,6 +49,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aauth-rust-person-server"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
+ "base64",
+ "http",
+ "httpdate",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "aauth-rust-resource"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -53,6 +74,7 @@ dependencies = [
  "aauth-rust-agent-provider",
  "aauth-rust-core",
  "aauth-rust-jose",
+ "aauth-rust-person-server",
  "aauth-rust-signature-key",
  "axum",
  "http",

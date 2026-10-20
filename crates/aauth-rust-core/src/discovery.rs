@@ -110,19 +110,8 @@ impl AgentProviderKeys {
         <Self as AgentKeyResolver>::key(self, issuer, dwk, kid)
     }
 }
-impl AgentKeyResolver for AgentProviderKeys {
-    ///
-    /// # Errors
-    /// Implementations must reject untrusted issuers before network access.
-    /// Reserve `UnknownKey` for missing kid on a trusted issuer, so a host may
-    /// refresh only its configured source after checking the issuer allowlist.
-    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
-        if issuer != self.issuer {
-            return Err(TokenError::UntrustedIssuer);
-        }
-        if dwk != "aauth-agent.json" {
-            return Err(TokenError::InvalidDiscoveryDocument);
-        }
+impl AgentProviderKeys {
+    fn selected_key(&self, kid: &str) -> Result<Jwk, TokenError> {
         if kid.is_empty() {
             return Err(TokenError::InvalidKeyId);
         }
@@ -140,6 +129,23 @@ impl AgentKeyResolver for AgentProviderKeys {
     }
 }
 
+impl AgentKeyResolver for AgentProviderKeys {
+    ///
+    /// # Errors
+    /// Implementations must reject untrusted issuers before network access.
+    /// Reserve `UnknownKey` for missing kid on a trusted issuer, so a host may
+    /// refresh only its configured source after checking the issuer allowlist.
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        if issuer != self.issuer {
+            return Err(TokenError::UntrustedIssuer);
+        }
+        if dwk != "aauth-agent.json" {
+            return Err(TokenError::InvalidDiscoveryDocument);
+        }
+        self.selected_key(kid)
+    }
+}
+
 impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for &T {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         (**self).key(issuer, dwk, kid)
@@ -153,5 +159,63 @@ impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for std::sync::Arc<T> {
 impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for Box<T> {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         (**self).key(issuer, dwk, kid)
+    }
+}
+
+/// Immutable metadata/JWKS snapshot for one explicitly trusted issuer and role.
+/// It never fetches token-named endpoints or makes a host trust decision.
+#[derive(Clone)]
+pub struct TrustedIssuerKeys {
+    snapshot: AgentProviderKeys,
+    dwk: String,
+}
+impl TrustedIssuerKeys {
+    /// Retain discovery documents for the exact issuer and metadata role the host trusts.
+    /// Supports Agent, Person, Resource and Access well-known document names.
+    ///
+    /// # Errors
+    /// Rejects an unknown role, invalid metadata/issuer or malformed/oversized JWKS.
+    pub fn from_documents(
+        issuer: &str,
+        dwk: &str,
+        metadata: &[u8],
+        jwks: &[u8],
+    ) -> Result<Self, TokenError> {
+        if ![
+            "aauth-agent.json",
+            "aauth-person.json",
+            "aauth-resource.json",
+            "aauth-access.json",
+        ]
+        .contains(&dwk)
+        {
+            return Err(TokenError::InvalidDiscoveryDocument);
+        }
+        Ok(Self {
+            snapshot: AgentProviderKeys::from_documents(issuer, metadata, jwks)?,
+            dwk: dwk.into(),
+        })
+    }
+    /// Original validated JWKS location; this snapshot never contacts it.
+    pub fn jwks_uri(&self) -> &str {
+        self.snapshot.jwks_uri()
+    }
+    /// Resolve a key only inside this exact issuer/role trust boundary.
+    ///
+    /// # Errors
+    /// Rejects a foreign issuer or role, empty/missing kid, or malformed selected key.
+    pub fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        <Self as AgentKeyResolver>::key(self, issuer, dwk, kid)
+    }
+}
+impl AgentKeyResolver for TrustedIssuerKeys {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        if issuer != self.snapshot.issuer {
+            return Err(TokenError::UntrustedIssuer);
+        }
+        if dwk != self.dwk {
+            return Err(TokenError::InvalidDiscoveryDocument);
+        }
+        self.snapshot.selected_key(kid)
     }
 }
