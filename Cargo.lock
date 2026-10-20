@@ -70,7 +70,12 @@ dependencies = [
 name = "aauth-rust-person-server-redb"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-core",
+ "aauth-rust-jose",
  "aauth-rust-person-server",
+ "http",
  "redb",
  "serde",
  "serde_json",

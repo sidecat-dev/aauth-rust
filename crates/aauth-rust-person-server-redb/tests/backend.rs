@@ -164,3 +164,71 @@ fn future_version_of_an_otherwise_complete_schema_is_refused() {
         999
     );
 }
+
+#[test]
+fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
+    use redb::{Database, TableDefinition};
+    let directory = tempfile::tempdir().unwrap();
+    for case in ["malformed-token", "miskeyed-token", "malformed-binding"] {
+        let path = directory.path().join(case);
+        let expected = record("retained");
+        let store = RedbStore::open(&path).unwrap();
+        store.commit(expected.clone(), true).unwrap();
+        drop(store);
+        let database = Database::open(&path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        if case == "malformed-binding" {
+            let key = serde_json::to_string(&(
+                &expected.token.reference.issuer,
+                &expected.principal.issuer,
+                &expected.principal.subject,
+            ))
+            .unwrap();
+            transaction
+                .open_table(TableDefinition::<&str, &[u8]>::new("aauth_ps_bindings"))
+                .unwrap()
+                .insert(key.as_str(), b"{}".as_slice())
+                .unwrap();
+        } else {
+            let key = serde_json::to_string(&(
+                &expected.token.reference.issuer,
+                &expected.token.reference.jti,
+            ))
+            .unwrap();
+            let bytes = if case == "miskeyed-token" {
+                let mut different = expected.clone();
+                different.token.reference.jti.push_str("-other");
+                serde_json::to_vec(&different).unwrap()
+            } else {
+                b"{}".to_vec()
+            };
+            transaction
+                .open_table(TableDefinition::<&str, &[u8]>::new("aauth_ps_tokens"))
+                .unwrap()
+                .insert(key.as_str(), bytes.as_slice())
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(database);
+        let reopened = RedbStore::open(&path).unwrap();
+        if case == "malformed-binding" {
+            assert_eq!(
+                reopened.binding(&expected.token.reference.issuer, &expected.principal),
+                Err(StoreError::Unavailable)
+            );
+        } else {
+            assert_eq!(
+                reopened.token(&expected.token.reference),
+                Err(StoreError::Unavailable)
+            );
+            assert_eq!(
+                reopened
+                    .binding(&expected.token.reference.issuer, &expected.principal)
+                    .unwrap()
+                    .unwrap()
+                    .person_id,
+                expected.person_id
+            );
+        }
+    }
+}

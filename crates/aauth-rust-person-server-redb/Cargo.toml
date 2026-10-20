@@ -21,3 +21,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+aauth-rust-agent.workspace = true
+aauth-rust-agent-provider.workspace = true
+aauth-rust-core.workspace = true
+aauth-rust-jose.workspace = true
+http.workspace = true

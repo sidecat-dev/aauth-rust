@@ -21,6 +21,8 @@
 //! ```
 #![deny(missing_docs)]
 
+#[cfg(test)]
+mod failure_tests;
 mod schema;
 use aauth_rust_person_server::{
     AgentIdentity, Binding, Store, StoreError, TokenRecord, TokenReference,
@@ -134,6 +136,77 @@ fn get_text(
     Ok(value.map(|v| v.value().to_owned()))
 }
 
+// All checks and writes belong to the caller's one transaction. Keeping the
+// staging operation separate also lets the unclosed-process test stop before
+// the real commit, without an alternate serialization or test-only store path.
+fn stage_issuance(
+    transaction: &WriteTransaction,
+    record: &TokenRecord,
+    establish_binding: bool,
+) -> Result<bool, StoreError> {
+    let reference = &record.token.reference;
+    let token_key = key(&(&reference.issuer, &reference.jti))?;
+    if let Some(value) = get_bytes(transaction, TOKENS, &token_key)? {
+        let existing = decode_record(&value, reference)?;
+        return if existing == *record {
+            Ok(false)
+        } else {
+            Err(StoreError::Conflict)
+        };
+    }
+    record.validate_for_commit(establish_binding)?;
+    let issuer = &reference.issuer;
+    let binding_key = key(&(issuer, &record.principal.issuer, &record.principal.subject))?;
+    let binding: Option<Binding> = get_bytes(transaction, BINDINGS, &binding_key)?
+        .map(|v| decode(&v))
+        .transpose()?;
+    match &binding {
+        Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
+        Some(binding) if binding.person_id != record.person_id => {
+            return Err(StoreError::Conflict);
+        }
+        None if !establish_binding => return Err(StoreError::MissingBinding),
+        _ => {}
+    }
+    let directed_key = key(&(issuer, &record.person_id, &record.resource))?;
+    let subject_key = key(&(issuer, &record.resource, &record.subject))?;
+    if get_text(transaction, DIRECTED, &directed_key)?.is_some_and(|s| s != record.subject)
+        || get_text(transaction, SUBJECTS, &subject_key)?.is_some_and(|p| p != record.person_id)
+    {
+        return Err(StoreError::Conflict);
+    }
+    if binding.is_none() {
+        transaction
+            .open_table(BINDINGS)
+            .map_err(unavailable)?
+            .insert(
+                binding_key.as_str(),
+                encode(&Binding {
+                    person_id: record.person_id.clone(),
+                    revoked: false,
+                })?
+                .as_slice(),
+            )
+            .map_err(unavailable)?;
+    }
+    transaction
+        .open_table(DIRECTED)
+        .map_err(unavailable)?
+        .insert(directed_key.as_str(), record.subject.as_str())
+        .map_err(unavailable)?;
+    transaction
+        .open_table(SUBJECTS)
+        .map_err(unavailable)?
+        .insert(subject_key.as_str(), record.person_id.as_str())
+        .map_err(unavailable)?;
+    transaction
+        .open_table(TOKENS)
+        .map_err(unavailable)?
+        .insert(token_key.as_str(), encode(record)?.as_slice())
+        .map_err(unavailable)?;
+    Ok(true)
+}
+
 impl Store for RedbStore {
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
         let key = key(&(issuer, &agent.issuer, &agent.subject))?;
@@ -156,72 +229,15 @@ impl Store for RedbStore {
             .transpose()
     }
     fn commit(&self, record: TokenRecord, establish_binding: bool) -> Result<(), StoreError> {
-        let reference = &record.token.reference;
-        let token_key = key(&(&reference.issuer, &reference.jti))?;
         let mut transaction = self.database.begin_write().map_err(unavailable)?;
         transaction
             .set_durability(Durability::Immediate)
             .map_err(unavailable)?;
-        if let Some(value) = get_bytes(&transaction, TOKENS, &token_key)? {
-            let existing = decode_record(&value, reference)?;
-            return if existing == record {
-                Ok(())
-            } else {
-                Err(StoreError::Conflict)
-            };
+        if stage_issuance(&transaction, &record, establish_binding)? {
+            transaction.commit().map_err(unavailable)
+        } else {
+            Ok(())
         }
-        record.validate_for_commit(establish_binding)?;
-        let issuer = &reference.issuer;
-        let binding_key = key(&(issuer, &record.principal.issuer, &record.principal.subject))?;
-        let binding: Option<Binding> = get_bytes(&transaction, BINDINGS, &binding_key)?
-            .map(|v| decode(&v))
-            .transpose()?;
-        match &binding {
-            Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
-            Some(binding) if binding.person_id != record.person_id => {
-                return Err(StoreError::Conflict);
-            }
-            None if !establish_binding => return Err(StoreError::MissingBinding),
-            _ => {}
-        }
-        let directed_key = key(&(issuer, &record.person_id, &record.resource))?;
-        let subject_key = key(&(issuer, &record.resource, &record.subject))?;
-        if get_text(&transaction, DIRECTED, &directed_key)?.is_some_and(|s| s != record.subject)
-            || get_text(&transaction, SUBJECTS, &subject_key)?
-                .is_some_and(|p| p != record.person_id)
-        {
-            return Err(StoreError::Conflict);
-        }
-        if binding.is_none() {
-            transaction
-                .open_table(BINDINGS)
-                .map_err(unavailable)?
-                .insert(
-                    binding_key.as_str(),
-                    encode(&Binding {
-                        person_id: record.person_id.clone(),
-                        revoked: false,
-                    })?
-                    .as_slice(),
-                )
-                .map_err(unavailable)?;
-        }
-        transaction
-            .open_table(DIRECTED)
-            .map_err(unavailable)?
-            .insert(directed_key.as_str(), record.subject.as_str())
-            .map_err(unavailable)?;
-        transaction
-            .open_table(SUBJECTS)
-            .map_err(unavailable)?
-            .insert(subject_key.as_str(), record.person_id.as_str())
-            .map_err(unavailable)?;
-        transaction
-            .open_table(TOKENS)
-            .map_err(unavailable)?
-            .insert(token_key.as_str(), encode(&record)?.as_slice())
-            .map_err(unavailable)?;
-        transaction.commit().map_err(unavailable)
     }
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         let binding_key = key(&(issuer, &agent.issuer, &agent.subject))?;
