@@ -8,5 +8,6 @@ repository.workspace = true
 
 [dependencies]
 aauth-jose.workspace = true
+aauth-core.workspace = true
 aauth-signature-key.workspace = true
 http.workspace = true

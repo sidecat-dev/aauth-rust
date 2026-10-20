@@ -6,6 +6,7 @@ version = 4
 name = "aauth-agent"
 version = "0.1.0"
 dependencies = [
+ "aauth-core",
  "aauth-jose",
  "aauth-signature-key",
  "http",
