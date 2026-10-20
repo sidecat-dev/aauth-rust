@@ -1134,8 +1134,9 @@ conditional consumer receives it; later GETs return 410. Signed DELETE cancels
 both roles with one AS request, and consumes local custody. Transport failure
 reports failure even though local cancellation closes the PS continuation.
 
-This is a top-level, missionless Core-scope profile. Deadlines are capped by all
-original credentials, including the Resource challenge. Long-wait refresh and
+This missionless Core-scope profile supports top-level Agents and one-level
+parent-mediated children. Deadlines are capped by all original credentials,
+including both Agent tokens for a child and the Resource challenge. Long-wait refresh and
 clarification `updated_request` need a later profile; submit a fresh original
 request after expiry. AS and PS independently enforce five clarification rounds,
 preserve unanswered question deadlines and advertise remaining timeout seconds. There is no durable AS/PS continuation adapter in this
