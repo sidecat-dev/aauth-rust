@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://gitlab.com/sidecat-dev/aauth-rust"
+
+[workspace.dependencies]
+aauth-jose = { path = "crates/aauth-jose" }
+aauth-signature-key = { path = "crates/aauth-signature-key" }
+aauth-core = { path = "crates/aauth-core" }
+aauth-agent = { path = "crates/aauth-agent" }
+aauth-agent-provider = { path = "crates/aauth-agent-provider" }
+base64 = "0.22"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+http = "1"
+url = "2"
+sfv = "0.16"
