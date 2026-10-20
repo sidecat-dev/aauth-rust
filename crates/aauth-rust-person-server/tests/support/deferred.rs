@@ -6,7 +6,7 @@ use aauth_rust_person_server::{DeferredConfig, FederationInput};
 use std::sync::Mutex;
 #[derive(Clone)]
 pub(super) struct NativeTransport {
-    stage: Arc<AtomicUsize>,
+    pub(super) stage: Arc<AtomicUsize>,
     pending: Arc<MemoryContinuations>,
     ids: Arc<AtomicUsize>,
     now: Arc<AtomicI64>,
@@ -110,7 +110,7 @@ fn config(store: Arc<MemoryContinuations>) -> DeferredConfig {
     c.retry_after = 0;
     c
 }
-fn poll<K: AgentKeyResolver>(
+pub(super) fn poll<K: AgentKeyResolver>(
     server: &Server<K>,
     holder: &Agent,
     location: &str,
