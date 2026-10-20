@@ -28,6 +28,9 @@ Missing coverage gets invalid_input with the required fields; a malformed or
 mismatched digest gets invalid_signature. Never verify an empty placeholder while
 forwarding unread content, and verify content before decompression. Streaming or
 trailer-based digests need a different adapter/profile; they are not implemented.
+Direct library verification above its 1 MiB buffered ceiling reports
+`invalid_request`, rather than a bad signature. Bound collection before calling
+the library; the adapter's earlier 413 is preferable to allocating a large body.
 
 Terminate TLS before this private hop. Take the external origin from service
 configuration; accept forwarded scheme/authority only through an explicitly
@@ -79,6 +82,12 @@ also authenticates those semantics. Verify raw content before decompression.
 
 Covered header fields use RFC 9421 canonicalization: trim outer spaces/tabs and
 combine field lines with `, `. Outer whitespace changes alone preserve a proof.
+Present empty fields are signed as empty values, distinctly from missing fields.
+This authenticates the field value without validating media type semantics;
+reject an empty or unsupported Content-Type before interpreting content if your
+application requires a media type. On empty content, Content-Type is not covered
+by this conditional profile, even if Content-Digest was supplied. Reject that
+form if the application would assign the unsigned type meaningful semantics.
 Interpret Authorization consistently, or reject forms your application does not
 support; do not treat signed coverage as a guarantee of raw header byte equality.
 

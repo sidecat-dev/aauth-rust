@@ -74,13 +74,13 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Self::InvalidSignature
-            | Self::BodyTooLarge
             | Self::InvalidDigest
             | Self::InvalidUri
             | Self::InvalidClock
             | Self::UnsupportedKeyId
             | Self::TargetMismatch => "invalid_signature",
             Self::InvalidInput => "invalid_input",
+            Self::BodyTooLarge => "invalid_request",
             Self::ClockSkew => "clock_skew",
             Self::InvalidKey => "invalid_key",
             Self::UnsupportedScheme => "unsupported_scheme",
@@ -125,22 +125,24 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
 
 fn header(req: &Request<Vec<u8>>, name: &str) -> Result<String, Error> {
     let mut combined = String::new();
+    let mut present = false;
     for value in req.headers().get_all(name) {
         if value.as_bytes().len() > 16384 - combined.len() {
             return Err(Error::InvalidSignature);
         }
-        if !combined.is_empty() {
+        if present {
             if combined.len() + value.as_bytes().len() + 2 > 16384 {
                 return Err(Error::InvalidSignature);
             }
             combined.push_str(", ");
         }
         combined.push_str(value.to_str().map_err(|_| Error::InvalidSignature)?.trim());
+        present = true;
         if combined.len() > 16384 {
             return Err(Error::InvalidSignature);
         }
     }
-    if combined.is_empty() {
+    if !present {
         return Err(Error::InvalidSignature);
     }
     Ok(combined)

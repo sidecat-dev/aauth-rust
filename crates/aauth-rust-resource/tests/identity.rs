@@ -795,6 +795,22 @@ fn explicit_metadata_issuer_is_validated_without_normalizing_server_identifiers(
     }
 }
 
+#[test]
+fn oversized_buffered_content_is_a_request_failure_not_a_bad_signature() {
+    let (agent, resource) = composition();
+    let mut req = request();
+    agent.sign(&mut req, 1000).unwrap();
+    *req.body_mut() = vec![0; aauth_rust_signature_key::MAX_BODY_BYTES + 1];
+    let response = resource.authorize(&req, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=invalid_request"
+    );
+    let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(problem["type"], "urn:ietf:params:sig-error:invalid_request");
+}
+
 fn resource_keys() -> AgentProviderKeys {
     let ap =
         AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
