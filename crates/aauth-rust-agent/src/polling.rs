@@ -39,7 +39,7 @@ pub struct PollSession {
     answering: bool,
 }
 impl PollSession {
-    /// Parse initial202/402 and retain its stable same-origin Location.
+    /// Parse initial 202/402 and retain its stable same-origin Location.
     /// Host supplies a finite deadline no more than one hour from `now`.
     pub fn new(
         endpoint: &str,
@@ -145,8 +145,8 @@ impl PollSession {
         self.signed(agent, "DELETE", Vec::new(), now)
     }
     /// Accept one actual buffered response. None means the host may schedule
-    /// another poll; Some is the exact terminal response.429 adds five seconds
-    /// to the interval;503 respects Retry-After (default five). Redirects and
+    /// another poll; Some is the exact terminal response. 429 adds five seconds
+    /// to the interval; 503 respects Retry-After (default five). Redirects and
     /// malformed/changed pending responses finish the session with an error.
     pub fn accept(
         &mut self,

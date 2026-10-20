@@ -245,8 +245,10 @@ deferred harness result; shared measurements are recorded separately.
 Authenticated callers that do not own a pending reference receive
 `403 wrong_poller`, independently of a real policy/user `403 denied`.
 This profile retains `410 gone` for both unknown and consumed references;
-it does not distinguish those two histories. Foreign callers never consume
-custody. When AS cancellation wins a race, an in-flight response is withheld
+it does not distinguish those two histories. An authenticated non-owner can
+still distinguish a live reference (`403 wrong_poller`) from an unknown or
+consumed one (`410 gone`). This reveals continuation existence to a caller who
+has or guesses the pending URL, as in Go. Foreign callers never consume custody. When AS cancellation wins a race, an in-flight response is withheld
 with `410 gone`. A PS DELETE during host advancement returns `429 slow_down`;
 retry cancellation after that transition. Actual storage failures remain local
 `500 server_error`.
