@@ -2,7 +2,7 @@
 
 The current profile authenticates an Agent directly to a Resource. Your service
 supplies issuer trust, HTTPS transport, admission policy and state. It has no
-Person Server, delegated authorization, body digest verification or replay store.
+Person Server, delegated authorization or replay store.
 Start with the README's library program, then run the framework example:
 
 ```sh
@@ -20,9 +20,14 @@ All framework/runtime dependencies belong to examples/tests, not the libraries.
 The [axum adapter](crates/aauth-rust-resource/examples/framework/mod.rs) keeps
 the received method, path/query and headers, reconstructs the absolute URI from
 its configured external origin, and reads the actual body with a 1 KiB limit.
-An oversized body gets 413 before verification. Any nonempty body within the
-limit reaches the gate and is refused by this bodyless profile. Never verify an
-empty placeholder while forwarding an unread body.
+An oversized body gets 413 before verification. Within that adapter limit,
+nonempty content reaches the gate and needs covered SHA-256 Content-Digest, plus
+covered Content-Type when present. The Agent generates these from actual bytes;
+the Resource verifies them before policy. The library itself permits up to1MiB.
+Missing coverage gets invalid_input with the required fields; a malformed or
+mismatched digest gets invalid_signature. Never verify an empty placeholder while
+forwarding unread content, and verify content before decompression. Streaming or
+trailer-based digests need a different adapter/profile; they are not implemented.
 
 Terminate TLS before this private hop. Take the external origin from service
 configuration; accept forwarded scheme/authority only through an explicitly

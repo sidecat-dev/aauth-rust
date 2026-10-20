@@ -160,15 +160,20 @@ Resource accepts signature `created` within ±60 seconds and refuses `iat` more
 than 60 seconds ahead. Core JWT verification alone does not use `iat` as a
 validity check. The AP issues tokens lasting at most 24 hours; verification
 does not turn that recommendation into a mandatory lifetime ceiling for other
-issuers. This request profile requires a bodyless absolute HTTPS URI.
-It signs method, authority, path, Signature-Key, query when present, and
-Authorization when present. It **does not compute or verify Content-Digest**.
-A nonempty body is refused at signing and verification, including one added to
-a signed empty POST. A host adapter must supply the actual body bytes or reject
-bodies before verification; passing an empty Vec while forwarding an unread
-body would defeat that check. An empty-body proof does not authorize a body
-operation. Body-bearing support needs digest verification before application
-handling and is outside this profile.
+issuers. Requests use absolute HTTPS URIs. The signer covers method, authority,
+path, Signature-Key, query when present, and Authorization when present. On
+nonempty content it automatically computes SHA-256 Content-Digest and covers it,
+plus Content-Type when present. The Resource checks the digest against the
+actual content before policy. Removing a signed body also fails verification.
+A supplied digest on empty content is covered and checked too.
+
+This is a local safe default for buffered Resource requests, not a universal
+draft requirement for arbitrary Resource APIs. The limit is 1 MiB; hosts must
+bound collection before allocating and supply actual content bytes before any
+decompression. Streaming/trailer digests are not implemented. Passing an empty
+Vec while forwarding unread content defeats body authentication. Missing required
+coverage returns invalid_input with required_input; malformed/mismatched digest
+or proof returns invalid_signature. Body integrity does not prevent replay.
 
 ## Trust and vocabulary
 

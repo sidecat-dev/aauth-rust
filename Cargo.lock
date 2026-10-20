@@ -74,6 +74,7 @@ dependencies = [
  "base64",
  "http",
  "sfv",
+ "sha2",
  "thiserror",
 ]
 

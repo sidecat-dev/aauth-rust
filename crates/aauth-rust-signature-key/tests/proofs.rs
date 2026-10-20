@@ -225,7 +225,7 @@ fn local_signing_errors_explain_body_uri_and_clock_units() {
     let key = SigningKey::from_seed([7; 32]);
     let material = || KeyMaterial::Hwk(key.public_jwk());
     let mut req = request();
-    *req.body_mut() = b"body".to_vec();
+    *req.body_mut() = vec![1; 1_048_577];
     assert!(
         sign_request(&mut req, &key, material(), 1000)
             .unwrap_err()
@@ -506,4 +506,122 @@ fn authorization_coverage_is_the_rfc9421_value_not_raw_outer_whitespace() {
             .contains("\"authorization\": AAuth, session\n")
     );
     assert!(combined.verify(&key.public_jwk()).is_err());
+}
+
+#[test]
+fn buffered_body_signing_covers_a_known_sha256_digest_and_content_type() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/whoami")
+        .header("content-type", "text/plain")
+        .header("content-digest", "stale")
+        .body(b"hello".to_vec())
+        .unwrap();
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    assert_eq!(
+        req.headers()["content-digest"],
+        "sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=:"
+    );
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    prepared.verify(&key.public_jwk()).unwrap();
+    let base = String::from_utf8(prepared.signature_base().to_vec()).unwrap();
+    assert!(
+        base.contains("\"content-digest\": sha-256=:LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=:")
+    );
+    assert!(base.contains("\"content-type\": text/plain"));
+    for body in [b"other".to_vec(), Vec::new()] {
+        let mut changed = req.clone();
+        *changed.body_mut() = body;
+        assert!(
+            PreparedRequest::prepare(&changed, "sig", 1000, 60).is_err(),
+            "body substitution accepted"
+        );
+    }
+    let mut changed = req.clone();
+    changed
+        .headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    assert!(
+        PreparedRequest::prepare(&changed, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .is_err()
+    );
+}
+
+#[test]
+fn bodies_and_supplied_empty_digests_require_covered_valid_sha256() {
+    let (mut req, _) = signed();
+    *req.body_mut() = b"hello".to_vec();
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidInput
+    );
+    let (mut req, _) = signed();
+    req.headers_mut().insert(
+        "content-digest",
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidInput
+    );
+    let key = SigningKey::from_seed([7; 32]);
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    for digest in [
+        "sha-256=\"bad\"",
+        "sha-256=:AAAA:",
+        "sha-512=:AAAA:",
+        "malformed",
+    ] {
+        let mut changed = req.clone();
+        changed
+            .headers_mut()
+            .insert("content-digest", digest.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare(&changed, "sig", 1000, 60)
+                .unwrap_err()
+                .code(),
+            "invalid_signature"
+        );
+    }
+    req.headers_mut().remove("content-digest");
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap_err()
+            .code(),
+        "invalid_signature"
+    );
+}
+
+#[test]
+fn buffered_body_limit_accepts_one_mib_and_refuses_more() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    *req.body_mut() = vec![1; 1_048_576];
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    req.body_mut().push(1);
+    assert!(
+        sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000)
+            .unwrap_err()
+            .to_string()
+            .contains("1048576")
+    );
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap_err()
+            .to_string()
+            .contains("1048576")
+    );
 }

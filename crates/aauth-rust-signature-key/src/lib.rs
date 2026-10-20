@@ -1,6 +1,8 @@
-//! Bodyless RFC 9421 request proofs with the Ed25519 `hwk` and `jwt` schemes.
+//! Buffered RFC 9421 request proofs with the Ed25519 `hwk` and `jwt` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
+mod content_digest;
+
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http::Request;
@@ -16,7 +18,7 @@ pub enum Error {
     /// Malformed framing, stale proof, unsupported component or failed signature.
     InvalidSignature,
     #[error(
-        "signature coverage is incomplete: include method, authority, path, Signature-Key, plus query and Authorization when present"
+        "signature coverage is incomplete: include method, authority, path, Signature-Key, query/Authorization when present, and Content-Digest plus Content-Type when content requires them"
     )]
     /// The selected signature omits required covered components.
     InvalidInput,
@@ -40,9 +42,17 @@ pub enum Error {
     )]
     /// The key algorithm is absent or unsupported.
     UnsupportedAlgorithm,
-    /// request body is unsupported: this profile signs bodyless requests only.
+    /// Legacy bodyless-profile refusal; retained for callers matching old errors.
     #[error("request body is unsupported: this profile signs bodyless requests only")]
     UnsupportedBody,
+    /// Actual buffered content exceeds the shared local 1 MiB profile.
+    #[error(
+        "request body exceeds 1048576 bytes: bound and collect actual content before signing or verification"
+    )]
+    BodyTooLarge,
+    /// Covered Content-Digest is malformed or does not match actual content bytes.
+    #[error("Content-Digest must be a single sha-256 byte sequence matching the actual body bytes")]
+    InvalidDigest,
     #[error(
         "request URI must be an absolute HTTPS URI with a valid authority and port, without userinfo"
     )]
@@ -68,6 +78,8 @@ impl Error {
         match self {
             Self::InvalidSignature
             | Self::UnsupportedBody
+            | Self::BodyTooLarge
+            | Self::InvalidDigest
             | Self::InvalidUri
             | Self::InvalidClock
             | Self::UnsupportedKeyId
@@ -90,7 +102,13 @@ pub enum KeyMaterial {
     Jwt(String),
 }
 
-/// Components required by this bodyless request profile.
+/// Maximum actual content bytes signed or verified by this buffered profile.
+/// Hosts must also bound collection before allocating a request body.
+pub const MAX_BODY_BYTES: usize = 1_048_576;
+
+/// Components required by the local buffered request profile.
+/// Nonempty bodies or a supplied Content-Digest require covered digest, plus
+/// Content-Type when present. A supplied empty-content digest is also checked.
 pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
     let mut required = vec!["@method", "@authority", "@path", "signature-key"];
     if req.uri().query().is_some() {
@@ -98,6 +116,12 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
     }
     if req.headers().contains_key("authorization") {
         required.push("authorization")
+    }
+    if content_digest::needed(req) {
+        required.push("content-digest");
+        if req.headers().contains_key("content-type") {
+            required.push("content-type");
+        }
     }
     required
 }
@@ -249,7 +273,7 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
                 lines.push(format!("\"@query\": ?{}", req.uri().query().unwrap_or("")));
                 continue;
             }
-            "signature-key" | "authorization" => {
+            "signature-key" | "authorization" | "content-digest" | "content-type" => {
                 lines.push(format!("\"{name}\": {}", header(req, name)?));
                 continue;
             }
@@ -297,8 +321,8 @@ impl PreparedRequest {
         window: i64,
         accepted: &[&str],
     ) -> Result<Self, Error> {
-        if !req.body().is_empty() {
-            return Err(Error::UnsupportedBody);
+        if req.body().len() > MAX_BODY_BYTES {
+            return Err(Error::BodyTooLarge);
         }
         if req.uri().scheme_str() != Some("https") {
             return Err(Error::InvalidUri);
@@ -314,6 +338,9 @@ impl PreparedRequest {
         let required = required_components(req);
         if required.iter().any(|s| !covered.contains(s)) {
             return Err(Error::InvalidInput);
+        }
+        if covered.contains(&"content-digest") {
+            content_digest::verify(req)?;
         }
         let created = match input.params.get("created") {
             Some(BareItem::Integer(n)) => i64::from(*n),
@@ -391,7 +418,10 @@ impl PreparedRequest {
 /// other headers are final.
 ///
 /// # Errors
-/// Rejects unsupported bodies, non-HTTPS/invalid targets, invalid clocks, malformed
+/// Computes and covers SHA-256 Content-Digest on nonempty content or when a
+/// digest field was supplied; covers Content-Type when present with that digest.
+/// Existing digest bytes are replaced from actual content before signing.
+/// Rejects bodies over 1 MiB, non-HTTPS/invalid targets, invalid clocks, malformed
 /// JWT/key material or an inline public key that differs from the signer.
 pub fn sign_request(
     req: &mut Request<Vec<u8>>,
@@ -399,8 +429,8 @@ pub fn sign_request(
     material: KeyMaterial,
     now: i64,
 ) -> Result<(), Error> {
-    if !req.body().is_empty() {
-        return Err(Error::UnsupportedBody);
+    if req.body().len() > MAX_BODY_BYTES {
+        return Err(Error::BodyTooLarge);
     }
     if req.uri().scheme_str() != Some("https") {
         return Err(Error::InvalidUri);
@@ -430,6 +460,17 @@ pub fn sign_request(
     }
     if req.headers().contains_key("authorization") {
         covered.push("authorization")
+    }
+    if content_digest::needed(req) {
+        let digest = content_digest::field(req.body());
+        req.headers_mut().insert(
+            "content-digest",
+            digest.parse().map_err(|_| Error::InvalidDigest)?,
+        );
+        covered.push("content-digest");
+        if req.headers().contains_key("content-type") {
+            covered.push("content-type");
+        }
     }
     covered.push("signature-key");
     let input = format!(

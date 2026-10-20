@@ -266,10 +266,12 @@ where
             path: self.path,
         }
     }
-    /// Check a bodyless absolute HTTPS request at `now` in Unix seconds.
+    /// Check a buffered absolute HTTPS request at `now` in Unix seconds.
     /// The proof window is ±60 seconds. Token expiry has no leeway; future
     /// `iat` beyond 60 seconds is refused. Policy receives token and request only
-    /// after verification. Supply actual body bytes or reject bodies at transport;
+    /// after verification. Nonempty content requires covered SHA-256 Content-Digest
+    /// and covered Content-Type when present; actual content is limited to 1 MiB.
+    /// Supply actual bytes before decompression, or reject bodies at transport;
     /// an empty placeholder does not authenticate an unread downstream body.
     ///
     /// ```

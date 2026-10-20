@@ -51,7 +51,9 @@ impl Agent {
     /// This replaces any signature headers; it never sends or retries a request.
     ///
     /// # Errors
-    /// Rejects body-bearing/non-HTTPS requests, invalid clocks and malformed
+    /// Nonempty content is digest-covered (up to 1 MiB), including Content-Type
+    /// when present. Hosts must pass actual bytes and bound body collection.
+    /// Rejects oversized/non-HTTPS requests, invalid clocks and malformed
     /// signing material. See the Signature-Key error explanation for a remedy.
     pub fn sign(&self, request: &mut Request<Vec<u8>>, now: i64) -> Result<(), Error> {
         sign_request(

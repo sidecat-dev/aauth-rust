@@ -137,7 +137,7 @@ async fn axum_reads_real_bodies_and_rejects_over_limit_bodies_before_the_gate() 
     assert_eq!(response.status(), 401);
     assert_eq!(
         response.headers()["signature-error"],
-        "error=invalid_signature"
+        "error=invalid_input, required_input=(\"@method\" \"@authority\" \"@path\" \"signature-key\" \"content-digest\")"
     );
     let oversized = app
         .oneshot(proxy_request(

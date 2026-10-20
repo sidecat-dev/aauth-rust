@@ -377,9 +377,11 @@ fn a_post_body_added_after_signing_is_refused_before_policy() {
     let Decision::SignatureFailure(error) = resource.authorize(&req, 1000) else {
         panic!("body accepted")
     };
-    assert!(error.to_string().contains("body"));
+    assert_eq!(error.code(), "invalid_input");
+    assert!(
+        matches!(error, aauth_rust_resource::SignatureFailure::Input(ref fields) if fields.contains(&"content-digest"))
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(agent.sign(&mut req, 1000).is_err());
     req.body_mut().clear();
     assert!(matches!(
         resource.authorize(&req, 1000),
@@ -643,4 +645,42 @@ fn agent_public_jwk_supports_renewal_without_exposing_or_mutating_the_proof_key(
             Decision::Granted(_)
         ));
     }
+}
+
+#[test]
+fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let (agent, resource) = composition();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let resource =
+        resource.with_policy(move |_: &VerifiedAgentToken, request: &Request<Vec<u8>>| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, aauth_rust_resource::Deny>(request.body().clone())
+        });
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/whoami")
+        .header("content-type", "application/json")
+        .body(br#"{"operation":"reserve"}"#.to_vec())
+        .unwrap();
+    agent.sign(&mut request, 1000).unwrap();
+    let (token, content) = resource.authorize(&request, 1000).into_result().unwrap();
+    assert_eq!(token.claims().sub, "aauth:Agent@ap.example");
+    assert_eq!(content, request.body().as_slice());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    for body in [br#"{"operation":"delete"}"#.to_vec(), Vec::new()] {
+        let mut changed = request.clone();
+        *changed.body_mut() = body;
+        let response = resource.authorize(&changed, 1000).into_response();
+        assert_eq!(response.status(), 401);
+        assert_eq!(
+            response.headers()["signature-error"],
+            "error=invalid_signature"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
