@@ -343,8 +343,26 @@ bare filename uses the current directory. A directory-sync failure returns
 platforms are refused before file creation. This restriction belongs to the
 optional adapter; other platforms can supply a custom `Store`.
 
-A locked, unreadable or invalid database has
-local code `store_unavailable`; an unrelated schema or unsupported version has
+The schema commit precedes directory synchronization. If open fails between
+those steps, the file can already contain an initialized schema, but no usable
+store was acknowledged and its directory entry may not be durable. An open
+error does not mean nothing was written. Diagnose the failure and reopen the
+same file; do not delete it as an initialization workaround.
+
+Open runs redb's page-integrity check before schema access. It refuses detected
+corruption, a reported integrity repair, and catchable unwinding engine panics
+with local code `store_unavailable`. The engine can modify a file during recovery
+or integrity repair even when the adapter refuses open. If corruption is
+suspected, stop the service and preserve a closed copy before diagnosing it;
+restore a verified closed backup before resuming. Such restoration can roll back
+issuances and revocations newer than the backup. The check costs a scan of
+retained engine pages at each open; it does not verify every JSON record or
+authenticate stored ancestry. The normal panic hook may still log a caught
+engine panic. Panic containment requires Rust's unwinding panic
+strategy; `panic=abort`, process signals and allocation aborts are not caught.
+
+A locked or unreadable database also has local code `store_unavailable`;
+an unrelated schema or unsupported version has
 `unsupported_store_schema`. These are configuration/storage errors, never
 Signature-Error codes. Unreadable stored records return `StoreError::Unavailable`,
 which stops the PS operation rather than treating the identity as absent.
@@ -355,8 +373,8 @@ The PS API is synchronous: run it on a blocking worker when adapting an async
 server. The adapter atomically checks and stores the binding, exact complete
 issuance and both directed-identity indexes before returning success. It uses
 immediate durability. Composite keys preserve issuer/JTI namespacing without
-scanning the database. Startup checks schema identity/types/version, not every
-record. The file contains internal identity and credential hashes/lineage,
+scanning the database on ordinary Store calls. Startup separately scans engine
+integrity and checks schema identity/types/version. The file contains internal identity and credential hashes/lineage,
 with no encryption, signing key or compact token storage.
 
 After every handle is closed, reopen the same file and supply the same issuer
@@ -366,9 +384,31 @@ revoked. Never replace a missing database with an empty one to repair a token
 error. Close all handles before copying/restoring a backup. An I/O error may
 leave a whole commit's outcome uncertain; the PS releases no credential on a
 commit error, and the database exposes no partial binding/index/token update.
-There is no cleanup or migration API in this version. Records remain indefinitely,
-including after `retain_until`; protect backups and plan capacity. The adapter
-does not provide request replay detection or operation idempotency.
+After a redb commit fails, the live database refuses further writes, including
+revocation, on every clone. Stop issuance/revocation, drop all store clones
+(including the owning PersonServer and in-flight handlers), then reopen the
+same file and reconstruct the service. A surviving handle's reads can show the
+old in-memory snapshot; they do not resolve the failed commit's durable outcome.
+The adapter does not recover or replace a live handle automatically. Logical
+refusals such as Conflict or InvalidRecord do not require reopening.
+
+There is **no adapter-enforced bound on total file size or record count**, and
+no cleanup, quota, compaction or migration API. Records remain indefinitely,
+including after `retain_until`. Provision capacity for every issuance, including
+retained tokens that were never released; monitor growth and stop admission
+before capacity is exhausted. A filesystem quota can stop writes but does not
+reclaim records. Deleting/rotating the file or editing tables directly is not a
+supported bounding mechanism: it can discard outstanding lineage or revocation.
+
+Each retained record is capped at **1 MiB of encoded UTF-8 JSON**, including
+field names and escaping (`MAX_RECORD_BYTES`). A fresh larger record returns
+`StoreError::InvalidRecord` before any binding/index/token change; oversized
+stored values return Unavailable. Existing-record comparison still comes first,
+so a changed oversized retry of an existing JTI is Conflict. Serialization stops
+at the cap; callers must still bound the strings they allocate and the subjects/
+IDs supplied by policy. This local adapter limit differs from the PS HTTP body's
+1 MiB limit and does not bound total growth or apply to every custom Store.
+The adapter does not provide request replay detection or operation idempotency.
 
 Custom adapters run `storetest::check_store_contract` with a fresh empty store
 on every factory call. Its checks match the Go issued-token contract's exact

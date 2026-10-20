@@ -2,7 +2,7 @@
 
 mod support;
 use aauth_rust_person_server::{Store, StoreError, storetest};
-use aauth_rust_person_server_redb::RedbStore;
+use aauth_rust_person_server_redb::{MAX_RECORD_BYTES, RedbStore};
 use std::cell::RefCell;
 use support::record;
 
@@ -178,6 +178,7 @@ fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
         "empty-identity",
         "person-with-presented",
         "empty-upstream-tie",
+        "oversized-record",
     ] {
         let path = directory.path().join(case);
         let expected = record("retained");
@@ -224,6 +225,10 @@ fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
                 tie.compact_sha256.clear();
                 invalid.upstream = Some(tie);
                 serde_json::to_vec(&invalid).unwrap()
+            } else if case == "oversized-record" {
+                let mut invalid = expected.clone();
+                invalid.subject = "x".repeat(1024 * 1024);
+                serde_json::to_vec(&invalid).unwrap()
             } else {
                 b"{}".to_vec()
             };
@@ -242,9 +247,12 @@ fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
                 Err(StoreError::Unavailable)
             );
         } else {
-            assert_eq!(
-                reopened.token(&expected.token.reference),
-                Err(StoreError::Unavailable)
+            assert!(
+                matches!(
+                    reopened.token(&expected.token.reference),
+                    Err(StoreError::Unavailable)
+                ),
+                "malformed case {case} did not return Unavailable"
             );
             assert_eq!(
                 reopened
@@ -256,4 +264,133 @@ fn unreadable_or_miskeyed_rows_are_unavailable_instead_of_missing_identity() {
             );
         }
     }
+}
+
+#[test]
+fn empty_binding_identity_is_unavailable_for_read_commit_and_revoke() {
+    use aauth_rust_person_server::Binding;
+    use redb::{Database, TableDefinition};
+    let directory = tempfile::tempdir().unwrap();
+    for revoked in [false, true] {
+        let path = directory
+            .path()
+            .join(format!("empty-binding-{revoked}.redb"));
+        let original = record("retained");
+        let store = RedbStore::open(&path).unwrap();
+        store.commit(original.clone(), true).unwrap();
+        drop(store);
+        let database = Database::open(&path).unwrap();
+        let transaction = database.begin_write().unwrap();
+        let key = serde_json::to_string(&(
+            &original.token.reference.issuer,
+            &original.principal.issuer,
+            &original.principal.subject,
+        ))
+        .unwrap();
+        let bytes = serde_json::to_vec(&Binding {
+            person_id: String::new(),
+            revoked,
+        })
+        .unwrap();
+        transaction
+            .open_table(TableDefinition::<&str, &[u8]>::new("aauth_ps_bindings"))
+            .unwrap()
+            .insert(key.as_str(), bytes.as_slice())
+            .unwrap();
+        transaction.commit().unwrap();
+        drop(database);
+        let store = RedbStore::open(path).unwrap();
+        let issuer = &original.token.reference.issuer;
+        assert_eq!(
+            store.binding(issuer, &original.principal),
+            Err(StoreError::Unavailable)
+        );
+        let candidate = record("new-issuance");
+        assert_eq!(
+            store.commit(candidate.clone(), true),
+            Err(StoreError::Unavailable)
+        );
+        assert_eq!(store.token(&candidate.token.reference).unwrap(), None);
+        assert_eq!(
+            store.revoke_binding(issuer, &original.principal),
+            Err(StoreError::Unavailable)
+        );
+        assert_eq!(
+            store.token(&original.token.reference).unwrap(),
+            Some(original)
+        );
+    }
+}
+
+#[test]
+fn oversized_records_are_invalid_without_leaking_any_table_state() {
+    use redb::{Database, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oversized.redb");
+    let store = RedbStore::open(&path).unwrap();
+    let mut oversized = record("oversized");
+    oversized.subject = "x".repeat(64 * 1024 * 1024);
+    assert_eq!(
+        store.commit(oversized, true),
+        Err(StoreError::InvalidRecord)
+    );
+    drop(store);
+    let database = Database::open(&path).unwrap();
+    let read = database.begin_read().unwrap();
+    for table in ["aauth_ps_tokens", "aauth_ps_bindings"] {
+        assert!(
+            read.open_table(TableDefinition::<&str, &[u8]>::new(table))
+                .unwrap()
+                .is_empty()
+                .unwrap()
+        );
+    }
+    for table in ["aauth_ps_directed", "aauth_ps_subjects"] {
+        assert!(
+            read.open_table(TableDefinition::<&str, &str>::new(table))
+                .unwrap()
+                .is_empty()
+                .unwrap()
+        );
+    }
+    drop(read);
+    drop(database);
+    let store = RedbStore::open(path).unwrap();
+    let valid = record("oversized");
+    store.commit(valid.clone(), true).unwrap();
+    assert_eq!(store.token(&valid.token.reference).unwrap(), Some(valid));
+}
+
+#[test]
+fn one_mib_encoded_record_is_accepted_but_one_more_byte_is_invalid() {
+    const LIMIT: usize = MAX_RECORD_BYTES;
+    let directory = tempfile::tempdir().unwrap();
+    let store = RedbStore::open(directory.path().join("boundary.redb")).unwrap();
+    let mut boundary = record("boundary");
+    let overhead = serde_json::to_vec(&boundary).unwrap().len() - boundary.subject.len();
+    boundary.subject = "x".repeat(LIMIT - overhead);
+    assert_eq!(serde_json::to_vec(&boundary).unwrap().len(), LIMIT);
+    store.commit(boundary.clone(), true).unwrap();
+    store.commit(boundary.clone(), true).unwrap();
+    assert_eq!(
+        store.token(&boundary.token.reference).unwrap(),
+        Some(boundary.clone())
+    );
+    let mut too_large = boundary.clone();
+    too_large.subject.push('x');
+    assert_eq!(
+        store.commit(too_large.clone(), true),
+        Err(StoreError::Conflict)
+    );
+    too_large.token.reference.jti = "new-jti!".into(); // same byte length
+    assert_eq!(serde_json::to_vec(&too_large).unwrap().len(), LIMIT + 1);
+    assert_eq!(
+        store.commit(too_large.clone(), true),
+        Err(StoreError::InvalidRecord)
+    );
+    assert_eq!(store.token(&too_large.token.reference).unwrap(), None);
+    assert_eq!(
+        store.token(&boundary.token.reference).unwrap(),
+        Some(boundary)
+    );
 }

@@ -147,8 +147,10 @@ pub enum StoreError {
     /// Authorization attempted without an existing original Agent binding.
     #[error("original Agent-person binding is missing")]
     MissingBinding,
-    /// Record fields are incomplete or inconsistent.
-    #[error("invalid issuance record: retain complete identity, token digest and expiry fields")]
+    /// Record fields are incomplete/inconsistent, or exceed an adapter's limit.
+    #[error(
+        "invalid issuance record: check identity, token digest, expiry and the adapter's record-size limit"
+    )]
     InvalidRecord,
     /// Storage cannot confirm completion; a whole commit outcome may be unknown.
     #[error("Person Server storage is unavailable")]

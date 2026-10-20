@@ -107,6 +107,7 @@ fn backend_write_error_is_unavailable_and_recovery_preserves_the_prior_transacti
         })
         .unwrap();
     let store = RedbStore::from_database(database, path.clone()).unwrap();
+    let clone = store.clone();
     let prior = record("committed-before-failure");
     store.commit(prior.clone(), true).unwrap();
     let candidate = child_record();
@@ -119,13 +120,31 @@ fn backend_write_error_is_unavailable_and_recovery_preserves_the_prior_transacti
         !fail.load(Ordering::SeqCst),
         "the real backend did not encounter the injected write failure"
     );
+    // The fault was one-shot. Its removal does not recover the invalidated
+    // allocator: every clone must close before writing again.
+    assert_eq!(
+        clone.commit(candidate.clone(), true),
+        Err(StoreError::Unavailable)
+    );
+    assert_eq!(
+        store.revoke_binding(&prior.token.reference.issuer, &prior.principal),
+        Err(StoreError::Unavailable)
+    );
     drop(store);
+    assert_eq!(
+        RedbStore::open(&path).unwrap_err().code(),
+        "store_unavailable"
+    );
+    drop(clone);
     let recovered = RedbStore::open(&path).unwrap();
     assert_eq!(
         recovered.token(&prior.token.reference).unwrap(),
-        Some(prior)
+        Some(prior.clone())
     );
     absent_without_index_leaks(&recovered, &candidate);
+    recovered
+        .revoke_binding(&prior.token.reference.issuer, &prior.principal)
+        .unwrap();
 }
 
 #[test]

@@ -8,6 +8,11 @@
 //! This adapter requires Unix and a filesystem supporting directory `sync_all`.
 //! Open synchronizes the database's parent after initializing its file; the host
 //! must durably provision that directory. Other platforms fail closed at open.
+//! Open scans engine page integrity before schema access and catches unwinding
+//! engine panics as `store_unavailable`. Failed engine commits require dropping every
+//! clone and reopening; this adapter does not automatically recover a live
+//! handle. Records are limited to [`MAX_RECORD_BYTES`], but total growth has no
+//! adapter-enforced bound or reclamation API.
 //!
 //! ```
 //! # #[cfg(unix)]
@@ -44,9 +49,16 @@ use schema::{BINDINGS, DIRECTED, SUBJECTS, TOKENS};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     io,
+    panic::catch_unwind,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Maximum UTF-8 JSON bytes in one retained record, including field names and
+/// escaping: 1 MiB. Larger fresh commits are InvalidRecord; oversized stored
+/// values are Unavailable. This does not bound total database growth or memory
+/// the caller already allocated for a record.
+pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 
 /// Local database-open failure, distinct from a caller's AAuth wire error.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +73,11 @@ pub enum OpenError {
         "store_unavailable: cannot initialize Person Server database; check storage health and write permissions"
     )]
     Unavailable,
+    /// Integrity repair or an unwinding engine panic prevents trusted open.
+    #[error(
+        "store_unavailable: database integrity/open checks failed; preserve the file for diagnosis and restore a verified closed backup before resuming"
+    )]
+    Integrity,
     /// The platform or filesystem cannot durably synchronize the parent entry.
     #[error(
         "store_unavailable: cannot synchronize the database parent directory; use Unix with a filesystem supporting directory sync and check permissions/health: {0}"
@@ -94,7 +111,14 @@ impl RedbStore {
     /// The host must durably provision the parent directory; the database file
     /// must have one process owner. After initializing the file, every open
     /// synchronizes its parent before returning. A bare filename uses `.`.
-    /// Ordinary startup checks the schema, not all retained records.
+    /// Startup scans engine integrity, then checks the schema. Its cost grows
+    /// with retained pages; it does not verify every record's JSON or ancestry.
+    /// Integrity repair, detected corruption and unwinding engine panics refuse
+    /// open with store_unavailable. With panic=abort, panics cannot be caught.
+    /// Integrity checks/recovery may modify the file even when open is refused;
+    /// preserve a closed copy first when diagnosing suspected corruption.
+    /// A schema commit can precede a failed directory sync: Err does not imply
+    /// that no file was created or initialized, and no usable handle is returned.
     /// Unix with directory-sync support is required; other platforms are refused
     /// before database creation. The rest of the protocol workspace remains
     /// independent of this optional adapter's platform support.
@@ -109,7 +133,10 @@ impl RedbStore {
             )));
         }
         let path = path.as_ref().to_owned();
-        Self::from_database(Database::create(&path)?, path)
+        // redb can panic while opening damaged pages or parsing metadata, even
+        // when its integrity check is used. No handle survives a failed open.
+        catch_unwind(|| Self::from_database(Database::create(&path)?, path.clone()))
+            .map_err(|_| OpenError::Integrity)?
     }
     fn from_database(database: Database, path: PathBuf) -> Result<Self, OpenError> {
         Self::from_database_with_sync(database, path, |parent| {
@@ -117,10 +144,15 @@ impl RedbStore {
         })
     }
     fn from_database_with_sync(
-        database: Database,
+        mut database: Database,
         path: PathBuf,
         sync_parent: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<Self, OpenError> {
+        if !database.check_integrity()? {
+            // The engine reports false when it repaired something. Do not
+            // silently admit possibly rolled-back state as an intact store.
+            return Err(OpenError::Integrity);
+        }
         schema::initialize(&database)?;
         sync_parent(parent_directory(&path)).map_err(OpenError::DirectoryDurability)?;
         Ok(Self {
@@ -150,7 +182,38 @@ fn encode(value: &impl Serialize) -> Result<Vec<u8>, StoreError> {
     serde_json::to_vec(value).map_err(unavailable)
 }
 fn decode<T: DeserializeOwned>(value: &[u8]) -> Result<T, StoreError> {
+    if value.len() > MAX_RECORD_BYTES {
+        return Err(StoreError::Unavailable);
+    }
     serde_json::from_slice(value).map_err(unavailable)
+}
+struct RecordBuffer(Vec<u8>);
+impl io::Write for RecordBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > MAX_RECORD_BYTES - self.0.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "record exceeds MAX_RECORD_BYTES",
+            ));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+fn encode_record(record: &TokenRecord) -> Result<Vec<u8>, StoreError> {
+    let mut buffer = RecordBuffer(Vec::new());
+    serde_json::to_writer(&mut buffer, record).map_err(|_| StoreError::InvalidRecord)?;
+    Ok(buffer.0)
+}
+fn decode_binding(value: &[u8]) -> Result<Binding, StoreError> {
+    let binding: Binding = decode(value)?;
+    if binding.person_id.is_empty() {
+        return Err(StoreError::Unavailable);
+    }
+    Ok(binding)
 }
 fn decode_record(value: &[u8], reference: &TokenReference) -> Result<TokenRecord, StoreError> {
     let record: TokenRecord = decode(value)?;
@@ -198,10 +261,11 @@ fn stage_issuance(
         };
     }
     record.validate_for_commit(establish_binding)?;
+    let encoded = encode_record(record)?;
     let issuer = &reference.issuer;
     let binding_key = key(&(issuer, &record.principal.issuer, &record.principal.subject))?;
     let binding: Option<Binding> = get_bytes(transaction, BINDINGS, &binding_key)?
-        .map(|v| decode(&v))
+        .map(|v| decode_binding(&v))
         .transpose()?;
     match &binding {
         Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
@@ -245,7 +309,7 @@ fn stage_issuance(
     transaction
         .open_table(TOKENS)
         .map_err(unavailable)?
-        .insert(token_key.as_str(), encode(record)?.as_slice())
+        .insert(token_key.as_str(), encoded.as_slice())
         .map_err(unavailable)?;
     Ok(true)
 }
@@ -256,11 +320,7 @@ impl Store for RedbStore {
         let read = self.database.begin_read().map_err(unavailable)?;
         let table = read.open_table(BINDINGS).map_err(unavailable)?;
         let value = table.get_owned(key.as_str()).map_err(unavailable)?;
-        let binding: Option<Binding> = value.map(|v| decode(v.value())).transpose()?;
-        if binding.as_ref().is_some_and(|b| b.person_id.is_empty()) {
-            return Err(StoreError::Unavailable);
-        }
-        Ok(binding)
+        value.map(|v| decode_binding(v.value())).transpose()
     }
     fn token(&self, reference: &TokenReference) -> Result<Option<TokenRecord>, StoreError> {
         let key = key(&(&reference.issuer, &reference.jti))?;
@@ -289,12 +349,9 @@ impl Store for RedbStore {
             .set_durability(Durability::Immediate)
             .map_err(unavailable)?;
         let mut binding: Binding = get_bytes(&transaction, BINDINGS, &binding_key)?
-            .map(|v| decode(&v))
+            .map(|v| decode_binding(&v))
             .transpose()?
             .ok_or(StoreError::MissingBinding)?;
-        if binding.person_id.is_empty() {
-            return Err(StoreError::Unavailable);
-        }
         binding.revoked = true;
         transaction
             .open_table(BINDINGS)

@@ -64,10 +64,22 @@ synchronizes the parent after file initialization and refuses a usable handle
 if that step fails; non-Unix open is refused before file creation. One process
 owns each file; cloned handles share that owner. Close every handle
 before copying/restoring a database backup. The adapter has no cleanup API and
-keeps records indefinitely, including after `retain_until`; plan storage capacity.
+keeps records indefinitely, including after `retain_until`; there is no enforced
+bound on file size or record count. Provision/monitor capacity and stop admission
+before exhaustion. A 1 MiB encoded-JSON record limit does not bound total growth
+or memory the caller already allocated.
+Open checks engine page integrity before schema access and maps catchable
+unwinding engine panics and detected corruption to store_unavailable. Checks
+can modify a file during repair and cost a page scan at startup; preserve a closed
+copy before diagnosing corruption. They do not authenticate coherently tampered
+rows or cover external modification after open. panic=abort and process/allocation
+aborts cannot be contained.
 Logical refusals leave state unchanged. An operational I/O error can leave a
 whole transaction's outcome uncertain, so the PS releases no credential on a
-commit error. No partial binding/index/token transaction is exposed. Process-exit
+commit error. A failed engine commit prevents writes/revocation through every
+clone until all handles close and the same file is reopened; reconstruct the PS
+and do not use surviving reads to infer the durable outcome. No partial
+binding/index/token transaction is exposed. Process-exit
 tests and one controlled write failure do not simulate every storage failure or
 physical power loss. This store is not an HTTP replay cache.
 

@@ -55,10 +55,13 @@ volatile reference; `storetest` is the executable contract for durable host
 implementations. The separate redb adapter passes that logical contract and a
 consuming close/reopen contract. Its keyed tables hold complete issuance,
 binding and both directed-identity indexes; one immediate-durable write
-transaction updates them together. Startup checks table identity/types and
-schema version without scanning records, then synchronizes the parent directory
+transaction updates them together. Startup scans engine page integrity, checks
+table identity/types and schema version, then synchronizes the parent directory
 after the database file. This optional adapter requires Unix directory-sync
-support and a durably provisioned parent. Backend process-exit and injected-I/O
+support and a durably provisioned parent. It contains unwinding open/metadata
+panics, caps encoded records at 1 MiB and retains an unbounded record count.
+Failed engine commits require all clones to close and the file to reopen.
+Backend process-exit and injected-I/O
 tests are distinct from the protocol contract. Separate upstream hooks default to denial. An intermediary
 uses its own self-issued Agent token while the retained upstream ties preserve
 the original accountable Agent/person; it never acquires the caller's key.
