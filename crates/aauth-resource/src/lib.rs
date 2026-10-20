@@ -8,12 +8,24 @@ pub enum SignatureFailure {
     Token(TokenError),
     Input(Vec<&'static str>),
 }
+impl SignatureFailure {
+    /// Machine-readable wire code, separate from local error explanations.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Proof(error) => error.code(),
+            Self::Token(error) => error.code(),
+            Self::Input(_) => "invalid_input",
+        }
+    }
+}
 impl std::fmt::Display for SignatureFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Proof(e) => e.fmt(f),
             Self::Token(e) => e.fmt(f),
-            Self::Input(_) => f.write_str("invalid_input"),
+            Self::Input(required) => {
+                write!(f, "signature coverage is incomplete: cover {required:?}")
+            }
         }
     }
 }
@@ -24,7 +36,7 @@ pub enum Decision {
     Granted(Box<VerifiedAgentToken>),
 }
 impl Decision {
-    /// Minimal HTTP mapping; a host supplies application response bodies.
+    /// HTTP mapping with safe RFC 9457 Problem Details for failures.
     pub fn into_response(self) -> Response<Vec<u8>> {
         let mut response = Response::new(Vec::new());
         match self {
@@ -34,16 +46,18 @@ impl Decision {
                     "aauth-requirement",
                     "requirement=agent-token".parse().unwrap(),
                 );
+                problem(&mut response, "about:blank", "Agent token required", 401);
             }
             Self::Forbidden => {
                 *response.status_mut() = StatusCode::FORBIDDEN;
+                problem(&mut response, "about:blank", "Forbidden", 403);
             }
             Self::Granted(token) => {
                 *response.body_mut() = token.claims().sub.as_bytes().to_vec();
             }
             Self::SignatureFailure(failure) => {
                 *response.status_mut() = StatusCode::UNAUTHORIZED;
-                let mut error = format!("error={failure}");
+                let mut error = format!("error={}", failure.code());
                 if let SignatureFailure::Input(required) = &failure {
                     let components = required
                         .iter()
@@ -60,6 +74,21 @@ impl Decision {
                 response
                     .headers_mut()
                     .insert("signature-error", error.parse().unwrap());
+                problem(
+                    &mut response,
+                    &format!("urn:ietf:params:sig-error:{}", failure.code()),
+                    "Request signature rejected",
+                    401,
+                );
+                if matches!(
+                    failure,
+                    SignatureFailure::Token(TokenError::UnexpectedTokenType)
+                ) {
+                    response.headers_mut().insert(
+                        "aauth-requirement",
+                        "requirement=agent-token".parse().unwrap(),
+                    );
+                }
                 if matches!(
                     failure,
                     SignatureFailure::Proof(Error::UnsupportedAlgorithm)
@@ -78,6 +107,15 @@ impl Decision {
         }
         response
     }
+}
+
+fn problem(response: &mut Response<Vec<u8>>, kind: &str, title: &str, status: u16) {
+    response
+        .headers_mut()
+        .insert("content-type", "application/problem+json".parse().unwrap());
+    *response.body_mut() =
+        serde_json::to_vec(&serde_json::json!({"type":kind,"title":title,"status":status}))
+            .expect("fixed Problem Details fields are serializable");
 }
 
 pub struct AgentIdentityResource<K, P> {

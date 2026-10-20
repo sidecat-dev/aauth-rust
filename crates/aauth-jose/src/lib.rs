@@ -44,7 +44,12 @@ impl Jwk {
         if self.alg != "Ed25519" {
             return Err(Error::UnsupportedAlgorithm);
         }
-        if self.kty != "OKP" || self.crv != "Ed25519" || self.extra.contains_key("d") {
+        if self.kty != "OKP"
+            || self.crv != "Ed25519"
+            || ["d", "k", "p", "q", "dp", "dq", "qi", "oth"]
+                .iter()
+                .any(|name| self.extra.contains_key(*name))
+        {
             return Err(Error::InvalidKey);
         }
         let raw = URL_SAFE_NO_PAD

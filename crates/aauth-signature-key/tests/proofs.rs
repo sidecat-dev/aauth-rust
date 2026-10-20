@@ -192,3 +192,194 @@ fn authority_normalizes_case_and_default_port_per_rfc9421() {
         );
     }
 }
+
+#[test]
+fn malformed_fields_are_not_missing_coverage_errors() {
+    for (field, value, code) in [
+        ("signature-input", "sig=(", "invalid_signature"),
+        (
+            "signature-input",
+            "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\")",
+            "invalid_signature",
+        ),
+        ("signature-key", "sig=", "invalid_key"),
+        ("signature-key", "sig=1", "invalid_key"),
+        ("signature-key", "other=hwk", "invalid_signature"),
+        ("signature", "sig=", "invalid_signature"),
+    ] {
+        let (mut req, _) = signed();
+        req.headers_mut().insert(field, value.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare(&req, "sig", 1000, 60)
+                .err()
+                .unwrap()
+                .code(),
+            code,
+            "{field}: {value}"
+        );
+    }
+}
+
+#[test]
+fn local_signing_errors_explain_body_uri_and_clock_units() {
+    let key = SigningKey::from_seed([7; 32]);
+    let material = || KeyMaterial::Hwk(key.public_jwk());
+    let mut req = request();
+    *req.body_mut() = b"body".to_vec();
+    assert!(
+        sign_request(&mut req, &key, material(), 1000)
+            .unwrap_err()
+            .to_string()
+            .contains("body")
+    );
+    let mut req = request();
+    *req.uri_mut() = "http://resource.example/whoami".parse().unwrap();
+    assert!(
+        sign_request(&mut req, &key, material(), 1000)
+            .unwrap_err()
+            .to_string()
+            .contains("HTTPS")
+    );
+    let (req, _) = signed();
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1_000_000, 60)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("seconds")
+    );
+}
+
+#[test]
+fn expires_cannot_precede_or_equal_created() {
+    let (mut req, _) = signed();
+    req.headers_mut().insert("signature-input","sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1020;expires=1010".parse().unwrap());
+    assert!(PreparedRequest::prepare(&req, "sig", 1000, 60).is_err());
+}
+
+fn resign(req: &mut Request<Vec<u8>>, key: &SigningKey) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let base = PreparedRequest::prepare(req, "sig", 1000, 60)
+        .unwrap()
+        .signature_base()
+        .to_vec();
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode(key.sign(&base)))
+            .parse()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn multiple_field_lines_and_authorization_are_signed_as_combined_values() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut req = request();
+    req.headers_mut()
+        .insert("authorization", "AAuth session".parse().unwrap());
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    req.headers_mut()
+        .append("signature-key", "other=future;value=token".parse().unwrap());
+    req.headers_mut().append(
+        "signature-input",
+        "other=(\"@path\");created=1000".parse().unwrap(),
+    );
+    req.headers_mut()
+        .append("signature", "other=:AA==:".parse().unwrap());
+    resign(&mut req, &key);
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", "AAuth changed".parse().unwrap());
+    assert!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk())
+            .is_err()
+    );
+}
+
+#[test]
+fn signature_alg_parameter_is_ignored_but_keyid_is_explicitly_unsupported() {
+    let (mut req, key) = signed();
+    let input = format!(
+        "{};alg=\"not-the-key-algorithm\"",
+        req.headers()["signature-input"].to_str().unwrap()
+    );
+    req.headers_mut()
+        .insert("signature-input", input.parse().unwrap());
+    resign(&mut req, &key);
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    req.headers_mut().insert(
+        "signature-input",
+        format!("{input};keyid=\"ap-1\"").parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .err()
+            .unwrap()
+            .code(),
+        "invalid_signature"
+    );
+}
+
+#[test]
+fn hwk_rejects_private_material_and_wrong_alg_type_but_allows_extensions() {
+    for suffix in [
+        ";k=\"secret\"",
+        ";p=\"secret\"",
+        ";q=\"secret\"",
+        ";dp=\"secret\"",
+        ";dq=\"secret\"",
+        ";qi=\"secret\"",
+        ";oth=\"secret\"",
+    ] {
+        let (mut req, _) = signed();
+        let value = format!(
+            "{}{suffix}",
+            req.headers()["signature-key"].to_str().unwrap()
+        );
+        req.headers_mut()
+            .insert("signature-key", value.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare(&req, "sig", 1000, 60)
+                .err()
+                .unwrap()
+                .code(),
+            "invalid_key",
+            "{suffix}"
+        );
+    }
+    let (mut req, _) = signed();
+    let value = req.headers()["signature-key"]
+        .to_str()
+        .unwrap()
+        .replace("alg=\"Ed25519\"", "alg=1");
+    req.headers_mut()
+        .insert("signature-key", value.parse().unwrap());
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .err()
+            .unwrap()
+            .code(),
+        "invalid_key"
+    );
+    let (mut req, key) = signed();
+    let value = format!(
+        "{}, sig=hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"{}\";alg=\"future\";alg=\"Ed25519\";extension=?1",
+        req.headers()["signature-key"].to_str().unwrap(),
+        key.public_jwk().x
+    );
+    req.headers_mut()
+        .insert("signature-key", value.parse().unwrap());
+    resign(&mut req, &key);
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+}

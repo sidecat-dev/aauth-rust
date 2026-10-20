@@ -214,3 +214,121 @@ fn missing_confirmation_algorithm_is_not_inferred_or_misclassified() {
         TokenError::UnsupportedAlgorithm
     );
 }
+
+#[test]
+fn local_claim_errors_name_the_field_to_fix() {
+    let (_, _, claims, _) = fixture();
+    let mut bad = claims.clone();
+    bad.iss = "http://ap.example".into();
+    assert!(bad.validate().unwrap_err().to_string().contains("https://"));
+    let mut bad = claims.clone();
+    bad.dwk = "wrong.json".into();
+    assert!(
+        bad.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("aauth-agent.json")
+    );
+    let mut bad = claims;
+    bad.sub = "aauth:Agent@other.example".into();
+    assert!(bad.validate().unwrap_err().to_string().contains("sub"));
+}
+
+#[test]
+fn explicit_null_optional_claims_are_not_absent_claims() {
+    let (ap, _, claims, _) = fixture();
+    for name in ["ps", "parent_agent", "nbf"] {
+        let mut value = serde_json::to_value(&claims).unwrap();
+        value[name] = json!(null);
+        let raw = Jws::sign(
+            &json!({"alg":"Ed25519","kid":"ap-1","typ":"aa-agent+jwt"}),
+            &serde_json::to_vec(&value).unwrap(),
+            &ap,
+        )
+        .unwrap();
+        assert!(AgentToken::parse(&raw).is_err(), "accepted {name}=null");
+    }
+}
+
+#[test]
+fn missing_kid_and_malformed_selected_keys_have_distinct_codes() {
+    let (ap, _, claims, _) = fixture();
+    let raw = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"aa-agent+jwt"}),
+        &serde_json::to_vec(&claims).unwrap(),
+        &ap,
+    )
+    .unwrap();
+    let error = AgentToken::parse(&raw).err().unwrap();
+    assert_eq!(error.code(), "invalid_jwt");
+    assert!(error.to_string().contains("kid"));
+    let metadata = br#"{"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}"#;
+    assert_eq!(
+        AgentProviderKeys::from_documents("https://ap.example", metadata, b"not json")
+            .err()
+            .unwrap()
+            .code(),
+        "invalid_key"
+    );
+    let mut key = serde_json::to_value(ap.public_jwk()).unwrap();
+    key["kid"] = json!("ap-1");
+    key["crv"] = json!("Ed448");
+    let keys = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        metadata,
+        &serde_json::to_vec(&json!({"keys":[key.clone(),key]})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        keys.key("https://ap.example", "aauth-agent.json", "ap-1")
+            .err()
+            .unwrap()
+            .code(),
+        "invalid_key"
+    );
+}
+
+#[test]
+fn optional_claims_and_numeric_date_boundaries_are_explicit() {
+    let (ap, _, mut claims, keys) = fixture();
+    claims.ps = Some("https://ps.example".into());
+    claims.parent_agent = Some("aauth:Parent@ap.example".into());
+    claims.sub = "aauth:Parent+Child@ap.example".into();
+    claims.nbf = Some(1000);
+    claims.iat = 0;
+    AgentToken::parse(&mint(&ap, &claims, "aa-agent+jwt"))
+        .unwrap()
+        .verify(&keys, 1000)
+        .unwrap();
+    claims.nbf = Some(2000);
+    for now in [1999, 2000] {
+        assert!(
+            AgentToken::parse(&mint(&ap, &claims, "aa-agent+jwt"))
+                .unwrap()
+                .verify(&keys, now)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn jwks_endpoints_are_https_urls_not_server_identifiers_and_empty_sets_are_valid() {
+    for uri in [
+        "https://AP.example/keys?v=1",
+        "https://127.0.0.1:8443/keys",
+        "https://[::1]/keys",
+    ] {
+        let metadata =
+            serde_json::to_vec(&json!({"issuer":"https://ap.example","jwks_uri":uri})).unwrap();
+        let keys =
+            AgentProviderKeys::from_documents("https://ap.example", &metadata, br#"{"keys":[]}"#)
+                .unwrap();
+        assert_eq!(keys.jwks_uri(), uri);
+        assert_eq!(
+            keys.key("https://ap.example", "aauth-agent.json", "absent")
+                .err()
+                .unwrap(),
+            TokenError::UnknownKey
+        );
+    }
+}

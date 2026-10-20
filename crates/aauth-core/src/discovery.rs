@@ -47,14 +47,14 @@ impl AgentProviderKeys {
     pub fn from_documents(issuer: &str, metadata: &[u8], jwks: &[u8]) -> Result<Self, TokenError> {
         let jwks_uri = metadata_jwks_uri(issuer, metadata)?;
         if jwks.len() > 65536 {
-            return Err(TokenError::UnknownKey);
+            return Err(TokenError::InvalidKey);
         }
-        let document = strict_json(jwks).map_err(|_| TokenError::UnknownKey)?;
+        let document = strict_json(jwks).map_err(|_| TokenError::InvalidKey)?;
         let keys = document
             .get("keys")
             .and_then(Value::as_array)
             .filter(|a| a.len() <= 128)
-            .ok_or(TokenError::UnknownKey)?
+            .ok_or(TokenError::InvalidKey)?
             .clone();
         Ok(Self {
             issuer: issuer.into(),
@@ -80,9 +80,9 @@ impl AgentKeyResolver for AgentProviderKeys {
             .filter(|v| v.get("kid").and_then(Value::as_str) == Some(kid));
         let value = matches.next().ok_or(TokenError::UnknownKey)?;
         if matches.next().is_some() {
-            return Err(TokenError::UnknownKey);
+            return Err(TokenError::InvalidKey);
         }
-        let key: Jwk = serde_json::from_value(value.clone()).map_err(|_| TokenError::InvalidJwt)?;
+        let key: Jwk = serde_json::from_value(value.clone()).map_err(|_| TokenError::InvalidKey)?;
         key.validate()?;
         Ok(key)
     }

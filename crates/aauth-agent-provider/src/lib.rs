@@ -13,7 +13,7 @@ impl AgentProvider {
     pub fn new(issuer: &str, kid: &str, key: SigningKey) -> Result<Self, TokenError> {
         validate_server_identifier(issuer)?;
         if kid.is_empty() {
-            return Err(TokenError::UnknownKey);
+            return Err(TokenError::InvalidKeyId);
         }
         Ok(Self {
             issuer: issuer.into(),
@@ -25,7 +25,7 @@ impl AgentProvider {
     pub fn issue(&self, claims: &AgentClaims) -> Result<String, TokenError> {
         claims.validate()?;
         if claims.iss != self.issuer || claims.exp <= claims.iat {
-            return Err(TokenError::InvalidJwt);
+            return Err(TokenError::InvalidTokenLifetime);
         }
         // Sub-agent issuance requires checking the parent's actual token/state.
         // That role capability has not been implemented in this first cycle.
@@ -36,7 +36,7 @@ impl AgentProvider {
                 .next()
                 .is_some_and(|s| s.contains('+'))
         {
-            return Err(TokenError::InvalidJwt);
+            return Err(TokenError::UnsupportedAgentProfile);
         }
         Jws::sign(
             &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":self.kid}),

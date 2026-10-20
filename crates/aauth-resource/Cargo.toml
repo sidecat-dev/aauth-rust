@@ -11,11 +11,11 @@ aauth-jose.workspace = true
 aauth-core.workspace = true
 aauth-signature-key.workspace = true
 http.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 aauth-agent.workspace = true
 aauth-agent-provider.workspace = true
-serde_json.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 rcgen = "0.13"
 httparse = "1"

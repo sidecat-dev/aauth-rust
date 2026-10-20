@@ -114,3 +114,40 @@ fn duplicate_json_members_are_rejected_recursively() {
         json!({"extension":{"a":[1,true,null]}})
     );
 }
+
+#[test]
+fn public_jwk_refuses_all_known_private_members() {
+    for name in ["d", "k", "p", "q", "dp", "dq", "qi", "oth"] {
+        let mut key = SigningKey::from_seed([7; 32]).public_jwk();
+        key.extra.insert(name.into(), json!("private material"));
+        assert!(key.validate().is_err(), "accepted private {name}");
+    }
+}
+
+#[test]
+fn noncanonical_base64url_trailing_bits_are_already_refused() {
+    let key = SigningKey::from_seed([7; 32]);
+    let mut jwk = key.public_jwk();
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let last = jwk.x.pop().unwrap();
+    let i = alphabet.iter().position(|b| *b == last as u8).unwrap();
+    jwk.x.push(alphabet[i + 1] as char);
+    assert!(jwk.validate().is_err());
+    let raw = Jws::sign(&json!({"alg":"Ed25519"}), b"arbitrary JWS payload", &key).unwrap();
+    let mut parts: Vec<String> = raw.split('.').map(str::to_owned).collect();
+    let last = parts[2].pop().unwrap();
+    let i = alphabet.iter().position(|b| *b == last as u8).unwrap();
+    parts[2].push(alphabet[i + 1] as char);
+    assert!(Jws::parse(&parts.join(".")).is_err());
+    Jws::parse(&raw).unwrap().verify(&key.public_jwk()).unwrap();
+}
+
+#[test]
+fn low_order_ed25519_keys_are_not_verification_keys() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut jwk = SigningKey::from_seed([7; 32]).public_jwk();
+    jwk.x = URL_SAFE_NO_PAD.encode(identity);
+    assert!(jwk.validate().is_err());
+}

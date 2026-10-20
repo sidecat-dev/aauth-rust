@@ -8,18 +8,59 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
-    #[error("invalid_signature")]
+    #[error(
+        "invalid request signature: check selected labels, Signature-Input syntax, created time in Unix seconds, covered values and signing key"
+    )]
     InvalidSignature,
-    #[error("invalid_input")]
+    #[error(
+        "signature coverage is incomplete: include method, authority, path, Signature-Key, plus query and Authorization when present"
+    )]
     InvalidInput,
-    #[error("clock_skew")]
+    #[error(
+        "created is too far in the future: synchronize the clock and use Unix seconds rather than milliseconds"
+    )]
     ClockSkew,
-    #[error("invalid_key")]
+    #[error(
+        "invalid Signature-Key: check the selected scheme's parameter types, public-only OKP/Ed25519 key, and that the signer owns that key"
+    )]
     InvalidKey,
-    #[error("unsupported_scheme")]
+    #[error(
+        "unsupported Signature-Key scheme: use a scheme accepted by this verifier; Direct Agent Identity requires jwt"
+    )]
     UnsupportedScheme,
-    #[error("unsupported_algorithm")]
+    #[error(
+        "unsupported or missing key alg: set alg to the string Ed25519; algorithms are not inferred from key shape"
+    )]
     UnsupportedAlgorithm,
+    #[error("request body is unsupported: this profile signs bodyless requests only")]
+    UnsupportedBody,
+    #[error(
+        "request URI must be an absolute HTTPS URI with a valid authority and port, without userinfo"
+    )]
+    InvalidUri,
+    #[error(
+        "invalid clock: supply non-negative Unix seconds and a non-negative verification window"
+    )]
+    InvalidClock,
+    #[error("keyid is unsupported by this profile: identify the key in Signature-Key instead")]
+    UnsupportedKeyId,
+}
+impl Error {
+    /// Stable Signature-Error code; Display is a local explanation.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidSignature
+            | Self::UnsupportedBody
+            | Self::InvalidUri
+            | Self::InvalidClock
+            | Self::UnsupportedKeyId => "invalid_signature",
+            Self::InvalidInput => "invalid_input",
+            Self::ClockSkew => "clock_skew",
+            Self::InvalidKey => "invalid_key",
+            Self::UnsupportedScheme => "unsupported_scheme",
+            Self::UnsupportedAlgorithm => "unsupported_algorithm",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -40,21 +81,31 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
     required
 }
 
-fn header<'a>(req: &'a Request<Vec<u8>>, name: &str) -> Result<&'a str, Error> {
-    let mut values = req.headers().get_all(name).iter();
-    let value = values.next().ok_or(Error::InvalidSignature)?;
-    if values.next().is_some() || value.as_bytes().len() > 16384 {
-        return Err(Error::InvalidInput);
+fn header(req: &Request<Vec<u8>>, name: &str) -> Result<String, Error> {
+    let mut combined = String::new();
+    for value in req.headers().get_all(name) {
+        if !combined.is_empty() {
+            combined.push_str(", ");
+        }
+        combined.push_str(value.to_str().map_err(|_| Error::InvalidSignature)?.trim());
+        if combined.len() > 16384 {
+            return Err(Error::InvalidSignature);
+        }
     }
-    value
-        .to_str()
-        .map(str::trim)
-        .map_err(|_| Error::InvalidInput)
+    if combined.is_empty() {
+        return Err(Error::InvalidSignature);
+    }
+    Ok(combined)
 }
 fn dictionary(req: &Request<Vec<u8>>, name: &str) -> Result<Dictionary, Error> {
-    Parser::new(header(req, name)?)
+    let error = if name == "signature-key" {
+        Error::InvalidKey
+    } else {
+        Error::InvalidSignature
+    };
+    Parser::new(&header(req, name).map_err(|_| error)?)
         .parse()
-        .map_err(|_| Error::InvalidInput)
+        .map_err(|_| error)
 }
 fn text<'a>(params: &'a Parameters, name: &str) -> Result<&'a str, Error> {
     match params.get(name) {
@@ -64,17 +115,21 @@ fn text<'a>(params: &'a Parameters, name: &str) -> Result<&'a str, Error> {
 }
 fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
     let ListEntry::Item(item) = entry else {
-        return Err(Error::InvalidInput);
+        return Err(Error::InvalidKey);
     };
     let BareItem::Token(scheme) = &item.bare_item else {
-        return Err(Error::InvalidInput);
+        return Err(Error::InvalidKey);
     };
     match scheme.as_str() {
         "hwk" => {
             if item.params.contains_key("kid") {
                 return Err(Error::InvalidKey);
             }
-            let alg = text(&item.params, "alg").map_err(|_| Error::UnsupportedAlgorithm)?;
+            let alg = match item.params.get("alg") {
+                None => return Err(Error::UnsupportedAlgorithm),
+                Some(BareItem::String(value)) => value.as_str(),
+                _ => return Err(Error::InvalidKey),
+            };
             if alg != "Ed25519" {
                 return Err(Error::UnsupportedAlgorithm);
             }
@@ -85,7 +140,10 @@ fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
                 alg: alg.into(),
                 extra: Default::default(),
             };
-            if item.params.contains_key("d") {
+            if ["d", "k", "p", "q", "dp", "dq", "qi", "oth"]
+                .iter()
+                .any(|name| item.params.contains_key(*name))
+            {
                 return Err(Error::InvalidKey);
             }
             key.validate().map_err(|_| Error::InvalidKey)?;
@@ -100,10 +158,10 @@ fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
     let mut seen = BTreeSet::new();
     for item in &input.items {
         let BareItem::String(name) = &item.bare_item else {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidSignature);
         };
         if !item.params.is_empty() || !seen.insert(name.as_str()) {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidSignature);
         }
         result.push(name.as_str());
     }
@@ -116,13 +174,13 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
         let value = match name {
             "@method" => req.method().as_str(),
             "@authority" => {
-                let authority = req.uri().authority().ok_or(Error::InvalidInput)?;
+                let authority = req.uri().authority().ok_or(Error::InvalidUri)?;
                 if authority.as_str().contains('@') {
-                    return Err(Error::InvalidInput);
+                    return Err(Error::InvalidUri);
                 }
                 let raw_host = authority.host();
                 if raw_host.is_empty() {
-                    return Err(Error::InvalidInput);
+                    return Err(Error::InvalidUri);
                 }
                 let suffix = &authority.as_str()[raw_host.len()..];
                 let port = if suffix.is_empty() {
@@ -131,9 +189,9 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
                     Some(
                         suffix
                             .strip_prefix(':')
-                            .ok_or(Error::InvalidInput)?
+                            .ok_or(Error::InvalidUri)?
                             .parse::<u16>()
-                            .map_err(|_| Error::InvalidInput)?,
+                            .map_err(|_| Error::InvalidUri)?,
                     )
                 };
                 let host = raw_host.to_ascii_lowercase();
@@ -152,14 +210,17 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
                 lines.push(format!("\"@query\": ?{}", req.uri().query().unwrap_or("")));
                 continue;
             }
-            "signature-key" | "authorization" => header(req, name)?,
-            _ => return Err(Error::InvalidInput),
+            "signature-key" | "authorization" => {
+                lines.push(format!("\"{name}\": {}", header(req, name)?));
+                continue;
+            }
+            _ => return Err(Error::InvalidSignature),
         };
         lines.push(format!("\"{name}\": {value}"));
     }
     let params = List::from([ListEntry::InnerList(input.clone())])
         .serialize()
-        .ok_or(Error::InvalidInput)?;
+        .ok_or(Error::InvalidSignature)?;
     lines.push(format!("\"@signature-params\": {params}"));
     Ok(lines.join("\n").into_bytes())
 }
@@ -187,16 +248,18 @@ impl PreparedRequest {
         window: i64,
         accepted: &[&str],
     ) -> Result<Self, Error> {
-        if !req.body().is_empty()
-            || req.uri().scheme_str() != Some("https")
-            || window < 0
-            || now < 0
-        {
-            return Err(Error::InvalidInput);
+        if !req.body().is_empty() {
+            return Err(Error::UnsupportedBody);
+        }
+        if req.uri().scheme_str() != Some("https") {
+            return Err(Error::InvalidUri);
+        }
+        if window < 0 || now < 0 {
+            return Err(Error::InvalidClock);
         }
         let inputs = dictionary(req, "signature-input")?;
         let Some(ListEntry::InnerList(input)) = inputs.get(label) else {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidSignature);
         };
         let covered = components(input)?;
         let required = required_components(req);
@@ -205,7 +268,7 @@ impl PreparedRequest {
         }
         let created = match input.params.get("created") {
             Some(BareItem::Integer(n)) => i64::from(*n),
-            _ => return Err(Error::InvalidInput),
+            _ => return Err(Error::InvalidSignature),
         };
         if created < 0 || created < now.saturating_sub(window) {
             return Err(Error::InvalidSignature);
@@ -214,21 +277,21 @@ impl PreparedRequest {
             return Err(Error::ClockSkew);
         }
         if input.params.contains_key("keyid") {
-            return Err(Error::InvalidInput);
+            return Err(Error::UnsupportedKeyId);
         }
         if let Some(expires) = input.params.get("expires") {
             match expires {
-                BareItem::Integer(n) if i64::from(*n) > now => {}
+                BareItem::Integer(n) if i64::from(*n) > now && i64::from(*n) > created => {}
                 _ => return Err(Error::InvalidSignature),
             }
         }
         let keys = dictionary(req, "signature-key")?;
-        let entry = keys.get(label).ok_or(Error::InvalidInput)?;
+        let entry = keys.get(label).ok_or(Error::InvalidSignature)?;
         let ListEntry::Item(item) = entry else {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidKey);
         };
         let BareItem::Token(scheme) = &item.bare_item else {
-            return Err(Error::InvalidInput);
+            return Err(Error::InvalidKey);
         };
         if !accepted.contains(&scheme.as_str()) {
             return Err(Error::UnsupportedScheme);
@@ -273,11 +336,14 @@ pub fn sign_request(
     material: KeyMaterial,
     now: i64,
 ) -> Result<(), Error> {
-    if !req.body().is_empty()
-        || req.uri().scheme_str() != Some("https")
-        || !(0..=999_999_999_999_999).contains(&now)
-    {
-        return Err(Error::InvalidInput);
+    if !req.body().is_empty() {
+        return Err(Error::UnsupportedBody);
+    }
+    if req.uri().scheme_str() != Some("https") {
+        return Err(Error::InvalidUri);
+    }
+    if !(0..=999_999_999_999_999).contains(&now) {
+        return Err(Error::InvalidClock);
     }
     let key_header = match material {
         KeyMaterial::Hwk(jwk) => {

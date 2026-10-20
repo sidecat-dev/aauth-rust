@@ -14,7 +14,7 @@ impl Agent {
     pub fn new(key: SigningKey, token: String) -> Result<Self, TokenError> {
         let parsed = AgentToken::parse(&token)?;
         if parsed.unverified_claims().cnf.jwk.thumbprint()? != key.public_jwk().thumbprint()? {
-            return Err(TokenError::InvalidJwt);
+            return Err(TokenError::ConfirmationKeyMismatch);
         }
         Ok(Self { key, token })
     }

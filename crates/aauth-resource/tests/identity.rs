@@ -156,3 +156,69 @@ fn missing_coverage_feedback_includes_query_and_authorization_requirements() {
     assert!(error.contains("\"@query\""), "{error}");
     assert!(error.contains("\"authorization\""), "{error}");
 }
+
+#[test]
+fn wire_failures_have_problem_details_and_safe_recovery_hints() {
+    use aauth_core::TokenError;
+    use aauth_resource::SignatureFailure;
+    for (failure, code, hint) in [
+        (
+            SignatureFailure::Token(TokenError::UnsupportedAlgorithm),
+            "unsupported_algorithm",
+            Some(("accept-signature-alg", "Ed25519")),
+        ),
+        (
+            SignatureFailure::Token(TokenError::IssuerMissing),
+            "issuer_missing",
+            None,
+        ),
+        (
+            SignatureFailure::Token(TokenError::IssuerMismatch),
+            "issuer_mismatch",
+            None,
+        ),
+        (
+            SignatureFailure::Token(TokenError::UnexpectedTokenType),
+            "invalid_jwt",
+            Some(("aauth-requirement", "requirement=agent-token")),
+        ),
+    ] {
+        let response = Decision::SignatureFailure(failure).into_response();
+        assert_eq!(response.status(), 401);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/problem+json"
+        );
+        assert_eq!(
+            response.headers()["signature-error"],
+            format!("error={code}")
+        );
+        if let Some((name, value)) = hint {
+            assert_eq!(response.headers()[name], value);
+        }
+        let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(problem["type"], format!("urn:ietf:params:sig-error:{code}"));
+        assert_eq!(problem["status"], 401);
+    }
+    let response = Decision::Forbidden.into_response();
+    assert_eq!(response.status(), 403);
+    assert!(!response.headers().contains_key("signature-error"));
+    let problem: serde_json::Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(problem["type"], "about:blank");
+}
+
+#[test]
+fn provider_refuses_subagent_issuance_in_the_top_level_profile() {
+    let (agent, _) = composition();
+    let mut claims = aauth_core::AgentToken::parse(agent.token())
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    let ap =
+        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
+    claims.sub = "aauth:Agent+Child@ap.example".into();
+    assert!(ap.issue(&claims).is_err());
+    claims.sub = "aauth:Agent@ap.example".into();
+    claims.parent_agent = Some("aauth:Parent@ap.example".into());
+    assert!(ap.issue(&claims).is_err());
+}
