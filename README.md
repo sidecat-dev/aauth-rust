@@ -1,9 +1,228 @@
 # AAuth for Rust
 
-`aauth-rust` implements the AAuth protocol family (agent authorization: Agent, Agent Provider, Person Server, Resource, Access Server; R3, Events, Budgets, Bootstrap; HTTP Signature Keys) as a Rust workspace, developed alongside [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) against the same pinned editor sources, so that findings can be checked in both before they are raised with the editors.
+Rust libraries for [AAuth](https://github.com/dickhardt/AAuth), developed alongside
+[aauth-go](https://gitlab.com/sidecat-dev/aauth-go). The current subset lets an
+Agent prove its identity directly to a Resource, using an Agent Provider's
+signed token and an HTTP request signature. Person-mediated authorization and
+the other AAuth roles are future work. [CONFORMANCE.md](CONFORMANCE.md) names
+the tested behavior and limits.
 
-Status: not yet started.
+The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
+is the project home. Development forks may carry changes before upstream accepts
+them. The commands below start in a development checkout containing this README
+and `Cargo.toml`. No crate or release binary has been published yet.
 
-Principles: local-first testing, then remote; easy to stand up and build on; small crates with clear boundaries; conformance stated only where a test executes it.
+## Run the local example
 
-License: MIT.
+Install [Rust with rustup](https://rustup.rs/) and a platform C compiler for the
+test/example TLS provider: Linux `build-essential`, macOS Xcode Command Line
+Tools, or Windows Visual Studio C++ Build Tools. Library builds use pure Rust
+dependencies. The checkout pins Rust 1.99.1; on first use rustup downloads that
+toolchain, rustfmt and clippy (several hundred MB), and Cargo downloads crates.
+
+```sh
+cargo test --workspace --locked
+cargo run --locked -p aauth-rust-resource --example direct-identity
+```
+
+This example generates fresh keys and certificates, starts an Agent Provider
+and Resource on random loopback ports, retrieves public discovery documents,
+and runs 14 wire/TLS checks. It needs no account, DNS change, privileged port,
+existing certificate or external service. It uses a fixed clock for repeatable
+boundary cases and closes its listeners and threads on exit. Output includes:
+
+```text
+unsigned: 401 requirement=agent-token
+valid-identity: 200 aauth:Agent@ap.example
+hwk-proof: 200 pseudonymous proof verified
+hwk-identity: 401 error=unsupported_scheme
+tampered-signature: 401 error=invalid_signature
+policy-denial: 403 no signature diagnostics
+untrusted-tls: 0 certificate refused
+```
+
+The proof-only endpoint accepts an inline public key; the identity endpoint
+requires an Agent token. Thus `hwk-proof` and `hwk-identity` have different
+outcomes. Status `0` means the TLS handshake failed before any HTTP response.
+
+## Use the libraries
+
+The following complete program issues a token, signs a request, verifies it,
+and applies admission policy in process. Run its exact source with
+`cargo run --locked -p aauth-rust-resource --example library`.
+
+```rust
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
+use aauth_rust_jose::SigningKey;
+use aauth_rust_resource::{AgentIdentityResource, Decision};
+use http::Request;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let issuer = "https://ap.example";
+    let provider = AgentProvider::new(issuer, "ap-1", SigningKey::generate())?;
+    let agent_key = SigningKey::generate();
+    let token = provider.issue(&AgentClaims {
+        iss: issuer.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent@ap.example".into(),
+        jti: "example-issuance-1".into(),
+        iat: now,
+        exp: now + 300,
+        cnf: Confirmation {
+            jwk: agent_key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    // This application trusts this provider; a network host supplies admitted documents.
+    let keys = AgentProviderKeys::from_documents(issuer, &provider.metadata()?, &provider.jwks()?)?;
+    let resource = AgentIdentityResource::new(
+        "https://resource.example/whoami",
+        keys,
+        |token: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            token.claims().sub == "aauth:Agent@ap.example"
+        },
+    )?;
+    let agent = Agent::new(agent_key, token)?;
+    let mut request = Request::builder()
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())?;
+    agent.sign(&mut request, now)?;
+    match resource.authorize(&request, now) {
+        Decision::Granted(token) => println!("verified {}", token.claims().sub),
+        other => return Err(format!("request refused: {}", other.into_response().status()).into()),
+    }
+    Ok(())
+}
+```
+
+For a separate application, use versioned path dependencies until the alpha
+packages are published. Adjust these paths to your checkout:
+
+```toml
+[dependencies]
+aauth-rust-agent = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-resource" }
+http = "1"
+```
+
+Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
+secret material; the constant seeds in tests are fixtures. Assign a unique `jti`
+for each real issuance. Put the Agent key's public JWK in `cnf.jwk`, then move
+the same private key into `Agent::new`. Call `sign` last, after the URI and other
+headers are final. It replaces previous signature headers. Changing a covered
+component's canonical value afterward invalidates the signature. RFC 9421
+removes leading/trailing spaces and tabs from field values and combines field
+lines with `, `; outer whitespace alone does not change the signed value.
+Host policy must interpret Authorization consistently with that canonicalization
+or reject forms it does not support. Signing never sends or retries.
+
+Configure each Resource with its own HTTPS endpoint (authority and path);
+never copy that configuration from the client Host header. The library refuses
+requests for another endpoint before invoking policy, even if their signatures
+are valid. Signed query values may vary at the configured path. Frameworks such as
+axum usually give servers an origin-form URI (`/path?query`). Before verification,
+reconstruct its absolute URI using your configured external HTTPS origin and
+the original path/query. Keep the receiving method and covered header values.
+Behind a TLS proxy, trust forwarded authority/scheme only under an explicitly
+configured proxy trust boundary, not arbitrary client headers.
+
+Policy receives both `&VerifiedAgentToken` and `&Request<Vec<u8>>`, after target,
+token and proof checks, so it can decide from the authenticated method, query
+and covered headers. For state stored in a server, use the named `BoxedPolicy`
+type with `AgentIdentityResource<AgentProviderKeys, BoxedPolicy>`; a boxed closure
+can capture application state. `VerifiedAgentToken` is Clone for handler state;
+its Debug output omits the compact credential. A policy can also return
+`Result<T, Deny>`; `Decision::Granted` carries `Authorized<T>`, whose `admitted()`
+value reaches the handler without another verification. Boolean policies still
+work. Use `Decision::into_result()` to obtain `(verified_token, admitted_value)`
+or a boxed refusal response, instead of mapping a granted request to a demo body.
+`Agent::with_token(new_token)` reuses its key for refresh without handling seed
+bytes. Resolvers can be borrowed, boxed or shared with Arc; snapshots are Clone.
+The [service guide](USE-IN-YOUR-SERVICE.md) covers trust, refresh, rotation,
+replay and local ports. Run the [axum example](crates/aauth-rust-resource/examples/axum.rs)
+with `cargo run --locked -p aauth-rust-resource --example axum` to see request
+adaptation and a handler using typed policy context.
+
+All times are **Unix seconds**, not milliseconds. Local signing/verifier clocks
+and AP-issued iat/exp are limited to 0..=8589934591 (through 2242), rejecting
+contemporary millisecond timestamps before signing or issuance. Expiry has no leeway; the
+Resource accepts signature `created` within ±60 seconds and refuses `iat` more
+than 60 seconds ahead. Core JWT verification alone does not use `iat` as a
+validity check. The AP issues tokens lasting at most 24 hours; verification
+does not turn that recommendation into a mandatory lifetime ceiling for other
+issuers. This request profile requires a bodyless absolute HTTPS URI.
+It signs method, authority, path, Signature-Key, query when present, and
+Authorization when present. It **does not compute or verify Content-Digest**.
+A nonempty body is refused at signing and verification, including one added to
+a signed empty POST. A host adapter must supply the actual body bytes or reject
+bodies before verification; passing an empty Vec while forwarding an unread
+body would defeat that check. An empty-body proof does not authorize a body
+operation. Body-bearing support needs digest verification before application
+handling and is outside this profile.
+
+## Trust and vocabulary
+
+The application chooses trusted Agent Providers. It obtains metadata and public
+keys over admitted, verified HTTPS, then gives the library those bytes as an
+immutable snapshot. `from_documents` checks issuer equality and key selection;
+it does not decide to trust an arbitrary issuer or fetch anything. A foreign
+issuer yields terminal `UntrustedIssuer` (`invalid_key` on the wire); only an
+unknown kid on a configured,
+trusted issuer yields `UnknownKey`. Refresh the configured JWKS source after
+checking issuer trust; never follow a token-supplied issuer on that error.
+Metadata with a missing or unusable `jwks_uri` yields terminal
+`InvalidDiscoveryMetadata` (`invalid_key`), not an unknown-key refresh hint.
+Production hosts own destination admission, timeouts, cache lifetime and refresh (including
+the draft's once-per-minute fetch floor), key storage, enrollment, revocation,
+replay policy and clocks. This profile supplies no nonce: if you require replay
+refusal, key the replay cache on the proof bytes within the accepted time window.
+See [SECURITY.md](SECURITY.md).
+
+| Name | Meaning here |
+| --- | --- |
+| AP, PS, AS | Agent Provider (issues Agent tokens), Person Server (represents a person), Access Server (authorizes access); only AP and direct Resource identity execute. |
+| `dwk` | Discovery well-known document name; `aauth-agent.json` locates AP metadata at `{iss}/.well-known/aauth-agent.json`. |
+| JWK, JWKS, JWS | JSON Web Key, set of public JWKs, JSON Web Signature. `kid` selects an issuer key from its JWKS. |
+| `hwk`, `jwt`, `cnf.jwk` | Signature-Key schemes conveying an inline public key or a compact token; the token's confirmation JWK binds its holder's request-signing key. |
+| `sig`, coverage, SFV | The selected signature label, the request values bound by its signature, and Structured Field Values used to encode signature headers. The same label correlates Signature-Key, Signature-Input and Signature. |
+| Direct Agent identity | An Agent proves itself directly to a Resource, without a Person Server in the exchange. The loopback example executes this complete exchange. |
+| R3 | Rich Resource Requests, an AAuth companion outside the implemented subset. |
+
+A `Decision` grants verified identity, requests an Agent token (`401` with
+`AAuth-Requirement`), reports a signature failure (`401` with `Signature-Error`),
+or denies host policy (`403`). Algorithm/scheme failures include
+`Accept-Signature-Alg`/`Accept-Signature-Scheme`. Failures have Problem Details
+bodies; policy denials contain no signature diagnostics. The successful
+`into_response()` convenience mapping writes the verified `sub` as its body;
+use `into_result()` to call your own handler. A Resource `clock_skew` response
+includes Date from the supplied verifier clock. Local Rust error
+messages explain what to fix; `.code()` returns the stable protocol code.
+
+## Build and contribute
+
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the six crate boundaries;
+[SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
+[CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
+
+```sh
+rustup target add aarch64-unknown-linux-gnu
+cargo build --workspace --lib --locked --target aarch64-unknown-linux-gnu
+```
+
+This library cross-build needs no cross C compiler. Tests and the TLS example
+use rustls/ring as a development dependency; ring compiles C and assembly, so
+cross-building those targets needs the target C compiler and linker.
+[CI](.gitlab-ci.yml) runs native Linux x86_64 and ARM64 tests and produces demo
+binaries. macOS and Windows jobs are opt-in with `AAUTH_NATIVE_RUNNERS=1` when
+runners are available; execution on those platforms is unverified. The tested
+toolchain is 1.99.1 and the declared minimum is 1.99. License: [MIT](LICENSE).

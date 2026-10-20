@@ -1,0 +1,22 @@
+[package]
+name = "aauth-rust-jose"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "Ed25519 public JWKs, thumbprints and compact JWS primitives for AAuth"
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
