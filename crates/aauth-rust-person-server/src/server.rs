@@ -1,4 +1,6 @@
+mod continuation;
 mod federation;
+pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
 mod lineage;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -63,7 +65,7 @@ impl ConfigurationError {
     }
 }
 
-/// Buffered immediate PS authorization. Host supplies trust, atomic storage,
+/// Buffered PS authorization with optional host-driven AS continuations. Host supplies trust, atomic storage,
 /// authenticated person policy, a trusted clock and fresh token identifiers.
 pub struct PersonServer<K, S, P, C, I> {
     config: Config,
@@ -74,6 +76,7 @@ pub struct PersonServer<K, S, P, C, I> {
     clock: C,
     ids: I,
     federation: Option<crate::BoxedFederation>,
+    deferred: Option<DeferredConfig>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -104,6 +107,13 @@ struct Presented {
     iat: i64,
     exp: i64,
     scope: Option<String>,
+}
+struct PreparedAuthorization {
+    resource: VerifiedResourceToken,
+    presented: Presented,
+    retained: TokenRecord,
+    context: AuthorizationRequest,
+    binding_context: BindingContext,
 }
 struct Issuance<'a> {
     kind: TokenKind,
@@ -174,9 +184,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             clock,
             ids,
             federation: None,
+            deferred: None,
         })
     }
-    /// Enable immediate AS federation for every /token request, including
+    /// Enable AS federation for every /token request, including
     /// collocated PS=AS. No direct-issuance fallback; consent defaults denied.
     /// Host adapter owns discovery, safe HTTPS, bounds, deadlines and egress.
     pub fn with_federation(mut self, adapter: impl crate::Federation + 'static) -> Self {
@@ -216,6 +227,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let now = (self.clock)();
         if canonical_authority(request.uri()).ok().as_deref() != Some(&self.authority) {
             return Err(Failure::proof(ProofError::TargetMismatch, request, now));
+        }
+        if self.deferred.is_some() && request.uri().path().starts_with("/token/pending/") {
+            return self.pending(request, now);
         }
         match (request.method().as_str(), request.uri().path()) {
             ("GET", "/.well-known/aauth-person.json") => {
@@ -259,17 +273,26 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         request: &Request<Vec<u8>>,
         now: i64,
     ) -> Result<VerifiedAgentToken, Failure> {
+        self.verify_agent(request, now, true)
+    }
+    fn verify_agent(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        body_required: bool,
+    ) -> Result<VerifiedAgentToken, Failure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
             .map_err(|error| Failure::proof(error, request, now))?;
         let base = std::str::from_utf8(proof.signature_base())
             .map_err(|_| Failure::proof(ProofError::InvalidInput, request, now))?;
-        if !request.headers().contains_key("content-type")
-            || !base
-                .lines()
-                .any(|line| line.starts_with("\"content-type\":"))
-            || !base
-                .lines()
-                .any(|line| line.starts_with("\"content-digest\":"))
+        if body_required
+            && (!request.headers().contains_key("content-type")
+                || !base
+                    .lines()
+                    .any(|line| line.starts_with("\"content-type\":"))
+                || !base
+                    .lines()
+                    .any(|line| line.starts_with("\"content-digest\":")))
         {
             return Err(Failure::proof(ProofError::InvalidInput, request, now));
         }
@@ -285,13 +308,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if token.claims().iat > now.saturating_add(60) {
             return Err(Failure::proof(ProofError::ClockSkew, request, now));
         }
-        if request
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim)
-            .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
+        if body_required
+            && request
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim)
+                .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
         {
             return Err(Failure::parameter("invalid_request"));
         }
@@ -505,13 +529,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             expires_at - released_at,
         ))
     }
-    fn auth(
+    fn prepare_authorization(
         &self,
-        agent: VerifiedAgentToken,
+        agent: &VerifiedAgentToken,
         parameters: Value,
         verified_at: i64,
-        upstream: Option<Upstream>,
-    ) -> Result<Response<Vec<u8>>, Failure> {
+        upstream: Option<&Upstream>,
+    ) -> Result<PreparedAuthorization, Failure> {
         let resource_compact = required_string(&parameters, "resource_token")?;
         let presented_compact = required_string(&parameters, "presented_token")?;
         let resource = ResourceToken::parse(resource_compact)
@@ -543,16 +567,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let presented = self.verify_presented(presented_compact, verified_at, "presented")?;
         self.match_resource(&presented, r)?;
         let retained = self.load_record(&presented, presented_compact, verified_at, "presented")?;
-        if retained.agent != Self::identity(&agent) {
+        if retained.agent != Self::identity(agent) {
             return Err(Failure::parameter("invalid_presented_token"));
         }
-        if retained.upstream != upstream.as_ref().map(|up| up.context.record.token.clone()) {
+        if retained.upstream != upstream.map(|up| up.context.record.token.clone()) {
             return Err(Failure::parameter("invalid_upstream_token"));
         }
         if upstream.is_none() && agent.claims().ps.as_deref() != Some(&self.config.issuer) {
             return Err(Failure::credential(TokenError::InvalidJwt));
         }
-        if upstream.as_ref().is_some_and(|up| {
+        if upstream.is_some_and(|up| {
             up.context.record.person_id != retained.person_id
                 || up.context.record.principal != retained.principal
         }) {
@@ -580,15 +604,40 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             resource: resource.clone(),
             presented: retained.clone(),
             scopes,
-            upstream: upstream.as_ref().map(|up| up.context.clone()),
+            upstream: upstream.map(|up| up.context.clone()),
             parameters,
         };
+        Ok(PreparedAuthorization {
+            resource,
+            presented,
+            retained,
+            context,
+            binding_context,
+        })
+    }
+    fn auth(
+        &self,
+        agent: VerifiedAgentToken,
+        parameters: Value,
+        verified_at: i64,
+        upstream: Option<Upstream>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let prepared =
+            self.prepare_authorization(&agent, parameters, verified_at, upstream.as_ref())?;
         if self.federation.is_some() {
             if upstream.is_some() {
                 return Err(Failure::parameter("invalid_request"));
             }
-            return self.federate(&agent, &resource, &presented, &retained, &context);
+            return self.federate(&agent, &prepared);
         }
+        let PreparedAuthorization {
+            resource,
+            presented,
+            retained,
+            context,
+            binding_context,
+        } = prepared;
+        let r = resource.claims();
         let grant = if upstream.is_some() {
             self.policy.authorize_upstream(&context)
         } else {

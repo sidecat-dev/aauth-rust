@@ -1,4 +1,4 @@
-//! Person Server identity binding and immediate direct authorization.
+//! Person Server identity binding, direct authorization and explicit AS continuations.
 //!
 //! The host supplies authenticated person policy, admitted issuer keys, an atomic
 //! store, Unix-second clock and fresh token IDs. This complete example publishes
@@ -62,7 +62,9 @@ pub use policy::{
     AuthorizationRequest, BoxedClock, BoxedPolicy, BoxedTokenIds, Grant, Person, PersonRequest,
     Policy, PolicyError, UpstreamContext,
 };
-pub use server::{Config, ConfigurationError, PersonServer};
+pub use server::{
+    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, PersonServer,
+};
 pub use store::{
     AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,
     TokenTie,

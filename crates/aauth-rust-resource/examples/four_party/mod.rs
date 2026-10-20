@@ -4,13 +4,17 @@ mod tls;
 use aauth_rust_access_server::{
     AccessServer, Config as AccessConfig, Decision, PolicyError as AccessPolicyError,
 };
-use aauth_rust_agent::{Agent, FederatedContext, Requirement};
+use aauth_rust_agent::{Agent, FederatedContext, PollSession, Requirement};
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::continuation::{
+    ContinuationStore, MemoryContinuations, PendingResponse, Requirement as DeferredRequirement,
+};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
     metadata_jwks_uri,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
+use aauth_rust_person_server::FederationInput;
 use aauth_rust_person_server::{
     AuthorizationRequest, Config, Federation, FederationError, Grant, MemoryStore, Person,
     PersonRequest, PersonServer, Policy, PolicyError, Store, TokenReference,
@@ -33,7 +37,15 @@ const PS: &str = "https://ps.example";
 const AS: &str = "https://as.example";
 const ORDERS: &str = "https://orders.example";
 /// Observed wire and application facts asserted by the integration test.
+pub struct DeferredTranscript {
+    pub access_statuses: Vec<u16>,
+    pub agent_statuses: Vec<u16>,
+    pub stable_ps_location: bool,
+    pub as_state_consumed: bool,
+    pub as_calls_after_waiting_agent_poll: usize,
+}
 pub struct Transcript {
+    pub deferred: Option<DeferredTranscript>,
     pub original_tokens: ForwardedTokens,
     pub forwarded_tokens: Vec<ForwardedTokens>,
     pub denied_error: String,
@@ -227,6 +239,13 @@ impl Federation for AccessTransport {
 /// Run one immediate grant, one POST effect and negative wire checks. Every TLS
 /// server owns a bounded loopback listener and joins its thread when dropped.
 pub fn run() -> Result<Transcript> {
+    run_flow(false)
+}
+/// Run payment, explicit host settlement, approval and single terminal delivery.
+pub fn run_deferred() -> Result<Transcript> {
+    run_flow(true)
+}
+fn run_flow(deferred: bool) -> Result<Transcript> {
     let trust = Trust::default();
     let provider = Arc::new(AgentProvider::new(
         "https://ap.example",
@@ -256,7 +275,7 @@ pub fn run() -> Result<Transcript> {
     let proof_count = proof_checks.clone();
     let proof_keys = trust.clone();
     let as_ids = AtomicUsize::new(0);
-    let access = AccessServer::new(
+    let mut access = AccessServer::new(
         AccessConfig::new(AS, "as-1", SigningKey::generate()),
         trust.clone(),
         move |r: &aauth_rust_access_server::AuthorizationRequest| {
@@ -273,10 +292,38 @@ pub fn run() -> Result<Transcript> {
             })
         },
         now,
-        move || format!("as-{}", as_ids.fetch_add(1, Ordering::SeqCst)),
+        move || {
+            format!(
+                "as-{}-{}",
+                as_ids.fetch_add(1, Ordering::SeqCst),
+                SigningKey::generate().public_jwk().thumbprint().unwrap()
+            )
+        },
     )?;
+    let settlement = Arc::new(AtomicUsize::new(0));
+    let pending_store = Arc::new(MemoryContinuations::new(32));
+    if deferred {
+        let stage = settlement.clone();
+        let mut config = aauth_rust_access_server::DeferredConfig::new(pending_store.clone());
+        config.lifetime = 60;
+        config.retry_after = 0;
+        access = access.with_deferred(
+            config,
+            move |_: &aauth_rust_access_server::DeferredContext| {
+                Ok(match stage.load(Ordering::SeqCst) {
+                    0 => Some(DeferredRequirement::Payment {
+                        authenticate: "Payment id=\"demo-bill\", method=\"example\"".into(),
+                    }),
+                    1 => Some(DeferredRequirement::Approval),
+                    _ => None,
+                })
+            },
+        )?;
+    }
+    let access_statuses = Arc::new(Mutex::new(Vec::new()));
+    let recorded_statuses = access_statuses.clone();
     let as_tls = Arc::new(TlsServer::start("as.example", move |request| {
-        if request.uri().path() == "/token" {
+        if request.uri().path() == "/token" || request.uri().path().starts_with("/token/pending/") {
             if let Ok(body) = serde_json::from_slice::<Value>(request.body())
                 && let (Some(agent), Some(presented), Some(resource)) = (
                     body["agent_token"].as_str(),
@@ -303,6 +350,13 @@ pub fn run() -> Result<Transcript> {
             }
         }
         let response = access.handle(&request);
+        if request.uri().path() == "/token" || request.uri().path().starts_with("/token/pending/") {
+            recorded_statuses
+                .lock()
+                .unwrap()
+                .push(response.status().as_u16());
+        }
+
         if request.uri().path() == "/token"
             && selected.load(Ordering::SeqCst) == 1
             && response.status() == 200
@@ -323,19 +377,34 @@ pub fn run() -> Result<Transcript> {
     let store = MemoryStore::default();
     let stored = store.clone();
     let ids = AtomicUsize::new(0);
-    let ps = PersonServer::new(
+    let mut ps = PersonServer::new(
         Config::new(PS, "ps-1", SigningKey::generate()),
         trust.clone(),
         store,
         HostPolicy,
         now,
-        move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)),
+        move || {
+            format!(
+                "ps-{}-{}",
+                ids.fetch_add(1, Ordering::SeqCst),
+                SigningKey::generate().public_jwk().thumbprint().unwrap()
+            )
+        },
     )?
     .with_federation(AccessTransport {
         server: as_tls.clone(),
         endpoint,
     });
-    let ps_tls = TlsServer::start("ps.example", move |r| ps.handle(&r))?;
+    if deferred {
+        let mut config =
+            aauth_rust_person_server::DeferredConfig::new(MemoryContinuations::new(32));
+        config.lifetime = 60;
+        config.retry_after = 0;
+        ps = ps.with_deferred(config)?;
+    }
+    let ps = Arc::new(ps);
+    let serving_ps = ps.clone();
+    let ps_tls = TlsServer::start("ps.example", move |r| serving_ps.handle(&r))?;
     trust.discover(&ps_tls, PS, "aauth-person.json")?;
     let effects = Arc::new(AtomicUsize::new(0));
     let effect_count = effects.clone();
@@ -412,7 +481,60 @@ pub fn run() -> Result<Transcript> {
             json!({"resource_token":resource,"presented_token":person}),
         )
     };
-    let grant = token_from(&successful(ps_tls.send(&exchange()?)?)?, "auth_token")?;
+    let (grant, deferred_transcript) = if deferred {
+        let first = ps_tls.send(&exchange()?)?;
+        let pending = PendingResponse::parse(&format!("{PS}/token"), &first)?;
+        let original_as = ps.federation_pending(&pending.location)?;
+        if !matches!(original_as.requirement, DeferredRequirement::Payment { .. }) {
+            return Err("expected native payment challenge".into());
+        }
+        let mut agent_statuses = vec![first.status().as_u16()];
+        let mut polls = PollSession::new(&format!("{PS}/token"), &first, now(), now() + 60)?;
+        let waiting = ps_tls.send(&polls.request(&agent, now())?)?;
+        agent_statuses.push(waiting.status().as_u16());
+        polls.accept(waiting, now())?;
+        let as_calls_after_waiting_agent_poll = access_statuses.lock().unwrap().len();
+        // This fixture's host confirms settlement; no payment provider is called.
+        settlement.store(1, Ordering::SeqCst);
+        ps.advance_federation(&pending.location, FederationInput::Poll)?;
+        let approval = ps_tls.send(&polls.request(&agent, now())?)?;
+        agent_statuses.push(approval.status().as_u16());
+        polls.accept(approval, now())?;
+        let stable_ps_location = polls.pending().location == pending.location;
+        settlement.store(2, Ordering::SeqCst);
+        ps.advance_federation(&pending.location, FederationInput::Poll)?;
+        let delivered = ps_tls.send(&polls.request(&agent, now())?)?;
+        agent_statuses.push(delivered.status().as_u16());
+        let terminal = polls
+            .accept(delivered, now())?
+            .ok_or("missing terminal delivery")?;
+        let grant = token_from(&successful(terminal)?, "auth_token")?;
+        let mut get = Request::builder().uri(&pending.location).body(Vec::new())?;
+        agent.sign(&mut get, now())?;
+        agent_statuses.push(ps_tls.send(&get)?.status().as_u16());
+        let id = original_as
+            .location
+            .rsplit('/')
+            .next()
+            .ok_or("missing AS pending ID")?;
+        let as_state_consumed = pending_store.load(id)?.is_none();
+        let access_statuses = access_statuses.lock().unwrap().clone();
+        (
+            grant,
+            Some(DeferredTranscript {
+                access_statuses,
+                agent_statuses,
+                stable_ps_location,
+                as_state_consumed,
+                as_calls_after_waiting_agent_poll,
+            }),
+        )
+    } else {
+        (
+            token_from(&successful(ps_tls.send(&exchange()?)?)?, "auth_token")?,
+            None,
+        )
+    };
     let auth = agent.verify_federated_auth_delivery(&grant, &verified, &context, &trust, now())?;
     let holder = agent.with_token(grant.clone())?;
     let request = signed(&holder, &format!("{ORDERS}/orders"), json!({"quantity":2}))?;
@@ -455,6 +577,7 @@ pub fn run() -> Result<Transcript> {
             .into())
     };
     Ok(Transcript {
+        deferred: deferred_transcript,
         original_tokens: ForwardedTokens {
             agent_token: agent.token().into(),
             presented_token: person,
@@ -477,7 +600,7 @@ pub fn run() -> Result<Transcript> {
         subject: auth.claims().sub.clone(),
         auth_expiry: auth.claims().exp,
         challenge_expiry: verified.claims().exp,
-        ps_proof_verified: proof_checks.load(Ordering::SeqCst) == 3,
+        ps_proof_verified: proof_checks.load(Ordering::SeqCst) == if deferred { 5 } else { 3 },
         as_token_retained: retained,
         untrusted_tls_refused: orders_tls.refuses_untrusted_certificate(),
     })

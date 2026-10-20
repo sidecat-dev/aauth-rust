@@ -18,8 +18,10 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
 four-party federation. The proof subset is Ed25519 `hwk`/`jwt` plus explicit
-`jwks_uri` service proofs. Missions, interactive/deferred authorization,
-Supervision and companion authorization vocabularies remain outside this subset.
+`jwks_uri` service proofs. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
+approval and WWW-Authenticate payment with signed polling. Settlement and
+interaction/code lifecycle are host-owned. Missions, Supervision and companion
+authorization vocabularies remain outside this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).
 

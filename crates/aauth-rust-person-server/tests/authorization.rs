@@ -1448,3 +1448,6 @@ fn delivery_rejects_foreign_as_issuer_even_when_its_resigned_token_verifies() {
         );
     }
 }
+
+#[path = "support/deferred.rs"]
+mod deferred;

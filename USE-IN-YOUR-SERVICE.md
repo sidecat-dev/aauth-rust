@@ -785,7 +785,63 @@ recomposition. Process restart durability and expiry collection belong to a
 host adapter. Revision values change across deletion/reinsertion so a stale
 consumer cannot remove a replacement record.
 
-These helpers and fixtures are independently tested primitives. The current
-server profile still lacks AS deferred-response orchestration, payment
-settlement, claims exchange and interaction handlers; no complete deferred
-four-party journey is claimed by these additions.
+The complete bounded deferred journey also runs with
+`cargo run --locked -p aauth-rust-resource --example four-party -- --deferred`.
+It uses certificate-verified TLS and actual native AS/PS state. The fixture host
+confirms example settlement, obtains approval, advances once per stage, and the
+Agent verifies a grant before one protected POST. No payment provider is called.
+
+
+## Configure AS and PS continuations
+
+The immediate constructors retain their existing behavior. For an AS, create
+`aauth_rust_access_server::DeferredConfig::new(store)` and call
+`access.with_deferred(config, callback)?`. The callback receives a
+`DeferredContext` containing independently verified original authorization,
+PS-provided identity claims and clarification responses. Return
+`Ok(Some(aauth_rust_core::continuation::Requirement::Approval))` or another
+supported requirement to wait. `Ok(None)` runs the ordinary AS grant policy;
+it is still that policy's responsibility to approve scopes and lifetime.
+
+For a PS, first configure its existing `Federation` adapter, then call
+`people.with_deferred(aauth_rust_person_server::DeferredConfig::new(store))?`.
+Use separate AS and PS stores or namespaces. Both configs expose `lifetime`
+(default300 seconds) and `retry_after` (default5 seconds); zero interval is
+useful only in controlled fixtures. Pending URLs use the existing host ID
+source: provide unique, unpredictable URL-safe IDs, not a production counter.
+The TLS example includes fresh random material in every pending ID.
+
+On an AS202/402, the PS returns202 with its own pending URL. Agent GET only reads
+PS custody. The trusted host calls `people.federation_pending(reference)?` to
+inspect the actual AS requirement and payment details. It settles a bill,
+completes an interaction, supplies claims or waits for an external approver.
+Then `people.advance_federation(reference, FederationInput::Poll)?` performs one
+signed AS GET, or POSTs a queued Agent clarification answer. It never resends
+the original token POST. Respect AS Retry-After: an early host call returns
+`AdvanceError::NotReady`; the library does not sleep or retry.
+
+Use `FederationInput::Claims(map)` to POST requested claims from a trusted source;
+`sub` is forbidden because the presented token already identifies the person.
+Use `FederationInput::Clarification(answer)` for a host/user answer. If the PS
+relays a question to the Agent, its signed `clarification_response` POST queues
+one answer without AS I/O; the host explicitly advances it. Interaction URL/code
+lifecycle belongs to the host that serves that interaction. Only that host can
+confirm completion; an Agent poll does not approve an interaction or a payment.
+
+`advance_federation` returns the actual AS pending response or the PS's verified
+terminal response. Inspect its `FederationFailure` extension for diagnostics
+before framework conversion. A200 here is available in retained PS custody;
+the Agent still obtains its terminal result through the PS pending URL. The PS
+verifies that grant again and confirms current bindings before delivery. One
+conditional consumer receives it; later GETs return410. Signed DELETE cancels
+both roles with one AS request, and consumes local custody. Transport failure
+reports failure even though local cancellation closes the PS continuation.
+
+This is a top-level, missionless Core-scope profile. Deadlines are capped by all
+original credentials, including the Resource challenge. Long-wait refresh and
+clarification `updated_request` need a later profile; submit a fresh original
+request after expiry. There is no durable AS/PS continuation adapter in this
+release. Custom stores must preserve atomic revisions, bounded records and
+role namespaces across restart, collect expiry and reconcile uncertain in-flight
+transitions. No automatic recovery repeats a POST, settlement or grant delivery.
+The ordinary PS issued-token store, including redb, remains a separate contract.

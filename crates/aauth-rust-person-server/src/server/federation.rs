@@ -8,11 +8,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     pub(super) fn federate(
         &self,
         agent: &VerifiedAgentToken,
-        resource: &VerifiedResourceToken,
-        presented: &Presented,
-        retained: &TokenRecord,
-        context: &AuthorizationRequest,
+        prepared: &PreparedAuthorization,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        let PreparedAuthorization {
+            resource,
+            presented,
+            retained,
+            context,
+            ..
+        } = prepared;
         let r = resource.claims();
         if presented.kind == TokenKind::Auth && presented.issuer != r.aud {
             return Err(Failure::parameter("invalid_presented_token"));
@@ -51,6 +55,28 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
+        self.accept_federation(response, agent, prepared, &endpoint)
+    }
+    pub(super) fn accept_federation(
+        &self,
+        response: Response<Vec<u8>>,
+        agent: &VerifiedAgentToken,
+        prepared: &PreparedAuthorization,
+        endpoint: &str,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let PreparedAuthorization {
+            resource,
+            presented,
+            retained,
+            context,
+            ..
+        } = prepared;
+        let r = resource.claims();
+        if self.deferred.is_some()
+            && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
+        {
+            return self.defer_federation(&response, agent, resource, presented, context, endpoint);
+        }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
         let failed = |reason| unreachable(&r.aud, Some(response.status()), reason);
@@ -197,7 +223,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         ))
     }
 }
-fn unreachable(access_server: &str, status: Option<StatusCode>, reason: Reason) -> Failure {
+pub(super) fn unreachable(
+    access_server: &str,
+    status: Option<StatusCode>,
+    reason: Reason,
+) -> Failure {
     Failure::status(StatusCode::BAD_GATEWAY, "as_unreachable").with_federation(FederationFailure {
         access_server: access_server.into(),
         status,

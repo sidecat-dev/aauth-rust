@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Immediate AAuth Access Server grants with authenticated Person Server federation and host policy"
+description = "AAuth Access Server grants and deferred authorization with authenticated Person Server federation and host policy"
 
 [dependencies]
 aauth-rust-core.workspace = true

@@ -1,6 +1,24 @@
 mod four_party;
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let t = four_party::run()?;
+    let deferred = match std::env::args().nth(1).as_deref() {
+        None => false,
+        Some("--deferred") => true,
+        Some(_) => return Err("usage: four-party [--deferred]".into()),
+    };
+    let t = if deferred {
+        four_party::run_deferred()?
+    } else {
+        four_party::run()?
+    };
+    if let Some(d) = &t.deferred {
+        assert_eq!(d.access_statuses, [402, 202, 200]);
+        assert_eq!(d.agent_statuses, [202, 202, 202, 200, 410]);
+        assert!(d.stable_ps_location && d.as_state_consumed);
+        assert_eq!(d.as_calls_after_waiting_agent_poll, 1);
+        println!(
+            "deferred TLS: AS402 -> approval202 -> verified grant200; PS202 -> one terminal200 -> gone410; host confirms example settlement"
+        );
+    }
     assert_eq!(
         (t.unsigned_status, t.challenge_status, t.authorized_status),
         (401, 401, 200)

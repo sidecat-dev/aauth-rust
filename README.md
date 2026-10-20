@@ -27,6 +27,7 @@ cargo test --workspace --locked
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
 cargo run --locked -p aauth-rust-resource --example four-party
+cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
 ```
 
 The direct-identity example generates fresh keys and certificates, starts an Agent Provider
