@@ -120,8 +120,24 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
                 if authority.as_str().contains('@') {
                     return Err(Error::InvalidInput);
                 }
-                let host = authority.host().to_ascii_lowercase();
-                let normalized = match authority.port_u16() {
+                let raw_host = authority.host();
+                if raw_host.is_empty() {
+                    return Err(Error::InvalidInput);
+                }
+                let suffix = &authority.as_str()[raw_host.len()..];
+                let port = if suffix.is_empty() {
+                    None
+                } else {
+                    Some(
+                        suffix
+                            .strip_prefix(':')
+                            .ok_or(Error::InvalidInput)?
+                            .parse::<u16>()
+                            .map_err(|_| Error::InvalidInput)?,
+                    )
+                };
+                let host = raw_host.to_ascii_lowercase();
+                let normalized = match port {
                     None | Some(443) => host,
                     Some(port) => format!("{host}:{port}"),
                 };

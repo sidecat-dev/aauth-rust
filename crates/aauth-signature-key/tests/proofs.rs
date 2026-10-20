@@ -179,4 +179,16 @@ fn authority_normalizes_case_and_default_port_per_rfc9421() {
             .verify(&key.public_jwk())
             .unwrap();
     }
+    for bad in [
+        "https://:443/whoami",
+        "https://resource.example:notaport/whoami",
+        "https://resource.example:65536/whoami",
+        "https://user@resource.example/whoami",
+    ] {
+        let mut req = Request::builder().uri(bad).body(Vec::new()).unwrap();
+        assert!(
+            sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).is_err(),
+            "accepted {bad}"
+        );
+    }
 }
