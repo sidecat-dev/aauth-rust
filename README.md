@@ -62,6 +62,12 @@ See the [three-party source](crates/aauth-rust-resource/examples/three_party/mod
 and the [Person Server service guide](USE-IN-YOUR-SERVICE.md#run-a-person-server).
 The example supplies volatile state and one explicit demo policy. A real host
 supplies person authentication, durable storage and consent policy.
+For local durable storage, the separate
+[`aauth-rust-person-server-redb`](crates/aauth-rust-person-server-redb) crate
+implements the PS `Store` with transactional file-backed bindings and exact
+issuance lineage. See [durable PS storage](USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
+for setup, restart and retention boundaries. The TLS example continues to use
+disposable `MemoryStore` state.
 `Requirement::from_headers` in the Agent crate extracts the challenge as
 Structured Fields; the Agent then verifies it before exchanging credentials.
 
@@ -245,7 +251,7 @@ messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute
 
-[ARCHITECTURE.md](ARCHITECTURE.md) explains the seven crate boundaries;
+[ARCHITECTURE.md](ARCHITECTURE.md) explains the eight crate boundaries;
 [SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
 [CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
 

@@ -134,13 +134,16 @@ pub enum StoreError {
     /// Record fields are incomplete or inconsistent.
     #[error("invalid issuance record: retain complete identity, token digest and expiry fields")]
     InvalidRecord,
-    /// Host storage cannot complete this operation.
+    /// Storage cannot confirm completion; a whole commit outcome may be unknown.
     #[error("Person Server storage is unavailable")]
     Unavailable,
 }
 
-/// Host storage boundary. Operations must be linearizable and preserve state on
-/// refusal. Commit is identical-record idempotent, issuer/JTI unique, and atomic
+/// Host storage boundary. Operations must be linearizable. Logical refusals
+/// (conflict, invalid record, missing/revoked binding) preserve state. An
+/// operational Unavailable may leave a whole transaction's outcome uncertain;
+/// partial binding/index/token changes must never become visible.
+/// Commit is identical-record idempotent, issuer/JTI unique, and atomic
 /// with person binding/directed-identity checks. Revocation cannot be undone by a
 /// token request. No record may disappear before its retain_until timestamp.
 pub trait Store: Send + Sync {

@@ -14,10 +14,12 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-agent` | One signed request using caller-owned credentials | Core, Signature-Key, JOSE |
 | `aauth-rust-resource` | Direct Agent identity, PS authorization and signed Resource challenges, proof before policy, HTTP decisions | Core, Signature-Key, JOSE |
 | `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants and immediate call chaining | Core, Signature-Key, JOSE |
+| `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
 Normal role dependencies never import one another; Resource dev-dependencies
 compose the roles for tests and examples. Examples import the roles and compose
-them without a cross-role lifecycle abstraction. Access
+them without a cross-role lifecycle abstraction. The storage adapter imports the
+PS role; the role never imports a database engine. Access
 Server, Bootstrap, R3, Events and Budgets will get their own boundaries as
 executing journeys require them; their absence is recorded in CONFORMANCE.md.
 
@@ -50,7 +52,12 @@ exact retained lineage before policy. Its `Policy` authenticates a person,
 assigns stable Resource-directed subjects and grants scopes. `Store` commits
 issuance and binding atomically before a token is released. `MemoryStore` is a
 volatile reference; `storetest` is the executable contract for durable host
-implementations. Separate upstream hooks default to denial. An intermediary
+implementations. The separate redb adapter passes that logical contract and a
+consuming close/reopen contract. Its keyed tables hold complete issuance,
+binding and both directed-identity indexes; one immediate-durable write
+transaction updates them together. Startup checks table identity/types and
+schema version without scanning records. Backend process-exit and injected-I/O
+tests are distinct from the protocol contract. Separate upstream hooks default to denial. An intermediary
 uses its own self-issued Agent token while the retained upstream ties preserve
 the original accountable Agent/person; it never acquires the caller's key.
 

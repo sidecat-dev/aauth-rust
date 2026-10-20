@@ -53,6 +53,20 @@ collection. Losing its records makes outstanding credentials unusable at that
 PS. The PS verifies exact retained Person/Auth issuances in exchanges and chains;
 a valid signature alone does not reconstruct missing state.
 
+The optional `aauth-rust-person-server-redb` adapter durably retains bindings,
+internal person IDs, tenant/Agent identity, credential hashes and lineage in a
+local database file. It stores no signing keys or complete compact tokens and
+provides no file encryption. Protect the parent directory and backups; retain
+the issuer signing key and unique token-ID source separately across restart.
+One process owns each file; cloned handles share that owner. Close every handle
+before copying/restoring a database backup. The adapter has no cleanup API and
+keeps records indefinitely, including after `retain_until`; plan storage capacity.
+Logical refusals leave state unchanged. An operational I/O error can leave a
+whole transaction's outcome uncertain, so the PS releases no credential on a
+commit error. No partial binding/index/token transaction is exposed. Process-exit
+tests and one controlled write failure do not simulate every storage failure or
+physical power loss. This store is not an HTTP replay cache.
+
 Person tokens establish identity, not access. Admit protected work only after
 Auth-token verification and application policy. The PS's upstream hooks deny by
 default: direct consent does not authorize an intermediary automatically. Use the

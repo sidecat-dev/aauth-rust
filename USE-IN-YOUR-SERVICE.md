@@ -319,6 +319,71 @@ hooks; clock and ID closures can capture state and are Send + Sync. For example,
 `PersonServer<K, S, BoxedPolicy, BoxedClock, BoxedTokenIds>` names the service type
 without naming closures. The constructor rustdoc uses these aliases.
 
+## Durable Person Server storage
+
+Add `aauth-rust-person-server-redb` alongside the PS dependency. With local
+checkouts, use `path = "../aauth-rust/crates/aauth-rust-person-server-redb"` in
+your consumer's dependencies, adjusting the path to your checkout. It implements
+the same `Store` as `MemoryStore` and adds no database dependency to the PS role.
+
+In the complete PS constructor linked above, replace `MemoryStore` with
+`RedbStore` in the `HostServer` type and pass this store argument:
+
+```rust
+use aauth_rust_person_server_redb::RedbStore;
+let store = RedbStore::open("/var/lib/my-service/person.redb")?;
+```
+
+Create the private parent directory first. `open` creates an absent/empty file
+or reopens the supported schema. A locked, unreadable or invalid database has
+local code `store_unavailable`; an unrelated schema or unsupported version has
+`unsupported_store_schema`. These are configuration/storage errors, never
+Signature-Error codes. Unreadable stored records return `StoreError::Unavailable`,
+which stops the PS operation rather than treating the identity as absent.
+
+One process owns a database file. Clone `RedbStore` to share its transactions
+among handlers; opening the same file independently while any clone lives fails.
+The PS API is synchronous: run it on a blocking worker when adapting an async
+server. The adapter atomically checks and stores the binding, exact complete
+issuance and both directed-identity indexes before returning success. It uses
+immediate durability. Composite keys preserve issuer/JTI namespacing without
+scanning the database. Startup checks schema identity/types/version, not every
+record. The file contains internal identity and credential hashes/lineage,
+with no encryption, signing key or compact token storage.
+
+After every handle is closed, reopen the same file and supply the same issuer
+signing key and a token-ID source that stays unique across restarts. Existing
+Person/Auth credentials keep their retained ancestry; binding revocation stays
+revoked. Never replace a missing database with an empty one to repair a token
+error. Close all handles before copying/restoring a backup. An I/O error may
+leave a whole commit's outcome uncertain; the PS releases no credential on a
+commit error, and the database exposes no partial binding/index/token update.
+There is no cleanup or migration API in this version. Records remain indefinitely,
+including after `retain_until`; protect backups and plan capacity. The adapter
+does not provide request replay detection or operation idempotency.
+
+Custom adapters run `storetest::check_store_contract` with a fresh empty store
+on every factory call. Its checks match the Go issued-token contract's exact
+round-trip, issuer namespace, every-field conflict and concurrent winner/retry
+guarantees, plus Rust's atomic binding/directed-identity rules. Run
+`storetest::check_persistence_contract` separately with a consuming callback
+that drops the sole handle before reopening the same storage. Returning a live
+object or leaving a clone open does not test persistence. Both contracts mutate
+state and must use disposable databases. A complete runnable factory is in
+[the adapter example](crates/aauth-rust-person-server-redb/examples/contracts.rs):
+
+```sh
+cargo run --locked -p aauth-rust-person-server-redb --example contracts
+```
+
+It prints `logical-store=pass reopen-store=pass` and removes its disposable files.
+The adapter's tests additionally cover process exit without Rust destructors,
+an abandoned real transaction, one injected native write failure and reconstructed
+direct/chained PS exchanges. These are separate backend checks, not evidence of
+physical power loss, every disk failure, distributed operation or other database
+engines. Missions, AS federation and token-revocation delivery stay outside the
+PS profile; adding persistence does not add those protocol roles.
+
 ## Protect a Resource with PS authorization
 
 Use `PsAuthorizationResource` with a `PsAuthorizationConfig`: published Resource
