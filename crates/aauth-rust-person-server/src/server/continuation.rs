@@ -262,6 +262,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
         }
+        // Only the delivery owner may consume its claimed row. It rechecks
+        // expiry and trust before release; rival cleanup must not steal custody.
+        if value["state"] == "delivering" {
+            return throttled_for(&value, (self.clock)());
+        }
         if expired(&value, now)? {
             if !d
                 .store
@@ -293,9 +298,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(error);
             }
         };
-        if value["state"] == "delivering" {
-            return throttled_for(&value, (self.clock)());
-        }
         if request.method() == "DELETE" {
             if value["state"] == "ready" {
                 if !d

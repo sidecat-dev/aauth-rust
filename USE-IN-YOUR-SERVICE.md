@@ -1385,9 +1385,16 @@ the Agent still obtains its terminal result through the PS pending URL. The PS
 verifies that grant again and confirms current bindings after final custody I/O
 before delivery. Its remaining `expires_in` uses the final clock; expiry or
 revocation during store publication/removal never releases a prepared token. One
-conditional consumer receives it; later GETs return 410. Signed DELETE cancels
-both roles with one AS request, and consumes local custody. Transport failure
-reports failure even though local cancellation closes the PS continuation.
+conditional consumer receives it; later GETs return 410. While delivery owns its
+claimed row, competing authenticated owner polls and DELETE return 429 without
+consuming custody, even after expiry or a Resource-trust change. The delivery
+owner still checks current release conditions. A final storage failure returns
+500 and can leave `delivering` custody for host reconciliation; storage recovery
+does not automatically retry delivery. Signed DELETE cancels ready custody
+locally without AS I/O. Cancelling waiting custody sends one AS DELETE and
+consumes local custody; transport failure reports failure even though local
+cancellation closes the PS continuation. Cancellation during host advancement
+returns 429 for a later retry.
 
 This missionless Core-scope profile supports top-level Agents and one-level
 parent-mediated children. Deadlines are capped by all original credentials,

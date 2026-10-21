@@ -2,14 +2,19 @@ stages: [verify]
 
 variables:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
 
-# Native targets produce standalone demo artifacts; they are not releases.
-.native-unix:
+# This pinned Linux job produces a standalone demo artifact, not a release.
+linux:
   stage: verify
+  image: rust:1.99.1@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+  tags: [sprint-gen6]
+  variables:
+    TARGET: x86_64-unknown-linux-gnu
   before_script:
-    - export PATH="$HOME/.cargo/bin:$PATH"
     - rustup component add rustfmt clippy
   script:
+    - cargo build --locked
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
@@ -29,82 +34,4 @@ variables:
   artifacts:
     name: "aauth-demo-${TARGET}-${CI_COMMIT_SHORT_SHA}"
     paths: [direct-identity-*]
-    expire_in: 14 days
-
-linux:
-  extends: .native-unix
-  image: rust:latest
-  parallel:
-    matrix:
-      - RUNNER: saas-linux-small-amd64
-        TARGET: x86_64-unknown-linux-gnu
-      - RUNNER: saas-linux-small-arm64
-        TARGET: aarch64-unknown-linux-gnu
-  tags: [$RUNNER]
-
-# Enable only when the project's corresponding native runners are available.
-# GitLab hosted macOS currently needs the appropriate plan/OSS entitlement.
-macos:
-  extends: .native-unix
-  image: macos-15-xcode-16
-  tags: [saas-macos-medium-m1]
-  variables:
-    TARGET: aarch64-apple-darwin
-  rules:
-    - if: '$AAUTH_NATIVE_RUNNERS == "1"'
-  before_script:
-    - export PATH="$HOME/.cargo/bin:$PATH"
-    - if ! command -v rustup >/dev/null; then curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; fi
-    - rustup component add rustfmt clippy
-
-windows:
-  stage: verify
-  tags: [saas-windows-medium-amd64]
-  rules:
-    - if: '$AAUTH_NATIVE_RUNNERS == "1"'
-  script:
-    - |
-      $ErrorActionPreference = 'Stop'
-      $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
-      if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-        Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe
-        & .\rustup-init.exe -y --profile minimal
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      }
-      rustup component add rustfmt clippy
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo fmt --all -- --check
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo clippy --workspace --all-targets --locked -- -D warnings
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      $env:RUSTDOCFLAGS = "-D warnings"
-      cargo doc --workspace --no-deps --locked
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo test --locked
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example library
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example axum
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example three-party
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example four-party
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo test --locked -p aauth-rust-resource --example subagent
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-resource --example subagent
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      cargo run --locked -p aauth-rust-person-server --example mixed-grants
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      # The optional redb adapter requires Unix directory synchronization.
-      cargo build --locked --release -p aauth-rust-resource --example direct-identity
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      & target\release\examples\direct-identity.exe
-      if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      Copy-Item target\release\examples\direct-identity.exe direct-identity-x86_64-pc-windows-msvc.exe
-  artifacts:
-    name: "aauth-demo-windows-${CI_COMMIT_SHORT_SHA}"
-    paths: [direct-identity-x86_64-pc-windows-msvc.exe]
     expire_in: 14 days

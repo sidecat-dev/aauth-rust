@@ -128,7 +128,11 @@ pub(super) fn poll<K: AgentKeyResolver>(
     holder.sign(&mut r, now).unwrap();
     server.handle(&r)
 }
-fn initial(f: &Fixture, server: &Server, holder: &Agent) -> (String, String, Response<Vec<u8>>) {
+fn initial<K: AgentKeyResolver>(
+    f: &Fixture,
+    server: &Server<K>,
+    holder: &Agent,
+) -> (String, String, Response<Vec<u8>>) {
     let person = compact(&f.person(server, holder, ORDERS, None), "person_token");
     let challenge = resource(holder, &person, "read", |r| {
         r.aud = "https://as.example".into()
@@ -495,6 +499,300 @@ fn concurrent_terminal_agent_delivery_has_one_consumer() {
         poll(&server, &holder, &pending.location, "GET", None, 1000).status(),
         410
     );
+}
+
+const DELIVERY_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct ReleaseDelivery(Option<std::sync::mpsc::SyncSender<()>>);
+impl ReleaseDelivery {
+    fn release(&mut self) {
+        if let Some(release) = self.0.take() {
+            // One slot is sufficient for this single-use gate. A disconnected
+            // receiver already means the owner cannot remain blocked here.
+            let _ = release.try_send(());
+        }
+    }
+}
+impl Drop for ReleaseDelivery {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+// Pause only after the successful delivery claim has reached custody, without
+// holding MemoryContinuations' lock. Both gate waits are bounded test-harness
+// safeguards; they do not advance or replace the injected protocol clock.
+struct DeliveryClaimStore {
+    inner: MemoryContinuations,
+    entered: std::sync::mpsc::SyncSender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    gate_failed: AtomicBool,
+    claims: AtomicUsize,
+    removals: AtomicUsize,
+    fail_removal: AtomicBool,
+}
+impl DeliveryClaimStore {
+    fn new() -> (Self, std::sync::mpsc::Receiver<()>, ReleaseDelivery) {
+        let (entered, ready) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        (
+            Self {
+                inner: MemoryContinuations::new(16),
+                entered,
+                release: Mutex::new(released),
+                gate_failed: AtomicBool::new(false),
+                claims: AtomicUsize::new(0),
+                removals: AtomicUsize::new(0),
+                fail_removal: AtomicBool::new(false),
+            },
+            ready,
+            ReleaseDelivery(Some(release)),
+        )
+    }
+}
+impl ContinuationStore for DeliveryClaimStore {
+    fn insert(
+        &self,
+        id: &str,
+        value: Value,
+    ) -> Result<(), aauth_rust_core::continuation::StoreError> {
+        self.inner.insert(id, value)
+    }
+    fn load(
+        &self,
+        id: &str,
+    ) -> Result<
+        Option<aauth_rust_core::continuation::Snapshot>,
+        aauth_rust_core::continuation::StoreError,
+    > {
+        self.inner.load(id)
+    }
+    fn replace(
+        &self,
+        id: &str,
+        revision: u64,
+        value: Option<Value>,
+    ) -> Result<bool, aauth_rust_core::continuation::StoreError> {
+        let claiming = value.as_ref().is_some_and(|v| v["state"] == "delivering");
+        let removing = value.is_none();
+        if removing && self.fail_removal.load(Ordering::SeqCst) {
+            return Err(aauth_rust_core::continuation::StoreError::Unavailable);
+        }
+        let changed = self.inner.replace(id, revision, value)?;
+        if changed && removing {
+            self.removals.fetch_add(1, Ordering::SeqCst);
+        }
+        if changed && claiming && self.claims.fetch_add(1, Ordering::SeqCst) == 0 {
+            let announced = self.entered.try_send(()).is_ok();
+            let released = announced
+                && self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(DELIVERY_GATE_TIMEOUT)
+                    .is_ok();
+            if !released {
+                self.gate_failed.store(true, Ordering::SeqCst);
+                return Err(aauth_rust_core::continuation::StoreError::Unavailable);
+            }
+        }
+        Ok(changed)
+    }
+}
+
+#[derive(Clone)]
+struct DeliveryResourceTrust(Arc<AtomicBool>);
+impl AgentKeyResolver for DeliveryResourceTrust {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        // Fresh Agent proof remains verifiable. Only the retained Resource's
+        // trust changes, so the competing poll reaches pending cleanup.
+        if issuer == ORDERS && dwk == "aauth-resource.json" && !self.0.load(Ordering::SeqCst) {
+            return Err(TokenError::UntrustedIssuer);
+        }
+        Keys.key(issuer, dwk, kid)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DeliveryInterference {
+    Expiry,
+    ResourceTrust,
+    Cancellation,
+    StoreFailure,
+}
+
+fn claimed_delivery(interference: DeliveryInterference) {
+    let f = Fixture::new();
+    let transport = NativeTransport::new(&f, 1, 0);
+    let (custody, ready, release) = DeliveryClaimStore::new();
+    let custody = Arc::new(custody);
+    let trusted_resource = Arc::new(AtomicBool::new(true));
+    let mut cfg = DeferredConfig::new(custody.clone());
+    cfg.lifetime = 60;
+    cfg.retry_after = 0;
+    let server = Arc::new(
+        f.server_with_keys(2000, DeliveryResourceTrust(trusted_resource.clone()))
+            .with_federation(transport.clone())
+            .with_deferred(cfg)
+            .unwrap(),
+    );
+    let holder = agent(false);
+    let (_, _, first) = initial(&f, &server, &holder);
+    let pending = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+    let id = pending.location.rsplit('/').next().unwrap();
+    transport.stage.store(2, Ordering::SeqCst);
+    let host = server
+        .advance_federation(&pending.location, FederationInput::Poll)
+        .unwrap();
+    assert_eq!(host.status(), 200);
+    let issued = AuthToken::parse(output(&host)["auth_token"].as_str().unwrap()).unwrap();
+    let issued_reference = TokenReference {
+        issuer: "https://as.example".into(),
+        jti: issued.unverified_claims().jti.clone(),
+    };
+    assert!(f.store.token(&issued_reference).unwrap().is_some());
+    let calls_before = transport.calls.load(Ordering::SeqCst);
+    let worker = server.clone();
+    let owner = holder.with_token(holder.token().into()).unwrap();
+    let location = pending.location.clone();
+    let (held_before, held_after, now, competing, cancellation, completed) = std::thread::scope(
+        |scope| {
+            // Move the release guard into this scope: unwinding a rival poll
+            // releases the owner before scope's mandatory thread join.
+            let mut release = release;
+            let thread = scope.spawn(move || poll(&worker, &owner, &location, "GET", None, 1000));
+            if let Err(error) = ready.recv_timeout(DELIVERY_GATE_TIMEOUT) {
+                release.release();
+                let owner_status = match thread.join() {
+                    Ok(response) => format!("HTTP {}", response.status().as_u16()),
+                    Err(_) => "thread panicked".into(),
+                };
+                panic!(
+                    "delivery claim gate was not reached within 10 seconds: {error}; owner status: {owner_status}"
+                );
+            }
+            let held_before = custody.load(id);
+            let now = match interference {
+                DeliveryInterference::Expiry => {
+                    // All signed credentials outlive the 1060 custody deadline.
+                    f.host.now.store(1060, Ordering::SeqCst);
+                    1060
+                }
+                DeliveryInterference::ResourceTrust => {
+                    trusted_resource.store(false, Ordering::SeqCst);
+                    1000
+                }
+                DeliveryInterference::StoreFailure => {
+                    custody.fail_removal.store(true, Ordering::SeqCst);
+                    1000
+                }
+                DeliveryInterference::Cancellation => 1000,
+            };
+            let competing = poll(&server, &holder, &pending.location, "GET", None, now);
+            let cancellation = poll(&server, &holder, &pending.location, "DELETE", None, now);
+            let held_after = custody.load(id);
+            release.release();
+            let completed = thread.join().unwrap();
+            (
+                held_before,
+                held_after,
+                now,
+                competing,
+                cancellation,
+                completed,
+            )
+        },
+    );
+    assert!(
+        !custody.gate_failed.load(Ordering::SeqCst),
+        "the delivery release gate timed out or disconnected"
+    );
+
+    // Join before asserting: the historical bug is observed as the owner's
+    // 500, rather than leaving a blocked worker behind after the rival fails.
+    let (status, code) = match interference {
+        DeliveryInterference::Expiry => (408, Some("expired")),
+        DeliveryInterference::ResourceTrust => (400, Some("invalid_resource_token")),
+        DeliveryInterference::Cancellation => (200, None),
+        DeliveryInterference::StoreFailure => (500, Some("server_error")),
+    };
+    assert_eq!(
+        completed.status(),
+        status,
+        "a competing poll stole delivery custody: owner status {}, rival status {}",
+        completed.status(),
+        competing.status()
+    );
+    if let Some(code) = code {
+        assert_eq!(output(&completed)["error"], code);
+        assert!(output(&completed).get("auth_token").is_none());
+    } else {
+        assert!(
+            output(&completed)["auth_token"] == output(&host)["auth_token"],
+            "delivery must preserve the verified host token's exact bytes"
+        );
+    }
+    for rival in [&competing, &cancellation] {
+        assert_eq!(rival.status(), 429);
+        assert_eq!(output(rival)["error"], "slow_down");
+        assert_eq!(rival.headers()["retry-after"], "1");
+        assert!(output(rival).get("auth_token").is_none());
+    }
+    let held_before = held_before.unwrap().unwrap();
+    let held_after = held_after
+        .unwrap()
+        .expect("the rival consumed the owner's row");
+    assert_eq!(held_before.value["state"], "delivering");
+    assert_eq!(held_after.value["state"], "delivering");
+    assert_eq!(held_after.revision, held_before.revision);
+    assert_eq!(custody.claims.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), calls_before);
+    assert_eq!(transport.original.lock().unwrap().len(), 1);
+    assert!(f.store.token(&issued_reference).unwrap().is_some());
+
+    if matches!(interference, DeliveryInterference::StoreFailure) {
+        assert_eq!(custody.removals.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            custody.load(id).unwrap().unwrap().value["state"],
+            "delivering"
+        );
+        custody.fail_removal.store(false, Ordering::SeqCst);
+        let retry = poll(&server, &holder, &pending.location, "GET", None, now);
+        assert_eq!(
+            retry.status(),
+            429,
+            "storage recovery must not replay delivery"
+        );
+        assert!(output(&retry).get("auth_token").is_none());
+        assert_eq!(custody.claims.load(Ordering::SeqCst), 1);
+    } else {
+        assert_eq!(custody.removals.load(Ordering::SeqCst), 1);
+        assert!(custody.load(id).unwrap().is_none());
+        let consumed = poll(&server, &holder, &pending.location, "GET", None, now);
+        assert_eq!(consumed.status(), 410);
+        assert_eq!(output(&consumed)["error"], "gone");
+        assert!(output(&consumed).get("auth_token").is_none());
+    }
+}
+
+#[test]
+fn claimed_delivery_survives_expired_competing_poll() {
+    claimed_delivery(DeliveryInterference::Expiry);
+}
+
+#[test]
+fn claimed_delivery_survives_untrusted_resource_competing_poll() {
+    claimed_delivery(DeliveryInterference::ResourceTrust);
+}
+
+#[test]
+fn claimed_delivery_rejects_competing_cancellation_and_delivers_once() {
+    claimed_delivery(DeliveryInterference::Cancellation);
+}
+
+#[test]
+fn claimed_delivery_store_failure_remains_local_500() {
+    claimed_delivery(DeliveryInterference::StoreFailure);
 }
 
 struct BoundaryStore {
