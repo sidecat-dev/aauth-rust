@@ -99,19 +99,22 @@ issuance lineage on Unix filesystems supporting directory synchronization.
 See [durable PS storage](USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
 for setup, restart and retention boundaries. The TLS example continues to use
 disposable `MemoryStore` state.
-`Requirement::from_headers` in the Agent crate extracts the challenge as
-Structured Fields; the Agent then verifies it before exchanging credentials.
+`Requirement::from_headers` in the Agent crate extracts immediate challenges as
+Structured Fields; the Agent then verifies them before exchanging credentials.
+For a deferred PS `202`, use `PollSession` as described below.
 
 For explicit client polling helpers and their current server-side limits, see
 [prepare Agent polls](USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls).
 
 ## Deferred grants and host settlement
 
-With continuations enabled, an Access Server sends its `402 Payment` challenge
-to the Person Server. The trusted **Person Server host settles the payment**;
-the Agent receives `202 Approval` and polls the PS pending URL. Claims requests
-also stay host-side and appear to the Agent as Approval. This profile provides
-no Agent payment hint or Agent settlement operation.
+With continuations enabled, an Access Server can wait for approval directly.
+If it requests payment with `402 Payment`, the trusted **Person Server host
+settles the payment**. The Agent receives `202` with an Approval requirement and
+polls the PS pending URL using `PollSession`; the immediate
+`Requirement::from_headers` parser returns `Unsupported` for approval. Claims
+requests also stay host-side and appear to the Agent as Approval. This profile
+provides no Agent payment hint or Agent settlement operation.
 
 The host inspects `federation_pending`, obtains confirmed settlement, claims or
 external approval, then explicitly calls `advance_federation`. Agent polls only
@@ -120,6 +123,12 @@ read PS custody and never advance the AS exchange. The
 a compile-checked host step, retry handling and the delivery/replay limits.
 The deferred four-party example above executes payment, approval and one terminal
 delivery over TLS with fixture settlement; it calls no payment provider.
+For approval alone, follow the guide's
+[approval-only composition](USE-IN-YOUR-SERVICE.md#approval-without-payment).
+Host completion does not shorten the caller's current `Retry-After`. A consumed
+PS delivery returns `410 gone`; it does not spend the delivered Auth token or
+deduplicate a Resource effect. See
+[delivery and Resource replay](USE-IN-YOUR-SERVICE.md#delivery-and-resource-replay).
 
 ## Use the libraries
 
@@ -179,7 +188,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 For a separate application, use versioned path dependencies until the alpha
-packages are published. Adjust these paths to your checkout:
+packages are published. Paths are relative to that application's `Cargo.toml`.
+Replace `../aauth-rust` with the actual relative path to your checkout:
 
 ```toml
 [dependencies]
@@ -189,6 +199,15 @@ aauth-rust-core = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aaut
 aauth-rust-jose = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-jose" }
 aauth-rust-resource = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
+```
+
+The program above uses the identity crates. If your application also hosts a
+federated Person Server and Access Server, add these entries to the same
+`[dependencies]` table:
+
+```toml
+aauth-rust-person-server = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-person-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
 Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned

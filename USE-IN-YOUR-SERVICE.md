@@ -480,6 +480,9 @@ and extension values return `RequirementError::Unsupported`. The combined field
 limit is 64 KiB and repeated names use RFC 9651 last-wins behavior. Status handling,
 deferred/polling behavior and transport remain host decisions. The running
 three-party example uses this parser instead of matching a serialized prefix.
+For an authenticated deferred PS `202` with approval, initialize
+[`PollSession`](#prepare-explicit-agent-polls) instead. The immediate parser's
+`Unsupported("approval")` describes its own subset, not a failed continuation.
 
 Discover PS endpoints from the configured PS's admitted metadata, using its
 `person_token_endpoint` and `auth_token_endpoint`, rather than assuming `/person`
@@ -1147,11 +1150,17 @@ original POST body. Calling early returns `PollError::TooEarly { at }`.
 Add a small scheduling margin when converting that whole-second timestamp into
 a sub-second timer; waking on a second boundary can otherwise arrive early and
 trigger `429` backoff. Respect the finite session deadline when scheduling.
+Host approval or a grant entering PS custody does not shorten the caller's
+current `Retry-After`: `request` still returns `TooEarly` until its scheduled
+time. The helper observes actual responses, not host-side completion signals.
+Keep the caller's poll schedule separate from the host's AS advancement schedule.
 
 Pass the actual response to `session.accept(response, now)`. `None` keeps the
 session pending; `Some(response)` returns the terminal wire response and closes
-the session. Verify a final Auth token with the existing Agent context helpers
-before presenting it to a Resource. The polling helper does not authenticate
+the session. A terminal response can also be a refusal, including `410 gone`;
+inspect its status before treating it as a grant. Verify a final Auth token with
+the existing Agent context helpers before presenting it to a Resource. The
+polling helper does not authenticate
 response bytes or broaden issuer trust. Use a fresh admitted transport response
 for each call; never follow redirects with credentials.
 
@@ -1208,6 +1217,30 @@ Use separate AS and PS stores or namespaces. Both configs expose `lifetime`
 useful only in controlled fixtures. Pending URLs use the existing host ID
 source: provide unique, unpredictable URL-safe IDs, not a production counter.
 The TLS example includes fresh random material in every pending ID.
+
+### Approval without payment
+
+Use the same deferred constructors for an approval-only application. The AS
+callback returns `Ok(Some(Requirement::Approval))` until host evidence permits
+`Ok(None)`; the ordinary grant policy still decides whether to issue the grant.
+Record the authenticated approval for this pending operation in state the AS
+callback reads. In one process, that callback and the PS host's
+`approval_complete` callback can read the same owned approval record. Separate
+hosts need an explicitly admitted approval integration. Returning `true` from
+the PS callback only permits its next AS poll; it does not transmit approval to
+the AS or change the AS callback's decision.
+
+| Actor | Next step |
+| --- | --- |
+| Agent | Submit the original exchange; read the PS's `202` and pending Location with `PollSession`. |
+| PS host | Inspect `federation_pending`, obtain approval from its authenticated approver, and respect the remaining AS retry wait. |
+| PS host | Call `advance_federation` when ready. If the AS issues a grant, the PS verifies and retains it for delivery. |
+| Agent | Wait out its own current `Retry-After`, poll the same PS Location, and verify a terminal `200` with its original exchange context. |
+| Resource host | Admit the signed request and apply its own effect/idempotency policy. PS delivery consumption does not count the Resource effect. |
+
+This composes the host helper and explicit Agent polls; it is not a separate
+executable command. The `four-party --deferred` command above also exercises
+payment before approval, and the `deferred_host` example only checks compilation.
 
 On an AS 202 or 402, the PS returns 202 with its own pending URL. Payment and
 Claims map to Approval toward the Agent; the original AS requirement remains
@@ -1360,6 +1393,13 @@ your logging policy. A terminal 200 is retained for Agent delivery, so keep
 serving the PS pending URL and let the Agent verify the final Auth token. The
 helper's `main` only confirms compilation; it does not compose a service or
 contact a payment provider. The complete TLS example exercises that composition.
+`HostStep::RetryAfter` can mean the approval callback is still false, an AS wait
+has not elapsed, or a later response requested backoff. Its delay includes the
+helper's one-second scheduling margin, even when the remaining AS wait is zero.
+Schedule that returned delay once; the helper does not sleep. Use the host's own
+approval state to describe what is waiting, rather than inferring it from a delay.
+`federation_pending` also returns `NotReady` for ready or in-flight custody;
+retry advice alone does not mean approval is missing. Keep serving Agent delivery.
 
 `NeedsClaims(names)` deliberately returns control to the host. Obtain those
 claims from a trusted source, then call `advance_federation` with
@@ -1378,6 +1418,8 @@ advancement, and a later AS question starts a new round even with identical text
 lifecycle belongs to the host that serves that interaction. Only that host can
 confirm completion; an Agent poll does not approve an interaction or a payment.
 
+### Delivery and Resource replay
+
 `advance_federation` returns the actual AS pending response or the PS's verified
 terminal response. Inspect its `FederationFailure` extension for diagnostics
 before framework conversion. A 200 here is available in retained PS custody;
@@ -1395,6 +1437,13 @@ locally without AS I/O. Cancelling waiting custody sends one AS DELETE and
 consumes local custody; transport failure reports failure even though local
 cancellation closes the PS continuation. Cancellation during host advancement
 returns 429 for a later retry.
+
+After successful delivery, an otherwise authenticated read of the consumed PS
+reference returns `410` with error `gone`. This closes that continuation; it does
+not revoke or spend the delivered Auth token. Another signed Resource request
+can still pass ordinary token validation and host policy. The Resource host
+owns replay and idempotency decisions and must couple a one-effect operation
+with its own effect storage; continuation custody does not provide that guarantee.
 
 This missionless Core-scope profile supports top-level Agents and one-level
 parent-mediated children. Deadlines are capped by all original credentials,
