@@ -19,6 +19,8 @@ linux:
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+    # Stage unpublished sibling dependencies and verify every archive; never upload.
+    - cargo publish --workspace --dry-run --locked
     - cargo test --locked
     - cargo run --locked -p aauth-rust-resource --example library
     - cargo run --locked -p aauth-rust-resource --example axum
@@ -38,5 +40,7 @@ linux:
     - cp target/release/examples/direct-identity "direct-identity-${TARGET}"
   artifacts:
     name: "aauth-demo-${TARGET}-${CI_COMMIT_SHORT_SHA}"
-    paths: [direct-identity-*]
+    paths:
+      - direct-identity-*
+      - target/package/tmp-crate/*.crate
     expire_in: 14 days

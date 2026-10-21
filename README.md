@@ -8,7 +8,7 @@ Person Server and Access Server for immediate four-party federation. A Resource
 can act as an Agent for an immediate downstream call on that person's behalf.
 A parent can obtain child-bound Person/Auth credentials for a one-level sub-agent,
 including opt-in AS payment and approval, while retaining consent and polling.
-[CONFORMANCE.md](CONFORMANCE.md) names
+[CONFORMANCE.md](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/CONFORMANCE.md) names
 the tested behavior and limits.
 
 The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
@@ -16,8 +16,14 @@ is the project home. Development forks may carry changes before upstream accepts
 them. The commands below start in a development checkout containing this README
 and `Cargo.toml`. No crate or release binary has been published yet.
 
-For a parent/child integration, see [the service guide](USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent)
-and [executable native example](crates/aauth-rust-resource/examples/subagent.rs).
+Each crate archive carries this workspace overview and its own MIT license.
+The commands below require the full development checkout; a single crate archive
+contains only that crate's sources, tests and examples. Follow the repository
+links for the service guide and workspace examples. Registry publication and
+platform runtime support are separate from local archive verification.
+
+For a parent/child integration, see [the service guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent)
+and [executable native example](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/crates/aauth-rust-resource/examples/subagent.rs).
 The parent signs PS requests and verifies child-bound deliveries without the
 child's private key; the child signs protected Resource calls. That example uses
 buffered native handlers and explicit fixture identity/payment/approval decisions.
@@ -79,28 +85,28 @@ credentials and issues its grant, and the PS verifies and retains that exact
 grant before returning it. The Agent verifies delivery and signs a POST that
 produces one effect. The example also refuses changed content, AS denial,
 malformed delivery, an untrusted PS and an untrusted TLS certificate. Run the
-[complete four-party source](crates/aauth-rust-resource/examples/four_party/mod.rs)
+[complete four-party source](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/crates/aauth-rust-resource/examples/four_party/mod.rs)
 without accounts, public DNS, privileged ports or external services. It owns and
 closes temporary listeners; its memory store and fixed demo person are disposable.
-See [run an Access Server](USE-IN-YOUR-SERVICE.md#run-an-access-server-and-federated-person-server)
+See [run an Access Server](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#run-an-access-server-and-federated-person-server)
 for the library integration and transport boundary.
 
-See the [three-party source](crates/aauth-rust-resource/examples/three_party/mod.rs)
-and the [Person Server service guide](USE-IN-YOUR-SERVICE.md#run-a-person-server).
+See the [three-party source](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/crates/aauth-rust-resource/examples/three_party/mod.rs)
+and the [Person Server service guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#run-a-person-server).
 The example supplies volatile state and one explicit demo policy. A real host
 supplies person authentication, durable storage and consent policy.
 For local durable storage, the separate
-[`aauth-rust-person-server-redb`](crates/aauth-rust-person-server-redb) crate
+[`aauth-rust-person-server-redb`](https://gitlab.com/sidecat-dev/aauth-rust/-/tree/main/crates/aauth-rust-person-server-redb) crate
 implements the PS `Store` with transactional file-backed bindings and exact
 issuance lineage on Unix filesystems supporting directory synchronization.
-See [durable PS storage](USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
+See [durable PS storage](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#durable-person-server-storage)
 for setup, restart and retention boundaries. The TLS example continues to use
 disposable `MemoryStore` state.
 `Requirement::from_headers` in the Agent crate extracts the challenge as
 Structured Fields; the Agent then verifies it before exchanging credentials.
 
 For explicit client polling helpers and their current server-side limits, see
-[prepare Agent polls](USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls).
+[prepare Agent polls](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls).
 
 ## Deferred grants and host settlement
 
@@ -113,7 +119,7 @@ no Agent payment hint or Agent settlement operation.
 The host inspects `federation_pending`, obtains confirmed settlement, claims or
 external approval, then explicitly calls `advance_federation`. Agent polls only
 read PS custody and never advance the AS exchange. The
-[service guide](USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) includes
+[service guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) includes
 a compile-checked host step, retry handling and the delivery/replay limits.
 The deferred four-party example above executes payment, approval and one terminal
 delivery over TLS with fixture settlement; it calls no payment provider.
@@ -221,9 +227,9 @@ work. Use `Decision::into_result()` to obtain `(verified_token, admitted_value)`
 or a boxed refusal response, instead of mapping a granted request to a demo body.
 `Agent::with_token(new_token)` reuses its key for refresh without handling seed
 bytes. Resolvers can be borrowed, boxed or shared with Arc; snapshots are Clone.
-The [service guide](USE-IN-YOUR-SERVICE.md) covers request adaptation, Person
+The [service guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md) covers request adaptation, Person
 Server integration, trust, refresh, rotation, replay and local ports.
-Run the [axum example](crates/aauth-rust-resource/examples/axum.rs)
+Run the [axum example](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/crates/aauth-rust-resource/examples/axum.rs)
 with `cargo run --locked -p aauth-rust-resource --example axum` to see request
 adaptation and a handler using typed policy context.
 
@@ -254,7 +260,7 @@ policy)` shares one verifier across paths; the exact-endpoint `new` constructor
 remains available. Both verify the actual signed path before policy. The host
 router/policy admits routes. `resource.metadata()` returns the verifier's
 minimal `/.well-known/aauth-resource.json` document; the axum example serves it
-publicly. See [service integration](USE-IN-YOUR-SERVICE.md).
+publicly. See [service integration](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/USE-IN-YOUR-SERVICE.md).
 
 ## Trust and vocabulary
 
@@ -272,7 +278,7 @@ Production hosts own destination admission, timeouts, cache lifetime and refresh
 the draft's once-per-minute fetch floor), key storage, enrollment, revocation,
 replay policy and clocks. This profile supplies no nonce: if you require replay
 refusal, key the replay cache on the proof bytes within the accepted time window.
-See [SECURITY.md](SECURITY.md).
+See [SECURITY.md](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/SECURITY.md).
 
 | Name | Meaning here |
 | --- | --- |
@@ -299,9 +305,9 @@ messages explain what to fix; `.code()` returns the stable protocol code.
 
 ## Build and contribute
 
-[ARCHITECTURE.md](ARCHITECTURE.md) explains the nine crate boundaries;
-[SPECIFICATIONS.md](SPECIFICATIONS.md) pins the source text and digests.
-[CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
+[ARCHITECTURE.md](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/ARCHITECTURE.md) explains the nine crate boundaries;
+[SPECIFICATIONS.md](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/SPECIFICATIONS.md) pins the source text and digests.
+[CONTRIBUTING.md](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/CONTRIBUTING.md) gives the change and verification workflow.
 
 ```sh
 rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
@@ -316,9 +322,9 @@ compiler or foreign execution. They do not link an application or execute the
 Windows refusal test. The redb adapter still refuses non-Unix open; a Windows
 Person Server needs another `Store`. Resource TLS tests and examples use rustls/ring as development dependencies,
 so building those targets requires the target C compiler and linker.
-[CI](.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
+[CI](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
 and a pinned Rust 1.99.1 image, with two Cargo build jobs. It runs the workspace
-checks/examples and these cross-target checks, and retains a Linux demo binary
-for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
+checks/examples, these cross-target checks and the workspace package dry-run,
+and retains the Linux demo binary and nine verified crate archives for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
 unverified; earlier platform evidence remains tied to its original revisions. The declared minimum toolchain is 1.99.
-License: [MIT](LICENSE).
+License: [MIT](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/LICENSE).
