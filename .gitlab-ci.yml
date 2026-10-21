@@ -16,6 +16,8 @@ linux:
     - rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
   script:
     - cargo build --locked
+    # Fresh separate consumer: compile README recipe using the primed registry cache.
+    - sh ci/check-consumer-bootstrap.sh "${CI_PROJECT_DIR}/target/consumer-bootstrap"
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked

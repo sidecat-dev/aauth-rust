@@ -187,11 +187,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-For a separate application, use versioned path dependencies until the alpha
-packages are published. Paths are relative to that application's `Cargo.toml`.
-Replace `../aauth-rust` with the actual relative path to your checkout:
+### Build a separate application
 
-```toml
+Use versioned path dependencies until the alpha packages are published. The
+following POSIX shell recipe starts in this checkout and creates an **unused**
+sibling directory, `../aauth-service`. It assumes the checkout is named
+`aauth-rust`; adjust the manifest's paths if you used another name. Paths are
+relative to the application's `Cargo.toml`, not your shell's current directory.
+Keep the application outside this checkout's Cargo workspace. The empty
+`[workspace]` table also makes it independent of any containing workspace.
+
+The application needs its own toolchain selection and lockfile: a path dependency
+does not select its checkout's `rust-toolchain.toml` or adopt that checkout's
+`Cargo.lock`. This copies the pinned Rust 1.99.1 selection and the unchanged
+complete program above. Install rustup first; it may download that toolchain and
+components. Initial dependency resolution/builds may also download registry
+crates, even though the AAuth crates themselves come from local paths.
+
+<!-- consumer-bootstrap-setup:begin -->
+```sh
+(
+set -eu
+mkdir ../aauth-service
+mkdir ../aauth-service/src
+cp rust-toolchain.toml ../aauth-service/
+cp crates/aauth-rust-resource/examples/library.rs ../aauth-service/src/main.rs
+cat > ../aauth-service/Cargo.toml <<'TOML'
+[package]
+name = "aauth-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace]
+
 [dependencies]
 aauth-rust-agent = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent" }
 aauth-rust-agent-provider = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
@@ -199,7 +229,35 @@ aauth-rust-core = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aaut
 aauth-rust-jose = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-jose" }
 aauth-rust-resource = { version = "0.1.0-alpha.1", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
+TOML
+cd ../aauth-service
+rustup show active-toolchain
+test ! -e Cargo.lock
+cargo generate-lockfile
+)
 ```
+<!-- consumer-bootstrap-setup:end -->
+
+The setup stops if `../aauth-service` already exists. Choose a new name rather
+than overwriting an existing application. For an existing app, merge the package
+and dependency settings into its own manifest instead. Add any optional role
+dependencies below before generating its lockfile.
+
+After initial resolution, keep the application's `Cargo.lock` with its source
+and use locked builds. Starting again from the AAuth checkout:
+
+<!-- consumer-bootstrap-build:begin -->
+```sh
+(cd ../aauth-service && cargo build --locked --jobs 2)
+```
+<!-- consumer-bootstrap-build:end -->
+
+This compiles the consumer; it does not run the program. `--locked` refuses a
+missing or outdated lockfile. `generate-lockfile` does not accept `--jobs`;
+put `--jobs 2` on the build. After intentional dependency changes, regenerate the
+lockfile and review its changes. Offline use additionally requires the toolchain
+and all resolved registry dependencies to be cached; a lockfile alone does not
+supply those bytes.
 
 The program above uses the identity crates. If your application also hosts a
 federated Person Server and Access Server, add these entries to the same
