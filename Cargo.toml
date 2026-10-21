@@ -9,7 +9,7 @@ rust-version = "1.99"
 license = "MIT"
 repository = "https://gitlab.com/sidecat-dev/aauth-rust"
 homepage = "https://gitlab.com/sidecat-dev/aauth-rust"
-readme = "README.md"
+readme = "PACKAGE-README.md"
 keywords = ["aauth", "authorization", "agent", "ed25519", "http-signatures"]
 categories = ["authentication", "cryptography"]
 

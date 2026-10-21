@@ -15,6 +15,9 @@ The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aaut
 is the project home. Development forks may carry changes before upstream accepts
 them. The commands below start in a development checkout containing this README
 and `Cargo.toml`. No crate or release binary has been published yet.
+Each crate archive instead includes the self-contained
+[package overview](PACKAGE-README.md) and its own MIT license; workspace commands
+and service guides require the full checkout.
 
 For a parent/child integration, see [the service guide](USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent)
 and [executable native example](crates/aauth-rust-resource/examples/subagent.rs).
@@ -318,7 +321,7 @@ Person Server needs another `Store`. Resource TLS tests and examples use rustls/
 so building those targets requires the target C compiler and linker.
 [CI](.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
 and a pinned Rust 1.99.1 image, with two Cargo build jobs. It runs the workspace
-checks/examples and these cross-target checks, and retains a Linux demo binary
-for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
+checks/examples, these cross-target checks and the workspace package dry-run,
+and retains the Linux demo binary and nine verified crate archives for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
 unverified; earlier platform evidence remains tied to its original revisions. The declared minimum toolchain is 1.99.
 License: [MIT](LICENSE).

@@ -31,12 +31,24 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 git diff --check
 ```
 
-Tests and the TLS example require a platform C compiler; library builds use
-pure Rust dependencies. The README explains toolchain setup and ARM64 builds.
-When changing packaging, also run `cargo publish --workspace --dry-run --locked`.
-This verifies archives and dependency versions without uploading them. New
-packages may need to be checked together because their dependencies are not
-on crates.io yet.
+Resource TLS tests and examples require a platform C compiler for their TLS
+provider; library builds and pure-Rust checks do not. The README explains the
+pinned toolchain and ARM64/Windows library metadata checks; those checks do not
+establish foreign-platform linking, execution or durable storage support.
+
+When changing packaging, also run:
+
+```sh
+cargo publish --workspace --dry-run --locked
+```
+
+Keep `--dry-run`: this creates and compile-verifies the workspace crate archives
+without uploading them. Check the workspace together so Cargo can stage the
+unpublished sibling dependencies. The Docker CI job runs the same command.
+It verifies archive builds, not registry publication, package tests, or a release.
+Each archive includes the self-contained `PACKAGE-README.md` and its crate's
+MIT license. Keep package documentation usable without the surrounding checkout;
+workspace-only commands and guide links belong in the root `README.md`.
 
 Describe the observable change, source clause, tests, and any interpretation or
 remaining limitation in the merge request. Update public docs when supported
