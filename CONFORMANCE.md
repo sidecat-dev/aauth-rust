@@ -4,16 +4,19 @@ As of 2026-10-21. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-This Rust 09 follow-up branches from the pushed Rust 08 candidate `4dbbcfe`,
+This Rust 10 platform follow-up branches from Rust 09 `91d61ea`, which adds
+delivery-custody controls on the pushed Rust 08 candidate `4dbbcfe`,
 itself based on merged Rust 07 sprint main `5c9c89e`. Rust 07 includes the Rust 05
 Access Server and Rust 06 deferred profiles and passed independent review, an
 application user test and the 185-assertion shared-wire smoke before merge. Rust
 08 adds regression coverage and the host guide; Rust 09 preserves claimed PS
-delivery custody against competing expiry/trust cleanup. The combined follow-up
-remains a candidate until its own review and merge. Earlier shared-wire results
+delivery custody against competing expiry/trust cleanup. Rust 10 adds only
+compile-time platform coverage and scoped platform documentation. The combined
+follow-up remains a candidate until its own review and merge. Earlier shared-wire results
 remain attributed to their exact revisions.
 
-Current engineer evidence: **303 integration tests and 5 backend unit tests
+Engineer evidence at the unchanged Rust 09 runtime `91d61ea`:
+**303 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -475,8 +478,11 @@ sync: the initialized file may exist without a durable directory entry; no
 usable store has been returned. An open error does not promise no file changes.
 Linux syscall evidence checks file-before-directory synchronization; relative-
 filename and injected directory-sync refusal tests execute. Non-Unix open is
-refused before creating a database. This candidate configures Linux x86_64 CI;
-ARM64, macOS and Windows runtime qualification is not claimed for this head.
+refused before creating a database. This candidate configures Linux x86_64 CI
+and cross-target library checks for ARM64 Linux and Windows MSVC. The configured
+Windows check typechecks the redb test target, including its non-Unix refusal
+control; that control is not executed on Windows. ARM64, macOS and Windows runtime/storage
+qualification is not claimed for this head.
 Other protocol crates and custom Store implementations do not depend on this
 adapter's platform restriction.
 
@@ -496,15 +502,27 @@ nothing was committed, or that database durability prevents HTTP request replay.
 
 ## Build evidence
 
-Local host: Linux x86_64, Rust 1.99.1. `cargo test --locked`, the optimized TLS
-example, formatting and clippy with warnings denied pass. ARM64 library
-cross-build instructions remain in the README; no new ARM64 build or runtime
-result is claimed for this follow-up.
+Native engineer baseline: Linux x86_64, Rust 1.99.1, source `91d61ea`.
+`cargo test --locked`, the optimized TLS example, formatting and clippy with
+warnings denied pass there. This follow-up preserves those runtime and test
+bytes; its own CI checks the exact submitted head.
 
-[CI](.gitlab-ci.yml) configures the suite and optimized TLS example on the
-`sprint-gen6` Docker runner with pinned Rust 1.99.1, two Cargo build jobs and
-Linux x86_64. It retains the demo binary for 14 days as a build artifact, not a
-published release. This head does not configure ARM64, macOS or Windows jobs;
-older platform evidence does not qualify it. To verify packaging without
+[CI](.gitlab-ci.yml) uses the `sprint-gen6` Docker runner, pinned Rust 1.99.1 and
+two Cargo build jobs. The Linux x86_64 job retains all workspace checks/examples
+and the optimized Linux demo binary for 14 days as a build artifact, not a
+published release. It additionally installs target standard libraries in its
+container and runs these compile-only checks:
+
+| Target | Configured check | Limit |
+| --- | --- | --- |
+| ARM64 Linux (`aarch64-unknown-linux-gnu`) | All workspace libraries | Typechecking, no foreign application linking or execution |
+| Windows MSVC (`x86_64-pc-windows-msvc`) | All workspace libraries and redb tests | Non-Unix refusal test compiled, not executed; adapter remains unsupported at open |
+
+The cross-target commands use `cargo check` and do not build the Resource TLS
+development targets. They require the host toolchain and target Rust standard
+libraries; no target C compiler or runtime is exercised. Linux runtime results
+and foreign-target metadata checks are distinct evidence. No macOS build/run or
+ARM64/Windows native test result is claimed, and older platform/shared-wire
+receipts remain tied to their original revisions. To verify packaging without
 uploading crates, run `cargo publish --workspace --dry-run --locked` with an
 unused `CARGO_TARGET_DIR` for repeated checks of unchanged alpha versions.

@@ -304,16 +304,21 @@ messages explain what to fix; `.code()` returns the stable protocol code.
 [CONTRIBUTING.md](CONTRIBUTING.md) gives the change and verification workflow.
 
 ```sh
-rustup target add aarch64-unknown-linux-gnu
-cargo build --workspace --lib --locked --target aarch64-unknown-linux-gnu
+rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
+cargo check --workspace --lib --locked --target aarch64-unknown-linux-gnu
+cargo check --workspace --lib --locked --target x86_64-pc-windows-msvc
+cargo check -p aauth-rust-person-server-redb --tests --locked --target x86_64-pc-windows-msvc
 ```
 
-This library cross-build needs no cross C compiler. Tests and the TLS example
-use rustls/ring as a development dependency; ring compiles C and assembly, so
-cross-building those targets needs the target C compiler and linker.
+These checks typecheck libraries for ARM64 Linux and Windows MSVC, plus the
+redb adapter's Windows test code. They emit Rust metadata without a target C
+compiler or foreign execution. They do not link an application or execute the
+Windows refusal test. The redb adapter still refuses non-Unix open; a Windows
+Person Server needs another `Store`. Resource TLS tests and examples use rustls/ring as development dependencies,
+so building those targets requires the target C compiler and linker.
 [CI](.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
 and a pinned Rust 1.99.1 image, with two Cargo build jobs. It runs the workspace
-checks and examples and retains a demo binary for 14 days. This configuration
-does not qualify ARM64, macOS or Windows execution; earlier platform evidence
-remains tied to its original revisions. The declared minimum toolchain is 1.99.
+checks/examples and these cross-target checks, and retains a Linux demo binary
+for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
+unverified; earlier platform evidence remains tied to its original revisions. The declared minimum toolchain is 1.99.
 License: [MIT](LICENSE).

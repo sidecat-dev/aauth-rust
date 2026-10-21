@@ -13,6 +13,7 @@ linux:
     TARGET: x86_64-unknown-linux-gnu
   before_script:
     - rustup component add rustfmt clippy
+    - rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
   script:
     - cargo build --locked
     - cargo fmt --all -- --check
@@ -28,6 +29,10 @@ linux:
     - cargo run --locked -p aauth-rust-resource --example subagent
     - cargo run --locked -p aauth-rust-person-server --example mixed-grants
     - cargo run --locked -p aauth-rust-person-server-redb --example contracts
+    # Compile-only coverage: no foreign executable, target linker or TLS C build.
+    - cargo check --workspace --lib --locked --target aarch64-unknown-linux-gnu
+    - cargo check --workspace --lib --locked --target x86_64-pc-windows-msvc
+    - cargo check -p aauth-rust-person-server-redb --tests --locked --target x86_64-pc-windows-msvc
     - cargo build --locked --release -p aauth-rust-resource --example direct-identity
     - target/release/examples/direct-identity
     - cp target/release/examples/direct-identity "direct-identity-${TARGET}"
