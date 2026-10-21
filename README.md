@@ -314,9 +314,8 @@ These checks typecheck libraries for ARM64 Linux and Windows MSVC, plus the
 redb adapter's Windows test code. They emit Rust metadata without a target C
 compiler or foreign execution. They do not link an application or execute the
 Windows refusal test. The redb adapter still refuses non-Unix open; a Windows
-Person Server needs another `Store`. Tests and TLS examples use rustls/ring as a
-development dependency, so building those targets requires the target C compiler
-and linker.
+Person Server needs another `Store`. Resource TLS tests and examples use rustls/ring as development dependencies,
+so building those targets requires the target C compiler and linker.
 [CI](.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
 and a pinned Rust 1.99.1 image, with two Cargo build jobs. It runs the workspace
 checks/examples and these cross-target checks, and retains a Linux demo binary

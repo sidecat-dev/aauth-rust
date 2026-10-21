@@ -479,9 +479,9 @@ usable store has been returned. An open error does not promise no file changes.
 Linux syscall evidence checks file-before-directory synchronization; relative-
 filename and injected directory-sync refusal tests execute. Non-Unix open is
 refused before creating a database. This candidate configures Linux x86_64 CI
-and cross-target library checks for ARM64 Linux and Windows MSVC. The Windows
-redb test target is typechecked, including its non-Unix refusal control; that
-control is not executed on Windows. ARM64, macOS and Windows runtime/storage
+and cross-target library checks for ARM64 Linux and Windows MSVC. The configured
+Windows check typechecks the redb test target, including its non-Unix refusal
+control; that control is not executed on Windows. ARM64, macOS and Windows runtime/storage
 qualification is not claimed for this head.
 Other protocol crates and custom Store implementations do not depend on this
 adapter's platform restriction.
