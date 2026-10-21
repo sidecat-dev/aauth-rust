@@ -1,16 +1,19 @@
 # Executing behavior
 
-As of 2026-10-20. This is not complete AAuth or
+As of 2026-10-21. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-This branch implements Rust 07 on sprint main `7c0992f`, which includes the
-merged Rust 05 Access Server and Rust 06 deferred profiles. The one-level
-parent-mediated sub-agent profile below is a candidate until its independent
-gates and merge. Earlier shared-wire results remain attributed to their exact
-revisions; new sub-agent measurements are recorded separately.
+This Rust 09 follow-up branches from the pushed Rust 08 candidate `4dbbcfe`,
+itself based on merged Rust 07 sprint main `5c9c89e`. Rust 07 includes the Rust 05
+Access Server and Rust 06 deferred profiles and passed independent review, an
+application user test and the 185-assertion shared-wire smoke before merge. Rust
+08 adds regression coverage and the host guide; Rust 09 preserves claimed PS
+delivery custody against competing expiry/trust cleanup. The combined follow-up
+remains a candidate until its own review and merge. Earlier shared-wire results
+remain attributed to their exact revisions.
 
-Current engineer evidence: **293 integration tests and 5 backend unit tests
+Current engineer evidence: **303 integration tests and 5 backend unit tests
 passed, 0 failed**, including
 the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
 that executes Orders→Inventory authorization and POST effects. A four-party TLS
@@ -20,15 +23,15 @@ run those same compositions. A wire check is not counted as a separate Rust test
 Four additional rustdoc tests execute an unsigned Resource challenge, the PS
 and AS constructor/metadata examples and durable-store open/reopen. One ignored backend
 test is a subprocess entry point, executed by its two parent recovery tests.
-The buffered `subagent` example separately passes three workflow tests and its
+The buffered `subagent` example separately passes eight route/workflow tests and its
 executable scenes; those tests are outside the workspace test total.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
 | RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
-| One-level sub-agents | Actual parent and child AP signatures, authoritative parent_agent, same provider, single depth and distinct proof keys; parent signs PS requests, owns consent/binding/polls, child holds Person/Auth and signs Resource requests; local and immediate/deferred AS grants; exact retained parent/child identity and parent revocation | Core `subagents.rs` (7), AP `subagents.rs` (4), Agent `subagents.rs` (8), PS/AS endpoint cases, memory/redb contracts and buffered native `subagent` example (3 separate example tests) |
+| One-level sub-agents | Actual parent and child AP signatures, authoritative parent_agent, same provider, single depth and distinct proof keys; parent signs PS requests, owns consent/binding/polls, child holds Person/Auth and signs Resource requests; local and immediate/deferred AS grants; exact retained parent/child identity and parent revocation | Core `subagents.rs` (7), AP `subagents.rs` (4), Agent `subagents.rs` (8), PS/AS endpoint cases, memory/redb contracts, Resource `subagent_revocation.rs` (2) and buffered native `subagent` example (8 separate example tests) |
 | Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits, 429 linear backoff, 503 retry interval, stable same-origin Location and terminal completion; host dispatches requests and verifies final credentials | `aauth-rust-agent/tests/polling.rs` (10 tests) |
-| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (58 tests, including 28 deferred cases), deferred TLS journey |
+| PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (66 tests, including 33 deferred cases), deferred TLS journey |
 | AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (34 tests, including child approval/payment, trust/expiry fences and omitted presented_token) |
 | Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
@@ -41,7 +44,7 @@ executable scenes; those tests are outside the workspace test total.
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (30 non-deferred tests, plus the mixed-grants composition test), `store.rs` (6 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid/revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances | `aauth-rust-person-server/tests/endpoints.rs` (2 tests), `authorization.rs` (33 non-deferred tests, plus the mixed-grants composition test), `store.rs` (6 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
 | Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (10 tests), `service_restart.rs` (2 tests), crate rustdoc |
 | Page corruption / bounded records | Exact data-byte checksum failure and 28 page-prefix bit flips/zeroings never escape open as a panic or bad record; 1 MiB accepted, one-byte overflow and 64 MiB refused without table writes; empty binding refused on read/commit/revoke | `aauth-rust-person-server-redb/tests/corruption.rs` (2 tests), backend tests |
 | Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
@@ -120,17 +123,35 @@ Revoking the parent binding blocks new child credentials and pending delivery.
 Already delivered credentials retain their signed expiry; AP-token revocation
 transport, per-child token revocation, cascades and automatic Resource revocation
 are absent. No `revoked_subagent_token` result is claimed without such a source.
+The two `Resource/tests/subagent_revocation.rs` tests present actual delivered
+PS/AS Auth credentials with signed child requests after parent revocation: the
+Resource still accepts at 1249 and refuses with `401 expired_jwt` at 1250, before
+policy. The next parent-mediated PS exchange returns `400 revoked_presented_token`;
+new Person issuance returns `403 denied`.
 
 PS custody belongs to the exact retained parent's identity and key; a child or
 another poller gets `403 wrong_poller`. Exact parent/child compact bytes survive
 role recomposition and are reverified before advancement and terminal release.
-Expiry, trust and parent binding are checked after final host I/O; a pure time
-fence computes remaining lifetime without another resolver callback. Parent-only
+The final resolver trust/credential recheck precedes the final host binding read.
+After that storage callback, the PS samples its clock and performs pure expiry
+checks and remaining-lifetime calculation without another resolver callback.
+A trust change during the final binding read is not rechecked in that release;
+this ordering is not an atomic trust/store snapshot. Parent-only
 cancellation, concurrent single delivery and child/parent expiry are exercised.
 The existing pending-reference existence and signed-poll replay limits below
 also apply to child flows. Nonterminal PS pending publication may cross expiry
 or a trust change during its storage callback; a later poll/advance rechecks it
 and withholds credentials. Hosts still own durable continuation recovery.
+
+Four separate `PS/tests/support/release_fences.rs` tests advance time during the
+final binding read, after resolver revalidation, and fail when their respective
+final guard is removed. Person, local Auth and immediate AS Auth each refuse with
+`400 expired_subagent_token`. Deferred delivery refuses with `408 expired`, then
+`410` on the next poll: its retained deadline is at or before the original child
+expiry. That final deadline guard covers child expiry too; a later child-specific
+check at the same timestamp would be redundant. The deferred test keeps every
+credential valid beyond the pending deadline so no other expiry can mask its
+removed guard. Earlier resolver-delay tests cover a different callback window.
 
 This subset excludes grandchildren, child-signed PS endpoints, child/upstream
 chaining, mission/R3 delegation and remote AP enrollment. It does not establish
@@ -304,10 +325,17 @@ has or guesses the pending URL, as in Go. Foreign callers never consume custody.
 with `410 gone`. A PS DELETE during host advancement returns `429 slow_down`;
 retry cancellation after that transition. Actual storage failures remain local
 `500 server_error`.
-An inherited PS race remains: expiry or trust-failure cleanup can consume
-`delivering` custody, causing its competing delivery to return a local 500 while
-withholding the token. This is a statically reviewed status-classification limit,
-separate from the tested live cancellation paths; it has no runtime race receipt.
+After fresh Agent authentication and exact owner matching, a PS poll or DELETE
+that finds `delivering` custody returns `429 slow_down` without expiry/trust
+cleanup or changing its revision. The delivery owner alone removes its claimed
+row and then rechecks release conditions. Deterministic tests pause after the
+successful delivery claim, expire the pending deadline or withdraw Resource
+trust, and prove that competing GET/DELETE requests retain custody while the
+owner returns `408 expired` or `400 invalid_resource_token` without a credential.
+Normal contention delivers the exact terminal token once; a genuine final
+removal error remains local `500 server_error`, retaining uncertain `delivering`
+custody for host reconciliation. These checks do not make resolver, clock and
+store operations atomic or provide crash recovery.
 
 Agent-facing PS Retry-After derives from the larger of the PS minimum and the
 remaining AS wait. Early polling reports the remaining wait; contention with no
@@ -447,9 +475,10 @@ sync: the initialized file may exist without a durable directory entry; no
 usable store has been returned. An open error does not promise no file changes.
 Linux syscall evidence checks file-before-directory synchronization; relative-
 filename and injected directory-sync refusal tests execute. Non-Unix open is
-refused before creating a database. Linux x86_64/ARM64 are the native CI targets;
-macOS runtime remains unverified. Other protocol crates and custom Store
-implementations do not depend on this adapter's platform restriction.
+refused before creating a database. This candidate configures Linux x86_64 CI;
+ARM64, macOS and Windows runtime qualification is not claimed for this head.
+Other protocol crates and custom Store implementations do not depend on this
+adapter's platform restriction.
 
 **DURABLE-STORE-IO:** logical refusal leaves all state unchanged. Operational
 I/O failure can make a whole transaction's outcome uncertain; PS commit errors
@@ -468,12 +497,14 @@ nothing was committed, or that database durability prevents HTTP request replay.
 ## Build evidence
 
 Local host: Linux x86_64, Rust 1.99.1. `cargo test --locked`, the optimized TLS
-example, formatting and clippy with warnings denied pass. The library workspace
-also cross-builds with `cargo build --locked --target aarch64-unknown-linux-gnu`.
+example, formatting and clippy with warnings denied pass. ARM64 library
+cross-build instructions remain in the README; no new ARM64 build or runtime
+result is claimed for this follow-up.
 
-[CI](.gitlab-ci.yml) runs the suite and optimized TLS example natively on Linux
-x86_64 and ARM64 and retains per-target demo binaries for 14 days. These are
-build artifacts, not a published release. macOS and Windows jobs are opt-in;
-execution on those platforms remains unverified. To verify packaging without
+[CI](.gitlab-ci.yml) configures the suite and optimized TLS example on the
+`sprint-gen6` Docker runner with pinned Rust 1.99.1, two Cargo build jobs and
+Linux x86_64. It retains the demo binary for 14 days as a build artifact, not a
+published release. This head does not configure ARM64, macOS or Windows jobs;
+older platform evidence does not qualify it. To verify packaging without
 uploading crates, run `cargo publish --workspace --dry-run --locked` with an
 unused `CARGO_TARGET_DIR` for repeated checks of unchanged alpha versions.

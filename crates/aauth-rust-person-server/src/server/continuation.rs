@@ -215,11 +215,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.binding(&prepared.retained.principal, BindingContext::Presented)?
             .ok_or_else(Failure::internal)?;
         let released = (self.clock)();
+        // Custody's deadline is capped by the original child's expiry. This
+        // final lease fence therefore also bounds the child, without changing
+        // an expired pending request's 408 into a child-parameter error.
         if released >= number(value, "deadline")? {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
         self.inputs_current(&original, &prepared.resource, &prepared.presented, released)?;
-        check_subagent_current(prepared.context.subagent.as_ref(), released)?;
         if auth.claims().exp <= released {
             return Err(Failure::internal());
         }
@@ -260,6 +262,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
         }
+        // Only the delivery owner may consume its claimed row. It rechecks
+        // expiry and trust before release; rival cleanup must not steal custody.
+        if value["state"] == "delivering" {
+            return throttled_for(&value, (self.clock)());
+        }
         if expired(&value, now)? {
             if !d
                 .store
@@ -291,9 +298,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(error);
             }
         };
-        if value["state"] == "delivering" {
-            return throttled_for(&value, (self.clock)());
-        }
         if request.method() == "DELETE" {
             if value["state"] == "ready" {
                 if !d

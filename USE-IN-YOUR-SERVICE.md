@@ -791,25 +791,200 @@ cargo test --locked -p aauth-rust-resource --example subagent
 cargo run --locked -p aauth-rust-resource --example subagent
 ```
 
-It executes immediate PS authorization, immediate AS federation, and AS Payment
-then Approval using actual native AP/PS/AS/Resource handlers. Requests and responses
-are buffered and routed in process. There are no sockets, TLS exchange, identity
-provider or payment provider. The fixture supplies an already authenticated person,
-generated keys, fixed Unix time and explicit host settlement/approval decisions.
-The existing `four-party` example separately demonstrates certificate-verified TLS.
+It executes authenticated AP child enrollment, immediate PS authorization,
+immediate AS federation, and AS Payment then Approval using native handlers.
+Requests and responses are buffered and routed in process. There are no sockets,
+TLS exchange, identity provider or payment provider. The fixture supplies an
+already authenticated person, generated keys, fixed Unix time and explicit host
+settlement/approval decisions. The `four-party` example separately demonstrates
+certificate-verified TLS. The Rust excerpts below are exact source from the
+compiled example; its imports, constants, `Trust` snapshot wrapper and `Result`
+alias provide their surrounding host context.
 
-The parent retains its Agent token and proof key. The child has a distinct key and
-an AP-issued token carrying authoritative `parent_agent`. Call
-`provider.issue_subagent(&claims, parent.token(), now)` only after host enrollment
-policy approves the child. The AP independently checks the actual parent using
-its configured issuer/key. Subject naming is validated for readability and depth;
-parsing a `+` never supplies delegation authority. The child and parent must share
-an AP issuer. This path permits one top-level parent and one level of children.
+**The parent must admit its own AP's `aauth-agent.json` and JWKS before calling
+`Subagent::verify` to verify the parent and child tokens.** Trust configured only
+on a Resource does not populate the parent's key resolver. The parent also needs
+the admitted PS, Resource and AS role snapshots used by its credential checks.
+This fixture obtains the AP's public documents from the native provider:
 
-The parent's host uses `Subagent` to verify returned credentials from public data.
-This excerpt is copied exactly from the compiled example; `trust` is the host's
-admitted issuer/role snapshot, `person_endpoint` comes from admitted PS metadata,
-and `response_token` extracts a token only from an actual successful response:
+```rust
+let trust = Trust::default();
+let ap = AgentProvider::new(AP, "ap", SigningKey::generate())?;
+trust.admit(AP, "aauth-agent.json", &ap.metadata()?, &ap.jwks()?)?;
+```
+
+A network host instead obtains those documents over admitted, certificate-verified
+HTTPS, checks exact metadata issuer equality, and admits the JWKS destination.
+Choose trusted issuer/role pairs before key lookup. Never auto-trust a token-named
+AP or follow its URLs without host admission. The example shares the retained
+public snapshot with the parent and with the AP route's identity gate; it does
+not give the parent the AP's signing key.
+
+The host defines the child-enrollment endpoint. `/subagents` below is an example
+route, not a standardized AP bootstrap endpoint supplied by the library. It uses
+`AgentIdentityResource::for_origin` to verify the parent's actual issuer token
+and HTTP proof. Its explicit host policy allows the configured top-level parent
+only. The signed JSON body must contain exactly `discriminator` and `jwk`, fit
+within 2 KiB, and contain a public-only Ed25519 key distinct from the parent's.
+The discriminator has a 32-byte ASCII syntax limit and this fixture approves
+only the `worker` slot. The host constructs all child claims; caller-supplied
+parent, issuer, lifetime or posture claims are not accepted or inherited:
+
+```rust
+fn json_response(status: u16, body: Value) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(body.to_string().into_bytes())
+        .unwrap()
+}
+fn child_route(
+    provider: &AgentProvider,
+    keys: &dyn AgentKeyResolver,
+    ids: &AtomicUsize,
+    request: &Request<Vec<u8>>,
+    now: i64,
+) -> Response<Vec<u8>> {
+    if request.method() != "POST"
+        || request.uri().path() != "/subagents"
+        || request.uri().query().is_some()
+    {
+        return json_response(404, json!({"error":"not_found"}));
+    }
+    // A network adapter must also bound collection before allocating this body.
+    if request.body().len() > 2048 {
+        return json_response(413, json!({"error":"enrollment_body_too_large"}));
+    }
+    let gate = AgentIdentityResource::for_origin(
+        AP,
+        keys,
+        |parent: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            parent.claims().iss == AP
+                && parent.claims().sub == PARENT
+                && parent.claims().parent_agent.is_none()
+        },
+    )
+    .expect("configured AP origin");
+    let (parent, ()) = match gate.authorize(request, now).into_result() {
+        Ok(verified) => verified,
+        Err(refusal) => return *refusal,
+    };
+    let Ok(body) = strict_json(request.body()) else {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    };
+    let Some(body) = body.as_object() else {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    };
+    if request
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        != Some("application/json")
+        || body.len() != 2
+        || !body.contains_key("discriminator")
+        || !body.contains_key("jwk")
+    {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    }
+    let Some(name) = body["discriminator"].as_str().filter(|s| {
+        !s.is_empty()
+            && s.len() <= 32
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+    }) else {
+        return json_response(400, json!({"error":"invalid_discriminator"}));
+    };
+    // This fixture approves one child slot for this authenticated parent.
+    if name != "worker" {
+        return json_response(403, json!({"error":"enrollment_denied"}));
+    }
+    let Ok(key) = serde_json::from_value::<Jwk>(body["jwk"].clone()) else {
+        return json_response(400, json!({"error":"invalid_child_key"}));
+    };
+    if key.validate().is_err() || key.thumbprint().ok() == parent.claims().cnf.jwk.thumbprint().ok()
+    {
+        return json_response(400, json!({"error":"invalid_child_key"}));
+    }
+    let (local, domain) = parent
+        .claims()
+        .sub
+        .rsplit_once('@')
+        .expect("verified Agent identifier");
+    let claims = AgentClaims {
+        iss: AP.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: format!("{local}+{name}@{domain}"),
+        jti: format!("child-{}", ids.fetch_add(1, Ordering::SeqCst)),
+        iat: now,
+        exp: now.saturating_add(900),
+        cnf: Confirmation { jwk: key },
+        ps: parent.claims().ps.clone(),
+        parent_agent: Some(parent.claims().sub.clone()),
+        nbf: None,
+        extra: Default::default(),
+    };
+    // The AP independently authenticates this exact parent using its own key.
+    match provider.issue_subagent(&claims, parent.compact(), now) {
+        Ok(compact) => json_response(200, json!({"agent_token":compact})),
+        Err(_) => json_response(400, json!({"error":"invalid_child_enrollment"})),
+    }
+}
+```
+
+Unsigned or changed signed content fails native verification with 401. A child
+caller fails the top-level enrollment policy with 403. Invalid body/key/name is
+400; oversized buffered input is 413. These enrollment-body errors are host
+route choices. `issue_subagent` independently authenticates the exact
+`parent.compact()` with the AP's configured issuer/key, even if the route's key
+resolver was misconfigured. The AP requires the same issuer, authoritative
+`parent_agent`, one level and a distinct proof key. Naming validation does not
+turn a `+` into authority. Child Agent-token lifetimes are independent from the
+parent's; returned credentials are bounded by both.
+
+A production host supplies account/enrollment authorization, child inventory,
+quotas, revocation policy, unique issuance IDs and replay/idempotency controls.
+The fixture counter and one-slot policy do not supply those lifecycle services.
+Bound network collection before allocation and retain a configured gate rather
+than constructing a new one for each request when that suits your host.
+
+The parent admits the AP endpoint before building the URI and signing. It sends
+the resulting request unchanged and uses the actual returned token. Here native
+dispatch calls `child_route` once; replace only that dispatch with your admitted
+transport, preserving URI, body, Content-Type and signature headers:
+
+```rust
+let mut enrollment_request = Request::post(format!("{AP}/subagents"))
+    .header("content-type", "application/json")
+    .body(serde_json::to_vec(&json!({
+        "discriminator":"worker", "jwk":child_key.public_jwk(),
+    }))?)?;
+parent.sign(&mut enrollment_request, NOW)?;
+let enrollment_response = child_route(&ap, &trust, &enrollment_ids, &enrollment_request, NOW);
+let child_compact = response_token(&enrollment_response, "agent_token")?;
+```
+
+The child retains its own private proof key in a separate `Agent`. The parent's
+verification uses the child token and public snapshots only. This response
+extractor is also compiled example source; it accepts a token only from an
+actual successful response:
+
+```rust
+fn response_token(response: &Response<Vec<u8>>, member: &str) -> Result<String> {
+    if response.status() != 200 {
+        return Err(format!(
+            "expected native 200, received {}: {}",
+            response.status(),
+            String::from_utf8_lossy(response.body())
+        )
+        .into());
+    }
+    let body: Value = serde_json::from_slice(response.body())?;
+    Ok(body[member].as_str().ok_or("missing credential")?.into())
+}
+```
+
+With `person_endpoint` from issuer-checked, host-admitted PS metadata, the parent
+obtains and verifies the child's Person credential:
 
 ```rust
 let admitted_child = Subagent::verify(parent.token(), &child_compact, &trust, NOW)?;
@@ -821,63 +996,143 @@ let verified_person =
     admitted_child.verify_person_delivery(&person_compact, RESOURCE, PS, &trust, NOW)?;
 ```
 
-`person_server.handle` is the example's explicit native dispatch. A network host
-sends the helper's exact signed bytes through its admitted PS transport and uses
-that actual response. It supplies certificate verification, routing, bounded
-collection, deadlines and redirect policy. Admit issuers before key lookup, verify
-metadata issuer equality, and admit endpoint destinations before any network I/O.
-Do not infer trust from a token-named URL or rewrite the target after signing.
-The helper performs no discovery fetch, transport, sleep or retry. The excerpt
-does not use the child's private key. `Agent::new` and `with_token` alone check
-local key binding; they do not replace this issuer and context verification.
+`person_server.handle` is explicit in-process dispatch. A network host sends the
+helper's exact signed bytes through its admitted PS transport and uses that
+actual response. Supply certificate verification, target routing, bounded
+collection, deadlines and redirect policy. Admit the final endpoint, including
+any configured listener port, **before signing**; do not rewrite it in `send`.
+The helpers perform no discovery fetch, transport, sleep or retry.
+`Agent::new` and `with_token` check local key binding and do not replace issuer
+or context verification.
 
-Pass the verified Person token to the child out of band. The child presents it
-at the Resource with its own proof, then returns the Resource challenge to the
-parent. The parent checks it with `Subagent::verify_resource_challenge`, or the
-federated variant with an explicit `FederatedContext`, and calls
-`Subagent::auth_request` with the exact presented Person/Auth token. The request
-uses the parent's proof and includes the exact `subagent_token`, `resource_token`
-and `presented_token` bytes. PS and AS policy still see the parent in `.agent`
-and the verified child in `.subagent`; the resulting Person/Auth `cnf` belongs to
-the child. A child's optional `ps` may be absent; when present, the owning PS must
-match. The AS's existing parent Agent PS profile still applies.
+Pass the verified Person token to the child out of band. The child proves its
+request at the Resource and returns the challenge. This compiled exchange checks
+the actual Resource and presented credential, chooses direct or federated
+verification, then builds a fully parent-signed Auth request:
 
-For a deferred result, retain the parent's original Agent for `PollSession`.
-Parent GETs read PS custody and never advance the AS. The PS host inspects
-`federation_pending`, confirms settlement or approval from its own admitted host
-evidence, then makes one explicit `advance_federation(..., FederationInput::Poll)`
-call per allowed stage. AS Payment remains between the AS and PS host; the parent
-sees PS Approval. The example changes fixture state explicitly and never pays a
-bill. Production settlement needs authenticated provider evidence and idempotent
-billing controls, as described under continuation configuration below. Keep PS
-and AS continuation stores separate and respect both Retry-After and finite
-deadlines; the example's zero intervals are for controlled fixture execution.
+```rust
+let person_holder = child.with_token(person_compact.clone())?;
+let challenge = resource_handler(
+    &signed(&person_holder, &format!("{RESOURCE}/records"), None)?,
+    "challenge",
+);
+let Some(Requirement::AuthToken { resource_token }) =
+    Requirement::from_headers(challenge.headers())?
+else {
+    return Err("native Resource did not issue an Auth challenge".into());
+};
+assert_eq!(protected_calls.load(Ordering::SeqCst), 0);
+let context = FederatedContext {
+    resource: RESOURCE,
+    person_server: PS,
+    access_server: AS,
+    presented_token: &person_compact,
+};
+let verified_challenge = if mode == Mode::Direct {
+    admitted_child.verify_resource_challenge(
+        &resource_token,
+        RESOURCE,
+        PS,
+        &person_compact,
+        &trust,
+        NOW,
+    )?
+} else {
+    admitted_child.verify_federated_resource_challenge(
+        &resource_token,
+        &context,
+        &trust,
+        NOW,
+    )?
+};
+let first = person_server.handle(&admitted_child.auth_request(
+    &parent,
+    &token_endpoint,
+    &verified_challenge,
+    &person_compact,
+    &trust,
+    NOW,
+)?);
+```
 
-Before delivering a final grant to the child, the parent checks it with
-`Subagent::verify_auth_delivery` or `verify_federated_auth_delivery` against the
-actual verified challenge and presented credential. The child then uses
-`with_token` and signs its Resource request. The example asserts one protected
-handler call, refusal of child-signed PS requests and child pending polls, exact
-forwarded compact bytes, and a single terminal PS delivery followed by `410 Gone`.
-This continuation guarantee does not provide application-request replay protection.
+The request preserves exact `subagent_token`, `resource_token` and
+`presented_token` strings. PS and AS policy see the parent in `.agent` and the
+verified child in `.subagent`; issued Person/Auth `cnf` belongs to the child.
+A child's optional `ps` may be absent; when present, the owning PS must match.
+The AS's existing parent Agent PS profile still applies.
 
-Current checks reauthenticate both Agent tokens and enforce their expiry on
-each helper call. Person/Auth expiry cannot exceed either Agent token; Auth also
-cannot exceed its presented credential. A Resource challenge must be current
-when exchanged but does not shorten an issued grant's lifetime. Pending custody
-also expires with its original challenge and credentials. Long-running host work
-must decide whether to recheck before its eventual effect; admission does not
-freeze time. Revoking the parent's local PS binding prevents later child
-authorization and pending delivery. An existing Auth token normally expires at
-the Resource unless a separately implemented revocation channel withdraws it.
-Local PS binding revocation does not revoke the AP's Agent token. AP token
+For an immediate result, `terminal` is the actual `first` response. For 202,
+retain the parent's original Agent for `PollSession`; the bounded polling code
+in the example and the continuation sections below produces `terminal` from
+`polls.accept` after a parent-signed PS GET. Parent GETs only read PS custody.
+The PS host inspects `federation_pending`, confirms settlement or approval using
+its own admitted host evidence, then performs one explicit
+`advance_federation(..., FederationInput::Poll)` per allowed stage. AS Payment
+stays between the AS and PS host; the parent sees PS Approval. The example changes
+fixture state explicitly and never pays a bill. Production settlement needs
+provider authentication and idempotent billing controls. Keep PS and AS stores
+separate and respect Retry-After and finite deadlines; zero intervals are for
+this controlled fixture only.
+
+The parent then verifies the final Auth credential against the original challenge
+and presented token, for either direct PS or AS delivery. Only the child loads
+the grant and proves the protected Resource request:
+
+```rust
+let grant = response_token(&terminal, "auth_token")?;
+let verified_auth = if mode == Mode::Direct {
+    admitted_child.verify_auth_delivery(
+        &grant,
+        RESOURCE,
+        &verified_challenge,
+        &person_compact,
+        &trust,
+        NOW,
+    )?
+} else {
+    admitted_child.verify_federated_auth_delivery(
+        &grant,
+        &verified_challenge,
+        &context,
+        &trust,
+        NOW,
+    )?
+};
+let authorized = resource_handler(
+    &signed(
+        &child.with_token(grant)?,
+        &format!("{RESOURCE}/records"),
+        None,
+    )?,
+    "authorized",
+);
+```
+
+The example asserts one protected handler call per scene, refusal of child-signed
+PS requests and child polls, exact forwarding, and one terminal PS delivery
+followed by 410. This does not provide application-request replay protection.
+Current helpers reauthenticate both Agent tokens and check expiry at each call.
+Person/Auth expiry cannot exceed either Agent token; Auth also cannot exceed its
+presented credential. A challenge must be current when exchanged but does not
+shorten an issued grant's lifetime. Pending custody also expires with its
+original challenge and credentials. Long-running host work must decide whether
+to recheck before its eventual effect; admission does not freeze time.
+
+Revoking the parent's local PS binding stops pending and later child
+authorization. In this profile, the parent's next pending poll receives
+`400 revoked_presented_token`, then 410 after terminal custody is consumed; new
+Person requests are refused with `403 denied`. An already delivered Auth token
+normally remains usable at the Resource until its signed expiry, unless a
+separate Resource-side revocation channel withdraws it. Local PS binding
+revocation does not revoke an AP Agent token. AP-token revocation, per-child
 revocation, key lifecycle and live snapshot refresh remain host responsibilities.
 
-This supported path is missionless Core, with immediate direct/federated grants
-and bounded AS approval/payment. Missions, R3, child chaining, remote AP enrollment
-and durable continuation recovery remain gaps. The example's memory stores have
-no process-restart recovery; retained issuance storage and continuation durability
-are separate host concerns.
+This path is missionless Core with immediate direct/federated grants and bounded
+AS approval/payment. Missions, R3, child chaining, general remote AP enrollment
+and durable continuation recovery remain gaps. The small host-defined AP route
+is a buffered enrollment example, not a remote provider integration. Memory
+continuations have no restart recovery; issuance storage and continuation
+durability are separate host concerns.
 
 ## Prepare explicit Agent polls
 
@@ -1130,9 +1385,16 @@ the Agent still obtains its terminal result through the PS pending URL. The PS
 verifies that grant again and confirms current bindings after final custody I/O
 before delivery. Its remaining `expires_in` uses the final clock; expiry or
 revocation during store publication/removal never releases a prepared token. One
-conditional consumer receives it; later GETs return 410. Signed DELETE cancels
-both roles with one AS request, and consumes local custody. Transport failure
-reports failure even though local cancellation closes the PS continuation.
+conditional consumer receives it; later GETs return 410. While delivery owns its
+claimed row, competing authenticated owner polls and DELETE return 429 without
+consuming custody, even after expiry or a Resource-trust change. The delivery
+owner still checks current release conditions. A final storage failure returns
+500 and can leave `delivering` custody for host reconciliation; storage recovery
+does not automatically retry delivery. Signed DELETE cancels ready custody
+locally without AS I/O. Cancelling waiting custody sends one AS DELETE and
+consumes local custody; transport failure reports failure even though local
+cancellation closes the PS continuation. Cancellation during host advancement
+returns 429 for a later retry.
 
 This missionless Core-scope profile supports top-level Agents and one-level
 parent-mediated children. Deadlines are capped by all original credentials,

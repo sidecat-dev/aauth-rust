@@ -4,18 +4,19 @@ use aauth_rust_access_server::{AccessServer, Config as AccessConfig, Decision as
 use aauth_rust_agent::{Agent, FederatedContext, PollSession, Requirement, Subagent};
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
-    AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
+    AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAgentToken,
+    VerifiedAuthToken,
     continuation::{
         ContinuationStore, MemoryContinuations, PendingResponse, Requirement as PendingRequirement,
     },
     metadata_jwks_uri,
 };
-use aauth_rust_jose::{Jwk, SigningKey};
+use aauth_rust_jose::{Jwk, SigningKey, strict_json};
 use aauth_rust_person_server::{
     AuthorizationRequest, Config, Federation, FederationError, FederationInput, Grant, MemoryStore,
     Person, PersonRequest, PersonServer, Policy, PolicyError,
 };
-use aauth_rust_resource::{PsAuthorizationConfig, PsAuthorizationResource};
+use aauth_rust_resource::{AgentIdentityResource, PsAuthorizationConfig, PsAuthorizationResource};
 use http::{Request, Response};
 use serde_json::{Value, json};
 use std::{
@@ -109,6 +110,7 @@ fn signed(agent: &Agent, endpoint: &str, body: Option<Value>) -> Result<Request<
     agent.sign(&mut request, NOW)?;
     Ok(request)
 }
+// BEGIN guide-response-token
 fn response_token(response: &Response<Vec<u8>>, member: &str) -> Result<String> {
     if response.status() != 200 {
         return Err(format!(
@@ -121,12 +123,113 @@ fn response_token(response: &Response<Vec<u8>>, member: &str) -> Result<String> 
     let body: Value = serde_json::from_slice(response.body())?;
     Ok(body[member].as_str().ok_or("missing credential")?.into())
 }
+// END guide-response-token
 fn admitted_endpoint(metadata: &Value, member: &str, expected: &str) -> Result<String> {
     if metadata[member].as_str() != Some(expected) {
         return Err("native metadata endpoint differs from the configured route".into());
     }
     Ok(expected.into())
 }
+// BEGIN guide-ap-route
+fn json_response(status: u16, body: Value) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(body.to_string().into_bytes())
+        .unwrap()
+}
+fn child_route(
+    provider: &AgentProvider,
+    keys: &dyn AgentKeyResolver,
+    ids: &AtomicUsize,
+    request: &Request<Vec<u8>>,
+    now: i64,
+) -> Response<Vec<u8>> {
+    if request.method() != "POST"
+        || request.uri().path() != "/subagents"
+        || request.uri().query().is_some()
+    {
+        return json_response(404, json!({"error":"not_found"}));
+    }
+    // A network adapter must also bound collection before allocating this body.
+    if request.body().len() > 2048 {
+        return json_response(413, json!({"error":"enrollment_body_too_large"}));
+    }
+    let gate = AgentIdentityResource::for_origin(
+        AP,
+        keys,
+        |parent: &VerifiedAgentToken, _: &Request<Vec<u8>>| {
+            parent.claims().iss == AP
+                && parent.claims().sub == PARENT
+                && parent.claims().parent_agent.is_none()
+        },
+    )
+    .expect("configured AP origin");
+    let (parent, ()) = match gate.authorize(request, now).into_result() {
+        Ok(verified) => verified,
+        Err(refusal) => return *refusal,
+    };
+    let Ok(body) = strict_json(request.body()) else {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    };
+    let Some(body) = body.as_object() else {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    };
+    if request
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        != Some("application/json")
+        || body.len() != 2
+        || !body.contains_key("discriminator")
+        || !body.contains_key("jwk")
+    {
+        return json_response(400, json!({"error":"invalid_enrollment"}));
+    }
+    let Some(name) = body["discriminator"].as_str().filter(|s| {
+        !s.is_empty()
+            && s.len() <= 32
+            && s.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+    }) else {
+        return json_response(400, json!({"error":"invalid_discriminator"}));
+    };
+    // This fixture approves one child slot for this authenticated parent.
+    if name != "worker" {
+        return json_response(403, json!({"error":"enrollment_denied"}));
+    }
+    let Ok(key) = serde_json::from_value::<Jwk>(body["jwk"].clone()) else {
+        return json_response(400, json!({"error":"invalid_child_key"}));
+    };
+    if key.validate().is_err() || key.thumbprint().ok() == parent.claims().cnf.jwk.thumbprint().ok()
+    {
+        return json_response(400, json!({"error":"invalid_child_key"}));
+    }
+    let (local, domain) = parent
+        .claims()
+        .sub
+        .rsplit_once('@')
+        .expect("verified Agent identifier");
+    let claims = AgentClaims {
+        iss: AP.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: format!("{local}+{name}@{domain}"),
+        jti: format!("child-{}", ids.fetch_add(1, Ordering::SeqCst)),
+        iat: now,
+        exp: now.saturating_add(900),
+        cnf: Confirmation { jwk: key },
+        ps: parent.claims().ps.clone(),
+        parent_agent: Some(parent.claims().sub.clone()),
+        nbf: None,
+        extra: Default::default(),
+    };
+    // The AP independently authenticates this exact parent using its own key.
+    match provider.issue_subagent(&claims, parent.compact(), now) {
+        Ok(compact) => json_response(200, json!({"agent_token":compact})),
+        Err(_) => json_response(400, json!({"error":"invalid_child_enrollment"})),
+    }
+}
+// END guide-ap-route
 struct HostPolicy;
 impl Policy for HostPolicy {
     fn bind_person(&self, r: &PersonRequest) -> std::result::Result<Person, PolicyError> {
@@ -213,9 +316,11 @@ impl Federation for NativeAccess {
 }
 
 fn run_scene(mode: Mode) -> Result<Transcript> {
+    // BEGIN guide-ap-trust
     let trust = Trust::default();
     let ap = AgentProvider::new(AP, "ap", SigningKey::generate())?;
     trust.admit(AP, "aauth-agent.json", &ap.metadata()?, &ap.jwks()?)?;
+    // END guide-ap-trust
     let parent_key = SigningKey::generate();
     let child_key = SigningKey::generate();
     let parent_claims = AgentClaims {
@@ -234,15 +339,18 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         extra: Default::default(),
     };
     let parent_compact = ap.issue(&parent_claims)?;
-    let mut child_claims = parent_claims.clone();
-    child_claims.sub = CHILD.into();
-    child_claims.jti = "child-agent".into();
-    child_claims.parent_agent = Some(PARENT.into());
-    child_claims.exp = NOW + 900;
-    child_claims.cnf.jwk = child_key.public_jwk();
-    child_claims.ps = None;
-    let child_compact = ap.issue_subagent(&child_claims, &parent_compact, NOW)?;
     let parent = Agent::new(parent_key, parent_compact)?;
+    let enrollment_ids = AtomicUsize::new(0);
+    // BEGIN guide-ap-request
+    let mut enrollment_request = Request::post(format!("{AP}/subagents"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({
+            "discriminator":"worker", "jwk":child_key.public_jwk(),
+        }))?)?;
+    parent.sign(&mut enrollment_request, NOW)?;
+    let enrollment_response = child_route(&ap, &trust, &enrollment_ids, &enrollment_request, NOW);
+    let child_compact = response_token(&enrollment_response, "agent_token")?;
+    // END guide-ap-request
     // This separate value represents the child process's own retained proof key.
     let child = Agent::new(child_key, child_compact.clone())?;
 
@@ -395,6 +503,7 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         .status()
         .as_u16();
     assert_eq!(child_person_request_status, 401);
+    // BEGIN guide-child-exchange
     let person_holder = child.with_token(person_compact.clone())?;
     let challenge = resource_handler(
         &signed(&person_holder, &format!("{RESOURCE}/records"), None)?,
@@ -437,11 +546,12 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         &trust,
         NOW,
     )?);
+    // END guide-child-exchange
     let mut agent_statuses = vec![first.status().as_u16()];
     let mut child_pending_status = None;
     let mut as_calls_after_parent_wait = 0;
     let mut custody_consumed = true;
-    let grant = if mode == Mode::Deferred {
+    let terminal = if mode == Mode::Deferred {
         assert_eq!(first.status(), 202);
         let own = PendingResponse::parse(&token_endpoint, &first)?;
         let original_as = person_server.federation_pending(&own.location)?;
@@ -489,7 +599,6 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         let terminal = polls
             .accept(delivered, NOW)?
             .ok_or("missing terminal delivery")?;
-        let compact = response_token(&terminal, "auth_token")?;
         agent_statuses.push(
             person_server
                 .handle(&signed(&parent, &own.location, None)?)
@@ -507,10 +616,12 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
             .next()
             .ok_or("missing PS pending id")?;
         custody_consumed = as_custody.load(as_id)?.is_none() && ps_custody.load(ps_id)?.is_none();
-        compact
+        terminal
     } else {
-        response_token(&first, "auth_token")?
+        first
     };
+    // BEGIN guide-child-delivery
+    let grant = response_token(&terminal, "auth_token")?;
     let verified_auth = if mode == Mode::Direct {
         admitted_child.verify_auth_delivery(
             &grant,
@@ -529,11 +640,6 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
             NOW,
         )?
     };
-    assert!(
-        verified_auth.claims().exp <= child_claims.exp
-            && verified_auth.claims().exp <= parent_claims.exp
-    );
-    assert!(!verified_auth.claims().extra.contains_key("parent_agent"));
     let authorized = resource_handler(
         &signed(
             &child.with_token(grant)?,
@@ -542,6 +648,12 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         )?,
         "authorized",
     );
+    // END guide-child-delivery
+    assert!(
+        verified_auth.claims().exp <= admitted_child.token().claims().exp
+            && verified_auth.claims().exp <= parent_claims.exp
+    );
+    assert!(!verified_auth.claims().extra.contains_key("parent_agent"));
     let posts = forwarded.lock().unwrap();
     let forwarded_exactly = mode == Mode::Direct
         || posts.as_slice()
@@ -600,7 +712,7 @@ fn main() -> Result<()> {
             );
         }
         println!(
-            "{mode:?}: parent verifies child-bound Person/Auth without child secret; child proof admits one Resource request"
+            "{mode:?}: authenticated AP route enrolls child; parent verifies child-bound Person/Auth without child secret; child proof admits one Resource request"
         );
         if mode == Mode::Deferred {
             println!(
@@ -616,6 +728,188 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parent_fixture() -> (AgentProvider, Trust, Agent) {
+        let provider = AgentProvider::new(AP, "ap", SigningKey::generate()).unwrap();
+        let trust = Trust::default();
+        trust
+            .admit(
+                AP,
+                "aauth-agent.json",
+                &provider.metadata().unwrap(),
+                &provider.jwks().unwrap(),
+            )
+            .unwrap();
+        let key = SigningKey::generate();
+        let claims = AgentClaims {
+            iss: AP.into(),
+            dwk: "aauth-agent.json".into(),
+            sub: PARENT.into(),
+            jti: "parent".into(),
+            iat: NOW,
+            exp: NOW + 1200,
+            cnf: Confirmation {
+                jwk: key.public_jwk(),
+            },
+            ps: Some(PS.into()),
+            parent_agent: None,
+            nbf: None,
+            extra: Default::default(),
+        };
+        let compact = provider.issue(&claims).unwrap();
+        (provider, trust, Agent::new(key, compact).unwrap())
+    }
+
+    #[test]
+    fn ap_route_authenticates_parent_and_returns_an_independently_verifiable_child() {
+        let (ap, trust, parent) = parent_fixture();
+        let child_key = SigningKey::generate();
+        let request = signed(
+            &parent,
+            &format!("{AP}/subagents"),
+            Some(json!({
+                "discriminator":"worker", "jwk":child_key.public_jwk(),
+            })),
+        )
+        .unwrap();
+        let response = child_route(&ap, &trust, &AtomicUsize::new(0), &request, NOW);
+        let compact = response_token(&response, "agent_token").unwrap();
+        assert_eq!(
+            Subagent::verify(parent.token(), &compact, &Trust::default(), NOW).unwrap_err(),
+            TokenError::UntrustedIssuer
+        );
+        let verified = Subagent::verify(parent.token(), &compact, &trust, NOW).unwrap();
+        assert_eq!(verified.parent().compact(), parent.token());
+        assert_eq!(verified.token().claims().sub, CHILD);
+        assert_eq!(
+            verified.token().claims().parent_agent.as_deref(),
+            Some(PARENT)
+        );
+        assert_eq!(
+            verified.token().claims().cnf.jwk.thumbprint().unwrap(),
+            child_key.public_jwk().thumbprint().unwrap()
+        );
+        assert_eq!(verified.token().claims().exp, NOW + 900);
+    }
+
+    #[test]
+    fn ap_route_refuses_unsigned_and_body_tampering_before_issuance() {
+        let (ap, trust, parent) = parent_fixture();
+        let ids = AtomicUsize::new(0);
+        let body = json!({"discriminator":"worker", "jwk":SigningKey::generate().public_jwk()});
+        let unsigned = Request::post(format!("{AP}/subagents"))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        assert_eq!(child_route(&ap, &trust, &ids, &unsigned, NOW).status(), 401);
+        let mut tampered = signed(&parent, &format!("{AP}/subagents"), Some(body)).unwrap();
+        tampered.body_mut().push(b' ');
+        assert_eq!(child_route(&ap, &trust, &ids, &tampered, NOW).status(), 401);
+        assert_eq!(ids.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ap_route_refuses_a_child_caller_before_enrollment() {
+        let (ap, trust, parent) = parent_fixture();
+        let ids = AtomicUsize::new(0);
+        let key = SigningKey::generate();
+        let request = signed(
+            &parent,
+            &format!("{AP}/subagents"),
+            Some(json!({
+                "discriminator":"worker", "jwk":key.public_jwk(),
+            })),
+        )
+        .unwrap();
+        let compact = response_token(
+            &child_route(&ap, &trust, &ids, &request, NOW),
+            "agent_token",
+        )
+        .unwrap();
+        let child = Agent::new(key, compact).unwrap();
+        let request = signed(
+            &child,
+            &format!("{AP}/subagents"),
+            Some(json!({
+                "discriminator":"worker", "jwk":SigningKey::generate().public_jwk(),
+            })),
+        )
+        .unwrap();
+        assert_eq!(child_route(&ap, &trust, &ids, &request, NOW).status(), 403);
+        assert_eq!(ids.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn ap_route_bounds_body_discriminator_and_public_key() {
+        let (ap, trust, parent) = parent_fixture();
+        let ids = AtomicUsize::new(0);
+        let key = SigningKey::generate().public_jwk();
+        let mut private = serde_json::to_value(&key).unwrap();
+        private["d"] = json!("not-public");
+        for (body, status) in [
+            (json!({}), 400),
+            (
+                json!({"discriminator":"worker","jwk":key,"parent_agent":PARENT}),
+                400,
+            ),
+            (json!({"discriminator":"worker","jwk":private}), 400),
+            (
+                json!({"discriminator":"worker","jwk":parent.public_jwk()}),
+                400,
+            ),
+            (json!({"discriminator":"worker+deeper","jwk":key}), 400),
+            (json!({"discriminator":"","jwk":key}), 400),
+            (json!({"discriminator":"x".repeat(33),"jwk":key}), 400),
+            (json!({"discriminator":"other","jwk":key}), 403),
+        ] {
+            let request = signed(&parent, &format!("{AP}/subagents"), Some(body)).unwrap();
+            assert_eq!(
+                child_route(&ap, &trust, &ids, &request, NOW).status(),
+                status
+            );
+        }
+        for body in [b"{".to_vec(), b" ".repeat(2049)] {
+            let mut request = Request::post(format!("{AP}/subagents"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap();
+            parent.sign(&mut request, NOW).unwrap();
+            let expected = if request.body().len() > 2048 {
+                413
+            } else {
+                400
+            };
+            assert_eq!(
+                child_route(&ap, &trust, &ids, &request, NOW).status(),
+                expected
+            );
+        }
+        assert_eq!(ids.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn ap_route_does_not_substitute_gateway_trust_for_the_provider_parent_check() {
+        let (wrong_provider, wrong_trust, parent) = parent_fixture();
+        let own_provider = AgentProvider::new(AP, "ap", SigningKey::generate()).unwrap();
+        assert_ne!(own_provider.jwks().unwrap(), wrong_provider.jwks().unwrap());
+        let ids = AtomicUsize::new(0);
+        let request = signed(
+            &parent,
+            &format!("{AP}/subagents"),
+            Some(json!({
+                "discriminator":"worker", "jwk":SigningKey::generate().public_jwk(),
+            })),
+        )
+        .unwrap();
+        let response = child_route(&own_provider, &wrong_trust, &ids, &request, NOW);
+        assert_eq!(response.status(), 400);
+        assert!(
+            serde_json::from_slice::<Value>(response.body())
+                .unwrap()
+                .get("agent_token")
+                .is_none()
+        );
+    }
 
     #[test]
     fn immediate_ps_scene_uses_parent_consent_and_child_resource_proof() {

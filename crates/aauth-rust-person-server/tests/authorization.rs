@@ -13,7 +13,7 @@ use aauth_rust_person_server::{
 use http::{Request, Response};
 use serde_json::{Value, json};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 };
 
@@ -83,10 +83,21 @@ struct TestStore {
     fail: Arc<AtomicBool>,
     revoke_after_commit: Arc<AtomicBool>,
     after_commit: Arc<AtomicBool>,
+    delay_binding_after_commit: Arc<AtomicI64>,
+    delayed_binding: Arc<Mutex<Option<(usize, i64)>>>,
 }
 impl Store for TestStore {
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
-        self.inner.binding(issuer, agent)
+        let binding = self.inner.binding(issuer, agent)?;
+        let mut delay = self.delayed_binding.lock().unwrap();
+        if let Some((remaining, at)) = delay.as_mut() {
+            *remaining -= 1;
+            if *remaining == 0 {
+                self.now.store(*at, Ordering::SeqCst);
+                *delay = None;
+            }
+        }
+        Ok(binding)
     }
     fn token(&self, reference: &TokenReference) -> Result<Option<TokenRecord>, StoreError> {
         self.inner.token(reference)
@@ -101,6 +112,10 @@ impl Store for TestStore {
         let principal = record.principal.clone();
         self.inner.commit(record, establish)?;
         self.after_commit.store(true, Ordering::SeqCst);
+        let delay = self.delay_binding_after_commit.swap(0, Ordering::SeqCst);
+        if delay > 0 {
+            *self.delayed_binding.lock().unwrap() = Some((1, delay));
+        }
         if self.revoke_after_commit.swap(false, Ordering::SeqCst) {
             self.inner.revoke_binding(PS, &principal)?;
         }
@@ -217,6 +232,8 @@ impl Fixture {
                 fail: Arc::new(AtomicBool::new(false)),
                 revoke_after_commit: Arc::new(AtomicBool::new(false)),
                 after_commit: Arc::new(AtomicBool::new(false)),
+                delay_binding_after_commit: Arc::new(AtomicI64::new(0)),
+                delayed_binding: Arc::new(Mutex::new(None)),
             },
             host: Host {
                 mode: Arc::new(AtomicUsize::new(0)),
@@ -1475,3 +1492,6 @@ mod deferred;
 
 #[path = "support/subagents.rs"]
 mod subagents;
+
+#[path = "support/release_fences.rs"]
+mod release_fences;

@@ -311,7 +311,9 @@ cargo build --workspace --lib --locked --target aarch64-unknown-linux-gnu
 This library cross-build needs no cross C compiler. Tests and the TLS example
 use rustls/ring as a development dependency; ring compiles C and assembly, so
 cross-building those targets needs the target C compiler and linker.
-[CI](.gitlab-ci.yml) runs native Linux x86_64 and ARM64 tests and produces demo
-binaries. macOS and Windows jobs are opt-in with `AAUTH_NATIVE_RUNNERS=1` when
-runners are available; execution on those platforms is unverified. The tested
-toolchain is 1.99.1 and the declared minimum is 1.99. License: [MIT](LICENSE).
+[CI](.gitlab-ci.yml) uses the Linux x86_64 Docker runner tagged `sprint-gen6`
+and a pinned Rust 1.99.1 image, with two Cargo build jobs. It runs the workspace
+checks and examples and retains a demo binary for 14 days. This configuration
+does not qualify ARM64, macOS or Windows execution; earlier platform evidence
+remains tied to its original revisions. The declared minimum toolchain is 1.99.
+License: [MIT](LICENSE).
