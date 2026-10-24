@@ -794,7 +794,7 @@ fn asked() -> AuthorizationAsk {
     AuthorizationAsk {
         ps: PS.into(),
         login_hint: Some("alice@example.com".into()),
-        sub: Some("directed-person".into()),
+        sub: "directed-person".into(),
         account: Some("acct-1".into()),
         tenant: Some("team".into()),
     }
@@ -872,41 +872,13 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let hint_without_subject = AuthorizationAsk {
-        sub: None,
-        ..asked()
-    };
-    let subject_without_hint = AuthorizationAsk {
-        login_hint: None,
-        sub: None,
-        ..asked()
-    };
-    let broken = resource
-        .authorize_for(
-            &signed(&auth(&matching)),
-            NOW,
-            "unused",
-            &hint_without_subject,
-        )
-        .into_response();
-    assert_eq!(broken.status(), 500);
-    let open_account = resource
-        .authorize_for(
-            &signed(&auth(&matching)),
-            NOW,
-            "unused",
-            &subject_without_hint,
-        )
-        .into_response();
-    assert_eq!(open_account.status(), 500);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
     for ask in [
         AuthorizationAsk {
             ps: String::new(),
             ..asked()
         },
         AuthorizationAsk {
-            sub: Some(String::new()),
+            sub: String::new(),
             ..asked()
         },
         AuthorizationAsk {
