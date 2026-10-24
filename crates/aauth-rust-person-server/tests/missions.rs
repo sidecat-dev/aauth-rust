@@ -508,3 +508,24 @@ fn current_mission_store_extension_is_closed_by_default() {
     assert_eq!(response.status(), 400);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn install_rejects_a_mission_that_is_not_active_before_writing_a_binding() {
+    let store = MemoryStore::default();
+    for state in [
+        MissionState::Terminated("revoked".into()),
+        MissionState::Terminated(String::new()),
+    ] {
+        let mut record = approved();
+        record.state = state;
+        assert_eq!(
+            store.install_approved_mission(record),
+            Err(MissionStoreError::Conflict)
+        );
+        assert!(store.binding(PS, &owner()).unwrap().is_none());
+    }
+    store.install_approved_mission(approved()).unwrap();
+    let binding = store.binding(PS, &owner()).unwrap().unwrap();
+    assert_eq!(binding.person_id, "private-person");
+    assert!(!binding.revoked);
+}

@@ -6,7 +6,7 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 /// Invalid exact-byte mission identity or current mandatory member shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "invalid approved mission: verify the exact persisted bytes, canonical s256/base64url, Agent and RFC3339 timestamps"
+    "invalid approved mission: verify the exact persisted bytes, canonical s256/base64url, nonempty description, Agent, nonnegative approval time, expiry after approval, and RFC3339 timestamps"
 )]
 pub struct MissionError;
 
@@ -31,7 +31,9 @@ impl ApprovedMission {
     ///
     /// # Errors
     /// Rejects malformed encodings, mismatched bytes, duplicate JSON members,
-    /// invalid Agent identifiers, missing mandatory strings or malformed times.
+    /// invalid Agent identifiers, a missing or empty description, a negative
+    /// approval time, an expiry that is not strictly after approval, or
+    /// malformed times.
     pub fn decode(s256: &str, encoded: &str) -> Result<Self, MissionError> {
         let digest = URL_SAFE_NO_PAD.decode(s256).map_err(|_| MissionError)?;
         let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| MissionError)?;
@@ -58,12 +60,21 @@ impl ApprovedMission {
                 .map_err(|_| MissionError)
         };
         let approved_at = timestamp(string("approved_at")?)?;
+        if approved_at < 0 {
+            return Err(MissionError);
+        }
         let expires_at = if object.contains_key("expires_at") {
             Some(timestamp(string("expires_at")?)?)
         } else {
             None
         };
+        if expires_at.is_some_and(|expires_at| expires_at <= approved_at) {
+            return Err(MissionError);
+        }
         let description = string("description")?;
+        if description.is_empty() {
+            return Err(MissionError);
+        }
         Ok(Self {
             s256: s256.into(),
             encoded: encoded.into(),

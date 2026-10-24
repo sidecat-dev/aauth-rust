@@ -37,6 +37,11 @@ fn malformed_mission_identity_and_known_members_are_refused() {
         r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-02-30T12:00:00Z","description":"Read"}"#,
         r#"{"agent":"aauth:Reader@ap.example","approved_at":true,"description":"Read"}"#,
         r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","expires_at":null,"description":"Read"}"#,
+        r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","description":""}"#,
+        r#"{"agent":"aauth:Reader@ap.example","approved_at":"1969-12-31T23:59:59Z","description":"Read"}"#,
+        r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","expires_at":"2026-10-21T12:00:00Z","description":"Read"}"#,
+        r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","expires_at":"2026-10-21T11:59:59Z","description":"Read"}"#,
+        r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","expires_at":"2026-10-21T12:00:00.9Z","description":"Read"}"#,
         r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z"}"#,
         r#"{"agent":"aauth:Reader@ap.example","approved_at":"2026-10-21T12:00:00Z","description":"Read","extension":{"x":1,"x":2}}"#,
     ] {
@@ -46,4 +51,9 @@ fn malformed_mission_identity_and_known_members_are_refused() {
     let valid = decode(exact).unwrap();
     assert!(ApprovedMission::decode(&format!("{}=", valid.s256()), valid.encoded()).is_err());
     assert!(ApprovedMission::decode(valid.s256(), &format!("{}=", valid.encoded())).is_err());
+    let epoch = br#"{"agent":"aauth:Reader@ap.example","approved_at":"1970-01-01T00:00:00Z","expires_at":"1970-01-01T00:00:01Z","description":"Read"}"#;
+    let opened = decode(epoch).unwrap();
+    assert_eq!(opened.approved_at(), 0);
+    assert_eq!(opened.expires_at(), Some(1));
+    assert_eq!(opened.description(), "Read");
 }

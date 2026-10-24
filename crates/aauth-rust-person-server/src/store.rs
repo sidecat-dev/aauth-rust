@@ -272,13 +272,19 @@ pub struct MemoryStore(Arc<Mutex<State>>);
 impl MemoryStore {
     /// Install a separately host-approved record and its authenticated person
     /// binding atomically. This administrative fixture boundary is not consent
-    /// collection, a login endpoint or a mission proposal API. Existing records
-    /// are exact-idempotent; a terminated mission cannot be replaced/reactivated.
+    /// collection, a login endpoint or a mission proposal API. An exact retry of
+    /// the same Active record is idempotent. A record that is not Active is
+    /// refused before any binding is written, and a terminated mission cannot
+    /// be replaced or reactivated.
     ///
     /// # Errors
-    /// Refuses invalid/different records and conflicting or revoked bindings.
+    /// Refuses a non-active record, invalid or different records, and
+    /// conflicting or revoked bindings.
     pub fn install_approved_mission(&self, record: MissionRecord) -> Result<(), MissionStoreError> {
         record.validate()?;
+        if record.state != MissionState::Active {
+            return Err(MissionStoreError::Conflict);
+        }
         let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
         let key = (
             record.person_server.clone(),

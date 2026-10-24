@@ -412,7 +412,8 @@ approving PS beside the digest and independently obtain the private person and
 complete Agent identity. Install a `MissionRecord` through
 `MemoryStore::install_approved_mission`, then use that same store in PersonServer.
 The record includes `person_server`, `owner`, `person_id`, `document` and
-`MissionState::Active`. Installation is a host administration interface, never
+`MissionState::Active`. A record in any other state is refused and does not
+create a person binding. Installation is a host administration interface, never
 proof of human approval or a login/mission-creation endpoint.
 
 A signed `/person` request may include `mission_s256`. Policy receives a verified

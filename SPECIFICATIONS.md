@@ -28,7 +28,9 @@ or continuation identifier for cross-exchange binding. Request replay protection
 and operation idempotency remain host duties. A host may install an already
 approved top-level mission and have the immediate PS consume it: exact blob
 identity, active state, owner, person binding and expiry are checked in the same
-store transaction as Person and Auth issuance. The direct Resource can opt in to
+store transaction as Person and Auth issuance. The decoder refuses an empty
+description, a negative approval time, and an expiry that is not strictly later
+than approval. Installing a record that is not active writes no person binding. The direct Resource can opt in to
 carrying that signed digest. Mission creation, update, completion and control
 endpoints do not execute. AS, child, upstream and federated mission paths do not
 execute. Supervision and companion authorization vocabularies remain outside
