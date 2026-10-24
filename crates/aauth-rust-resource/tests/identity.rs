@@ -101,6 +101,19 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
         req.headers()["signature-key"].clone(),
         "sig=future;value=token".parse().unwrap(),
         "sig=hwk".parse().unwrap(),
+        "sig=cached;cid=\"abc\"".parse().unwrap(),
+        "sig=jwks;url=\"https://keys.example/jwks\";kid=\"k\""
+            .parse()
+            .unwrap(),
+        "sig=jkt-jwt;jwt=\"eyJhbGciOiJFZDI1NTE5In0.e30.c2ln\""
+            .parse()
+            .unwrap(),
+        "sig=self-jwt;jwt=\"eyJhbGciOiJFZDI1NTE5In0.e30.c2ln\""
+            .parse()
+            .unwrap(),
+        "sig=x509;x5u=\"https://keys.example/cert\";x5t=:AA:"
+            .parse()
+            .unwrap(),
     ] {
         req.headers_mut().insert("signature-key", header);
         let response = resource.authorize(&req, 1000).into_response();
@@ -110,6 +123,7 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
             "error=unsupported_scheme"
         );
         assert_eq!(response.headers()["accept-signature-scheme"], "jwt");
+        assert!(response.headers().get("signature-key-cache").is_none());
     }
 }
 
