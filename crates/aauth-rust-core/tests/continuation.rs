@@ -46,6 +46,13 @@ fn pending_requirements_preserve_host_inputs() {
             json!({"status":"future-status"}),
             Requirement::Approval,
         ),
+        (
+            "requirement=auth-token; resource-token=\"eyJhbGciOiJFZDI1NTE5In0.e30.c2ln\"",
+            json!({"status":"pending"}),
+            Requirement::AuthToken {
+                resource_token: "eyJhbGciOiJFZDI1NTE5In0.e30.c2ln".into(),
+            },
+        ),
     ] {
         let pending =
             PendingResponse::parse("https://as.example/token", &response(202, field, body))
@@ -58,6 +65,13 @@ fn pending_requirements_preserve_host_inputs() {
                 .unwrap();
         assert_eq!(pending, again);
     }
+    assert!(
+        PendingResponse::parse(
+            "https://as.example/token",
+            &response(202, "requirement=auth-token", json!({"status":"pending"}))
+        )
+        .is_err()
+    );
 }
 #[test]
 fn payment_preserves_details_without_becoming_an_agent_instruction() {
