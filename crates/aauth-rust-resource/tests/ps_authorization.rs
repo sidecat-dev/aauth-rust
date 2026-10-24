@@ -312,7 +312,7 @@ fn invalid_target_token_key_scope_and_body_never_reach_policy() {
 }
 
 #[test]
-fn person_audience_and_mission_are_checked_before_challenge() {
+fn person_audience_and_default_mission_are_checked_before_challenge() {
     let calls = Arc::new(AtomicUsize::new(0));
     let resource = resource(calls.clone(), true);
     for mut claims in [person_claims(), person_claims()].into_iter().enumerate() {
@@ -370,6 +370,32 @@ fn resource_metadata_and_config_advertise_only_the_implemented_role() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn configured_scope_descriptions_are_published_without_an_invented_endpoint() {
+    use std::collections::BTreeMap;
+    let resource = resource(Arc::new(AtomicUsize::new(0)), true)
+        .with_scope_descriptions(BTreeMap::from([(
+            "records.read".into(),
+            "Read the frozen revision".into(),
+        )]))
+        .unwrap();
+    let metadata: Value = serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata["scope_descriptions"]["records.read"],
+        "Read the frozen revision"
+    );
+    assert!(metadata.get("authorization_endpoint").is_none());
+    assert!(superfluous_scope_descriptions_are_refused());
+}
+fn superfluous_scope_descriptions_are_refused() -> bool {
+    resource(Arc::new(AtomicUsize::new(0)), true)
+        .with_scope_descriptions(std::collections::BTreeMap::from([(
+            "admin".into(),
+            "Unconfigured privilege".into(),
+        )]))
+        .is_err()
 }
 
 #[test]
@@ -632,4 +658,125 @@ fn explicit_federation_pins_as_and_role_even_when_collocated() {
             .verify_federated_auth_delivery(&auth(&claims), &challenge, &context, &keys, NOW)
             .is_err()
     );
+}
+
+// Core70d6737: the Resource consumes authenticated mission context, not the
+// mission description or a host's human-review fixture. Existing public APIs
+// must preserve that context through the Person challenge and Auth admission.
+const CURRENT_MISSION: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+#[test]
+fn current_mission_person_context_reaches_the_signed_resource_challenge() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = resource(calls.clone(), true).with_mission_context();
+    let mut claims = person_claims();
+    claims.mission_s256 = Some(CURRENT_MISSION.into());
+    let compact = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &claims).unwrap();
+    let response = resource
+        .authorize(&signed(&compact), NOW, "mission-challenge")
+        .into_response();
+    let challenge = challenge_token(&response);
+    let verified = ResourceToken::parse(challenge)
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(
+        verified.claims().mission_s256.as_deref(),
+        Some(CURRENT_MISSION)
+    );
+    assert_eq!(verified.claims().presented_jti, claims.jti);
+    assert_eq!(verified.claims().ps, PS);
+    assert_eq!(verified.claims().sub, claims.sub);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "Person identity is not Auth admission"
+    );
+    agent()
+        .verify_resource_challenge(challenge, RESOURCE, PS, &compact, &keys(), NOW)
+        .unwrap();
+}
+
+#[test]
+fn current_mission_auth_digest_reaches_host_policy() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let policy: Policy = Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        if token.claims().mission_s256.as_deref() == Some(CURRENT_MISSION) {
+            Ok("approved-mission".to_owned())
+        } else {
+            Err(Deny)
+        }
+    });
+    let resource = PsAuthorizationResource::new(config(), keys(), policy)
+        .unwrap()
+        .with_mission_context();
+    let mut claims = auth_claims();
+    claims.mission_s256 = Some(CURRENT_MISSION.into());
+    let compact = auth(&claims);
+    let (verified, admitted) = resource
+        .authorize(&signed(&compact), NOW, "unused")
+        .into_result()
+        .expect("valid PS-issued mission Auth credential must reach host admission");
+    assert_eq!(
+        verified.claims().mission_s256.as_deref(),
+        Some(CURRENT_MISSION)
+    );
+    assert_eq!(verified.compact(), compact);
+    assert_eq!(admitted, "approved-mission");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    for substituted in [
+        None,
+        Some("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".to_owned()),
+    ] {
+        let mut changed = claims.clone();
+        changed.mission_s256 = substituted;
+        let response = resource
+            .authorize(&signed(&auth(&changed)), NOW, "unused")
+            .into_response();
+        assert_eq!(
+            response.status(),
+            403,
+            "host must refuse another/missing mission"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn federated_resource_refuses_a_mission_even_when_direct_context_is_enabled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let mut snapshots = keys().0;
+    snapshots.push(issuer_key(PS, "aauth-access.json", 3, "ps-1"));
+    let resource = PsAuthorizationResource::new_federated(
+        config(),
+        PS,
+        Keys(snapshots),
+        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok("should-not-run".to_owned())
+        }) as Policy,
+    )
+    .unwrap()
+    .with_mission_context();
+    let mut person = person_claims();
+    person.mission_s256 = Some(CURRENT_MISSION.into());
+    let person = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &person).unwrap();
+    let challenged = resource
+        .authorize(&signed(&person), NOW, "mission-challenge")
+        .into_response();
+    assert_eq!(challenged.status(), 401);
+    assert!(!challenged.headers().contains_key("aauth-requirement"));
+    let mut auth_claims = auth_claims();
+    auth_claims.mission_s256 = Some(CURRENT_MISSION.into());
+    auth_claims.iss = PS.into();
+    auth_claims.dwk = "aauth-access.json".into();
+    let admitted = resource
+        .authorize(&signed(&auth(&auth_claims)), NOW, "unused")
+        .into_result();
+    assert!(admitted.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

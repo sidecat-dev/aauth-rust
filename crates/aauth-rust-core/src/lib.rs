@@ -4,6 +4,8 @@
 pub mod continuation;
 mod discovery;
 mod identifiers;
+mod mission;
+pub use mission::{ApprovedMission, MissionError};
 mod tokens;
 pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};

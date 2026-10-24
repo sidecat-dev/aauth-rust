@@ -1,4 +1,5 @@
-//! Immediate, missionless Person-Server authorization with route challenges.
+//! Immediate Person-Server authorization with route challenges.
+//! Mission context is opt-in through `with_mission_context`.
 use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceClaims, TokenError,
@@ -178,16 +179,22 @@ fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
     response
 }
 
-/// Missionless PS authorization: credential/holder verification precedes policy.
+/// PS authorization: credential/holder verification precedes policy.
 /// This Resource issues route challenges, not an explicit authorization endpoint.
-/// Host keys implement the accepted issuer trust set; host policy owns account and
-/// person-record admission. A Person token is never admitted as authorization.
+/// The default profile is missionless. [`Self::with_mission_context`] copies a
+/// verified Person mission digest into the challenge and admits a PS Auth token
+/// that carries one; host policy still decides whether that digest is the mission
+/// it asked for. Host keys implement the accepted issuer trust set; host policy
+/// owns account and person-record admission. A Person token is never admitted
+/// as authorization.
 pub struct PsAuthorizationResource<K, P> {
     config: PsAuthorizationConfig,
     authority: String,
     keys: K,
     policy: P,
     access_server: Option<String>,
+    scope_descriptions: Option<std::collections::BTreeMap<String, String>>,
+    mission_context: bool,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -235,6 +242,8 @@ where
             keys,
             policy,
             access_server: None,
+            scope_descriptions: None,
+            mission_context: false,
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
@@ -255,6 +264,38 @@ where
         resource.access_server = Some(access_server.into());
         Ok(resource)
     }
+    /// Publish host-authored Markdown descriptions for this exact scope profile.
+    /// This adds no authorization endpoint or scope; host routing and actual
+    /// revision/payload policy must implement the advertised meaning.
+    ///
+    /// # Errors
+    /// Rejects missing/extra scope names and empty descriptions.
+    pub fn with_scope_descriptions(
+        mut self,
+        descriptions: std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, PsConfigurationError> {
+        if descriptions.len() != self.config.scopes.len()
+            || self
+                .config
+                .scopes
+                .iter()
+                .any(|s| descriptions.get(s).is_none_or(|d| d.is_empty()))
+        {
+            return Err(PsConfigurationError::InvalidScopes);
+        }
+        self.scope_descriptions = Some(descriptions);
+        Ok(self)
+    }
+    /// Accept signed mission context on the direct PS path.
+    ///
+    /// A Person token's `mission_s256` is copied into the Resource challenge.
+    /// A PS Auth token carrying one reaches host policy instead of being refused
+    /// as an unknown profile. Federated AS Auth remains missionless. The digest
+    /// is not a grant: policy must still compare it with the mission it asked for.
+    pub fn with_mission_context(mut self) -> Self {
+        self.mission_context = true;
+        self
+    }
     /// Accurate public metadata; serve at the published Resource well-known path.
     /// This Resource publishes no revocation or explicit authorization endpoint;
     /// AS selection is carried by its signed challenge audience.
@@ -262,7 +303,11 @@ where
     /// # Errors
     /// Returns a serialization error as InvalidJwt.
     pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
-        serde_json::to_vec(&json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"access_mode":"auth-token","signature_window":60})).map_err(|_| TokenError::InvalidJwt)
+        let mut metadata = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"access_mode":"auth-token","signature_window":60});
+        if let Some(descriptions) = &self.scope_descriptions {
+            metadata["scope_descriptions"] = json!(descriptions);
+        }
+        serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
     }
     /// Public Resource signing key with its configured kid, without secret bytes.
     ///
@@ -278,8 +323,9 @@ where
     /// Host supplies trusted Unix seconds and a fresh challenge identifier. Proof
     /// coverage/body bounds follow Signature-Key's 1 MiB buffered profile and
     /// 60-second window. Direct mode accepts PS Auth; new_federated accepts only
-    /// its configured AS issuer and discovery role. Missions and known companion
-    /// authority claims are refused by this immediate Core-scope profile.
+    /// its configured AS issuer and discovery role. Missions are refused unless
+    /// `with_mission_context` is set, and AS missions stay refused either way.
+    /// Known companion authority claims are refused by this immediate Core-scope profile.
     pub fn authorize(
         &self,
         request: &Request<Vec<u8>>,
@@ -346,7 +392,9 @@ where
                 if claims.aud != self.config.issuer {
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                 }
-                if claims.mission_s256.is_some() || unsupported_companion(&claims.extra) {
+                if self.mission_refused(claims.mission_s256.is_some())
+                    || unsupported_companion(&claims.extra)
+                {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 let challenge = ResourceClaims {
@@ -372,7 +420,11 @@ where
                     login_hint: None,
                     nbf: None,
                     tenant: claims.tenant.clone(),
-                    mission_s256: None,
+                    mission_s256: if self.mission_context {
+                        claims.mission_s256.clone()
+                    } else {
+                        None
+                    },
                     extra: Default::default(),
                 };
                 match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
@@ -397,7 +449,7 @@ where
                     None => claims.dwk == "aauth-person.json" && claims.iss == claims.ps,
                 };
                 if !valid_role
-                    || claims.mission_s256.is_some()
+                    || self.mission_refused(claims.mission_s256.is_some())
                     || unsupported_companion(&claims.extra)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
@@ -421,6 +473,9 @@ where
             }
             _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
         }
+    }
+    fn mission_refused(&self, present: bool) -> bool {
+        present && (!self.mission_context || self.access_server.is_some())
     }
 }
 fn check_iat(iat: i64, now: i64) -> Result<(), SignatureFailure> {

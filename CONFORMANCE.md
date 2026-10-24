@@ -1,6 +1,6 @@
 # Executing behavior
 
-As of 2026-10-21. This is not complete AAuth or
+As of 2026-10-24. This is not complete AAuth or
 HTTP Signature Keys conformance. No percentage of either draft is claimed.
 The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
@@ -165,7 +165,11 @@ a general delegation lifecycle or automatic sub-agent process supervision.
 - Direct Agent identity and immediate missionless PS/AS authorization execute.
   Local AP sub-agent issuance and parent-mediated child credentials also execute.
   Session tokens, enrollment, revocation transport/cascades, recursive delegation,
-  missions and permission/interaction/audit endpoints do not execute. Unsupported PS parameters are refused explicitly.
+  mission creation/management and permission/interaction/audit endpoints do not execute.
+  Separately host-approved top-level immediate PS mission consumption is
+  available through the optional same-store boundary described below. A direct
+  Resource stays missionless unless `with_mission_context` is set. Other
+  unsupported PS parameters are refused explicitly.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
 - Ed25519 only. Other algorithms, private/HSM signer adapters and remaining
@@ -389,8 +393,8 @@ not claims that the cited clauses are fully implemented.
 | **PS-PRESENTED-ERRORS** | [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | A missing/different retained issuance or recipient Agent is invalid_presented_token. Genuine Resource-versus-presented jti/sub/tenant/PS mismatches remain invalid_resource_token. |
 | **PS-IMMEDIATE-DENIAL** | [Polling Error Codes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#polling-error-codes) | Immediate host PolicyError::Denied retains 403 access_denied. Deferred AS policy denial is 403 denied, relayed by the PS on its pending URL. Expired pending state returns 408 expired; consumed/cancelled state returns 410 gone. A revoked binding on new Person issuance separately returns 403 denied; presented/upstream revocation uses its specific 400 code. |
 | **PS-BINDING-REVOCATION** | [Agent Person Binding](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#agent-person-binding), [token errors](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#token-endpoint-error-codes) | Binding revocation blocks new Person issuance with 403 denied, direct exchanges of outstanding Person/Auth with 400 revoked_presented_token, and chains with revoked_upstream_token, including policy/commit races. There is no individual token/Agent-token revocation set, cascade or Resource revocation delivery; an already issued Auth token still verifies at a Resource until expiry unless the host adds that state. |
-| **PS-SCOPE-ONLY** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure), [Scopes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#scopes) | The PS requires a nonempty Core scope string. Missing/empty scope and companion authority claims are refused; a companion claim cannot replace scope in this profile. Scope descriptions and identity-claim expansion are not implemented. |
-| **PS-MISSION-INPUT** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint), [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | mission_s256 is not accepted as a PS request parameter. Mission-bearing credentials/challenges are explicitly refused by PS/Resource roles, even when otherwise well formed. Core can parse their syntax but does not establish mission state; no mission is silently ignored. |
+| **PS-SCOPE-ONLY** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure), [Scopes](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#scopes) | The PS requires a nonempty Core scope string. Missing/empty scope and companion authority claims are refused; a companion claim cannot replace scope in this profile. Resource hosts can opt into exact configured scope descriptions with with_scope_descriptions; PS identity-claim expansion is not implemented. |
+| **PS-MISSION-INPUT** | [Person Token Endpoint](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#person-token-endpoint), [Resource Token Verification](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-verification) | Top-level immediate PS mission consumption is opt-in through Store::missions on the SAME atomic store. MemoryStore supports separately host-approved Active records and refuses a non-active install before writing a binding; unsupported stores (including redb) refuse. The decoder refuses an empty description, a negative approval time, and an expiry that is not strictly after approval. Person/Auth issuance checks owner, PS, exact digest, person binding, active state and expiry before/after host work, atomically at retention, and before release. A direct Resource stays missionless unless with_mission_context is set; that opt-in copies the Person digest into the challenge and admits a PS Auth digest to host policy, which must compare it. The challenge may outlive the Person credential. AS/federated, child/upstream mission paths and mission creation/management endpoints remain unsupported. |
 | **PS-RESOURCE-LIFETIME** | [Resource Token Structure](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#resource-token-structure) | The PS hard-refuses a current Resource token whose lifetime exceeds max_resource_lifetime (default 300 seconds, configurable 1..3600). This is local policy above the five-minute SHOULD, not a draft MUST or an Auth expiry cap. |
 | **CHAIN-PS-ROUTING** | [Call Chaining](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#call-chaining) | The host routes using verified upstream Person iss or Auth ps, never the intermediary Agent's ps. The PS verifies that the upstream names itself. There is no automatic Agent HTTP router; the one-PS example deliberately gives the intermediary a different ps and still reaches the upstream PS. |
 | **CHAIN-SERVED-REQUEST** | [Call Chaining](https://github.com/dickhardt/AAuth/blob/70d67375deb0bb002af7da0711fc58f6e8926e7e/draft-hardt-oauth-aauth-protocol.md#call-chaining) | The intermediary may use only a token from a request it served. A Person-token request answered with an Auth challenge does not qualify. The PS accepts valid Person upstream evidence but cannot observe a remote handler's served state; host code must enforce this before starting the chain. No synthetic served bit is claimed. |
@@ -423,8 +427,9 @@ consent, audit, revocation-delivery or other store interfaces.
 
 Rust also checks its stricter atomic Agent-person binding and stable directed
 identity profile, both private indexes after refused commits, and losing token
-absence in an eight-caller first-binding race. Mission state is not present in
-Rust's supported record profile; no Go mission-store parity is claimed.
+absence in an eight-caller first-binding race. The optional same-store MissionStore boundary now supports separately approved
+missions in MemoryStore. The ordinary issued-token store contract does not certify
+that extension; redb does not implement it. No Go mission-lifecycle-store parity is claimed.
 The shared shape validator checks identifier syntax and nonempty references/
 digests, requires a presented parent for Auth and forbids one for Person. It
 does not authenticate parent credentials or verify digest contents. Existing-
@@ -526,3 +531,36 @@ ARM64/Windows native test result is claimed, and older platform/shared-wire
 receipts remain tied to their original revisions. To verify packaging without
 uploading crates, run `cargo publish --workspace --dry-run --locked` with an
 unused `CARGO_TARGET_DIR` for repeated checks of unchanged alpha versions.
+
+## Host-approved mission consumption evidence and limits
+
+Selected source: Core70d6737 Mission Approval/Identifier, Person Token Endpoint/
+Structure, Resource Token Verification, Auth Token Structure/Verification, Mission
+Management/Status Errors and Scopes (see SPECIFICATIONS.md). Core's ApprovedMission
+keeps exact decoded bytes and canonical s256/base64url, ignores additive/legacy
+content for authority, and parses RFC3339 timestamps. It refuses an empty
+description, a negative approval time, and an expiry that is not strictly after
+approval. `install_approved_mission` refuses a record that is not Active and
+writes no person binding for that call. PS tests in `tests/missions.rs`
+exercise real public Person/Auth requests, private person ownership, expiry caps,
+substitution/stripping, host grant broadening and policy/commit races. Resource
+tests exercise the opt-in challenge copy and the host comparison of the Auth
+digest. The default Resource still refuses a mission before policy. Executed
+results belong to exact retained run receipts, not merely these source files.
+
+`MemoryStore::install_approved_mission` supplies already-approved host state and
+an independently authenticated private person binding. It is not mission creation,
+a PS login interface or proof that a human approved the text. The reference store
+is volatile; custom mission stores must compare and commit under the same atomic
+boundary and invalidate approvals on binding replacement. Termination is permanent
+and expiry is materialized. Already issued Resource Auth admission has no automatic
+mission-state/revocation channel; the host must supply current enforcement where
+needed. No blanket cascade is added. An opted-in Resource sees the authenticated
+digest and Core scopes, not private mission text. The default Resource refuses
+the digest before policy. A generic frozen-revision handler is
+application policy, not an invented protocol proposal claim.
+
+This slice does not add AS, child/chained/federated missions, deferred mission
+approval, mission proposal/review UI, permission endpoints, R3 or full latest
+conformance. Existing missionless shared results retain their original suite
+identity; a new mission suite is separately attributable. See INTERPRETATIONS.md.

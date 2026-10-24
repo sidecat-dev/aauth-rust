@@ -2,6 +2,7 @@ mod continuation;
 mod federation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
 mod lineage;
+mod missions;
 mod subagents;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -344,7 +345,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             "capabilities",
         ];
         let specific = if person {
-            &["resource"][..]
+            &["resource", "mission_s256"][..]
         } else {
             &["resource_token", "presented_token"][..]
         };
@@ -447,7 +448,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         } else {
             self.binding(&principal, binding_context)?
         };
+        let mission = if parameters.get("mission_s256").is_some() {
+            if upstream.is_some() || parameters.get("subagent_token").is_some() {
+                return Err(Failure::parameter("invalid_request"));
+            }
+            Some(self.load_mission(
+                &agent,
+                required_string(&parameters, "mission_s256")?,
+                (self.clock)(),
+                binding_context,
+            )?)
+        } else {
+            None
+        };
         let policy_request = PersonRequest {
+            mission: mission.clone(),
             agent: agent.clone(),
             subagent: self.subagent(&agent, &parameters, (self.clock)())?,
             resource: resource.into(),
@@ -462,7 +477,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         .map_err(Failure::policy)?;
         validate_person(&person)?;
-        if binding.is_some_and(|binding| binding.person_id != person.id)
+        if mission.as_ref().is_some_and(|m| m.person_id != person.id)
+            || binding.is_some_and(|binding| binding.person_id != person.id)
             || upstream
                 .as_ref()
                 .is_some_and(|up| up.context.record.person_id != person.id)
@@ -479,6 +495,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         check_agent_current(&agent, now)?;
         self.subagent_current(&agent, policy_request.subagent.as_ref(), now)?;
         check_upstream_current(upstream.as_ref(), now)?;
+        self.recheck_mission(&agent, mission.as_ref(), now, binding_context)?;
         let mut expires_at = now
             .saturating_add(self.config.person_lifetime)
             .min(agent.claims().exp);
@@ -486,6 +503,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         expires_at = expires_at.min(holder.claims().exp);
         if let Some(up) = &upstream {
             expires_at = expires_at.min(up.token.exp);
+        }
+        if let Some(exp) = mission.as_ref().and_then(|m| m.document.expires_at()) {
+            expires_at = expires_at.min(exp);
         }
         let claims = PersonClaims {
             iss: self.config.issuer.clone(),
@@ -499,7 +519,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             iat: now,
             exp: expires_at,
             nbf: None,
-            mission_s256: None,
+            mission_s256: mission.as_ref().map(|m| m.document.s256().to_owned()),
             tenant: person.tenant,
             extra: Default::default(),
         };
@@ -526,9 +546,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 upstream: upstream.as_ref().map(|up| up.context.record.token.clone()),
             },
         )?;
-        self.store
-            .commit(record, upstream.is_none())
-            .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.commit_issuance(
+            record,
+            upstream.is_none(),
+            mission.as_ref(),
+            binding_context,
+        )?;
         self.subagent_current(&agent, policy_request.subagent.as_ref(), (self.clock)())?;
         self.binding(&principal, binding_context)?
             .ok_or_else(Failure::internal)?;
@@ -536,6 +559,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         check_agent_current(&agent, released_at)?;
         check_subagent_current(policy_request.subagent.as_ref(), released_at)?;
         check_upstream_current(upstream.as_ref(), released_at)?;
+        self.recheck_mission(&agent, mission.as_ref(), released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
@@ -571,7 +595,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .jwk
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
-            || r.mission_s256.is_some()
+            || (r.mission_s256.is_some()
+                && (self.federation.is_some() || upstream.is_some() || subagent.is_some()))
             || unsupported(&r.extra)
         {
             return Err(Failure::parameter("invalid_resource_token"));
@@ -620,7 +645,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::parameter("invalid_request"));
         }
+        let mission = if let Some(s256) = &r.mission_s256 {
+            let mission = self.load_mission(agent, s256, verified_at, binding_context)?;
+            if mission.person_id != retained.person_id {
+                return Err(Failure::parameter("invalid_presented_token"));
+            }
+            Some(mission)
+        } else {
+            None
+        };
         let context = AuthorizationRequest {
+            mission,
             agent: agent.clone(),
             subagent,
             resource: resource.clone(),
@@ -667,7 +702,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         .map_err(Failure::policy)?;
         validate_grant(&grant, &context.scopes)?;
+        let mission = context.mission.as_ref();
         let now = (self.clock)();
+        self.recheck_mission(&agent, mission, now, binding_context)?;
         self.inputs_current(&agent, &resource, &presented, now)?;
         self.subagent_current(&agent, context.subagent.as_ref(), now)?;
         check_upstream_current(upstream.as_ref(), now)?;
@@ -679,6 +716,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         expires_at = expires_at.min(holder.claims().exp);
         if let Some(up) = &upstream {
             expires_at = expires_at.min(up.token.exp);
+        }
+        if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
+            expires_at = expires_at.min(exp);
         }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
@@ -695,7 +735,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             scope: Some(grant.scopes.join(" ")),
             account: r.account.clone(),
             nbf: None,
-            mission_s256: None,
+            mission_s256: r.mission_s256.clone(),
             tenant: r.tenant.clone(),
             extra: Default::default(),
         };
@@ -719,9 +759,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 upstream: upstream.as_ref().map(|up| up.context.record.token.clone()),
             },
         )?;
-        self.store
-            .commit(record, false)
-            .map_err(|error| store_issuance_failure(error, binding_context))?;
+        self.commit_issuance(record, false, mission, binding_context)?;
         self.subagent_current(&agent, context.subagent.as_ref(), (self.clock)())?;
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
@@ -729,6 +767,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.inputs_current(&agent, &resource, &presented, released_at)?;
         check_subagent_current(context.subagent.as_ref(), released_at)?;
         check_upstream_current(upstream.as_ref(), released_at)?;
+        self.recheck_mission(&agent, mission, released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }

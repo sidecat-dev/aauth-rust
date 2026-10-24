@@ -1,3 +1,4 @@
+use crate::{MissionRecord, MissionState, MissionStore, MissionStoreError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -220,6 +221,10 @@ pub enum StoreError {
 /// with person binding/directed-identity checks. Revocation cannot be undone by a
 /// token request. No record may disappear before its retain_until timestamp.
 pub trait Store: Send + Sync {
+    /// Optional same-store mission boundary. None refuses mission consumption.
+    fn missions(&self) -> Option<&dyn MissionStore> {
+        None
+    }
     /// Read an Agent binding in this PS namespace.
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError>;
     /// Read an owned, complete retained issuance record.
@@ -233,6 +238,9 @@ pub trait Store: Send + Sync {
 }
 
 impl<T: Store + ?Sized> Store for Arc<T> {
+    fn missions(&self) -> Option<&dyn MissionStore> {
+        (**self).missions()
+    }
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
         (**self).binding(issuer, agent)
     }
@@ -249,6 +257,7 @@ impl<T: Store + ?Sized> Store for Arc<T> {
 
 #[derive(Default)]
 struct State {
+    missions: BTreeMap<(String, AgentIdentity, String), MissionRecord>,
     bindings: BTreeMap<(String, AgentIdentity), Binding>,
     tokens: BTreeMap<TokenReference, TokenRecord>,
     directed: BTreeMap<(String, String, String), String>,
@@ -260,7 +269,157 @@ struct State {
 /// production hosts supply a durable implementation and run the public contract.
 #[derive(Clone, Default)]
 pub struct MemoryStore(Arc<Mutex<State>>);
+impl MemoryStore {
+    /// Install a separately host-approved record and its authenticated person
+    /// binding atomically. This administrative fixture boundary is not consent
+    /// collection, a login endpoint or a mission proposal API. An exact retry of
+    /// the same Active record is idempotent. A record that is not Active is
+    /// refused before any binding is written, and a terminated mission cannot
+    /// be replaced or reactivated.
+    ///
+    /// # Errors
+    /// Refuses a non-active record, invalid or different records, and
+    /// conflicting or revoked bindings.
+    pub fn install_approved_mission(&self, record: MissionRecord) -> Result<(), MissionStoreError> {
+        record.validate()?;
+        if record.state != MissionState::Active {
+            return Err(MissionStoreError::Conflict);
+        }
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let key = (
+            record.person_server.clone(),
+            record.owner.clone(),
+            record.document.s256().to_owned(),
+        );
+        if let Some(existing) = state.missions.get(&key) {
+            return if existing == &record {
+                Ok(())
+            } else {
+                Err(MissionStoreError::Conflict)
+            };
+        }
+        let binding_key = (record.person_server.clone(), record.owner.clone());
+        match state.bindings.get(&binding_key) {
+            Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding.into()),
+            Some(binding) if binding.person_id != record.person_id => {
+                return Err(MissionStoreError::Conflict);
+            }
+            _ => {}
+        }
+        state
+            .bindings
+            .entry(binding_key)
+            .or_insert_with(|| Binding {
+                person_id: record.person_id.clone(),
+                revoked: false,
+            });
+        state.missions.insert(key, record);
+        Ok(())
+    }
+    /// Permanently terminate an owned mission using a host-supplied reason.
+    /// This is host administration, not a protocol mission-management endpoint.
+    ///
+    /// # Errors
+    /// Absent/wrong-owner records are indistinguishable; storage fails closed.
+    pub fn terminate_mission(
+        &self,
+        ps: &str,
+        owner: &AgentIdentity,
+        s256: &str,
+        reason: &str,
+    ) -> Result<(), MissionStoreError> {
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let record = state
+            .missions
+            .get_mut(&(ps.into(), owner.clone(), s256.into()))
+            .ok_or(MissionStoreError::NotFound)?;
+        if record.state == MissionState::Active {
+            record.state = MissionState::Terminated(reason.into());
+        }
+        Ok(())
+    }
+}
+fn active_mission_locked(
+    state: &mut State,
+    ps: &str,
+    owner: &AgentIdentity,
+    s256: &str,
+    at: i64,
+) -> Result<MissionRecord, MissionStoreError> {
+    let record = state
+        .missions
+        .get_mut(&(ps.into(), owner.clone(), s256.into()))
+        .ok_or(MissionStoreError::NotFound)?;
+    if record.state == MissionState::Active
+        && record.document.expires_at().is_some_and(|exp| at >= exp)
+    {
+        record.state = MissionState::Terminated("expired".into());
+    }
+    if let MissionState::Terminated(reason) = &record.state {
+        return Err(MissionStoreError::Terminated(reason.clone()));
+    }
+    let binding = state
+        .bindings
+        .get(&(ps.into(), owner.clone()))
+        .ok_or(StoreError::MissingBinding)?;
+    if binding.revoked {
+        return Err(StoreError::RevokedBinding.into());
+    }
+    if binding.person_id != record.person_id {
+        return Err(MissionStoreError::Conflict);
+    }
+    Ok(record.clone())
+}
+impl MissionStore for MemoryStore {
+    fn load_mission(
+        &self,
+        ps: &str,
+        owner: &AgentIdentity,
+        s256: &str,
+        at: i64,
+    ) -> Result<MissionRecord, MissionStoreError> {
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        active_mission_locked(&mut state, ps, owner, s256, at)
+    }
+    fn commit_mission_token(
+        &self,
+        expected: &MissionRecord,
+        at: i64,
+        record: TokenRecord,
+        establish_binding: bool,
+    ) -> Result<(), MissionStoreError> {
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let current = active_mission_locked(
+            &mut state,
+            &expected.person_server,
+            &expected.owner,
+            expected.document.s256(),
+            at,
+        )?;
+        if &current != expected
+            || record.binding_issuer() != expected.person_server
+            || record.person_id != expected.person_id
+            || record.principal != expected.owner
+            || record.agent != expected.owner
+            || record.parent_agent.is_some()
+            || record.person_server.is_some()
+            || record.upstream.is_some()
+            || record.issued_at > at
+            || record.expires_at <= at
+            || expected
+                .document
+                .expires_at()
+                .is_some_and(|exp| record.expires_at > exp)
+        {
+            return Err(MissionStoreError::Conflict);
+        }
+        commit_locked(&mut state, record, establish_binding).map_err(Into::into)
+    }
+}
 impl Store for MemoryStore {
+    fn missions(&self) -> Option<&dyn MissionStore> {
+        Some(self)
+    }
     fn binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<Option<Binding>, StoreError> {
         Ok(self
             .0
@@ -281,69 +440,7 @@ impl Store for MemoryStore {
     }
     fn commit(&self, record: TokenRecord, establish_binding: bool) -> Result<(), StoreError> {
         let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
-        if let Some(existing) = state.tokens.get(&record.token.reference) {
-            return if existing == &record {
-                Ok(())
-            } else {
-                Err(StoreError::Conflict)
-            };
-        }
-        record.validate_for_commit(establish_binding)?;
-        if record.person_server.is_some() {
-            let reference = &record
-                .presented
-                .as_ref()
-                .ok_or(StoreError::InvalidRecord)?
-                .reference;
-            let parent = state
-                .tokens
-                .get(reference)
-                .ok_or(StoreError::InvalidRecord)?;
-            record.validate_federated_parent(parent)?;
-        }
-        let issuer = record.binding_issuer();
-        let binding_key = (issuer.to_owned(), record.principal.clone());
-        match state.bindings.get(&binding_key) {
-            Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
-            Some(binding) if binding.person_id != record.person_id => {
-                return Err(StoreError::Conflict);
-            }
-            None if !establish_binding => return Err(StoreError::MissingBinding),
-            _ => {}
-        }
-        let directed_key = (
-            issuer.to_owned(),
-            record.person_id.clone(),
-            record.resource.clone(),
-        );
-        let identity = record.subject.clone();
-        let subject_key = (
-            issuer.to_owned(),
-            record.resource.clone(),
-            record.subject.clone(),
-        );
-        if state
-            .directed
-            .get(&directed_key)
-            .is_some_and(|v| v != &identity)
-            || state
-                .subjects
-                .get(&subject_key)
-                .is_some_and(|id| id != &record.person_id)
-        {
-            return Err(StoreError::Conflict);
-        }
-        state
-            .bindings
-            .entry(binding_key)
-            .or_insert_with(|| Binding {
-                person_id: record.person_id.clone(),
-                revoked: false,
-            });
-        state.directed.insert(directed_key, identity);
-        state.subjects.insert(subject_key, record.person_id.clone());
-        state.tokens.insert(record.token.reference.clone(), record);
-        Ok(())
+        commit_locked(&mut state, record, establish_binding)
     }
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
@@ -354,4 +451,74 @@ impl Store for MemoryStore {
         binding.revoked = true;
         Ok(())
     }
+}
+
+fn commit_locked(
+    state: &mut State,
+    record: TokenRecord,
+    establish_binding: bool,
+) -> Result<(), StoreError> {
+    if let Some(existing) = state.tokens.get(&record.token.reference) {
+        return if existing == &record {
+            Ok(())
+        } else {
+            Err(StoreError::Conflict)
+        };
+    }
+    record.validate_for_commit(establish_binding)?;
+    if record.person_server.is_some() {
+        let reference = &record
+            .presented
+            .as_ref()
+            .ok_or(StoreError::InvalidRecord)?
+            .reference;
+        let parent = state
+            .tokens
+            .get(reference)
+            .ok_or(StoreError::InvalidRecord)?;
+        record.validate_federated_parent(parent)?;
+    }
+    let issuer = record.binding_issuer();
+    let binding_key = (issuer.to_owned(), record.principal.clone());
+    match state.bindings.get(&binding_key) {
+        Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
+        Some(binding) if binding.person_id != record.person_id => {
+            return Err(StoreError::Conflict);
+        }
+        None if !establish_binding => return Err(StoreError::MissingBinding),
+        _ => {}
+    }
+    let directed_key = (
+        issuer.to_owned(),
+        record.person_id.clone(),
+        record.resource.clone(),
+    );
+    let identity = record.subject.clone();
+    let subject_key = (
+        issuer.to_owned(),
+        record.resource.clone(),
+        record.subject.clone(),
+    );
+    if state
+        .directed
+        .get(&directed_key)
+        .is_some_and(|v| v != &identity)
+        || state
+            .subjects
+            .get(&subject_key)
+            .is_some_and(|id| id != &record.person_id)
+    {
+        return Err(StoreError::Conflict);
+    }
+    state
+        .bindings
+        .entry(binding_key)
+        .or_insert_with(|| Binding {
+            person_id: record.person_id.clone(),
+            revoked: false,
+        });
+    state.directed.insert(directed_key, identity);
+    state.subjects.insert(subject_key, record.person_id.clone());
+    state.tokens.insert(record.token.reference.clone(), record);
+    Ok(())
 }

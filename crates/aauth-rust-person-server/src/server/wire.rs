@@ -10,8 +10,14 @@ pub(super) struct Failure {
     signature: Option<String>,
     date: Option<i64>,
     federation: Option<Box<crate::FederationFailure>>,
+    mission_reason: Option<String>,
 }
 impl Failure {
+    pub(super) fn mission_terminated(reason: &str) -> Self {
+        let mut failure = Self::status(StatusCode::FORBIDDEN, "mission_terminated");
+        failure.mission_reason = Some(reason.into());
+        failure
+    }
     pub(super) fn parameter(code: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -19,6 +25,7 @@ impl Failure {
             signature: None,
             date: None,
             federation: None,
+            mission_reason: None,
         }
     }
     pub(super) fn policy(error: PolicyError) -> Self {
@@ -35,6 +42,7 @@ impl Failure {
             signature: None,
             date: None,
             federation: None,
+            mission_reason: None,
         }
     }
     pub(super) fn internal() -> Self {
@@ -79,6 +87,7 @@ impl Failure {
             signature: Some(signature),
             date: matches!(error, ProofError::ClockSkew).then_some(now),
             federation: None,
+            mission_reason: None,
         }
     }
     pub(super) fn credential(error: TokenError) -> Self {
@@ -89,6 +98,7 @@ impl Failure {
             signature: Some(format!("error={code}")),
             date: None,
             federation: None,
+            mission_reason: None,
         }
     }
     pub(super) fn clock(now: i64) -> Self {
@@ -98,6 +108,7 @@ impl Failure {
             signature: None,
             date: Some(now),
             federation: None,
+            mission_reason: None,
         }
     }
     pub(super) fn with_federation(mut self, diagnostic: crate::FederationFailure) -> Self {
@@ -109,10 +120,12 @@ impl Failure {
         self
     }
     pub(super) fn response(self) -> Response<Vec<u8>> {
-        let mut response = json_response(
-            self.status,
-            json!({"type":"about:blank","title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code}),
-        );
+        let mut body = json!({"type":"about:blank","title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code});
+        if let Some(reason) = self.mission_reason {
+            body["mission_status"] = json!("terminated");
+            body["termination_reason"] = json!(reason);
+        }
+        let mut response = json_response(self.status, body);
         response
             .headers_mut()
             .insert("content-type", "application/problem+json".parse().unwrap());

@@ -33,6 +33,8 @@ pub struct UpstreamContext {
 
 /// Verified context passed to person binding or explicit downstream policy.
 pub struct PersonRequest {
+    /// Verified active host-approved mission, never a raw Agent assertion.
+    pub mission: Option<crate::MissionRecord>,
     /// Authenticated requesting Agent, whose HTTP proof also verified.
     pub agent: VerifiedAgentToken,
     /// Verified child receiving the credential; the parent in agent owns consent.
@@ -49,6 +51,8 @@ pub struct PersonRequest {
 
 /// Complete verified exchange context, before any Auth credential is released.
 pub struct AuthorizationRequest {
+    /// Verified active host-approved mission, matched to presented context.
+    pub mission: Option<crate::MissionRecord>,
     /// Authenticated requesting Agent and verified HTTP proof holder.
     pub agent: VerifiedAgentToken,
     /// Verified child holder, independently bound to Resource and presented token.

@@ -51,10 +51,12 @@
 //! ```
 #![deny(missing_docs)]
 mod federation;
+mod mission;
 mod policy;
 pub use federation::{
     BoxedFederation, Federation, FederationError, FederationFailure, FederationFailureReason,
 };
+pub use mission::{MissionRecord, MissionState, MissionStore, MissionStoreError};
 mod server;
 mod store;
 pub mod storetest;

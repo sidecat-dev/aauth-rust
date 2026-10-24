@@ -25,8 +25,16 @@ requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal
 delivery applies per continuation, and Auth tokens carry no Resource challenge
 or continuation identifier for cross-exchange binding. Request replay protection
-and operation idempotency remain host duties. Missions, Supervision and companion
-authorization vocabularies remain outside this subset.
+and operation idempotency remain host duties. A host may install an already
+approved top-level mission and have the immediate PS consume it: exact blob
+identity, active state, owner, person binding and expiry are checked in the same
+store transaction as Person and Auth issuance. The decoder refuses an empty
+description, a negative approval time, and an expiry that is not strictly later
+than approval. Installing a record that is not active writes no person binding. The direct Resource can opt in to
+carrying that signed digest. Mission creation, update, completion and control
+endpoints do not execute. AS, child, upstream and federated mission paths do not
+execute. Supervision and companion authorization vocabularies remain outside
+this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).
 
