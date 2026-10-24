@@ -169,6 +169,16 @@ fn person_binding_and_direct_grant_retain_identity_and_clip_parent_expiry() {
         String::from_utf8_lossy(person_response.body())
     );
     assert_eq!(person_response.headers()["cache-control"], "no-store");
+    let published: Value = serde_json::from_slice(&server.metadata()).unwrap();
+    assert_eq!(
+        published,
+        json!({
+            "issuer": "https://ps.example",
+            "jwks_uri": "https://ps.example/.well-known/jwks.json",
+            "person_token_endpoint": "https://ps.example/person",
+            "auth_token_endpoint": "https://ps.example/token"
+        })
+    );
     let person = value(&person_response)["person_token"]
         .as_str()
         .unwrap()

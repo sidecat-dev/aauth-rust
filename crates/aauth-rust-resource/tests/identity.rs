@@ -79,7 +79,9 @@ fn unknown_capabilities_are_ignored_and_absence_assumes_none() {
     agent.sign(&mut with, 1000).unwrap();
     with.headers_mut().insert(
         "aauth-capabilities",
-        "interaction, not-a-registered-capability".parse().unwrap(),
+        "interaction; detail=\"ignored\", not-a-registered-capability"
+            .parse()
+            .unwrap(),
     );
     let Decision::Granted(plain) = resource.authorize(&without, 1000) else {
         panic!("absent capabilities denied")
