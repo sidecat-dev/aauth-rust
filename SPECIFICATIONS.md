@@ -35,9 +35,10 @@ carrying that signed digest. Mission creation, update, completion and control
 endpoints do not execute. AS, child, upstream and federated mission paths do not
 execute. A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
-it expects. It refuses a token whose Person Server, subject, account or tenant
-differs, and it does not treat the same subject at another server as a match.
-The hint is not that subject. Omitting the subject authorizes no one.
+it expects. A verified token whose Person Server, subject, account or tenant
+differs is refused with `403` `access_denied` and no `Signature-Error` header.
+The same subject at another server does not match. The hint is not that
+subject. Omitting the subject authorizes no one.
 Supervision and companion authorization vocabularies remain outside
 this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies

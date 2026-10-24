@@ -782,6 +782,14 @@ fn explicit_federation_pins_as_and_role_even_when_collocated() {
     );
 }
 
+fn assert_verified_mismatch(response: &http::Response<Vec<u8>>) {
+    assert_eq!(response.status(), 403);
+    assert!(!response.headers().contains_key("signature-error"));
+    assert!(!response.headers().contains_key("aauth-requirement"));
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(body["error"], "access_denied");
+}
+
 fn asked() -> AuthorizationAsk {
     AuthorizationAsk {
         ps: PS.into(),
@@ -857,8 +865,10 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
         other_tenant,
         replaced_tenant,
     ] {
-        let decision = resource.authorize_for(&signed(&auth(&claims)), NOW, "unused", &asked());
-        assert!(decision.into_result().is_err());
+        let response = resource
+            .authorize_for(&signed(&auth(&claims)), NOW, "unused", &asked())
+            .into_response();
+        assert_verified_mismatch(&response);
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
@@ -939,7 +949,7 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
     let refused = resource
         .authorize_for(&signed(&other), NOW, "hint-challenge", &asked())
         .into_response();
-    assert!(!refused.headers().contains_key("aauth-requirement"));
+    assert_verified_mismatch(&refused);
     let mut other_tenant_person = person_claims();
     other_tenant_person.tenant = Some("other-team".into());
     other_tenant_person.jti = "person-other-tenant".into();
@@ -952,7 +962,7 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
     let refused_tenant = resource
         .authorize_for(&signed(&other_tenant), NOW, "hint-challenge", &asked())
         .into_response();
-    assert!(!refused_tenant.headers().contains_key("aauth-requirement"));
+    assert_verified_mismatch(&refused_tenant);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -983,7 +993,7 @@ fn same_subject_from_another_person_server_does_not_match_the_ask() {
     let refused = resource
         .authorize_for(&signed(&foreign_person), NOW, "hint-challenge", &asked())
         .into_response();
-    assert!(!refused.headers().contains_key("aauth-requirement"));
+    assert_verified_mismatch(&refused);
     let mut foreign_auth = auth_claims();
     foreign_auth.iss = OTHER.into();
     foreign_auth.ps = OTHER.into();
@@ -991,11 +1001,10 @@ fn same_subject_from_another_person_server_does_not_match_the_ask() {
     foreign_auth.jti = "auth-other-ps".into();
     let foreign_auth =
         mint_auth_token(&SigningKey::from_seed([5; 32]), "other-1", &foreign_auth).unwrap();
-    assert!(
-        resource
+    assert_verified_mismatch(
+        &resource
             .authorize_for(&signed(&foreign_auth), NOW, "unused", &asked())
-            .into_result()
-            .is_err()
+            .into_response(),
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
@@ -1034,18 +1043,17 @@ fn same_subject_from_another_person_server_does_not_match_the_ask() {
     assert_eq!(context, "federated");
     access.ps = OTHER.into();
     access.jti = "auth-access-other-ps".into();
-    assert!(
-        federated
+    assert_verified_mismatch(
+        &federated
             .authorize_for(
                 &signed(
-                    &mint_auth_token(&SigningKey::from_seed([6; 32]), "as-1", &access).unwrap()
+                    &mint_auth_token(&SigningKey::from_seed([6; 32]), "as-1", &access).unwrap(),
                 ),
                 NOW,
                 "unused",
                 &asked(),
             )
-            .into_result()
-            .is_err()
+            .into_response(),
     );
     assert_eq!(federated_calls.load(Ordering::SeqCst), 1);
 }

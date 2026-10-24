@@ -411,10 +411,12 @@ where
     /// A Person challenge copies `login_hint` and `account` and still copies
     /// `sub` and `tenant` from the presented Person token. The Person token's
     /// `iss` and the Auth token's `ps` must be the asked Person Server, and
-    /// `sub`, `account` and `tenant` must match inside that namespace. The
-    /// hint is not compared to `sub` and is not shown to policy as an identity.
-    /// A missing or empty subject, an empty hint, account or tenant, or a `ps`
-    /// that is not a server identifier, is a host error.
+    /// `sub`, `account` and `tenant` must match inside that namespace. A
+    /// verified token that differs is `403` `access_denied` with no
+    /// `Signature-Error` header and does not reach policy. The hint is not
+    /// compared to `sub` and is not shown to policy as an identity. A missing
+    /// or empty subject, an empty hint, account or tenant, or a `ps` that is
+    /// not a server identifier, is a host error.
     pub fn authorize_for(
         &self,
         request: &Request<Vec<u8>>,
@@ -493,7 +495,7 @@ where
                 }
                 let (login_hint, account) = if let Some(asked) = asked {
                     if asked.person_differs(&claims.iss, &claims.sub, claims.tenant.as_deref()) {
-                        return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                        return Ok(AuthDecision::Forbidden);
                     }
                     (asked.login_hint.clone(), asked.account.clone())
                 } else {
@@ -565,7 +567,7 @@ where
                         claims.account.as_deref(),
                         claims.tenant.as_deref(),
                     ) {
-                        return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                        return Ok(AuthDecision::Forbidden);
                     }
                 }
                 let granted: Vec<&str> = claims.scope.as_deref().unwrap_or("").split(' ').collect();
