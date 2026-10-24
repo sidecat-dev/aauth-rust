@@ -179,13 +179,33 @@ fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
     response
 }
 
+/// Claims a Resource asked a Person Server to authorize.
+///
+/// `login_hint` is copied into the resource-token challenge. It is not an Auth
+/// subject. When it is set, `sub` is required and is the directed subject the
+/// Auth token must carry. `account` and `tenant` are exact expectations,
+/// including when they are absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizationAsk {
+    /// Hint forwarded unchanged. An empty string is a host error.
+    pub login_hint: Option<String>,
+    /// Directed subject required on the Auth token. Required with `login_hint`.
+    pub sub: Option<String>,
+    /// Account placed in the challenge and required again on the Auth token.
+    pub account: Option<String>,
+    /// Tenant copied from the presented Person token and required on the Auth token.
+    pub tenant: Option<String>,
+}
+
 /// PS authorization: credential/holder verification precedes policy.
 /// This Resource issues route challenges, not an explicit authorization endpoint.
 /// The default profile is missionless. [`Self::with_mission_context`] copies a
 /// verified Person mission digest into the challenge and admits a PS Auth token
 /// that carries one; host policy still decides whether that digest is the mission
-/// it asked for. Host keys implement the accepted issuer trust set; host policy
-/// owns account and person-record admission. A Person token is never admitted
+/// it asked for. [`PsAuthorizationResource::authorize`] does not ask for a login
+/// hint. [`PsAuthorizationResource::authorize_for`] does, and checks the Auth
+/// token against that ask. Host keys implement the accepted issuer trust set;
+/// host policy owns person-record admission. A Person token is never admitted
 /// as authorization.
 pub struct PsAuthorizationResource<K, P> {
     config: PsAuthorizationConfig,
@@ -348,7 +368,60 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti) {
+        match self.authorize_proved(request, now, challenge_jti, None) {
+            Ok(decision) => decision,
+            Err(error) => AuthDecision::SignatureFailure(error),
+        }
+    }
+    /// Verify one request, and compare its Auth token with `asked`.
+    ///
+    /// A Person challenge copies `login_hint` and `account` and still copies
+    /// `sub` and `tenant` from the presented Person token. Those presented
+    /// values must match the ask. An Auth token is admitted only when its
+    /// `sub`, `account` and `tenant` match the ask. The hint is not compared
+    /// to `sub` and is not shown to policy as an identity. A hint without a
+    /// subject, or an empty hint, account, subject or tenant, is a host error.
+    pub fn authorize_for(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        asked: &AuthorizationAsk,
+    ) -> AuthDecision<O::Context> {
+        if asked
+            .login_hint
+            .as_ref()
+            .is_some_and(|hint| hint.is_empty())
+            || asked
+                .account
+                .as_ref()
+                .is_some_and(|account| account.is_empty())
+            || asked.sub.as_ref().is_some_and(|sub| sub.is_empty())
+            || asked
+                .tenant
+                .as_ref()
+                .is_some_and(|tenant| tenant.is_empty())
+            || (asked.login_hint.is_some() && asked.sub.is_none())
+        {
+            return AuthDecision::InternalError;
+        }
+        let authority = match canonical_authority(request.uri()) {
+            Ok(value) => value,
+            Err(error) => return AuthDecision::SignatureFailure(SignatureFailure::Proof(error)),
+        };
+        if authority != self.authority {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
+        }
+        if !(0..=(1_i64 << 33) - 1).contains(&now) {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::InvalidClock));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|name| !request.headers().contains_key(*name))
+        {
+            return AuthDecision::PersonTokenRequired;
+        }
+        match self.authorize_proved(request, now, challenge_jti, Some(asked)) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -358,6 +431,7 @@ where
         request: &Request<Vec<u8>>,
         now: i64,
         challenge_jti: &str,
+        asked: Option<&AuthorizationAsk>,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
             .map_err(|error| match error {
@@ -397,6 +471,16 @@ where
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
+                let (login_hint, account) = if let Some(asked) = asked {
+                    if asked.sub.as_deref().is_some_and(|sub| sub != claims.sub)
+                        || asked.tenant.as_deref() != claims.tenant.as_deref()
+                    {
+                        return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                    }
+                    (asked.login_hint.clone(), asked.account.clone())
+                } else {
+                    (None, None)
+                };
                 let challenge = ResourceClaims {
                     iss: self.config.issuer.clone(),
                     dwk: "aauth-resource.json".into(),
@@ -416,8 +500,8 @@ where
                     iat: now,
                     exp: now.saturating_add(300),
                     scope: Some(self.config.scopes.join(" ")),
-                    account: None,
-                    login_hint: None,
+                    account,
+                    login_hint,
                     nbf: None,
                     tenant: claims.tenant.clone(),
                     mission_s256: if self.mission_context {
@@ -453,6 +537,15 @@ where
                     || unsupported_companion(&claims.extra)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                }
+                if let Some(asked) = asked {
+                    // The hint is not a subject. Only the asked claims authorize.
+                    if asked.sub.as_deref().is_some_and(|sub| sub != claims.sub)
+                        || asked.account.as_deref() != claims.account.as_deref()
+                        || asked.tenant.as_deref() != claims.tenant.as_deref()
+                    {
+                        return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                    }
                 }
                 let granted: Vec<&str> = claims.scope.as_deref().unwrap_or("").split(' ').collect();
                 if self

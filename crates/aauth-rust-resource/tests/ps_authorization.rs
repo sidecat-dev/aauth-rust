@@ -6,7 +6,8 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_resource::{
-    AuthDecision, BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig, PsAuthorizationResource,
+    AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig,
+    PsAuthorizationResource,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
@@ -398,6 +399,127 @@ fn superfluous_scope_descriptions_are_refused() -> bool {
         .is_err()
 }
 
+// Core70d6737: the Resource consumes authenticated mission context, not the
+// mission description or a host's human-review fixture. Existing public APIs
+// must preserve that context through the Person challenge and Auth admission.
+const CURRENT_MISSION: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+#[test]
+fn current_mission_person_context_reaches_the_signed_resource_challenge() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = resource(calls.clone(), true).with_mission_context();
+    let mut claims = person_claims();
+    claims.mission_s256 = Some(CURRENT_MISSION.into());
+    let compact = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &claims).unwrap();
+    let response = resource
+        .authorize(&signed(&compact), NOW, "mission-challenge")
+        .into_response();
+    let challenge = challenge_token(&response);
+    let verified = ResourceToken::parse(challenge)
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(
+        verified.claims().mission_s256.as_deref(),
+        Some(CURRENT_MISSION)
+    );
+    assert_eq!(verified.claims().presented_jti, claims.jti);
+    assert_eq!(verified.claims().ps, PS);
+    assert_eq!(verified.claims().sub, claims.sub);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "Person identity is not Auth admission"
+    );
+    agent()
+        .verify_resource_challenge(challenge, RESOURCE, PS, &compact, &keys(), NOW)
+        .unwrap();
+}
+
+#[test]
+fn current_mission_auth_digest_reaches_host_policy() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let policy: Policy = Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        if token.claims().mission_s256.as_deref() == Some(CURRENT_MISSION) {
+            Ok("approved-mission".to_owned())
+        } else {
+            Err(Deny)
+        }
+    });
+    let resource = PsAuthorizationResource::new(config(), keys(), policy)
+        .unwrap()
+        .with_mission_context();
+    let mut claims = auth_claims();
+    claims.mission_s256 = Some(CURRENT_MISSION.into());
+    let compact = auth(&claims);
+    let (verified, admitted) = resource
+        .authorize(&signed(&compact), NOW, "unused")
+        .into_result()
+        .expect("valid PS-issued mission Auth credential must reach host admission");
+    assert_eq!(
+        verified.claims().mission_s256.as_deref(),
+        Some(CURRENT_MISSION)
+    );
+    assert_eq!(verified.compact(), compact);
+    assert_eq!(admitted, "approved-mission");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    for substituted in [
+        None,
+        Some("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".to_owned()),
+    ] {
+        let mut changed = claims.clone();
+        changed.mission_s256 = substituted;
+        let response = resource
+            .authorize(&signed(&auth(&changed)), NOW, "unused")
+            .into_response();
+        assert_eq!(
+            response.status(),
+            403,
+            "host must refuse another/missing mission"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn federated_resource_refuses_a_mission_even_when_direct_context_is_enabled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let mut snapshots = keys().0;
+    snapshots.push(issuer_key(PS, "aauth-access.json", 3, "ps-1"));
+    let resource = PsAuthorizationResource::new_federated(
+        config(),
+        PS,
+        Keys(snapshots),
+        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok("should-not-run".to_owned())
+        }) as Policy,
+    )
+    .unwrap()
+    .with_mission_context();
+    let mut person = person_claims();
+    person.mission_s256 = Some(CURRENT_MISSION.into());
+    let person = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &person).unwrap();
+    let challenged = resource
+        .authorize(&signed(&person), NOW, "mission-challenge")
+        .into_response();
+    assert_eq!(challenged.status(), 401);
+    assert!(!challenged.headers().contains_key("aauth-requirement"));
+    let mut auth_claims = auth_claims();
+    auth_claims.mission_s256 = Some(CURRENT_MISSION.into());
+    auth_claims.iss = PS.into();
+    auth_claims.dwk = "aauth-access.json".into();
+    let admitted = resource
+        .authorize(&signed(&auth(&auth_claims)), NOW, "unused")
+        .into_result();
+    assert!(admitted.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn retained_agent_key_signs_person_and_auth_without_asserting_issuer_trust() {
     let agent = agent();
@@ -660,123 +782,94 @@ fn explicit_federation_pins_as_and_role_even_when_collocated() {
     );
 }
 
-// Core70d6737: the Resource consumes authenticated mission context, not the
-// mission description or a host's human-review fixture. Existing public APIs
-// must preserve that context through the Person challenge and Auth admission.
-const CURRENT_MISSION: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+fn asked() -> AuthorizationAsk {
+    AuthorizationAsk {
+        login_hint: Some("alice@example.com".into()),
+        sub: Some("directed-person".into()),
+        account: Some("acct-1".into()),
+        tenant: Some("team".into()),
+    }
+}
 
 #[test]
-fn current_mission_person_context_reaches_the_signed_resource_challenge() {
+fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let resource = resource(calls.clone(), true).with_mission_context();
-    let mut claims = person_claims();
-    claims.mission_s256 = Some(CURRENT_MISSION.into());
-    let compact = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &claims).unwrap();
+    let observed = calls.clone();
+    let resource = PsAuthorizationResource::new(
+        config(),
+        keys(),
+        Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(token.claims().sub, "directed-person");
+            assert_ne!(token.claims().sub, "alice@example.com");
+            Ok("checked".to_owned())
+        }) as Policy,
+    )
+    .unwrap();
     let response = resource
-        .authorize(&signed(&compact), NOW, "mission-challenge")
+        .authorize_for(&signed(&person()), NOW, "hint-challenge", &asked())
         .into_response();
-    let challenge = challenge_token(&response);
-    let verified = ResourceToken::parse(challenge)
+    let compact = challenge_token(&response);
+    let challenge = ResourceToken::parse(compact)
         .unwrap()
         .verify(&keys(), NOW)
         .unwrap();
     assert_eq!(
-        verified.claims().mission_s256.as_deref(),
-        Some(CURRENT_MISSION)
+        challenge.claims().login_hint.as_deref(),
+        Some("alice@example.com")
     );
-    assert_eq!(verified.claims().presented_jti, claims.jti);
-    assert_eq!(verified.claims().ps, PS);
-    assert_eq!(verified.claims().sub, claims.sub);
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "Person identity is not Auth admission"
-    );
-    agent()
-        .verify_resource_challenge(challenge, RESOURCE, PS, &compact, &keys(), NOW)
-        .unwrap();
-}
+    assert_eq!(challenge.claims().sub, "directed-person");
+    assert_eq!(challenge.claims().account.as_deref(), Some("acct-1"));
+    assert_eq!(challenge.claims().tenant.as_deref(), Some("team"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-#[test]
-fn current_mission_auth_digest_reaches_host_policy() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
-    let policy: Policy = Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
-        observed.fetch_add(1, Ordering::SeqCst);
-        if token.claims().mission_s256.as_deref() == Some(CURRENT_MISSION) {
-            Ok("approved-mission".to_owned())
-        } else {
-            Err(Deny)
-        }
-    });
-    let resource = PsAuthorizationResource::new(config(), keys(), policy)
-        .unwrap()
-        .with_mission_context();
-    let mut claims = auth_claims();
-    claims.mission_s256 = Some(CURRENT_MISSION.into());
-    let compact = auth(&claims);
+    let mut matching = auth_claims();
+    matching.account = Some("acct-1".into());
     let (verified, admitted) = resource
-        .authorize(&signed(&compact), NOW, "unused")
+        .authorize_for(&signed(&auth(&matching)), NOW, "unused", &asked())
         .into_result()
-        .expect("valid PS-issued mission Auth credential must reach host admission");
-    assert_eq!(
-        verified.claims().mission_s256.as_deref(),
-        Some(CURRENT_MISSION)
-    );
-    assert_eq!(verified.compact(), compact);
-    assert_eq!(admitted, "approved-mission");
+        .unwrap();
+    assert_eq!(verified.claims().sub, "directed-person");
+    assert_eq!(admitted, "checked");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    for substituted in [
-        None,
-        Some("AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE".to_owned()),
-    ] {
-        let mut changed = claims.clone();
-        changed.mission_s256 = substituted;
-        let response = resource
-            .authorize(&signed(&auth(&changed)), NOW, "unused")
-            .into_response();
-        assert_eq!(
-            response.status(),
-            403,
-            "host must refuse another/missing mission"
-        );
+    let mut hinted_subject = matching.clone();
+    hinted_subject.sub = "alice@example.com".into();
+    hinted_subject.jti = "auth-hint-subject".into();
+    let mut other_account = matching.clone();
+    other_account.account = None;
+    other_account.jti = "auth-other-account".into();
+    let mut other_tenant = matching.clone();
+    other_tenant.tenant = None;
+    other_tenant.jti = "auth-other-tenant".into();
+    for claims in [hinted_subject, other_account, other_tenant] {
+        let decision = resource.authorize_for(&signed(&auth(&claims)), NOW, "unused", &asked());
+        assert!(decision.into_result().is_err());
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-}
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-#[test]
-fn federated_resource_refuses_a_mission_even_when_direct_context_is_enabled() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
-    let mut snapshots = keys().0;
-    snapshots.push(issuer_key(PS, "aauth-access.json", 3, "ps-1"));
-    let resource = PsAuthorizationResource::new_federated(
-        config(),
-        PS,
-        Keys(snapshots),
-        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok("should-not-run".to_owned())
-        }) as Policy,
-    )
-    .unwrap()
-    .with_mission_context();
-    let mut person = person_claims();
-    person.mission_s256 = Some(CURRENT_MISSION.into());
-    let person = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &person).unwrap();
-    let challenged = resource
-        .authorize(&signed(&person), NOW, "mission-challenge")
+    let hint_without_subject = AuthorizationAsk {
+        sub: None,
+        ..asked()
+    };
+    let broken = resource
+        .authorize_for(
+            &signed(&auth(&matching)),
+            NOW,
+            "unused",
+            &hint_without_subject,
+        )
         .into_response();
-    assert_eq!(challenged.status(), 401);
-    assert!(!challenged.headers().contains_key("aauth-requirement"));
-    let mut auth_claims = auth_claims();
-    auth_claims.mission_s256 = Some(CURRENT_MISSION.into());
-    auth_claims.iss = PS.into();
-    auth_claims.dwk = "aauth-access.json".into();
-    let admitted = resource
-        .authorize(&signed(&auth(&auth_claims)), NOW, "unused")
-        .into_result();
-    assert!(admitted.is_err());
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(broken.status(), 500);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut other_person = person_claims();
+    other_person.sub = "someone-else".into();
+    other_person.jti = "person-else".into();
+    let other = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &other_person).unwrap();
+    let refused = resource
+        .authorize_for(&signed(&other), NOW, "hint-challenge", &asked())
+        .into_response();
+    assert!(!refused.headers().contains_key("aauth-requirement"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
