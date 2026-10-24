@@ -83,6 +83,30 @@ fn backoff_updates_deadline_and_terminal_delivery_stops_the_session() {
             .is_err()
     );
 }
+
+#[test]
+fn accept_returns_terminal_bytes_without_verifying_a_token() {
+    let mut session = PollSession::new(
+        "https://ps.example/token",
+        &pending(Requirement::Approval),
+        1000,
+        1100,
+    )
+    .unwrap();
+    let body = br#"{"auth_token":"not-a-jwt"}"#;
+    let terminal = Response::builder().status(200).body(body.to_vec()).unwrap();
+    let got = session.accept(terminal, 1005).unwrap().unwrap();
+    assert_eq!(got.body(), body);
+    assert!(matches!(
+        session.request(&agent(), 1005),
+        Err(PollError::Finished)
+    ));
+    assert!(
+        session
+            .accept(pending(Requirement::Approval), 1016)
+            .is_err()
+    );
+}
 #[test]
 fn changed_pending_location_and_expired_sessions_refuse_before_signing() {
     let a = agent();
