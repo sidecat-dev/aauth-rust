@@ -33,7 +33,13 @@ description, a negative approval time, and an expiry that is not strictly later
 than approval. Installing a record that is not active writes no person binding. The direct Resource can opt in to
 carrying that signed digest. Mission creation, update, completion and control
 endpoints do not execute. AS, child, upstream and federated mission paths do not
-execute. Supervision and companion authorization vocabularies remain outside
+execute. A Resource that asks for a
+`login_hint` also names the Person Server, directed subject, account and tenant
+it expects. A verified token whose Person Server, subject, account or tenant
+differs is refused with `403` `access_denied` and no `Signature-Error` header.
+The same subject at another server does not match. The hint is not that
+subject. Omitting the subject authorizes no one.
+Supervision and companion authorization vocabularies remain outside
 this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).
