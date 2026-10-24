@@ -784,6 +784,7 @@ fn explicit_federation_pins_as_and_role_even_when_collocated() {
 
 fn asked() -> AuthorizationAsk {
     AuthorizationAsk {
+        ps: PS.into(),
         login_hint: Some("alice@example.com".into()),
         sub: Some("directed-person".into()),
         account: Some("acct-1".into()),
@@ -818,6 +819,7 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
         challenge.claims().login_hint.as_deref(),
         Some("alice@example.com")
     );
+    assert_eq!(challenge.claims().ps, PS);
     assert_eq!(challenge.claims().sub, "directed-person");
     assert_eq!(challenge.claims().account.as_deref(), Some("acct-1"));
     assert_eq!(challenge.claims().tenant.as_deref(), Some("team"));
@@ -839,16 +841,33 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
     let mut other_account = matching.clone();
     other_account.account = None;
     other_account.jti = "auth-other-account".into();
+    let mut replaced_account = matching.clone();
+    replaced_account.account = Some("acct-2".into());
+    replaced_account.jti = "auth-replaced-account".into();
     let mut other_tenant = matching.clone();
     other_tenant.tenant = None;
     other_tenant.jti = "auth-other-tenant".into();
-    for claims in [hinted_subject, other_account, other_tenant] {
+    let mut replaced_tenant = matching.clone();
+    replaced_tenant.tenant = Some("other-team".into());
+    replaced_tenant.jti = "auth-replaced-tenant".into();
+    for claims in [
+        hinted_subject,
+        other_account,
+        replaced_account,
+        other_tenant,
+        replaced_tenant,
+    ] {
         let decision = resource.authorize_for(&signed(&auth(&claims)), NOW, "unused", &asked());
         assert!(decision.into_result().is_err());
     }
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let hint_without_subject = AuthorizationAsk {
+        sub: None,
+        ..asked()
+    };
+    let subject_without_hint = AuthorizationAsk {
+        login_hint: None,
         sub: None,
         ..asked()
     };
@@ -861,7 +880,57 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
         )
         .into_response();
     assert_eq!(broken.status(), 500);
+    let open_account = resource
+        .authorize_for(
+            &signed(&auth(&matching)),
+            NOW,
+            "unused",
+            &subject_without_hint,
+        )
+        .into_response();
+    assert_eq!(open_account.status(), 500);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    for ask in [
+        AuthorizationAsk {
+            ps: String::new(),
+            ..asked()
+        },
+        AuthorizationAsk {
+            sub: Some(String::new()),
+            ..asked()
+        },
+        AuthorizationAsk {
+            login_hint: Some(String::new()),
+            ..asked()
+        },
+        AuthorizationAsk {
+            account: Some(String::new()),
+            ..asked()
+        },
+        AuthorizationAsk {
+            tenant: Some(String::new()),
+            ..asked()
+        },
+    ] {
+        assert_eq!(
+            resource
+                .authorize_for(&signed(&auth(&matching)), NOW, "unused", &ask)
+                .into_response()
+                .status(),
+            500
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let no_hint = AuthorizationAsk {
+        login_hint: None,
+        ..asked()
+    };
+    let still = resource
+        .authorize_for(&signed(&auth(&matching)), NOW, "unused", &no_hint)
+        .into_result()
+        .unwrap();
+    assert_eq!(still.0.claims().sub, "directed-person");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 
     let mut other_person = person_claims();
     other_person.sub = "someone-else".into();
@@ -871,5 +940,112 @@ fn resource_checks_auth_claims_against_the_ask_and_not_the_login_hint() {
         .authorize_for(&signed(&other), NOW, "hint-challenge", &asked())
         .into_response();
     assert!(!refused.headers().contains_key("aauth-requirement"));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut other_tenant_person = person_claims();
+    other_tenant_person.tenant = Some("other-team".into());
+    other_tenant_person.jti = "person-other-tenant".into();
+    let other_tenant = mint_person_token(
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &other_tenant_person,
+    )
+    .unwrap();
+    let refused_tenant = resource
+        .authorize_for(&signed(&other_tenant), NOW, "hint-challenge", &asked())
+        .into_response();
+    assert!(!refused_tenant.headers().contains_key("aauth-requirement"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn same_subject_from_another_person_server_does_not_match_the_ask() {
+    const OTHER: &str = "https://other-ps.example";
+    const ACCESS: &str = "https://as.example";
+    let mut snapshots = keys().0;
+    snapshots.push(issuer_key(OTHER, "aauth-person.json", 5, "other-1"));
+    snapshots.push(issuer_key(ACCESS, "aauth-access.json", 6, "as-1"));
+    let keyset = Keys(snapshots);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let resource = PsAuthorizationResource::new(
+        config(),
+        keyset.clone(),
+        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok("checked".to_owned())
+        }) as Policy,
+    )
+    .unwrap();
+    let mut foreign_person = person_claims();
+    foreign_person.iss = OTHER.into();
+    foreign_person.jti = "person-other-ps".into();
+    let foreign_person =
+        mint_person_token(&SigningKey::from_seed([5; 32]), "other-1", &foreign_person).unwrap();
+    let refused = resource
+        .authorize_for(&signed(&foreign_person), NOW, "hint-challenge", &asked())
+        .into_response();
+    assert!(!refused.headers().contains_key("aauth-requirement"));
+    let mut foreign_auth = auth_claims();
+    foreign_auth.iss = OTHER.into();
+    foreign_auth.ps = OTHER.into();
+    foreign_auth.account = Some("acct-1".into());
+    foreign_auth.jti = "auth-other-ps".into();
+    let foreign_auth =
+        mint_auth_token(&SigningKey::from_seed([5; 32]), "other-1", &foreign_auth).unwrap();
+    assert!(
+        resource
+            .authorize_for(&signed(&foreign_auth), NOW, "unused", &asked())
+            .into_result()
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let federated_calls = Arc::new(AtomicUsize::new(0));
+    let federated_observed = federated_calls.clone();
+    let federated = PsAuthorizationResource::new_federated(
+        config(),
+        ACCESS,
+        keyset,
+        Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            federated_observed.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(token.claims().ps, PS);
+            Ok("federated".to_owned())
+        }) as Policy,
+    )
+    .unwrap();
+    let admitted = federated
+        .authorize_for(&signed(&person()), NOW, "fed-challenge", &asked())
+        .into_response();
+    assert!(admitted.headers().contains_key("aauth-requirement"));
+    let mut access = auth_claims();
+    access.iss = ACCESS.into();
+    access.dwk = "aauth-access.json".into();
+    access.account = Some("acct-1".into());
+    access.jti = "auth-access".into();
+    let (verified, context) = federated
+        .authorize_for(
+            &signed(&mint_auth_token(&SigningKey::from_seed([6; 32]), "as-1", &access).unwrap()),
+            NOW,
+            "unused",
+            &asked(),
+        )
+        .into_result()
+        .unwrap();
+    assert_eq!(verified.claims().ps, PS);
+    assert_eq!(context, "federated");
+    access.ps = OTHER.into();
+    access.jti = "auth-access-other-ps".into();
+    assert!(
+        federated
+            .authorize_for(
+                &signed(
+                    &mint_auth_token(&SigningKey::from_seed([6; 32]), "as-1", &access).unwrap()
+                ),
+                NOW,
+                "unused",
+                &asked(),
+            )
+            .into_result()
+            .is_err()
+    );
+    assert_eq!(federated_calls.load(Ordering::SeqCst), 1);
 }

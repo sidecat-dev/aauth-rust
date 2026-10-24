@@ -181,20 +181,53 @@ fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
 
 /// Claims a Resource asked a Person Server to authorize.
 ///
-/// `login_hint` is copied into the resource-token challenge. It is not an Auth
-/// subject. When it is set, `sub` is required and is the directed subject the
-/// Auth token must carry. `account` and `tenant` are exact expectations,
+/// `ps` is that Person Server. A Person token must carry it as `iss` and an
+/// Auth token must carry it as `ps`. `sub` and `tenant` are compared only in
+/// that namespace, so the same subject string from another server does not
+/// match. `sub` is required on every ask; omitting it is a host error and
+/// authorizes no one. `login_hint` is copied into the resource-token challenge
+/// and is not an Auth subject. `account` and `tenant` are exact expectations,
 /// including when they are absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuthorizationAsk {
+    /// Person Server namespace for `sub` and `tenant`.
+    pub ps: String,
     /// Hint forwarded unchanged. An empty string is a host error.
     pub login_hint: Option<String>,
-    /// Directed subject required on the Auth token. Required with `login_hint`.
+    /// Directed subject required on the Person token and the Auth token.
+    /// `None` and an empty string are host errors, not wildcards.
     pub sub: Option<String>,
     /// Account placed in the challenge and required again on the Auth token.
     pub account: Option<String>,
-    /// Tenant copied from the presented Person token and required on the Auth token.
+    /// Tenant required on the Person token and the Auth token, under `ps`.
     pub tenant: Option<String>,
+}
+impl AuthorizationAsk {
+    fn host_error(&self) -> bool {
+        validate_server_identifier(&self.ps).is_err()
+            || self.sub.as_ref().is_none_or(|sub| sub.is_empty())
+            || self.login_hint.as_ref().is_some_and(|hint| hint.is_empty())
+            || self
+                .account
+                .as_ref()
+                .is_some_and(|account| account.is_empty())
+            || self.tenant.as_ref().is_some_and(|tenant| tenant.is_empty())
+    }
+    fn person_differs(&self, iss: &str, sub: &str, tenant: Option<&str>) -> bool {
+        self.ps != iss || self.sub.as_deref() != Some(sub) || self.tenant.as_deref() != tenant
+    }
+    fn auth_differs(
+        &self,
+        ps: &str,
+        sub: &str,
+        account: Option<&str>,
+        tenant: Option<&str>,
+    ) -> bool {
+        self.ps != ps
+            || self.sub.as_deref() != Some(sub)
+            || self.account.as_deref() != account
+            || self.tenant.as_deref() != tenant
+    }
 }
 
 /// PS authorization: credential/holder verification precedes policy.
@@ -376,11 +409,12 @@ where
     /// Verify one request, and compare its Auth token with `asked`.
     ///
     /// A Person challenge copies `login_hint` and `account` and still copies
-    /// `sub` and `tenant` from the presented Person token. Those presented
-    /// values must match the ask. An Auth token is admitted only when its
-    /// `sub`, `account` and `tenant` match the ask. The hint is not compared
-    /// to `sub` and is not shown to policy as an identity. A hint without a
-    /// subject, or an empty hint, account, subject or tenant, is a host error.
+    /// `sub` and `tenant` from the presented Person token. The Person token's
+    /// `iss` and the Auth token's `ps` must be the asked Person Server, and
+    /// `sub`, `account` and `tenant` must match inside that namespace. The
+    /// hint is not compared to `sub` and is not shown to policy as an identity.
+    /// A missing or empty subject, an empty hint, account or tenant, or a `ps`
+    /// that is not a server identifier, is a host error.
     pub fn authorize_for(
         &self,
         request: &Request<Vec<u8>>,
@@ -388,21 +422,7 @@ where
         challenge_jti: &str,
         asked: &AuthorizationAsk,
     ) -> AuthDecision<O::Context> {
-        if asked
-            .login_hint
-            .as_ref()
-            .is_some_and(|hint| hint.is_empty())
-            || asked
-                .account
-                .as_ref()
-                .is_some_and(|account| account.is_empty())
-            || asked.sub.as_ref().is_some_and(|sub| sub.is_empty())
-            || asked
-                .tenant
-                .as_ref()
-                .is_some_and(|tenant| tenant.is_empty())
-            || (asked.login_hint.is_some() && asked.sub.is_none())
-        {
+        if asked.host_error() {
             return AuthDecision::InternalError;
         }
         let authority = match canonical_authority(request.uri()) {
@@ -472,9 +492,7 @@ where
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 let (login_hint, account) = if let Some(asked) = asked {
-                    if asked.sub.as_deref().is_some_and(|sub| sub != claims.sub)
-                        || asked.tenant.as_deref() != claims.tenant.as_deref()
-                    {
+                    if asked.person_differs(&claims.iss, &claims.sub, claims.tenant.as_deref()) {
                         return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                     }
                     (asked.login_hint.clone(), asked.account.clone())
@@ -539,11 +557,14 @@ where
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 if let Some(asked) = asked {
-                    // The hint is not a subject. Only the asked claims authorize.
-                    if asked.sub.as_deref().is_some_and(|sub| sub != claims.sub)
-                        || asked.account.as_deref() != claims.account.as_deref()
-                        || asked.tenant.as_deref() != claims.tenant.as_deref()
-                    {
+                    // The hint is not a subject. The asked Person Server and
+                    // claims authorize; a bare subject from another server does not.
+                    if asked.auth_differs(
+                        &claims.ps,
+                        &claims.sub,
+                        claims.account.as_deref(),
+                        claims.tenant.as_deref(),
+                    ) {
                         return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                     }
                 }
