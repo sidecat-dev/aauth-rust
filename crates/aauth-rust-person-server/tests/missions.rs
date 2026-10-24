@@ -353,8 +353,15 @@ fn current_mission_wrong_owner_digest_ps_and_terminal_state_never_reach_policy()
         assert_ne!(response.status(), 200, "mode {mode}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         if mode >= 3 {
+            let body = value(&response);
             assert_eq!(response.status(), 403);
-            assert_eq!(value(&response)["error"], "mission_terminated");
+            assert_eq!(body["error"], "mission_terminated");
+            assert_eq!(body["mission_status"], "terminated");
+            assert_eq!(
+                body["termination_reason"],
+                if mode == 3 { "expired" } else { "revoked" }
+            );
+            assert_ne!(body["mission_status"], body["termination_reason"]);
         }
     }
 }
