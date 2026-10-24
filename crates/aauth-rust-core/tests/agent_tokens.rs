@@ -138,9 +138,32 @@ fn identifiers_are_exact_and_do_not_accept_url_normalization() {
         "aauth:a b@ap.example",
         "agent@ap.example",
         "aauth:a@AP.example",
+        &format!("aauth:{}@ap.example", "a".repeat(256)),
     ] {
         assert!(validate_agent_identifier(bad).is_err(), "{bad}");
     }
+    validate_agent_identifier(&format!("aauth:{}@ap.example", "a".repeat(255))).unwrap();
+}
+
+#[test]
+fn agent_identifiers_that_differ_only_by_local_case_stay_distinct() {
+    let (ap, _, mut claims, keys) = fixture();
+    claims.sub = "aauth:Agent@ap.example".into();
+    let upper = mint(&ap, &claims, "aa-agent+jwt");
+    claims.sub = "aauth:agent@ap.example".into();
+    claims.jti = "token-2".into();
+    let lower = mint(&ap, &claims, "aa-agent+jwt");
+    let upper = AgentToken::parse(&upper)
+        .unwrap()
+        .verify(&keys, 1000)
+        .unwrap();
+    let lower = AgentToken::parse(&lower)
+        .unwrap()
+        .verify(&keys, 1000)
+        .unwrap();
+    assert_eq!(upper.claims().sub, "aauth:Agent@ap.example");
+    assert_eq!(lower.claims().sub, "aauth:agent@ap.example");
+    assert_ne!(upper.claims().sub, lower.claims().sub);
 }
 
 #[test]

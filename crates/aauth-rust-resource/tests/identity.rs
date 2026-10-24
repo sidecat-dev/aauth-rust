@@ -71,6 +71,27 @@ fn direct_identity_is_verified_before_policy_sees_it() {
 }
 
 #[test]
+fn unknown_capabilities_are_ignored_and_absence_assumes_none() {
+    let (agent, resource) = composition();
+    let mut without = request();
+    agent.sign(&mut without, 1000).unwrap();
+    let mut with = request();
+    agent.sign(&mut with, 1000).unwrap();
+    with.headers_mut().insert(
+        "aauth-capabilities",
+        "interaction, not-a-registered-capability".parse().unwrap(),
+    );
+    let Decision::Granted(plain) = resource.authorize(&without, 1000) else {
+        panic!("absent capabilities denied")
+    };
+    let Decision::Granted(declared) = resource.authorize(&with, 1000) else {
+        panic!("unknown capabilities denied")
+    };
+    assert_eq!(plain.claims().sub, declared.claims().sub);
+    assert_eq!(plain.claims().sub, "aauth:Agent@ap.example");
+}
+
+#[test]
 fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
     let (_, resource) = composition();
     let key = SigningKey::from_seed([2; 32]);

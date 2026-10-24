@@ -18,8 +18,12 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
 four-party federation. The proof subset is Ed25519 `hwk`/`jwt` plus explicit
-`jwks_uri` service proofs. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
-approval and WWW-Authenticate payment with signed polling. Settlement and
+`jwks_uri` service proofs. A `keyid` parameter is accepted only when it equals
+the `kid` carried by that Signature-Key member; the key still comes from
+Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
+approval and WWW-Authenticate payment with signed polling. An Agent also parses
+a Resource `202` `requirement=auth-token` and polls it with a retained auth
+token. The Resource does not hold that invocation. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal
@@ -30,7 +34,8 @@ approved top-level mission and have the immediate PS consume it: exact blob
 identity, active state, owner, person binding and expiry are checked in the same
 store transaction as Person and Auth issuance. The decoder refuses an empty
 description, a negative approval time, and an expiry that is not strictly later
-than approval. Installing a record that is not active writes no person binding. The direct Resource can opt in to
+than approval. Installing a record that is not active writes no person binding.
+An empty administrative termination reason is refused before the record changes. The direct Resource can opt in to
 carrying that signed digest. Mission creation, update, completion and control
 endpoints do not execute. AS, child, upstream and federated mission paths do not
 execute. A Resource that asks for a
@@ -38,7 +43,7 @@ execute. A Resource that asks for a
 it expects. A verified token whose Person Server, subject, account or tenant
 differs is refused with `403` `access_denied` and no `Signature-Error` header.
 The same subject at another server does not match. The hint is not that
-subject. Omitting the subject authorizes no one.
+subject. The directed subject is a required string; an empty subject authorizes no one.
 Supervision and companion authorization vocabularies remain outside
 this subset.
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
