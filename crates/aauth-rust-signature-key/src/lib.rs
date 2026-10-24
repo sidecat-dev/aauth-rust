@@ -60,8 +60,10 @@ pub enum Error {
     )]
     /// Clock or verification window is outside the nonnegative Unix-second profile.
     InvalidClock,
-    /// keyid is unsupported by this profile: identify the key in Signature-Key instead.
-    #[error("keyid is unsupported by this profile: identify the key in Signature-Key instead")]
+    /// `keyid` does not name the same key Signature-Key already carries.
+    #[error(
+        "keyid must equal the kid of the Signature-Key member; the verifier takes the key from Signature-Key, and hwk has no kid"
+    )]
     UnsupportedKeyId,
     #[error(
         "request target differs from this Resource endpoint: sign for its configured HTTPS authority and path"
@@ -222,6 +224,23 @@ fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
             })
         }
         _ => Err(Error::UnsupportedScheme),
+    }
+}
+/// Identifier the Signature-Key member itself carries. `hwk` has none.
+fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
+    match key {
+        KeyMaterial::Hwk(_) => Ok(None),
+        KeyMaterial::JwksUri { kid, .. } => Ok(Some(kid.clone())),
+        KeyMaterial::Jwt(compact) => {
+            let header = aauth_rust_jose::Jws::parse(compact)
+                .map_err(|_| Error::InvalidKey)?
+                .header()
+                .get("kid")
+                .and_then(|value| value.as_str())
+                .filter(|kid| !kid.is_empty())
+                .map(str::to_owned);
+            Ok(header)
+        }
     }
 }
 fn quoted(value: &str) -> Result<String, Error> {
@@ -402,9 +421,6 @@ impl PreparedRequest {
         if created > now.saturating_add(window) {
             return Err(Error::ClockSkew);
         }
-        if input.params.contains_key("keyid") {
-            return Err(Error::UnsupportedKeyId);
-        }
         if let Some(expires) = input.params.get("expires") {
             match expires {
                 BareItem::Integer(n) if i64::from(*n) > now && i64::from(*n) > created => {}
@@ -423,6 +439,15 @@ impl PreparedRequest {
             return Err(Error::UnsupportedScheme);
         }
         let key = parse_key(entry)?;
+        if let Some(keyid) = input.params.get("keyid") {
+            let BareItem::String(keyid) = keyid else {
+                return Err(Error::InvalidSignature);
+            };
+            match key_identifier(&key)? {
+                Some(kid) if kid == keyid.as_str() => {}
+                _ => return Err(Error::UnsupportedKeyId),
+            }
+        }
         let signatures = dictionary(req, "signature")?;
         let Some(ListEntry::Item(signature)) = signatures.get(label) else {
             return Err(Error::InvalidSignature);

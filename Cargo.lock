@@ -132,6 +132,7 @@ dependencies = [
  "aauth-rust-jose",
  "base64",
  "http",
+ "serde_json",
  "sfv",
  "sha2",
  "thiserror",

@@ -1,6 +1,7 @@
-use aauth_rust_jose::SigningKey;
+use aauth_rust_jose::{Jws, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, sign_request};
 use http::Request;
+use serde_json::json;
 
 fn request() -> Request<Vec<u8>> {
     Request::builder()
@@ -340,6 +341,102 @@ fn signature_alg_parameter_is_ignored_but_keyid_is_explicitly_unsupported() {
             .unwrap()
             .code(),
         "invalid_signature"
+    );
+}
+
+#[test]
+fn keyid_must_equal_the_kid_carried_by_signature_key() {
+    let key = SigningKey::from_seed([3; 32]);
+    let token = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-1"}),
+        b"{}",
+        &key,
+    )
+    .unwrap();
+    let mut req = request();
+    sign_request(&mut req, &key, KeyMaterial::Jwt(token), 1000).unwrap();
+    let base = req.headers()["signature-input"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    req.headers_mut().insert(
+        "signature-input",
+        format!("{base};keyid=\"ap-1\"").parse().unwrap(),
+    );
+    resign(&mut req, &key);
+    PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    req.headers_mut().insert(
+        "signature-input",
+        format!("{base};keyid=\"other\"").parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedKeyId
+    );
+    req.headers_mut().insert(
+        "signature-input",
+        format!("{base};keyid=1").parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    let mut service = Request::builder()
+        .method("POST")
+        .uri("https://as.example/token")
+        .header("content-type", "application/json")
+        .body(b"{}".to_vec())
+        .unwrap();
+    sign_request(
+        &mut service,
+        &key,
+        KeyMaterial::JwksUri {
+            id: "https://ps.example".into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps-key".into(),
+        },
+        1000,
+    )
+    .unwrap();
+    let service_base = service.headers()["signature-input"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    service.headers_mut().insert(
+        "signature-input",
+        format!("{service_base};keyid=\"ps-key\"").parse().unwrap(),
+    );
+    resign_with(&mut service, &key, &["jwks_uri"]);
+    PreparedRequest::prepare_with_schemes(&service, "sig", 1000, 60, &["jwks_uri"])
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    service.headers_mut().insert(
+        "signature-input",
+        format!("{service_base};keyid=\"other\"").parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&service, "sig", 1000, 60, &["jwks_uri"])
+            .unwrap_err(),
+        Error::UnsupportedKeyId
+    );
+}
+
+fn resign_with(req: &mut Request<Vec<u8>>, key: &SigningKey, schemes: &[&str]) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let base = PreparedRequest::prepare_with_schemes(req, "sig", 1000, 60, schemes)
+        .unwrap()
+        .signature_base()
+        .to_vec();
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode(key.sign(&base)))
+            .parse()
+            .unwrap(),
     );
 }
 
