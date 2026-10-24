@@ -19,7 +19,8 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
   there. This is deliberately separate from the unimplemented mission endpoint's
   mission_not_found. Both lookup misses use an owner-qualified key. Owned terminal
   missions return mission_terminated with mission_status terminated and an opaque
-  termination_reason. The reason never permits reactivation.
+  termination_reason. The reason never permits reactivation. An empty reason is
+  refused before the record changes; the draft does not define the empty string.
 - Store::missions is optional and closed by default; mission checks and issuance
   retention must be atomic in the same store. Expiry/termination/revocation during
   policy or commit withholds credentials even if an internal issuance row was
