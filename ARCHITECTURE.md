@@ -150,3 +150,17 @@ pending delivery without invalidating credentials already delivered. Both memory
 and redb stores execute the expanded logical and consuming reopen contracts.
 Local AP issuance verifies the actual parent token; no identifier parsing grants
 authority. This profile refuses recursive delegation and child/upstream chaining.
+
+## Approved mission boundary
+
+Core ApprovedMission verifies exact document identity and current member shape,
+without authenticating approval. PS MissionRecord adds the trusted PS, complete
+Agent owner, independently authenticated private person and permanent state.
+Store::missions defaults to None. An implementation returning MissionStore must
+share the SAME issuance transaction; a separate check followed by Store::commit
+is insufficient. MemoryStore holds both under its existing mutex. redb remains
+mission unsupported. Policy receives owned verified mission context; credential
+release rechecks state, binding and current time after host work. A direct
+Resource receives signed mission context only after `with_mission_context`;
+otherwise it refuses the digest before policy. Host policy still admits the
+payload. Core never imports the role or storage adapter.

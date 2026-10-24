@@ -402,3 +402,35 @@ checks/examples, these cross-target checks and the workspace package dry-run,
 and retains the Linux demo binary and nine verified crate archives for 14 days. ARM64 and Windows checks do not qualify runtime behavior. macOS is
 unverified; earlier platform evidence remains tied to its original revisions. The declared minimum toolchain is 1.99.
 License: [MIT](LICENSE).
+
+## Consuming a separately approved mission
+
+The top-level immediate PS/Resource path supports Core scopes with a mission
+that the host has already approved. Decode its exact persisted base64url bytes
+and digest with `aauth_rust_core::ApprovedMission::decode`. Authenticate the
+approving PS beside the digest and independently obtain the private person and
+complete Agent identity. Install a `MissionRecord` through
+`MemoryStore::install_approved_mission`, then use that same store in PersonServer.
+The record includes `person_server`, `owner`, `person_id`, `document` and
+`MissionState::Active`. Installation is a host administration interface, never
+proof of human approval or a login/mission-creation endpoint.
+
+A signed `/person` request may include `mission_s256`. Policy receives a verified
+`PersonRequest.mission`; its returned private person must match the approval.
+The native PS caps the Person token. A direct Resource that calls
+`with_mission_context` preserves the signed mission digest in its challenge;
+redeem it at the PS with the exact presented token. Without that opt-in the
+Resource refuses a mission-bearing credential before policy.
+`AuthorizationRequest.mission` supplies the verified current host context, while
+policy returns only requested scopes. The PS retains issuance atomically with
+mission checks and caps Auth expiry. Resource host policy still enforces the
+actual operation, revision and payload. A blob, Person token or waiting exchange
+is not an Auth grant.
+
+Existing stores default to mission unsupported. A custom MissionStore must share
+the Store's atomic boundary; a two-store precheck is insufficient. The reference
+store is volatile and terminates permanently, including expiry. The redb adapter
+does not support this extension. AS, child/chained/federated missions, creation,
+human review UI, automatic Resource revocation delivery and R3 remain excluded.
+The public request/store controls are in the PS `tests/missions.rs`; scope and
+interpretation details are in CONFORMANCE.md and INTERPRETATIONS.md.

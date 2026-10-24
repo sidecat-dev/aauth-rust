@@ -72,7 +72,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
         };
         check_parameter_iat(value.iat, now)?;
-        if value.mission.is_some() {
+        if value.mission.is_some() && (parameter == "upstream" || self.federation.is_some()) {
             return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
         }
         Ok(value)
