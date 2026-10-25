@@ -282,8 +282,9 @@ fn request_builders_preserve_exact_child_credentials_and_use_parent_proof() {
     let body: Value = serde_json::from_slice(person_request.body()).unwrap();
     assert_eq!(
         body,
-        json!({"resource":RESOURCE,"subagent_token":child.token().compact()})
+        json!({"resource":RESOURCE,"subagent_token":child.token().compact(),"capabilities":["budget"]})
     );
+    assert_eq!(person_request.headers()["aauth-capabilities"], "budget");
     let person = signed("person", &person(), 4);
     let resource = child
         .verify_resource_challenge(
@@ -311,6 +312,8 @@ fn request_builders_preserve_exact_child_credentials_and_use_parent_proof() {
     assert_eq!(body["presented_token"], person);
     assert_eq!(body["subagent_token"], child.token().compact());
     assert_eq!(body["login_hint"], "person@example.com");
+    assert_eq!(body["capabilities"], json!(["budget"]));
+    assert_eq!(auth_request.headers()["aauth-capabilities"], "budget");
     for request in [person_request, auth_request] {
         let proof = PreparedRequest::prepare(&request, "sig", 1000, 60).unwrap();
         assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == parent.token()));
