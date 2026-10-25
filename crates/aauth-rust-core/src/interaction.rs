@@ -8,7 +8,7 @@
 
 use http::{Response, StatusCode, Uri};
 
-use crate::continuation::is_emitted_interaction_code;
+use crate::continuation::{PendingResponse, Requirement, is_emitted_interaction_code};
 
 /// The interaction URL or callback is not an HTTPS URL without a query or fragment,
 /// the code cannot be emitted, or the host refused egress.
@@ -204,6 +204,164 @@ pub fn receive_callback(query: Option<&str>) -> CallbackReceipt {
             .map(CallbackError::polling_error)
             .unwrap_or("server_error"),
     }
+}
+
+/// One interaction propagated to the caller that started this resource.
+///
+/// The caller's pending response uses this resource's location and code.
+/// [`ChainedInteraction::poll`] returns the stored result once to the opener,
+/// at or before `exp`, and answers `410` after that. A different caller receives
+/// an empty `404`.
+pub struct ChainedInteraction {
+    shown: PendingResponse,
+    caller: String,
+    expires_at: i64,
+    downstream_url: String,
+    downstream_code: String,
+    result: Option<StoredResult>,
+    delivered: bool,
+}
+
+struct StoredResult {
+    content_type: Option<String>,
+    body: Vec<u8>,
+}
+
+impl ChainedInteraction {
+    /// Propagate a downstream interaction as this resource's own `202`.
+    ///
+    /// # Errors
+    /// Returns [`InteractionError`] when `downstream` is not
+    /// `requirement=interaction`, when `caller` is empty or not a single token,
+    /// when `expires_at` is negative, or when this resource's URL, code, or
+    /// pending location cannot be emitted.
+    ///
+    /// `caller` is the opener's key thumbprint or the `jti` of an auth token
+    /// the host already verified. This ledger does not verify that token.
+    pub fn open(
+        downstream: &PendingResponse,
+        endpoint: &str,
+        location: &str,
+        interaction_url: &str,
+        code: &str,
+        caller: &str,
+        expires_at: i64,
+    ) -> Result<Self, InteractionError> {
+        let Requirement::Interaction {
+            url: downstream_url,
+            code: downstream_code,
+        } = &downstream.requirement
+        else {
+            return Err(InteractionError);
+        };
+        bound_caller(caller)?;
+        if expires_at < 0 {
+            return Err(InteractionError);
+        }
+        https_target(interaction_url)?;
+        if !is_emitted_interaction_code(code) {
+            return Err(InteractionError);
+        }
+        let shown = PendingResponse::new(
+            endpoint,
+            location,
+            downstream.retry_after,
+            Requirement::Interaction {
+                url: interaction_url.to_owned(),
+                code: code.to_owned(),
+            },
+        )
+        .map_err(|_| InteractionError)?;
+        Ok(Self {
+            shown,
+            caller: caller.to_owned(),
+            expires_at,
+            downstream_url: downstream_url.clone(),
+            downstream_code: downstream_code.clone(),
+            result: None,
+            delivered: false,
+        })
+    }
+
+    /// Downstream interaction URL and code retained from `open`.
+    pub fn downstream(&self) -> (&str, &str) {
+        (&self.downstream_url, &self.downstream_code)
+    }
+
+    /// The opener's next poll.
+    ///
+    /// A different `caller` gets an empty `404`. At or before `expires_at`, the
+    /// opener gets the interaction `202` until [`Self::complete`], then the
+    /// stored result once. A later poll, and any poll after `expires_at`, is
+    /// empty `410`.
+    ///
+    /// # Errors
+    /// Returns [`InteractionError`] when the interaction `202` cannot be rendered.
+    pub fn poll(&mut self, caller: &str, now: i64) -> Result<Response<Vec<u8>>, InteractionError> {
+        if caller != self.caller {
+            return Ok(empty(StatusCode::NOT_FOUND));
+        }
+        if now > self.expires_at || self.delivered {
+            return Ok(empty(StatusCode::GONE));
+        }
+        let Some(result) = &self.result else {
+            return self.shown.response().map_err(|_| InteractionError);
+        };
+        self.delivered = true;
+        let mut response = Response::builder().status(StatusCode::OK);
+        if let Some(content_type) = &result.content_type {
+            response = response.header("content-type", content_type);
+        }
+        response
+            .body(result.body.clone())
+            .map_err(|_| InteractionError)
+    }
+
+    /// Store the original request's result once the downstream interaction is done.
+    ///
+    /// # Errors
+    /// Returns [`InteractionError`] when a result is already stored, the body is
+    /// larger than 1 MiB, or `content_type` is empty or contains a control character.
+    pub fn complete(
+        &mut self,
+        content_type: Option<&str>,
+        body: Vec<u8>,
+    ) -> Result<(), InteractionError> {
+        if self.result.is_some() || body.len() > 1_048_576 {
+            return Err(InteractionError);
+        }
+        if let Some(content_type) = content_type
+            && (content_type.is_empty()
+                || content_type.len() > 256
+                || content_type.bytes().any(|byte| byte.is_ascii_control()))
+        {
+            return Err(InteractionError);
+        }
+        self.result = Some(StoredResult {
+            content_type: content_type.map(str::to_owned),
+            body,
+        });
+        Ok(())
+    }
+}
+
+fn bound_caller(caller: &str) -> Result<(), InteractionError> {
+    if caller.is_empty()
+        || caller.len() > 256
+        || caller
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return Err(InteractionError);
+    }
+    Ok(())
+}
+
+fn empty(status: StatusCode) -> Response<Vec<u8>> {
+    Response::builder()
+        .status(status)
+        .body(Vec::new())
+        .expect("empty response")
 }
 
 fn redirect(location: &str) -> Result<Response<Vec<u8>>, InteractionError> {

@@ -36,7 +36,11 @@ when the flow did not finish. `access_denied` polls as `denied`,
 `person_server_redirect` and `receive_callback` are helpers; no Person Server
 route calls them. Callback targets are HTTPS, so `http://localhost` and
 `http://127.0.0.1` are refused. A callback that carries `error` does not
-complete the pending request. Settlement and
+complete the pending request. A resource that must propagate a downstream
+interaction returns its own `202`, with its own code and pending URL. The host
+binds that poll to the opener it already verified. The stored result is
+returned once, at or before `exp`, and a later poll is `410`. A different
+caller receives an empty `404`. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal

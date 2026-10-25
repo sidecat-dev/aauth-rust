@@ -1,5 +1,6 @@
+use aauth_rust_core::continuation::{PendingResponse, Requirement};
 use aauth_rust_core::interaction::{
-    CallbackError, CallbackReceipt, InteractionOutcome, completion_redirect,
+    CallbackError, CallbackReceipt, ChainedInteraction, InteractionOutcome, completion_redirect,
     parse_interaction_query, person_server_redirect, receive_callback,
 };
 
@@ -90,6 +91,110 @@ fn resource_callback_redirects_and_an_error_does_not_complete() {
             polling_error: "server_error"
         }
     ));
+}
+
+#[test]
+fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
+    let downstream = PendingResponse::new(
+        "https://down.example/token",
+        "/pending/down",
+        5,
+        Requirement::Interaction {
+            url: "https://down.example/consent".into(),
+            code: "DNST1234".into(),
+        },
+    )
+    .unwrap();
+    let approval = PendingResponse::new(
+        "https://down.example/token",
+        "/pending/other",
+        5,
+        Requirement::Approval,
+    )
+    .unwrap();
+    assert!(
+        ChainedInteraction::open(
+            &approval,
+            "https://resource.example/api",
+            "/pending/job",
+            "https://resource.example/interact",
+            "C0DE8X42",
+            "thumb-owner",
+            2000,
+        )
+        .is_err()
+    );
+    let mut chain = ChainedInteraction::open(
+        &downstream,
+        "https://resource.example/api",
+        "/pending/job",
+        "https://resource.example/interact",
+        "C0DE8X42",
+        "thumb-owner",
+        2000,
+    )
+    .unwrap();
+    assert_eq!(
+        chain.downstream(),
+        ("https://down.example/consent", "DNST1234")
+    );
+    let stranger = chain.poll("thumb-other", 1000).unwrap();
+    assert_eq!(stranger.status(), 404);
+    assert!(stranger.body().is_empty());
+    let propagated = chain.poll("thumb-owner", 1000).unwrap();
+    assert_eq!(propagated.status(), 202);
+    let pending = PendingResponse::parse("https://resource.example/api", &propagated).unwrap();
+    assert_eq!(pending.location, "https://resource.example/pending/job");
+    match pending.requirement {
+        Requirement::Interaction { url, code } => {
+            assert_eq!(url, "https://resource.example/interact");
+            assert_eq!(code, "C0DE8X42");
+            assert_ne!(code, "DNST1234");
+        }
+        other => panic!("expected interaction, got {other:?}"),
+    }
+    chain
+        .complete(Some("text/plain"), b"shipped".to_vec())
+        .unwrap();
+    assert!(
+        chain
+            .complete(Some("text/plain"), b"again".to_vec())
+            .is_err()
+    );
+    let hidden = chain.poll("thumb-other", 2000).unwrap();
+    assert_eq!(hidden.status(), 404);
+    assert!(hidden.body().is_empty());
+    let result = chain.poll("thumb-owner", 2000).unwrap();
+    assert_eq!(result.status(), 200);
+    assert_eq!(result.body(), b"shipped");
+    assert_eq!(
+        result
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/plain"
+    );
+    let again = chain.poll("thumb-owner", 2000).unwrap();
+    assert_eq!(again.status(), 410);
+    assert!(again.body().is_empty());
+    let mut expired = ChainedInteraction::open(
+        &downstream,
+        "https://resource.example/api",
+        "/pending/job",
+        "https://resource.example/interact",
+        "C0DE8X42",
+        "thumb-owner",
+        1500,
+    )
+    .unwrap();
+    expired
+        .complete(Some("text/plain"), b"late".to_vec())
+        .unwrap();
+    let late = expired.poll("thumb-owner", 1501).unwrap();
+    assert_eq!(late.status(), 410);
+    assert!(late.body().is_empty());
 }
 
 fn error_name(error: CallbackError) -> &'static str {

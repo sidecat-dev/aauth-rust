@@ -182,6 +182,11 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   `receive_callback` are helpers; no Person Server route calls them. Callback
   targets must be HTTPS. `http://localhost` and `http://127.0.0.1` are refused.
   A callback that carries `error` does not complete the pending request.
+  Interaction chaining does execute. A resource that receives a downstream
+  interaction `202` returns its own pending URL and its own interaction code.
+  The host binds the poll to the opener it already verified. That caller receives
+  the stored result once, at or before `exp`. A later poll is `410`. A different
+  caller receives an empty `404` and not the result.
   Opt-in mission creation, update, completion, authenticated approval and owner audit do execute.
   Opt-in interaction, permission, and audit posts do execute. Interaction and payment relays return `424 interaction_unavailable`. Presented interaction codes are correlated, not consent.
   Opt-in revocation does execute. The ledger is process memory, and downstream
