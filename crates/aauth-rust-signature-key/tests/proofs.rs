@@ -1,7 +1,8 @@
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_signature_key::{
     AssertionCache, CacheRequest, Error, KeyMaterial, PreparedRequest, RequestSignature,
-    present_issued_cid, select_presented_scheme, sign_request, sign_requests,
+    choose_presented_scheme, present_issued_cid, recognized_tokens, select_presented_scheme,
+    sign_request, sign_requests, signature_error_code,
 };
 use http::Request;
 use serde_json::json;
@@ -2723,6 +2724,46 @@ fn multiple_signatures_cover_the_complete_signature_key_dictionary() {
         Error::InvalidInput
     );
     assert!(bad_label.headers().get("signature-key").is_none());
+}
+
+#[test]
+fn client_ignores_unknown_accept_tokens_and_signature_error_members() {
+    let known = ["hwk", "jwt", "cached", "jwks_uri"];
+    let recognized = recognized_tokens("future, hwk, jwt", &known).unwrap();
+    assert_eq!(recognized, ["hwk", "jwt"]);
+    assert!(
+        recognized_tokens("future, later", &known)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        recognized_tokens("es256, Ed25519, HS256", &["Ed25519", "ES256"]).unwrap(),
+        ["Ed25519"]
+    );
+    assert_eq!(
+        choose_presented_scheme("cached, future, jwt", &known, None).unwrap(),
+        Some("jwt".into())
+    );
+    assert_eq!(
+        choose_presented_scheme("cached, future", &known, None).unwrap(),
+        None
+    );
+    assert_eq!(
+        choose_presented_scheme("cached, jwt", &known, Some("issued-cid")).unwrap(),
+        Some("cached".into())
+    );
+    assert_eq!(
+        signature_error_code("error=unsupported_algorithm, note=1, detail=:AA:; retry=?1").unwrap(),
+        "unsupported_algorithm"
+    );
+    assert_eq!(
+        signature_error_code("error=cache_miss").unwrap(),
+        "cache_miss"
+    );
+    assert_eq!(
+        signature_error_code("note=1").unwrap_err(),
+        Error::InvalidInput
+    );
 }
 
 fn cache_request(

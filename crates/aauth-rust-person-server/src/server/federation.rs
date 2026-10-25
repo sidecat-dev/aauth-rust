@@ -99,6 +99,60 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if response.body().len() > MAX_BODY_BYTES {
             return Err(failed(Reason::ResponseTooLarge));
         }
+        let relay_terminal = |error: &str,
+                              signature_error: Option<String>,
+                              detail: Option<String>|
+         -> Result<Failure, Failure> {
+            let diagnostic = FederationFailure {
+                access_server: r.aud.clone(),
+                status: Some(response.status()),
+                reason: Reason::TerminalError {
+                    error: error.into(),
+                    signature_error,
+                    detail,
+                },
+            };
+            let mut failure = Failure::status(response.status(), error);
+            if error == "clock_skew" {
+                if ![StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED].contains(&response.status())
+                {
+                    return Err(failed(Reason::MalformedResponse(
+                        "clock_skew has an invalid status",
+                    )));
+                }
+                let date = response
+                    .headers()
+                    .get("date")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| httpdate::parse_http_date(v).ok())
+                    .and_then(|v| v.duration_since(std::time::UNIX_EPOCH).ok())
+                    .and_then(|v| i64::try_from(v.as_secs()).ok())
+                    .ok_or_else(|| {
+                        failed(Reason::MalformedResponse("clock_skew has no valid Date"))
+                    })?;
+                failure = failure.with_date(date);
+            }
+            Ok(failure.with_federation(diagnostic))
+        };
+        let terminal = response.status() != StatusCode::PAYMENT_REQUIRED
+            && (response.status().is_client_error() || response.status().is_server_error());
+        if response.status() != StatusCode::OK
+            && terminal
+            && let Some(header) = response.headers().get("signature-error")
+        {
+            let header = header
+                .to_str()
+                .map_err(|_| failed(Reason::MalformedResponse("invalid Signature-Error")))?;
+            let error = aauth_rust_signature_key::signature_error_code(header)
+                .ok()
+                .filter(|code| problem_code(code))
+                .ok_or_else(|| failed(Reason::MalformedResponse("invalid Signature-Error")))?;
+            return Err(relay_terminal(
+                &error,
+                Some(bounded(header, 1024)),
+                problem_detail(response.body()),
+            )?);
+        }
         let value = strict_json(response.body())
             .map_err(|_| failed(Reason::MalformedResponse("response is not strict JSON")))?;
         let content_type = response
@@ -109,60 +163,26 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map(str::trim)
             .ok_or_else(|| failed(Reason::MalformedResponse("missing or invalid Content-Type")))?;
         if response.status() != StatusCode::OK {
-            if response.status() != StatusCode::PAYMENT_REQUIRED
-                && (response.status().is_client_error() || response.status().is_server_error())
-                && content_type.eq_ignore_ascii_case("application/problem+json")
-            {
+            if terminal && content_type.eq_ignore_ascii_case("application/problem+json") {
                 let error = value
                     .get("error")
                     .and_then(Value::as_str)
-                    .filter(|s| {
-                        !s.is_empty()
-                            && s.len() <= 128
-                            && s.bytes()
-                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                    })
+                    .filter(|code| problem_code(code))
                     .ok_or_else(|| {
                         failed(Reason::MalformedResponse("invalid terminal problem error"))
                     })?;
-                let diagnostic = FederationFailure {
-                    access_server: r.aud.clone(),
-                    status: Some(response.status()),
-                    reason: Reason::TerminalError {
-                        error: error.into(),
-                        signature_error: response
-                            .headers()
-                            .get("signature-error")
-                            .and_then(|h| h.to_str().ok())
-                            .map(|s| bounded(s, 1024)),
-                        detail: value
-                            .get("detail")
-                            .and_then(Value::as_str)
-                            .map(|s| bounded(s, 4096)),
-                    },
-                };
-                let mut failure = Failure::status(response.status(), error);
-                if error == "clock_skew" {
-                    if ![StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED]
-                        .contains(&response.status())
-                    {
-                        return Err(failed(Reason::MalformedResponse(
-                            "clock_skew has an invalid status",
-                        )));
-                    }
-                    let date = response
+                return Err(relay_terminal(
+                    error,
+                    response
                         .headers()
-                        .get("date")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| httpdate::parse_http_date(v).ok())
-                        .and_then(|v| v.duration_since(std::time::UNIX_EPOCH).ok())
-                        .and_then(|v| i64::try_from(v.as_secs()).ok())
-                        .ok_or_else(|| {
-                            failed(Reason::MalformedResponse("clock_skew has no valid Date"))
-                        })?;
-                    failure = failure.with_date(date);
-                }
-                return Err(failure.with_federation(diagnostic));
+                        .get("signature-error")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|s| bounded(s, 1024)),
+                    value
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .map(|s| bounded(s, 4096)),
+                )?);
             }
             return Err(failed(Reason::UnsupportedResponse));
         }
@@ -261,4 +281,22 @@ fn bounded(value: &str, max_bytes: usize) -> String {
         end -= 1;
     }
     value[..end].to_owned()
+}
+fn problem_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+fn problem_detail(body: &[u8]) -> Option<String> {
+    strict_json(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("detail")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .map(|detail| bounded(&detail, 4096))
 }

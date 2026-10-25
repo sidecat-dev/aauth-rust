@@ -2,6 +2,7 @@
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod cache;
+mod client;
 mod content_digest;
 mod jkt;
 mod jwks;
@@ -11,6 +12,7 @@ pub use cache::{
     AssertionCache, CacheGrant, CacheRequest, CachedAssertion, MAX_CACHEABLE_LIFETIME,
     present_issued_cid, select_presented_scheme,
 };
+pub use client::{choose_presented_scheme, recognized_tokens, signature_error_code};
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};

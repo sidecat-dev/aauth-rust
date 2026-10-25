@@ -67,7 +67,13 @@ identity, the person server, and the access server do not accept `cached`.
 Compact JWS remains Ed25519. When a request carries more than one signature,
 the signer writes the complete Signature-Key dictionary before creating any
 signature, and each signature covers that field. The verifier still checks
-one selected label. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+one selected label. A client that reads `Accept-Signature-Scheme` or
+`Accept-Signature-Alg` keeps only tokens it recognizes, compared
+case-sensitively, and does not sign when none remain. `Signature-Error`
+contributes its `error` token; other members are ignored. On a non-success
+response the Person Server takes that token and does not require a JSON body.
+When the header is absent, a problem body still supplies `error`. A JSON
+`detail` may be present. `clock_skew` still requires `Date`. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses

@@ -1129,6 +1129,27 @@ impl aauth_rust_person_server::Federation for AccessTransport {
             }
             8 => *response.status_mut() = http::StatusCode::ACCEPTED,
             9 => self.now.store(4000, Ordering::SeqCst),
+            30 => {
+                *response.status_mut() = http::StatusCode::UNAUTHORIZED;
+                response.headers_mut().insert(
+                    "signature-error",
+                    "error=invalid_signature".parse().unwrap(),
+                );
+                *response.body_mut() = b"not-json".to_vec();
+            }
+            31 => {
+                *response.status_mut() = http::StatusCode::UNAUTHORIZED;
+                response.headers_mut().insert(
+                    "signature-error",
+                    "error=invalid_signature".parse().unwrap(),
+                );
+                response
+                    .headers_mut()
+                    .insert("content-type", "application/problem+json".parse().unwrap());
+                *response.body_mut() = json!({"error":"access_denied","detail":"from-body"})
+                    .to_string()
+                    .into_bytes();
+            }
             _ => {}
         }
         Ok(response)
@@ -1325,7 +1346,7 @@ fn terminal_as_service_proof_refusal_relays_status_error_without_federation_retr
 #[test]
 fn federation_diagnostics_remain_host_visible_and_distinguish_failure_phases() {
     use aauth_rust_person_server::{FederationFailure, FederationFailureReason as Reason};
-    for mode in [1, 2, 8, 11, 23, 24, 25, 27] {
+    for mode in [1, 2, 8, 11, 23, 24, 25, 27, 30, 31] {
         let f = Fixture::new();
         let server = f.server(2000).with_federation(AccessTransport {
             mode,
@@ -1358,7 +1379,7 @@ fn federation_diagnostics_remain_host_visible_and_distinguish_failure_phases() {
                 assert_eq!(diagnostic.status, None);
                 assert_eq!(diagnostic.reason, Reason::TransportUnavailable);
             }
-            24 | 27 => {
+            24 | 27 | 30 | 31 => {
                 assert_eq!(diagnostic.status, Some(http::StatusCode::UNAUTHORIZED));
                 let Reason::TerminalError {
                     error,
@@ -1368,17 +1389,28 @@ fn federation_diagnostics_remain_host_visible_and_distinguish_failure_phases() {
                 else {
                     panic!("terminal diagnostic expected")
                 };
-                let expected = if mode == 24 {
-                    "invalid_signature"
-                } else {
+                let expected = if mode == 27 {
                     "unsupported_scheme"
+                } else {
+                    "invalid_signature"
                 };
                 assert_eq!(error, expected);
-                assert_eq!(
-                    signature_error.as_deref(),
-                    Some(format!("error={expected}").as_str())
-                );
-                assert_eq!(detail.as_deref(), Some("private AS proof diagnostic"));
+                assert_eq!(response.status(), 401);
+                assert_eq!(output(&response)["error"], expected);
+                if mode == 30 {
+                    assert_eq!(signature_error.as_deref(), Some("error=invalid_signature"));
+                    assert!(detail.is_none());
+                } else if mode == 31 {
+                    assert_eq!(signature_error.as_deref(), Some("error=invalid_signature"));
+                    assert_eq!(detail.as_deref(), Some("from-body"));
+                    assert_ne!(error.as_str(), "access_denied");
+                } else {
+                    assert_eq!(
+                        signature_error.as_deref(),
+                        Some(format!("error={expected}").as_str())
+                    );
+                    assert_eq!(detail.as_deref(), Some("private AS proof diagnostic"));
+                }
             }
             _ => unreachable!(),
         }
