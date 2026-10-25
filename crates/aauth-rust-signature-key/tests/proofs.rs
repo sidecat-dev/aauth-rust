@@ -1725,3 +1725,135 @@ fn self_jwt_uses_the_discovered_key_and_rejects_confirmation() {
     );
     assert_eq!(calls.get(), 0);
 }
+
+#[test]
+fn direct_jwks_keeps_the_url_bytes_as_the_signer_identity() {
+    use std::cell::RefCell;
+
+    let key = SigningKey::from_seed([3; 32]);
+    let url = "https://client.example/keys.jwks";
+    let kid = "key-1";
+    let mut req = request();
+    sign_request(
+        &mut req,
+        &key,
+        KeyMaterial::Jwks {
+            url: url.into(),
+            kid: kid.into(),
+        },
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    assert!(
+        req.headers()["signature-key"]
+            .to_str()
+            .unwrap()
+            .contains(url)
+    );
+    let seen = RefCell::new(String::new());
+    let seen_kid = RefCell::new(String::new());
+    let public = key.public_jwk();
+    let resolver = |presented: &str, key_id: &str| {
+        *seen.borrow_mut() = presented.to_owned();
+        *seen_kid.borrow_mut() = key_id.to_owned();
+        if presented == url && key_id == kid {
+            Ok(public.clone())
+        } else {
+            Err(Error::UnknownKey)
+        }
+    };
+    let prepared = PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks"]).unwrap();
+    let identity = prepared.verify_jwks(&resolver).unwrap();
+    assert_eq!(identity.url, url);
+    assert_eq!(identity.key_id, kid);
+    assert_eq!(identity.key.x, public.x);
+    assert_eq!(seen.borrow().as_str(), url);
+
+    for other in [
+        "https://Client.example/keys.jwks",
+        "https://client.example:443/keys.jwks",
+        "https://client.example/keys.jwks/",
+        "https://client.example/Keys.jwks",
+        "https://client.example/../keys.jwks",
+        "https://client.example/keys.jwks?v=1",
+    ] {
+        let mut variant = request();
+        sign_request(
+            &mut variant,
+            &key,
+            KeyMaterial::Jwks {
+                url: other.into(),
+                kid: kid.into(),
+            },
+            1000,
+        )
+        .unwrap();
+        let proof =
+            PreparedRequest::prepare_with_schemes(&variant, "sig", 1000, 60, &["jwks"]).unwrap();
+        assert!(matches!(proof.key(), KeyMaterial::Jwks { url, .. } if url == other));
+        assert_eq!(proof.verify_jwks(&resolver).unwrap_err(), Error::UnknownKey);
+        assert_eq!(seen.borrow().as_str(), other);
+        assert_eq!(seen_kid.borrow().as_str(), kid);
+    }
+
+    let mut wrong_http = req.clone();
+    resign_with(&mut wrong_http, &SigningKey::from_seed([9; 32]), &["jwks"]);
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&wrong_http, "sig", 1000, 60, &["jwks"])
+            .unwrap()
+            .verify_jwks(&resolver)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    for (bad_url, bad_kid) in [
+        ("http://client.example/keys.jwks", kid),
+        ("https://user@client.example/keys.jwks", kid),
+        ("https://client.example/keys.jwks#frag", kid),
+        ("https://client.example:0/keys.jwks", kid),
+        (url, ""),
+        ("", kid),
+    ] {
+        assert_eq!(
+            sign_request(
+                &mut request(),
+                &key,
+                KeyMaterial::Jwks {
+                    url: bad_url.into(),
+                    kid: bad_kid.into(),
+                },
+                1000
+            )
+            .unwrap_err(),
+            Error::InvalidKey,
+            "{bad_url} {bad_kid}"
+        );
+    }
+    for header in [
+        "sig=jwks;kid=\"key-1\"",
+        "sig=jwks;url=\"https://client.example/keys.jwks\"",
+    ] {
+        let mut missing = req.clone();
+        missing
+            .headers_mut()
+            .insert("signature-key", header.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare_with_schemes(&missing, "sig", 1000, 60, &["jwks"])
+                .unwrap_err(),
+            Error::InvalidKey,
+            "{header}"
+        );
+    }
+    let mut unsupported = key.public_jwk();
+    unsupported.alg = "ES256".into();
+    assert_eq!(
+        prepared
+            .verify_jwks(&|_: &str, _: &str| Ok(unsupported.clone()))
+            .unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+}

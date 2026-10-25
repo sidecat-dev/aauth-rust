@@ -38,7 +38,7 @@ executable scenes; those tests are outside the workspace test total.
 | AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (34 tests, including child approval/payment, trust/expiry fences and omitted presented_token) |
 | Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval/auth-token and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody. An auth-token requirement from an Access Server is not a federation continuation | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk`, `jwt`, Ed25519 `jkt-s256+jwt` (thumbprint `iss`, `cnf.jwk` request key, bare `cache` requires `jti`; no cache identifier is issued), Ed25519 `self-jwt` (host resolves exact `iss`, `dwk`, and header `kid` only after the JWT parses; `cnf` and `cache` are rejected; no cache identifier is issued; the same key verifies the JWT and the HTTP signature), explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member. Direct agent identity still accepts only `jwt` | `aauth-rust-signature-key/tests/proofs.rs` (31 tests), TLS journey |
+| Signature-Key | `hwk`, `jwt`, Ed25519 `jkt-s256+jwt` (thumbprint `iss`, `cnf.jwk` request key, bare `cache` requires `jti`; no cache identifier is issued), Ed25519 `self-jwt` (host resolves exact `iss`, `dwk`, and header `kid` only after the JWT parses; `cnf` and `cache` are rejected; no cache identifier is issued; the same key verifies the JWT and the HTTP signature), direct `jwks` (exact `url` and `kid`; the URL is not canonicalized), explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member. Direct agent identity still accepts only `jwt` | `aauth-rust-signature-key/tests/proofs.rs` (32 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
 | Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers including local length and case, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (18 tests) |
 | Person, Resource and Auth tokens | Role-specific typ/dwk, required and forbidden claims, public confirmation keys, exact signed bytes, Person/Auth one-hour ceiling and expiry/nbf; Core verification does not grant application access | `aauth-rust-core/tests/role_tokens.rs` (10 tests) |
@@ -202,7 +202,9 @@ a general delegation lifecycle or automatic sub-agent process supervision.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
 - Ed25519 only. Other algorithms, private/HSM signer adapters and remaining
-  Signature-Key schemes (`jwks`, EC and RSA `hwk`, `x509`, `cached`) are absent.
+  Signature-Key schemes (EC and RSA `hwk`, `x509`, `cached`) are absent.
+  Direct `jwks` executes in this crate: the host supplies the key for the exact
+  `url` and `kid`, and this library does not fetch or rewrite that URL.
   `self-jwt` executes in this crate: the host supplies the metadata bytes and
   the issuer key, the library requires metadata `issuer` to equal `iss`, and
   this library does not fetch `{iss}/.well-known/{dwk}` or issue a cache identifier.
@@ -220,7 +222,7 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   content/trailers, component parameters, general field canonicalization, nonce
   replay storage and complete negotiation are absent. A `keyid` parameter is
   accepted only when it equals the `kid` already carried by the selected
-  Signature-Key member (the JWT header `kid`, or the `jwks_uri` `kid`). The
+  Signature-Key member (the JWT header `kid`, the direct `jwks` `kid`, or the `jwks_uri` `kid`). The
   verifier still takes the key from Signature-Key. `hwk` has no `kid`, so
   `keyid` on `hwk` is refused, as is a mismatch or a non-string `keyid`; the
   wire code remains `invalid_signature`. The alg signature parameter is ignored. Hosts must bound collection and pass

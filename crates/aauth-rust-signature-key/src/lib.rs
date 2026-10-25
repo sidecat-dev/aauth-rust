@@ -1,10 +1,12 @@
-//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod content_digest;
 mod jkt;
+mod jwks;
 mod self_jwt;
 pub use jkt::JktDelegation;
+pub use jwks::{JwksIdentity, JwksResolver};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
 
 use aauth_rust_jose::{Jwk, SigningKey};
@@ -153,6 +155,13 @@ pub enum KeyMaterial {
         /// Compact JWT. It must not carry `cnf`, and this scheme has no `cache` parameter.
         jwt: String,
     },
+    /// Direct JWKS. `url` is the signer identity and is compared as presented.
+    Jwks {
+        /// Exact HTTPS JWKS URL. Not canonicalized.
+        url: String,
+        /// Key identifier inside that JWKS.
+        kid: String,
+    },
 }
 
 /// Algorithms this profile accepts. Servers advertise exactly this set in
@@ -253,6 +262,12 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
                 jwt: text(&item.params, "jwt")?.to_owned(),
             })
         }
+        "jwks" => {
+            let url = text(&item.params, "url")?.to_owned();
+            let kid = text(&item.params, "kid")?.to_owned();
+            jwks::validate(&url, &kid)?;
+            Ok(KeyMaterial::Jwks { url, kid })
+        }
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
             let dwk = text(&item.params, "dwk")?;
@@ -271,7 +286,7 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
 fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
         KeyMaterial::Hwk(_) => Ok(None),
-        KeyMaterial::JwksUri { kid, .. } => Ok(Some(kid.clone())),
+        KeyMaterial::JwksUri { kid, .. } | KeyMaterial::Jwks { kid, .. } => Ok(Some(kid.clone())),
         KeyMaterial::Jwt(compact)
         | KeyMaterial::JktJwt { jwt: compact, .. }
         | KeyMaterial::SelfJwt { jwt: compact } => {
@@ -635,6 +650,10 @@ pub fn sign_request(
                 quoted(&kid)?
             )
         }
+        KeyMaterial::Jwks { url, kid } => {
+            jwks::validate(&url, &kid)?;
+            format!("sig=jwks;url={};kid={}", quoted(&url)?, quoted(&kid)?)
+        }
         KeyMaterial::Jwt(jwt) => {
             aauth_rust_jose::Jws::parse(&jwt).map_err(|_| Error::InvalidKey)?;
             format!("sig=jwt;jwt=\"{jwt}\"")
@@ -710,6 +729,7 @@ impl std::fmt::Debug for PreparedRequest {
             KeyMaterial::Hwk(_) => "hwk",
             KeyMaterial::Jwt(_) => "jwt",
             KeyMaterial::JwksUri { .. } => "jwks_uri",
+            KeyMaterial::Jwks { .. } => "jwks",
             KeyMaterial::JktJwt { .. } => "jkt-jwt",
             KeyMaterial::SelfJwt { .. } => "self-jwt",
         };

@@ -33,7 +33,11 @@ present, and `cnf` is absent, the metadata document's `issuer` must equal
 `iss` or the resolver is not called. The host resolver is then asked for that
 exact `iss`, `dwk`, and `kid`. That key verifies the JWT and then the HTTP
 signature. A `cache` parameter is rejected and no cache identifier is issued.
-The library does not fetch the issuer. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+The library does not fetch the issuer. A direct `jwks` member names an HTTPS
+JWKS `url` and a `kid`. The URL is the signer identity and is passed to the
+host resolver unchanged: host case, an explicit port, a trailing slash, and a
+query are not rewritten. Byte-different URLs are different identities. The
+library does not fetch the JWKS. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses
