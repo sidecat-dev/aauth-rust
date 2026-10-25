@@ -1266,6 +1266,29 @@ fn proactive_authorization_verifies_the_person_token_and_requires_scope() {
     assert_eq!(verified.claims().ps, PS);
     assert_eq!(verified.claims().sub, "directed-person");
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let with_account = resource
+        .authorize_endpoint(
+            &authorize_json(
+                Some(&person()),
+                json!({ "scope": "records.read", "account": "ignored-account" }),
+            ),
+            NOW,
+            "proactive-account",
+        )
+        .into_response();
+    assert_eq!(
+        with_account.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(with_account.body())
+    );
+    let issued: Value = serde_json::from_slice(with_account.body()).unwrap();
+    let issued = ResourceToken::parse(issued["resource_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(issued.claims().scope.as_deref(), Some("records.read"));
+    assert!(!issued.claims().extra.contains_key("account"));
     assert!(matches!(
         resource.authorize_endpoint(&authorize_body(Some(&person()), None), NOW, "proactive-1"),
         ProactiveDecision::InvalidRequest
