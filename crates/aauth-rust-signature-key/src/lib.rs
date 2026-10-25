@@ -7,6 +7,7 @@ mod content_digest;
 mod egress;
 mod jkt;
 mod jwks;
+mod jwt_discovery;
 mod key_cache;
 mod self_jwt;
 mod server_keys;
@@ -23,6 +24,7 @@ pub use egress::{
 };
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
+pub use jwt_discovery::{DiscoveredJwt, verify_application_jwt, verify_discovered_jwt};
 pub use key_cache::{
     CachedDocument, DEFAULT_KEY_TTL, FetchedHeaders, KeyCache, KeyCacheAnswer, KeyCacheStore,
     MIN_REFETCH_INTERVAL,

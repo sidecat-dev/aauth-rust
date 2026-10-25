@@ -90,7 +90,14 @@ authorize it. A pseudonym client admits each Ed25519 thumbprint
 for one canonical HTTPS authority. The same host with port 443, any path, and
 any query is that server. A different port is a different server. The same
 server may rotate to a new key. `jkt-jwt` binds the enclave key, not the
-ephemeral confirmation key. `sign_request` does not keep this table. Direct
+ephemeral confirmation key. `sign_request` does not keep this table. A
+`jwt` that carries both `iss` and `dwk` is verified from host-supplied
+metadata and JWKS. The library builds `{iss}/.well-known/{dwk}` and does not
+fetch it or the JWKS. `iss` is a bare HTTPS origin. `issuer` must equal
+`iss`. The header `kid` selects the issuer key, that key's `alg` must equal
+the header `alg`, and both the issuer key and `cnf.jwk` are Ed25519. When
+either claim is absent, the host supplies the Ed25519 issuer key itself.
+Direct
 agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,

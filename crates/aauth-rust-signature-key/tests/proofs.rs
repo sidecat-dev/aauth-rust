@@ -8,6 +8,7 @@ use aauth_rust_signature_key::{
     ServerKeyBinding, accept_pinned_peer, accept_response, admit_fetch, admit_redirect,
     choose_presented_scheme, origin_is_allowed, origin_pseudonym, present_issued_cid,
     recognized_tokens, select_presented_scheme, sign_request, sign_requests, signature_error_code,
+    verify_application_jwt, verify_discovered_jwt,
 };
 use http::Request;
 use serde_json::json;
@@ -3368,6 +3369,185 @@ fn pseudonym_keys_are_distinct_for_distinct_servers() {
         Error::InvalidUri
     );
     binding.admit("https://two.example", &two).unwrap();
+}
+
+#[test]
+fn jwt_discovery_checks_issuer_metadata_before_the_signature() {
+    let issuer = SigningKey::from_seed([4; 32]);
+    let confirmation = SigningKey::from_seed([5; 32]);
+    let iss = "https://issuer.example";
+    let compact = jwt(
+        &issuer,
+        json!({
+            "iss": iss,
+            "dwk": "aauth-agent.json",
+            "exp": 2_000,
+            "cnf": {"jwk": confirmation.public_jwk()}
+        }),
+    );
+    let metadata = format!(r#"{{"issuer":"{iss}","jwks_uri":"https://issuer.example/jwks"}}"#);
+    let jwks = jwks_of(&issuer, "key-1");
+    assert_eq!(
+        verify_discovered_jwt(&compact, b"not-json", b"", 2_000).unwrap_err(),
+        Error::ExpiredJwt
+    );
+    let discovered = verify_discovered_jwt(&compact, metadata.as_bytes(), &jwks, 1_999).unwrap();
+    assert_eq!(
+        discovered.metadata_url,
+        "https://issuer.example/.well-known/aauth-agent.json"
+    );
+    assert_eq!(discovered.jwks_uri, "https://issuer.example/jwks");
+    assert_eq!(
+        discovered.confirmation.thumbprint().unwrap(),
+        confirmation.public_jwk().thumbprint().unwrap()
+    );
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            br#"{"jwks_uri":"https://issuer.example/jwks"}"#,
+            &jwks,
+            1_999
+        )
+        .unwrap_err(),
+        Error::IssuerMissing
+    );
+    assert_eq!(Error::IssuerMissing.code(), "issuer_missing");
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            br#"{"issuer":"https://other.example","jwks_uri":"https://issuer.example/jwks"}"#,
+            &jwks,
+            1_999
+        )
+        .unwrap_err(),
+        Error::IssuerMismatch
+    );
+    assert_eq!(Error::IssuerMismatch.code(), "issuer_mismatch");
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            metadata.as_bytes(),
+            &jwks_of(&issuer, "other"),
+            1_999
+        )
+        .unwrap_err(),
+        Error::UnknownKey
+    );
+    let stranger = SigningKey::from_seed([6; 32]);
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            metadata.as_bytes(),
+            &jwks_of(&stranger, "key-1"),
+            1_999
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    assert_eq!(
+        verify_application_jwt(&compact, &issuer.public_jwk(), 1_999).unwrap_err(),
+        Error::InvalidJwt
+    );
+    let mut doubled: serde_json::Value = serde_json::from_slice(&jwks).unwrap();
+    let first = doubled["keys"][0].clone();
+    doubled["keys"].as_array_mut().unwrap().push(first);
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            metadata.as_bytes(),
+            doubled.to_string().as_bytes(),
+            1_999
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            br#"{"issuer":"https://issuer.example","jwks_uri":"http://issuer.example/jwks"}"#,
+            &jwks,
+            1_999
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+    let application = jwt(
+        &issuer,
+        json!({
+            "iss": iss,
+            "exp": 2_000,
+            "cnf": {"jwk": confirmation.public_jwk()}
+        }),
+    );
+    assert_eq!(
+        verify_discovered_jwt(&application, metadata.as_bytes(), &jwks, 1_999).unwrap_err(),
+        Error::InvalidJwt
+    );
+    let confirmed = verify_application_jwt(&application, &issuer.public_jwk(), 1_999).unwrap();
+    assert_eq!(
+        confirmed.thumbprint().unwrap(),
+        confirmation.public_jwk().thumbprint().unwrap()
+    );
+    assert_eq!(
+        verify_application_jwt(&application, &stranger.public_jwk(), 1_999).unwrap_err(),
+        Error::InvalidJwt
+    );
+    let mut ec_confirmation = confirmation.public_jwk();
+    ec_confirmation.alg = "ES256".into();
+    let ec_assertion = jwt(
+        &issuer,
+        json!({
+            "iss": iss,
+            "exp": 2_000,
+            "cnf": {"jwk": ec_confirmation}
+        }),
+    );
+    assert_eq!(
+        verify_application_jwt(&ec_assertion, &issuer.public_jwk(), 1_999).unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+    let mut ec_issuer = issuer.public_jwk();
+    ec_issuer.alg = "ES256".into();
+    assert_eq!(
+        verify_application_jwt(&application, &ec_issuer, 1_999).unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+    let mut ec_jwks: serde_json::Value = serde_json::from_slice(&jwks).unwrap();
+    ec_jwks["keys"][0]["alg"] = json!("ES256");
+    assert_eq!(
+        verify_discovered_jwt(
+            &compact,
+            metadata.as_bytes(),
+            ec_jwks.to_string().as_bytes(),
+            1_999
+        )
+        .unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+    let pathed = jwt(
+        &issuer,
+        json!({
+            "iss": "https://issuer.example/tenant",
+            "dwk": "aauth-agent.json",
+            "exp": 2_000,
+            "cnf": {"jwk": confirmation.public_jwk()}
+        }),
+    );
+    assert_eq!(
+        verify_discovered_jwt(&pathed, metadata.as_bytes(), &jwks, 1_999).unwrap_err(),
+        Error::InvalidJwt
+    );
+}
+
+fn jwt(key: &SigningKey, claims: serde_json::Value) -> String {
+    let header = json!({"alg": "Ed25519", "kid": "key-1", "typ": "jwt"});
+    Jws::sign(&header, &serde_json::to_vec(&claims).unwrap(), key).unwrap()
+}
+
+fn jwks_of(key: &SigningKey, kid: &str) -> Vec<u8> {
+    let mut public = serde_json::to_value(key.public_jwk()).unwrap();
+    public["kid"] = json!(kid);
+    serde_json::to_vec(&json!({"keys": [public]})).unwrap()
 }
 
 fn cache_request(
