@@ -31,23 +31,23 @@ executable scenes; those tests are outside the workspace test total.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
-| RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (9 tests, including RFC 8032 empty-message signature vector) |
+| RFC 8032/8037, RFC 7638 | Ed25519 signing and strict verification; public-only OKP JWK; fully specified algorithm and key-shape checks; thumbprint | `aauth-rust-jose/tests/jose.rs` (10 tests, including RFC 8032 empty-message signature vector) |
 | One-level sub-agents | Actual parent and child AP signatures, authoritative parent_agent, same provider, single depth and distinct proof keys; parent signs PS requests, owns consent/binding/polls, child holds Person/Auth and signs Resource requests; local and immediate/deferred AS grants; exact retained parent/child identity and parent revocation | Core `subagents.rs` (7), AP `subagents.rs` (4), Agent `subagents.rs` (8), PS/AS endpoint cases, memory/redb contracts, Resource `subagent_revocation.rs` (2) and buffered native `subagent` example (8 separate example tests) |
 | Explicit Agent polling | Signed GET, clarification POST and cancellation DELETE preparation; required waits, 429 linear backoff, 503 retry interval, stable same-origin Location and terminal completion; a 202 `requirement=auth-token` is parsed and polled with a retained auth token; host dispatches requests and verifies final credentials. The Resource does not hold an invocation or replay a result | `aauth-rust-agent/tests/polling.rs` (12 tests) |
 | PS deferred federation | PS-owned signed Agent GET/clarification POST/DELETE, explicit signed AS advancement, exact original-token retention, independent grant verification and atomic delivery; payment/claims stay host-side; revocation/expiry/concurrency refuse | `aauth-rust-person-server/tests/authorization.rs` (67 tests, including 33 deferred cases), deferred TLS journey |
 | AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (34 tests, including child approval/payment, trust/expiry fences and omitted presented_token) |
 | Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval/auth-token and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody. An auth-token requirement from an Access Server is not a federation continuation | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk`, `jwt`, explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member | `aauth-rust-signature-key/tests/proofs.rs` (29 tests), TLS journey |
+| Signature-Key | `hwk` for Ed25519, ES256, ES384, RS256, and PS256 (each required parameter is present; RSA `alg` selects PKCS#1 v1.5 or PSS with SHA-256), `jwt`, Ed25519 `jkt-s256+jwt` (thumbprint `iss`, `cnf.jwk` request key, bare `cache` requires `jti`; a host that opts in receives a sealed cache identifier), Ed25519 `self-jwt` (host resolves exact `iss`, `dwk`, and header `kid` only after the JWT parses; `cnf` and `cache` are rejected; no cache identifier is issued; the same key verifies the JWT and the HTTP signature), direct `jwks` (exact `url` and `kid`; the URL is not canonicalized), `x509` (HTTPS `x5u` is not fetched or rewritten; `x5t` is the SHA-256 of the first certificate's DER; the host supplies the PEM chain and trust anchors; chain validation runs before the signature; the end-entity key selects Ed25519, ES256, or ES384; an RSA certificate is `unsupported_algorithm`), `cached` (`cid` is presented unchanged; a local index or a ChaCha20-Poly1305 seal resolves it; the HTTP signature is then checked with the Ed25519 confirmation key; unknown, evicted, and unopenable identifiers are `cache_miss`; a held assertion past `exp` is `expired_jwt`; `expires` is not later than the assertion `exp` and is honored through that second; an assertion with more than 86400 seconds left is not cached; a client does not present `cached` until an identifier was issued), explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member. Multiple signatures write the complete Signature-Key dictionary before any signature is created, and each signature covers `signature-key`. A client drops unrecognized `Accept-Signature-Scheme` and `Accept-Signature-Alg` tokens and reads only the `error` member of `Signature-Error`. A JWKS cache the host fills expires by `Cache-Control`, refuses a refetch of the same issuer and `dwk`, or the same URL, inside sixty seconds, caps freshness at 86400 seconds, and holds a caller-chosen number of targets. Before a discovery fetch, the host admits an HTTPS URL, one globally routable unicast address after embedded IPv4 is decoded, refusing the local-use NAT64 prefix `64:ff9b:1::/48` as a whole, a finite size and timeout rechecked at admission, and a same-host redirect. A parsed `jwks_uri` origin is not an authorization. A pseudonym key's Ed25519 thumbprint is admitted for one canonical HTTPS authority. A `jwt` with both `iss` and `dwk` is checked against host-supplied metadata and JWKS and is not fetched: `iss` is a bare origin, `issuer` must equal `iss`, and the header `kid` selects an Ed25519 key whose `alg` equals the header `alg`. `cnf.jwk` is Ed25519. Compact JWS and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519. Direct agent identity still accepts only `jwt` | `aauth-rust-signature-key/tests/proofs.rs` (41 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
 | Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers including local length and case, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (18 tests) |
 | Person, Resource and Auth tokens | Role-specific typ/dwk, required and forbidden claims, public confirmation keys, exact signed bytes, Person/Auth one-hour ceiling and expiry/nbf; Core verification does not grant application access | `aauth-rust-core/tests/role_tokens.rs` (10 tests) |
 | AP metadata and JWKS | Exact issuer binding; HTTPS JWKS location with terminal invalid_key for unusable metadata; reject foreign issuer with invalid_key separately from rotation; select only named kid, tolerate unselected unsupported keys; host-retained snapshot | Core tests; AP discovery over TLS |
-| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk`, `cached`, `jwks`, `jkt-jwt`, `self-jwt`, and `x509` receive `unsupported_scheme` and no `Signature-Key-Cache` is emitted; wrong key refusal; exact endpoint or explicit origin binding before policy; denial after valid authentication; Date from verifier time on clock_skew. An `AAuth-Capabilities` header is ignored, including unknown tokens, and its absence assumes no capability | `aauth-rust-resource/tests/identity.rs` (31 tests), `response_mapping.rs` (2 tests), TLS journey |
+| Direct Agent identity | Unsigned request challenge; token plus proof before policy; `hwk`, `cached`, `jwks`, `jkt-jwt`, `self-jwt`, and `x509` receive `unsupported_scheme` and no `Signature-Key-Cache` is emitted; wrong key refusal; exact endpoint or explicit origin binding before policy; denial after valid authentication; Date from verifier time on clock_skew. An `AAuth-Capabilities` header is ignored, including unknown tokens, and its absence assumes no capability | `aauth-rust-resource/tests/identity.rs` (32 tests), `response_mapping.rs` (2 tests), TLS journey |
 | Resource metadata | Explicit published issuer separate from signed authority/port, agent-token access and 60-second window; no fictitious JWKS/authorization endpoints; invalid publication settings return a local configuration error | Resource and axum metadata tests |
 | Framework adapter | Origin-form URI reconstruction from configured HTTPS origin, typed policy context, custom success response, wrong-origin proof refusal and bounded actual-body handling; canonical metadata publication with a nondefault signed port | `aauth-rust-resource/tests/axum_service.rs` (5 tests), executable axum example |
 | Local composition | Fresh random AP/Agent keys; certificate-verified loopback TLS; AP metadata/JWKS retrieval; Resource outcomes | `aauth-rust-resource/tests/loopback_tls.rs` (1 test, 14 checks) |
-| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid, expired, and revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances. Metadata publishes exactly `issuer`, `jwks_uri`, `person_token_endpoint`, and `auth_token_endpoint`. `platform` must be one of the five pinned registry values. `device` is at most 64 characters and has no control characters. `capabilities` is a unique nonempty string array; unknown tokens do not change issuance. `justification` reaches host policy and is not a scope input | `aauth-rust-person-server/tests/endpoints.rs` (3 tests), `authorization.rs` (34 non-deferred tests, plus the mixed-grants composition test), `store.rs` (6 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
+| Person binding / PS token endpoints | Agent proof and covered JSON before policy; case-insensitive JSON media type without rewriting covered bytes; stable directed identities; issuer-scoped atomic records and binding; exact presented lineage; distinct invalid, expired, and revoked presented-token errors; scope narrowing; expiry and binding rechecked after policy/storage; no release before commit; repeatable valid exchanges with fresh retained Auth issuances. Metadata publishes exactly `issuer`, `jwks_uri`, `person_token_endpoint`, and `auth_token_endpoint`. `platform` must be one of the five pinned registry values. `device` is at most 64 characters and has no control characters. `capabilities` is a unique nonempty string array; unknown tokens do not change issuance. `justification` reaches host policy and is not a scope input | `aauth-rust-person-server/tests/endpoints.rs` (3 tests), `authorization.rs` (34 non-deferred tests, plus the mixed-grants composition test), `store.rs` (7 tests for logical/persistence contracts, detection fixtures and shared serialization/validation) |
 | Durable PS store adapter | Same logical contract as MemoryStore; actual close/reopen, issuer-qualified records, exact retry/conflict ordering, sticky revocation; schema/row errors; reconstructed direct/chained PS flows | `aauth-rust-person-server-redb/tests/backend.rs` (10 tests), `service_restart.rs` (2 tests), crate rustdoc |
 | Page corruption / bounded records | Exact data-byte checksum failure and 28 page-prefix bit flips/zeroings never escape open as a panic or bad record; 1 MiB accepted, one-byte overflow and 64 MiB refused without table writes; empty binding refused on read/commit/revoke | `aauth-rust-person-server-redb/tests/corruption.rs` (2 tests), backend tests |
 | Backend transaction recovery | Acknowledged commit survives process exit without Drop; staged uncommitted real transaction stays invisible; injected native FileBackend write error preserves prior state and exposes no partial indexes | `aauth-rust-person-server-redb/src/failure_tests.rs` (3 parent/unit tests; 1 ignored child entry invoked by parents) |
@@ -201,9 +201,88 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   unsupported PS parameters are refused explicitly.
 - No R3, Events, Budgets, Bootstrap or Supervision behavior. Pinning a document
   does not imply implementing it.
-- Ed25519 only. Other algorithms, private/HSM signer adapters and remaining
-  Signature-Key schemes are absent. Verifiers select the configured `sig` label;
-  this is not general multiple-signature policy. Combined field lines and
+- Header web keys verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS
+  and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519.
+  ES512, Ed448, and other RSA hashes are `unsupported_algorithm`. Private/HSM
+  signer adapters are absent.
+  `cached` executes in this crate when the host opts in. The identifier is a
+  XChaCha20-Poly1305 seal of the scheme, issuer, optional subject, SHA-256 of
+  the verified compact assertion, the `jti`, the assertion `exp`, the retention
+  time, and the Ed25519 confirmation key, plus 192 random bits. It does not
+  contain the `jti` in the clear. A local index records what this process has
+  not evicted; a peer that holds the same key opens the seal without that
+  index. Opening the seal is not authentication: the HTTP signature is checked
+  next. An unknown, evicted, tampered, or unopenable identifier is `cache_miss`.
+  The identifier is honored through its `expires` second and is a miss after
+  that. An assertion still held at `exp` fails as `expired_jwt`. `expires` is
+  not later than the assertion `exp`. An assertion with more than 86400 seconds
+  remaining is not cached, and there is no separate revocation list. A full
+  index, or a confirmation key that already has its per-key allotment, also
+  issues nothing. `self-jwt` still rejects `cache`. Direct agent identity, the
+  person server, and the access server do not accept `cached` and emit no
+  `Signature-Key-Cache`. A client helper skips `cached` until an identifier
+  was issued, including when `cached` is listed first, and presents that
+  identifier unchanged.
+  `x509` executes in this crate: the host supplies the PEM chain and the trust
+  anchors, and this library does not fetch `x5u` or a revocation source. The
+  first certificate is the end entity. Its chain must validate before `x5t` is
+  accepted. The end-entity key selects Ed25519, P-256 as ES256, or P-384 as
+  ES384. An RSA certificate is `unsupported_algorithm` because its key
+  identifier names neither padding nor hash.
+  Direct `jwks` executes in this crate: the host supplies the key for the exact
+  `url` and `kid`, and this library does not fetch or rewrite that URL.
+  `self-jwt` executes in this crate: the host supplies the metadata bytes and
+  the issuer key, the library requires metadata `issuer` to equal `iss`, and
+  this library does not fetch `{iss}/.well-known/{dwk}` or issue a cache identifier.
+  `sign_requests` writes every Signature-Key member before it creates any
+  signature, and each signature covers `signature-key`. A verifier still
+  selects one label; unselected members are ignored. The Resource, person
+  server, and access server still verify the configured `sig` label only.
+  A client helper ignores unrecognized tokens in `Accept-Signature-Scheme`
+  and `Accept-Signature-Alg`, skips `cached` until an identifier was issued,
+  and takes the `Signature-Error` code from the `error` member alone. The
+  response body is not an input to that read. On a non-success Access Server
+  response, the Person Server uses that header when it is present and does
+  not require a JSON body; a problem `error` applies only when the header is
+  absent, and `clock_skew` still requires `Date`.
+  `KeyCache` records a JWKS document the host already fetched. It does not
+  open a connection, and `store` cannot retract that fetch. A `jwks_uri`
+  entry is keyed by issuer and `dwk`. `s-maxage` wins over `max-age`. A quoted
+  delta is accepted. `Age` is subtracted after the 86400-second cap. `Expires`
+  is an IMF-fixdate used when `Cache-Control` sets no lifetime: `Expires` minus
+  `Date`, or minus `now` when `Date` is absent. A
+  missing lifetime uses 300 seconds, and freshness is at most 86400 seconds.
+  `no-store` and `no-cache` record the fetch without making the body reusable.
+  The same issuer and `dwk`, or the same URL, cannot be fetched again for 60
+  seconds. The entry bound is chosen at open, and a zero bound is refused.
+  Egress admission does not fetch. It requires HTTPS, pins one resolved
+  address, and refuses a connected peer that differs from the pin. Only a
+  globally routable unicast address is admitted. IPv4-mapped, IPv4-compatible,
+  well-known NAT64 (`64:ff9b::/96`), 6to4, and Teredo forms are decoded before
+  that check. The local-use prefix `64:ff9b:1::/48` is refused as a whole.
+  Other addresses are refused unless the caller allows them. Zero or unbounded size and timeout
+  are `invalid_input` at admission. A redirect to another host is refused.
+  Three redirects are admitted, including a different port on the same host,
+  and a fourth is `invalid_input`. A
+  `jwks_uri` on a different host than its metadata document is refused unless
+  the caller allows it.
+  The response cap is at most 65536 bytes and the timeout is at most 30
+  seconds. A parsed `id` is an origin name. It is authorized only when that
+  exact string is on a list the host supplies.
+  `ServerKeyBinding` admits an Ed25519 thumbprint for one canonical HTTPS
+  authority. Host case, the path, the query, and port 443 do not make another
+  server. Any other port does. The same server may use a second key. A key
+  without an Ed25519 thumbprint is refused. `sign_request` does not consult
+  this binding. For `jkt-jwt` the caller passes the enclave key.
+  `verify_discovered_jwt` does not fetch. The host supplies the bytes from
+  `{iss}/.well-known/{dwk}` and from `jwks_uri`. `iss` is a bare HTTPS origin.
+  The metadata `issuer` must equal the `iss` claim byte for byte. The header
+  `kid` selects one JWKS key. That key and `cnf.jwk` are Ed25519, the key
+  `alg` equals the header `alg`, and the key must verify the assertion before
+  `cnf.jwk` is returned. An assertion missing `iss` or `dwk` is verified with
+  an Ed25519 key the host already holds, and the discovery documents are not
+  read.
+  Combined field lines and
   repeated dictionary/parameter names use RFC 9651 last-wins parsing. An identical
   repeated Signature-Input member preserves its signature base; changing the
   selected last member requires a new valid proof.
@@ -216,7 +295,7 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   content/trailers, component parameters, general field canonicalization, nonce
   replay storage and complete negotiation are absent. A `keyid` parameter is
   accepted only when it equals the `kid` already carried by the selected
-  Signature-Key member (the JWT header `kid`, or the `jwks_uri` `kid`). The
+  Signature-Key member (the JWT header `kid`, the direct `jwks` `kid`, or the `jwks_uri` `kid`). The
   verifier still takes the key from Signature-Key. `hwk` has no `kid`, so
   `keyid` on `hwk` is refused, as is a mismatch or a non-string `keyid`; the
   wire code remains `invalid_signature`. The alg signature parameter is ignored. Hosts must bound collection and pass

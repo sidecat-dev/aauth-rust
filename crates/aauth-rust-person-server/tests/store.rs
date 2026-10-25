@@ -38,6 +38,31 @@ fn child_person_retains_authoritative_parent_and_establishes_only_parent_binding
     assert_eq!(store.commit(another, true), Err(StoreError::RevokedBinding));
 }
 
+#[test]
+fn tenant_is_not_part_of_the_directed_person_identifier() {
+    let mut value = serde_json::to_value(record()).unwrap();
+    value["kind"] = serde_json::json!("Person");
+    value["presented"] = serde_json::Value::Null;
+    value["upstream"] = serde_json::Value::Null;
+    value["parent_agent"] = value["principal"].clone();
+    value["agent"]["subject"] = serde_json::json!("aauth:Agent+worker@ap.example");
+    value["tenant"] = serde_json::json!("team");
+    let first: TokenRecord = serde_json::from_value(value.clone()).unwrap();
+    let store = MemoryStore::default();
+    assert_eq!(store.commit(first, true), Ok(()));
+
+    value["token"]["reference"]["jti"] = serde_json::json!("same-person-other-tenant");
+    value["tenant"] = serde_json::json!("other-team");
+    let same_person: TokenRecord = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(store.commit(same_person, true), Ok(()));
+
+    value["token"]["reference"]["jti"] = serde_json::json!("other-subject");
+    value["subject"] = serde_json::json!("other-directed-person");
+    value["tenant"] = serde_json::json!("third-team");
+    let other_subject: TokenRecord = serde_json::from_value(value).unwrap();
+    assert_eq!(store.commit(other_subject, true), Err(StoreError::Conflict));
+}
+
 // A host adapter can accidentally omit fields from its Auth-row serializer even
 // when Person records round-trip correctly. The public contract must catch it.
 #[derive(Default)]

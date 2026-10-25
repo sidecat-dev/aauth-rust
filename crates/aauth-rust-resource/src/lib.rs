@@ -4,7 +4,9 @@ mod held;
 mod ps_authorization;
 mod session;
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
-use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
+use aauth_rust_signature_key::{
+    Error, KeyMaterial, PreparedRequest, required_components, role_signature_alg_header,
+};
 pub use held::{HeldError, HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
@@ -237,9 +239,10 @@ impl<T> Decision<T> {
                     SignatureFailure::Proof(Error::UnsupportedAlgorithm)
                         | SignatureFailure::Token(TokenError::UnsupportedAlgorithm)
                 ) {
-                    response
-                        .headers_mut()
-                        .insert("accept-signature-alg", "Ed25519".parse().unwrap());
+                    response.headers_mut().insert(
+                        "accept-signature-alg",
+                        role_signature_alg_header().parse().unwrap(),
+                    );
                 }
                 if matches!(failure, SignatureFailure::Proof(Error::UnsupportedScheme)) {
                     response

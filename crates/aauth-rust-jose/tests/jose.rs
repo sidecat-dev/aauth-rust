@@ -46,6 +46,15 @@ fn compact_jws_preserves_original_bytes_and_rejects_substitution() {
             .verify(&SigningKey::from_seed([8; 32]).public_jwk())
             .is_err()
     );
+    let mut ec = key.public_jwk();
+    ec.kty = "EC".into();
+    ec.crv = "P-256".into();
+    ec.alg = "ES256".into();
+    ec.y = ec.x.clone();
+    assert!(matches!(
+        parsed.verify(&ec),
+        Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+    ));
     for alg in ["EdDSA", "none", "HS256"] {
         assert!(Jws::sign(&json!({"alg":alg}), b"{}", &key).is_err());
     }
@@ -81,6 +90,38 @@ fn jwk_algorithm_and_shape_are_checked_at_use() {
     assert!(matches!(
         serde_json::from_value::<Jwk>(no_alg).unwrap().validate(),
         Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+    ));
+}
+
+#[test]
+fn unknown_kty_and_symmetric_algs_are_unsupported_not_inconsistent() {
+    let key = SigningKey::from_seed([7; 32]);
+    let original = serde_json::to_value(key.public_jwk()).unwrap();
+    for (member, value) in [
+        ("kty", json!("AKP")),
+        ("kty", json!("oct")),
+        ("alg", json!("none")),
+        ("alg", json!("HS256")),
+        ("alg", json!("HS384")),
+        ("alg", json!("HS512")),
+    ] {
+        let mut bad = original.clone();
+        bad[member] = value;
+        let jwk: Jwk = serde_json::from_value(bad).unwrap();
+        assert!(
+            matches!(
+                jwk.validate(),
+                Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+            ),
+            "{member}"
+        );
+    }
+    let mut inconsistent = original;
+    inconsistent["kty"] = json!("EC");
+    let jwk: Jwk = serde_json::from_value(inconsistent).unwrap();
+    assert!(matches!(
+        jwk.validate(),
+        Err(aauth_rust_jose::Error::InvalidKey)
     ));
 }
 

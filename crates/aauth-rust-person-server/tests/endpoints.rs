@@ -396,3 +396,65 @@ fn device_platform_capabilities_and_justification_are_not_grant_inputs() {
     assert_eq!(auth.claims().scope.as_deref(), Some("read"));
     assert_eq!(authorized.load(Ordering::SeqCst), 1);
 }
+
+#[test]
+fn person_endpoint_requires_an_https_origin_resource() {
+    let (agent, ap) = agent();
+    let bound = Arc::new(AtomicUsize::new(0));
+    let server = PersonServer::new(
+        Config::new("https://ps.example", "ps-1", SigningKey::from_seed([3; 32])),
+        Keys {
+            ap,
+            resource: SigningKey::from_seed([4; 32]).public_jwk(),
+        },
+        MemoryStore::default(),
+        Host {
+            bound: bound.clone(),
+            authorized: Arc::new(AtomicUsize::new(0)),
+            now: Arc::new(AtomicI64::new(1000)),
+            late: false,
+        },
+        || 1000,
+        || "person-1".into(),
+    )
+    .unwrap();
+    let refuse = |resource: &str| {
+        let response = server.handle(&signed(&agent, "/person", json!({"resource": resource})));
+        assert_eq!(response.status(), 400, "{resource}");
+        assert_eq!(value(&response)["error"], "invalid_request", "{resource}");
+    };
+    let missing = server.handle(&signed(&agent, "/person", json!({})));
+    assert_eq!(missing.status(), 400);
+    assert_eq!(value(&missing)["error"], "invalid_request");
+    for resource in [
+        "http://resource.example",
+        "https://Resource.example",
+        "https://resource.example/",
+        "https://resource.example:443",
+        "https://resource.example?x=1",
+        "https://resource.example#x",
+        "https://user@resource.example",
+    ] {
+        refuse(resource);
+    }
+    assert_eq!(bound.load(Ordering::SeqCst), 0);
+    let response = server.handle(&signed(
+        &agent,
+        "/person",
+        json!({"resource": "https://resource.example"}),
+    ));
+    assert_eq!(response.status(), 200);
+    let pskeys = TrustedIssuerKeys::from_documents(
+        "https://ps.example",
+        "aauth-person.json",
+        &server.metadata(),
+        &server.jwks(),
+    )
+    .unwrap();
+    let person = PersonToken::parse(value(&response)["person_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&pskeys, 1000)
+        .unwrap();
+    assert_eq!(person.claims().aud, "https://resource.example");
+    assert_eq!(bound.load(Ordering::SeqCst), 1);
+}

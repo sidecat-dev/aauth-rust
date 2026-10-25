@@ -150,6 +150,16 @@ impl TokenError {
         }
     }
 }
+/// Confirmation and issuer keys used outside `hwk` are Ed25519.
+pub(crate) fn require_ed25519(jwk: &Jwk) -> Result<(), TokenError> {
+    jwk.validate()?;
+    if jwk.alg == "Ed25519" {
+        Ok(())
+    } else {
+        Err(TokenError::UnsupportedAlgorithm)
+    }
+}
+
 impl From<aauth_rust_jose::Error> for TokenError {
     fn from(e: aauth_rust_jose::Error) -> Self {
         match e {
@@ -254,7 +264,7 @@ impl AgentClaims {
                 return Err(TokenError::InvalidJwt);
             }
         }
-        self.cnf.jwk.validate()?;
+        crate::require_ed25519(&self.cnf.jwk)?;
         Ok(())
     }
 }

@@ -17,8 +17,88 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
-four-party federation. The proof subset is Ed25519 `hwk`/`jwt` plus explicit
-`jwks_uri` service proofs. A `keyid` parameter is accepted only when it equals
+four-party federation. The proof subset is Ed25519, ES256, ES384, RS256, and PS256 `hwk`, Ed25519 `jwt`, Ed25519 `jkt-s256+jwt`
+self-issued delegation, plus explicit
+`jwks_uri` service proofs. A `jkt-jwt` member is verified by recomputing
+`urn:jkt:sha-256:` from the header `jwk` and comparing it to `iss`, then
+verifying the assertion and the HTTP signature under `cnf.jwk`. `iat` uses
+the same window as `created`. `exp` must be strictly after the verifier
+clock. The bare `cache` flag requires `jti`. When the host opts in, the library
+issues a sealed `Signature-Key-Cache` identifier. A `self-jwt` member is the same kind of proof with one
+key: after the compact JWT parses, `typ` matches the caller's deployment
+policy, `exp` is after the verifier clock, an optional `iat` uses the same
+window as `created`, `iss` is an HTTPS origin kept
+byte for byte, `dwk` is a discovery-document name, the header `kid` is
+present, and `cnf` is absent, the metadata document's `issuer` must equal
+`iss` or the resolver is not called. The host resolver is then asked for that
+exact `iss`, `dwk`, and `kid`. That key verifies the JWT and then the HTTP
+signature. A `cache` parameter is rejected and no cache identifier is issued.
+The library does not fetch the issuer. A direct `jwks` member names an HTTPS
+JWKS `url` and a `kid`. The URL is the signer identity and is passed to the
+host resolver unchanged: host case, an explicit port, a trailing slash, and a
+query are not rewritten. Byte-different URLs are different identities. The
+library does not fetch the JWKS. An EC header key carries `kty`, `crv`,
+`x`, `y`, and `alg` (`ES256` with `P-256`, or `ES384` with `P-384`). An RSA
+header key carries `kty`, `n`, `e`, and an `alg` that names both padding and
+hash (`RS256` or `PS256`). `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. A missing parameter or a curve that disagrees with
+`alg` is rejected. An `x509` member names an HTTPS `x5u` and a 32-byte `x5t`.
+The URL is kept as presented and is not fetched. The host passes the PEM
+chain and the DER trust anchors. The first certificate is the end entity. The
+chain must validate to one of those anchors at the verifier clock, and `x5t`
+must be the SHA-256 of that certificate, before the HTTP signature is checked.
+That certificate's key selects one algorithm: Ed25519, P-256 as ES256, or
+P-384 as ES384. An RSA certificate is `unsupported_algorithm` because
+`rsaEncryption` names neither padding nor hash. Revocation is host-owned.
+A `jwt` or `jkt-jwt` member may carry a bare `cache` flag. On `jwt` the flag
+requires a nonempty `jti` and a nonnegative `exp`. The host may then ask
+`AssertionCache` for a `Signature-Key-Cache` value. The identifier is a
+XChaCha20-Poly1305 seal under a verifier key: 192 random bits, the scheme,
+issuer, optional subject, SHA-256 of the verified compact assertion, the
+`jti`, both expiries, and the Ed25519 confirmation key. `expires` is the retention time
+and is not later than the assertion `exp`. It is honored through that second.
+After it, or after this process evicts the entry, resolution is `cache_miss`.
+A held assertion whose `exp` is not after the verifier clock fails as
+`expired_jwt` once the HTTP signature has verified. A bad HTTP signature is
+`invalid_signature`, including when the identifier resolves. An assertion with
+more than 86400 seconds left is not cached. `self-jwt` rejects `cache`. A
+caller presents `cid` only as the exact string issued, and does not present
+`cached` merely because `Accept-Signature-Scheme` lists it first. Direct agent
+identity, the person server, and the access server do not accept `cached`.
+Compact JWS remains Ed25519. When a request carries more than one signature,
+the signer writes the complete Signature-Key dictionary before creating any
+signature, and each signature covers that field. The verifier still checks
+one selected label. A client that reads `Accept-Signature-Scheme` or
+`Accept-Signature-Alg` keeps only tokens it recognizes, compared
+case-sensitively, and does not sign when none remain. `Signature-Error`
+contributes its `error` token; other members are ignored. On a non-success
+response the Person Server takes that token and does not require a JSON body.
+When the header is absent, a problem body still supplies `error`. A JSON
+`detail` may be present. `clock_skew` still requires `Date`. `KeyCache` stores a JWKS document the host fetched. It does not open a connection and cannot retract that fetch. A `jwks_uri` entry is keyed by issuer and `dwk`. Freshness
+comes from `s-maxage`, then `max-age`, otherwise 300 seconds, and is at most
+86400 seconds. `no-store` and
+`no-cache` do not leave a reusable body. Another fetch of that issuer and `dwk`, or of that URL,
+waits 60 seconds, and the cache holds only the bound given at open. A
+discovery fetch is admitted only for HTTPS, to one pinned globally routable
+unicast address, with a response cap of at most 65536 bytes and a timeout of
+at most 30 seconds. Those bounds are checked again at admission. Embedded
+IPv4 in mapped, compatible, well-known NAT64 (`64:ff9b::/96`), 6to4, and Teredo
+forms is classified as that IPv4 address. The local-use prefix `64:ff9b:1::/48`
+is refused as a whole. Anything else needs an explicit allowance, as does a JWKS
+host that differs from the metadata host. Redirects stay on that host, including a different port, and stop after three. A
+parsed `jwks_uri` `id` is an origin name; an empty allowlist does not
+authorize it. A pseudonym client admits each Ed25519 thumbprint
+for one canonical HTTPS authority. The same host with port 443, any path, and
+any query is that server. A different port is a different server. The same
+server may rotate to a new key. `jkt-jwt` binds the enclave key, not the
+ephemeral confirmation key. `sign_request` does not keep this table. A
+`jwt` that carries both `iss` and `dwk` is verified from host-supplied
+metadata and JWKS. The library builds `{iss}/.well-known/{dwk}` and does not
+fetch it or the JWKS. `iss` is a bare HTTPS origin. `issuer` must equal
+`iss`. The header `kid` selects the issuer key, that key's `alg` must equal
+the header `alg`, and both the issuer key and `cnf.jwk` are Ed25519. When
+either claim is absent, the host supplies the Ed25519 issuer key itself.
+Direct
+agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses
