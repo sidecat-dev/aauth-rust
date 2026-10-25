@@ -16,11 +16,18 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
   is host administration; Policy still chooses the directed identity and grant.
 - An unknown or wrong-owner reference at the Person token endpoint returns
   invalid_request; the selected endpoint error table supplies no distinct code
-  there. This is deliberately separate from the unimplemented mission endpoint's
-  mission_not_found. Both lookup misses use an owner-qualified key. Owned terminal
-  missions return mission_terminated with mission_status terminated and an opaque
-  termination_reason. The reason never permits reactivation. An empty reason is
-  refused before the record changes; the draft does not define the empty string.
+  there. The mission endpoint returns the same `404` `mission_not_found`, body,
+  and header set when the mission is absent and when it belongs to a different
+  authenticated agent. A proposal poll and a mission read or update each look
+  up one owner-qualified key, so those two misses are the same path. The draft
+  does not define a cycle bound; this profile treats that single lookup as the
+  timing equivalence. A request whose signature does not verify is refused
+  before that lookup, whether or not the path names a stored mission. Approval
+  reads a proposal id only after this Person Server's signature verifies.
+  Owned terminal missions return mission_terminated with mission_status
+  terminated and an opaque termination_reason. The reason never permits
+  reactivation. An empty reason is refused before the record changes; the draft
+  does not define the empty string.
 - Store::missions is optional and closed by default; mission checks and issuance
   retention must be atomic in the same store. Expiry/termination/revocation during
   policy or commit withholds credentials even if an internal issuance row was

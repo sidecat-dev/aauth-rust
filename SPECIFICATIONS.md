@@ -155,7 +155,10 @@ unrecognized action is `400 invalid_request`. Update requires `description` and
 returns that update's digest without changing the mission digest. Completion
 requires `summary` and terminates with reason `completed`. The owning agent can
 read the exact mission bytes and the accepted updates. A different owner receives
-the same `404` as a missing mission. Proposals are process memory. MemoryStore and
+the same `404`, body, and headers as a missing mission. A proposal poll uses the
+authenticated agent's issuer and subject together with the proposal id, so a
+missing proposal and someone else's proposal miss the same way. A signature
+that does not verify is refused before that lookup. Proposals are process memory. MemoryStore and
 redb persist the approved document. `mission_control_endpoint`, `person_tokens`
 and `capabilities` are not produced. AS, child, upstream and federated mission
 paths do not execute. Opt-in interaction, permission, and audit endpoints execute.
