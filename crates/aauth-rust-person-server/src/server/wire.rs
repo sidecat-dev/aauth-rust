@@ -90,6 +90,16 @@ impl Failure {
             mission_reason: None,
         }
     }
+    pub(super) fn revoked_jwt() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "revoked_jwt".into(),
+            signature: Some("error=revoked_jwt".into()),
+            date: None,
+            federation: None,
+            mission_reason: None,
+        }
+    }
     pub(super) fn credential(error: TokenError) -> Self {
         let code = error.code();
         Self {

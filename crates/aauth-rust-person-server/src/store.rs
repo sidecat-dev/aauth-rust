@@ -235,6 +235,12 @@ pub trait Store: Send + Sync {
     fn commit(&self, record: TokenRecord, establish_binding: bool) -> Result<(), StoreError>;
     /// Revoke the original Agent's binding, immediately preventing new issuance.
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError>;
+    /// Every retained issuance. The default is empty, so a store that does not
+    /// offer a scan cannot drive a revocation cascade. Adapters that retain
+    /// tokens override it.
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        Ok(Vec::new())
+    }
 }
 
 impl<T: Store + ?Sized> Store for Arc<T> {
@@ -252,6 +258,9 @@ impl<T: Store + ?Sized> Store for Arc<T> {
     }
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         (**self).revoke_binding(issuer, agent)
+    }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        (**self).retained()
     }
 }
 
@@ -455,6 +464,16 @@ impl Store for MemoryStore {
             .ok_or(StoreError::MissingBinding)?;
         binding.revoked = true;
         Ok(())
+    }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| StoreError::Unavailable)?
+            .tokens
+            .values()
+            .cloned()
+            .collect())
     }
 }
 

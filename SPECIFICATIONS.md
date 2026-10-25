@@ -36,7 +36,12 @@ store transaction as Person and Auth issuance. The decoder refuses an empty
 description, a negative approval time, and an expiry that is not strictly later
 than approval. Installing a record that is not active writes no person binding.
 An empty administrative termination reason is refused before the record changes. The direct Resource can opt in to
-carrying that signed digest. Mission creation, update, completion and control
+carrying that signed digest. Opt-in revocation executes for a Person Server, an Access Server, and a Resource.
+The caller signs as a server. The recipient keys `(iss, jti)` by the verified caller, ignores an `iss` body field, and keeps the first `exp`.
+The ledger is process memory. Downstream calls are a host-supplied directory, not an HTTP client in this library.
+A recipient with nothing downstream answers an empty `200` and never `202`. A Resource refuses a revoked person or auth token with `401` `revoked_jwt` and does not issue a resource token; a revoked auth token asks for a person token.
+An agent helper remembers a resource token refused as `revoked_resource_token`. `Subagent::auth_request` consults that set and does not build another request for that same token. The host records the token-endpoint error before the next build. Another error does not ban the token.
+Mission creation, update, completion and control
 endpoints do not execute. AS, child, upstream and federated mission paths do not
 execute. A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant

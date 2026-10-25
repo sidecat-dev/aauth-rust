@@ -1,0 +1,514 @@
+//! Signed revocation endpoint and the cascades a Person Server initiates.
+use super::*;
+use crate::TokenReference;
+use aauth_rust_core::revocation::{
+    covers_revocation_body, empty_ok, parse_revocation_body, pending as pending_response, problem,
+    success_response, unknown_pending,
+};
+use aauth_rust_core::{
+    CallOutcome, DownstreamReport, RevocationDirectory, RevocationLedger, RevocationLimits,
+};
+use aauth_rust_signature_key::KeyMaterial;
+use http::StatusCode;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+pub(super) struct Gate {
+    ledger: RevocationLedger,
+    pub(super) directory: Option<Arc<dyn RevocationDirectory>>,
+    pending: Mutex<BTreeMap<String, Job>>,
+    attempts: Mutex<BTreeMap<(String, String), Vec<TargetState>>>,
+}
+struct Job {
+    caller: String,
+    report: bool,
+    key: (String, String),
+    targets: Vec<Target>,
+}
+#[derive(Clone)]
+struct Target {
+    recipient: String,
+    jti: String,
+    exp: i64,
+}
+#[derive(Clone)]
+struct TargetState {
+    recipient: String,
+    jti: String,
+    error: Option<&'static str>,
+    deferred: bool,
+}
+impl Gate {
+    pub(super) fn new(limits: RevocationLimits) -> Self {
+        Self {
+            ledger: RevocationLedger::new(limits),
+            directory: None,
+            pending: Mutex::new(BTreeMap::new()),
+            attempts: Mutex::new(BTreeMap::new()),
+        }
+    }
+    fn limits(&self) -> RevocationLimits {
+        self.ledger.limits()
+    }
+}
+
+impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
+    PersonServer<K, S, P, C, I>
+{
+    /// Accept signed revocations and advertise `revocation_endpoint`.
+    ///
+    /// The ledger is process memory. Downstream calls use a
+    /// [`RevocationDirectory`] when one is installed; without it, each
+    /// downstream target is `revocation_unavailable`.
+    pub fn with_revocation(self) -> Self {
+        self.with_revocation_limits(RevocationLimits::default())
+    }
+    /// [`Self::with_revocation`] with an explicit lifetime and rate limit.
+    pub fn with_revocation_limits(mut self, limits: RevocationLimits) -> Self {
+        let directory = self
+            .revocation
+            .as_ref()
+            .and_then(|gate| gate.directory.clone());
+        let mut gate = Gate::new(limits);
+        gate.directory = directory;
+        self.revocation = Some(gate);
+        self
+    }
+    /// Install the host that delivers downstream revocations.
+    /// Enables revocation when it was off.
+    pub fn with_revocation_directory(mut self, directory: Arc<dyn RevocationDirectory>) -> Self {
+        if self.revocation.is_none() {
+            self = self.with_revocation();
+        }
+        if let Some(gate) = self.revocation.as_mut() {
+            gate.directory = Some(directory);
+        }
+        self
+    }
+    /// `exp` remembered for `(issuer, jti)`, if this server recorded it.
+    pub fn revocation_exp(&self, issuer: &str, jti: &str) -> Option<i64> {
+        self.revocation
+            .as_ref()
+            .and_then(|gate| gate.ledger.expiration(issuer, jti))
+    }
+    /// Revoke a person token this server issued, then cascade.
+    ///
+    /// The resource named in `aud` is called, and so is every access server
+    /// this person token was presented to. Auth tokens this server issued
+    /// against it are revoked at their resources. The response reports
+    /// `downstream` when there is anything to report. The agent-person binding
+    /// is left unchanged.
+    pub fn revoke_person_token(&self, jti: &str) -> Response<Vec<u8>> {
+        if self.revocation.is_none() {
+            return problem(StatusCode::NOT_FOUND, "not_found", None);
+        }
+        let targets = match self.person_targets(jti) {
+            Ok(targets) => targets,
+            Err(error) => return error.response(),
+        };
+        let key = (self.config.issuer.clone(), jti.to_owned());
+        self.finish(&self.config.issuer, key, true, targets)
+    }
+    pub(super) fn route_revocation(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<Option<Response<Vec<u8>>>, Failure> {
+        if self.revocation.is_none() {
+            return Ok(None);
+        }
+        let path = request.uri().path();
+        if request.method() == http::Method::POST && path == "/revoke" {
+            return self.revoke_post(request, now).map(Some);
+        }
+        if request.method() == http::Method::GET && path.starts_with("/revoke/pending/") {
+            return self.revoke_poll(request, now).map(Some);
+        }
+        Ok(None)
+    }
+    pub(super) fn token_revoked(&self, issuer: &str, jti: &str, now: i64) -> bool {
+        self.revocation
+            .as_ref()
+            .is_some_and(|gate| gate.ledger.is_revoked(issuer, jti, now))
+    }
+    fn revoke_post(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let caller = self.verify_revocation_caller(request, now, true)?;
+        if !matches!(
+            caller.dwk.as_str(),
+            "aauth-agent.json" | "aauth-resource.json"
+        ) {
+            return Ok(problem(StatusCode::FORBIDDEN, "unsupported_iss", None));
+        }
+        if let Some(limited) = self.charge(&caller.id)? {
+            return Ok(limited);
+        }
+        if request
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map(str::trim)
+            .is_none_or(|value| !value.eq_ignore_ascii_case("application/json"))
+        {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        let body = parse_revocation_body(request.body())
+            .map_err(|_| Failure::parameter("invalid_request"))?;
+        let gate = self.revocation.as_ref().expect("revocation is enabled");
+        if !gate.ledger.exp_allowed(body.exp, now) {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        gate.ledger.remember(&caller.id, &body.jti, body.exp);
+        let targets = if caller.dwk == "aauth-agent.json" {
+            self.agent_targets(&caller.id, &body.jti)?
+        } else {
+            Vec::new()
+        };
+        let key = (caller.id.clone(), body.jti);
+        Ok(self.finish(&caller.id, key, false, targets))
+    }
+    fn revoke_poll(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let caller = self.verify_revocation_caller(request, now, false)?;
+        let id = request
+            .uri()
+            .path()
+            .trim_start_matches("/revoke/pending/")
+            .to_owned();
+        if id.is_empty() || id.contains('/') {
+            return Ok(unknown_pending());
+        }
+        let job = {
+            let pending = self
+                .revocation
+                .as_ref()
+                .expect("revocation is enabled")
+                .pending
+                .lock()
+                .map_err(|_| Failure::internal())?;
+            pending.get(&id).map(|job| Job {
+                caller: job.caller.clone(),
+                report: job.report,
+                key: job.key.clone(),
+                targets: job.targets.clone(),
+            })
+        };
+        let Some(job) = job else {
+            return Ok(unknown_pending());
+        };
+        if job.caller != caller.id {
+            return Ok(unknown_pending());
+        }
+        if !request.body().is_empty() {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        let _ = now;
+        Ok(self.finish(&job.caller, job.key, job.report, job.targets))
+    }
+    fn finish(
+        &self,
+        caller: &str,
+        key: (String, String),
+        report: bool,
+        targets: Vec<Target>,
+    ) -> Response<Vec<u8>> {
+        let Some(gate) = &self.revocation else {
+            return problem(StatusCode::NOT_FOUND, "not_found", None);
+        };
+        let previous = gate
+            .attempts
+            .lock()
+            .ok()
+            .and_then(|attempts| attempts.get(&key).cloned())
+            .unwrap_or_default();
+        let states = self.dispatch(&targets, &previous);
+        if gate.attempts.lock().ok().is_some_and(|mut attempts| {
+            attempts.insert(key.clone(), states.clone());
+            true
+        }) && states.iter().any(|state| state.deferred)
+        {
+            let id = self.pending_id();
+            if let Ok(mut pending) = gate.pending.lock() {
+                pending.insert(
+                    id.clone(),
+                    Job {
+                        caller: caller.to_owned(),
+                        report,
+                        key,
+                        targets,
+                    },
+                );
+            }
+            return pending_response(
+                &format!("{}/revoke/pending/{id}", self.config.issuer),
+                gate.limits().retry_after,
+            );
+        }
+        if let Ok(mut pending) = gate.pending.lock() {
+            pending.retain(|_, job| job.key != key);
+        }
+        let reports = aggregate(&states);
+        if !report {
+            empty_ok()
+        } else {
+            success_response(&reports, true)
+        }
+    }
+    fn dispatch(&self, targets: &[Target], previous: &[TargetState]) -> Vec<TargetState> {
+        let directory = self
+            .revocation
+            .as_ref()
+            .and_then(|gate| gate.directory.as_ref());
+        targets
+            .iter()
+            .map(|target| {
+                if let Some(kept) = previous.iter().find(|state| {
+                    state.recipient == target.recipient
+                        && state.jti == target.jti
+                        && ((state.error.is_none() && !state.deferred)
+                            || state.error == Some("revocation_unsupported"))
+                }) {
+                    return kept.clone();
+                }
+                let outcome = directory
+                    .map(|directory| directory.revoke(&target.recipient, &target.jti, target.exp))
+                    .unwrap_or(CallOutcome::Unavailable);
+                let report = DownstreamReport::from_outcome(&target.recipient, outcome);
+                TargetState {
+                    recipient: target.recipient.clone(),
+                    jti: target.jti.clone(),
+                    error: report.error,
+                    deferred: report.deferred,
+                }
+            })
+            .collect()
+    }
+    fn charge(&self, caller: &str) -> Result<Option<Response<Vec<u8>>>, Failure> {
+        let gate = self.revocation.as_ref().expect("revocation is enabled");
+        match gate.ledger.charge(caller, (self.clock)()) {
+            Ok(()) => Ok(None),
+            Err(Some(retry_after)) => Ok(Some(problem(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                Some(retry_after),
+            ))),
+            Err(None) => Err(Failure::internal()),
+        }
+    }
+    fn person_targets(&self, jti: &str) -> Result<Vec<Target>, Failure> {
+        let reference = TokenReference {
+            issuer: self.config.issuer.clone(),
+            jti: jti.to_owned(),
+        };
+        let Some(person) = self
+            .store
+            .token(&reference)
+            .map_err(|_| Failure::internal())?
+        else {
+            return Err(Failure::parameter("invalid_request"));
+        };
+        if person.kind != TokenKind::Person || person.token.reference.issuer != self.config.issuer {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        self.remember(&self.config.issuer, jti, person.expires_at);
+        let mut targets = vec![Target {
+            recipient: person.resource.clone(),
+            jti: jti.to_owned(),
+            exp: person.expires_at,
+        }];
+        let records = self.store.retained().map_err(|_| Failure::internal())?;
+        let mut access_servers = std::collections::BTreeSet::new();
+        for record in records.iter().filter(|record| {
+            record.presented.as_ref().map(|tie| &tie.reference) == Some(&reference)
+        }) {
+            if record.token.reference.issuer == self.config.issuer {
+                self.remember(
+                    &self.config.issuer,
+                    &record.token.reference.jti,
+                    record.expires_at,
+                );
+            }
+            if record.person_server.is_some() {
+                if access_servers.insert(record.token.reference.issuer.clone()) {
+                    targets.push(Target {
+                        recipient: record.token.reference.issuer.clone(),
+                        jti: jti.to_owned(),
+                        exp: person.expires_at,
+                    });
+                }
+            } else if record.kind == TokenKind::Auth
+                && record.token.reference.issuer == self.config.issuer
+            {
+                targets.push(Target {
+                    recipient: record.resource.clone(),
+                    jti: record.token.reference.jti.clone(),
+                    exp: record.expires_at,
+                });
+            }
+        }
+        Ok(targets)
+    }
+    fn agent_targets(&self, caller: &str, agent_jti: &str) -> Result<Vec<Target>, Failure> {
+        let records = self.store.retained().map_err(|_| Failure::internal())?;
+        let subject = records.iter().find_map(|record| {
+            (record.agent.issuer == caller
+                && record.agent_token_jti == agent_jti
+                && record.binding_issuer() == self.config.issuer)
+                .then(|| record.agent.subject.clone())
+        });
+        let Some(subject) = subject else {
+            return Ok(Vec::new());
+        };
+        let mut targets = Vec::new();
+        let mut access_servers = std::collections::BTreeSet::new();
+        for record in records.iter().filter(|record| {
+            record.agent.issuer == caller
+                && record.agent.subject == subject
+                && record.binding_issuer() == self.config.issuer
+        }) {
+            if record.token.reference.issuer == self.config.issuer {
+                self.remember(
+                    &self.config.issuer,
+                    &record.token.reference.jti,
+                    record.expires_at,
+                );
+            }
+            if record.kind == TokenKind::Person
+                && record.token.reference.issuer == self.config.issuer
+            {
+                targets.push(Target {
+                    recipient: record.resource.clone(),
+                    jti: record.token.reference.jti.clone(),
+                    exp: record.expires_at,
+                });
+            } else if record.kind == TokenKind::Auth
+                && record.person_server.is_some()
+                && let Some(presented) = &record.presented
+                && access_servers.insert(record.token.reference.issuer.clone())
+            {
+                let exp = records
+                    .iter()
+                    .find(|person| person.token.reference == presented.reference)
+                    .map(|person| person.expires_at)
+                    .unwrap_or(record.expires_at);
+                targets.push(Target {
+                    recipient: record.token.reference.issuer.clone(),
+                    jti: presented.reference.jti.clone(),
+                    exp,
+                });
+            } else if record.kind == TokenKind::Auth
+                && record.token.reference.issuer == self.config.issuer
+            {
+                targets.push(Target {
+                    recipient: record.resource.clone(),
+                    jti: record.token.reference.jti.clone(),
+                    exp: record.expires_at,
+                });
+            }
+        }
+        Ok(targets)
+    }
+    fn remember(&self, issuer: &str, jti: &str, exp: i64) {
+        if let Some(gate) = &self.revocation {
+            gate.ledger.remember(issuer, jti, exp);
+        }
+    }
+    fn pending_id(&self) -> String {
+        let raw = (self.ids)();
+        let safe: String = raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if safe.is_empty() {
+            "pending".into()
+        } else {
+            safe
+        }
+    }
+    fn verify_revocation_caller(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        body_required: bool,
+    ) -> Result<Caller, Failure> {
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
+            .map_err(|error| Failure::proof(error, request, now))?;
+        let base = std::str::from_utf8(proof.signature_base())
+            .map_err(|_| Failure::proof(ProofError::InvalidInput, request, now))?;
+        if body_required && !covers_revocation_body(base) {
+            return Err(Failure::proof(ProofError::InvalidInput, request, now));
+        }
+        let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
+            return Err(Failure::proof(ProofError::UnsupportedScheme, request, now));
+        };
+        validate_server_identifier(id)
+            .map_err(|_| Failure::proof(ProofError::InvalidKey, request, now))?;
+        let key = self
+            .resolver()
+            .key(id, dwk, kid)
+            .map_err(Failure::credential)?;
+        proof
+            .verify(&key)
+            .map_err(|error| Failure::proof(error, request, now))?;
+        Ok(Caller {
+            id: id.clone(),
+            dwk: dwk.clone(),
+        })
+    }
+}
+struct Caller {
+    id: String,
+    dwk: String,
+}
+pub(super) fn revoked_parameter(parameter: &'static str) -> Failure {
+    Failure::parameter(match parameter {
+        "resource" => "revoked_resource_token",
+        "upstream" => "revoked_upstream_token",
+        _ => "revoked_presented_token",
+    })
+}
+fn aggregate(states: &[TargetState]) -> Vec<DownstreamReport> {
+    let mut recipients = Vec::new();
+    for state in states {
+        if !recipients.contains(&state.recipient) {
+            recipients.push(state.recipient.clone());
+        }
+    }
+    recipients
+        .into_iter()
+        .map(|recipient| {
+            let group: Vec<_> = states
+                .iter()
+                .filter(|state| state.recipient == recipient)
+                .collect();
+            let deferred = group.iter().any(|state| state.deferred);
+            let error = if deferred {
+                None
+            } else if group
+                .iter()
+                .any(|state| state.error == Some("revocation_unavailable"))
+            {
+                Some("revocation_unavailable")
+            } else if group
+                .iter()
+                .any(|state| state.error == Some("revocation_unsupported"))
+            {
+                Some("revocation_unsupported")
+            } else {
+                None
+            };
+            DownstreamReport {
+                recipient,
+                error,
+                deferred,
+            }
+        })
+        .collect()
+}

@@ -36,6 +36,7 @@
 //! ```
 #![deny(missing_docs)]
 mod continuation;
+mod revocation;
 mod wire;
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
@@ -138,6 +139,7 @@ pub struct AccessServer<K, P, C, I> {
     clock: C,
     ids: I,
     deferred: Option<continuation::Deferred>,
+    revocation: Option<revocation::Gate>,
 }
 struct Resolver<'a, K> {
     config: &'a Config,
@@ -194,12 +196,17 @@ impl<
             clock,
             ids,
             deferred: None,
+            revocation: None,
         })
     }
     /// Metadata served at /.well-known/aauth-access.json. No unsupported endpoints
     /// or companion capabilities are advertised.
     pub fn metadata(&self) -> Vec<u8> {
-        json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer)}).to_string().into_bytes()
+        let mut value = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer)});
+        if self.revocation.is_some() {
+            value["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
+        value.to_string().into_bytes()
     }
     /// Public JWKS for the current signing key. Hosts collocating roles must serve
     /// one merged key set; publication/rotation overlap remains host-managed.
@@ -228,6 +235,9 @@ impl<
         }
         if request.uri().path().starts_with("/token/pending/") && self.deferred.is_some() {
             return self.pending(request, now);
+        }
+        if let Some(response) = self.route_revocation(request, now)? {
+            return Ok(response);
         }
         match (request.method().as_str(), request.uri().path()) {
             ("GET", "/.well-known/aauth-access.json") => {
@@ -335,7 +345,9 @@ impl<
             })
             .transpose()?;
         let holder = subagent.as_ref().unwrap_or(&agent);
-        let resource = ResourceToken::parse(required(body, "resource_token")?)
+        let resource_compact = required(body, "resource_token")?;
+        self.refuse_revoked_parameter(resource_compact, now, "resource")?;
+        let resource = ResourceToken::parse(resource_compact)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|e| Failure::token(e, "resource", now))?;
         let r = resource.claims();
@@ -355,7 +367,9 @@ impl<
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
-        let presented = presented(required(body, "presented_token")?, &self.resolver(), now)?;
+        let presented_compact = required(body, "presented_token")?;
+        self.refuse_revoked_parameter(presented_compact, now, "presented")?;
+        let presented = presented(presented_compact, &self.resolver(), now)?;
         presented.matches(r)?;
         let requested_scopes = scopes(r.scope.as_deref().unwrap_or(""))
             .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
@@ -411,6 +425,13 @@ impl<
         };
         let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
             .map_err(|_| Failure::internal())?;
+        self.note_issued(revocation::IssuedAuth {
+            jti: claims.jti.clone(),
+            resource: claims.aud.clone(),
+            exp: claims.exp,
+            presented_issuer: presented.issuer.clone(),
+            presented_jti: presented.jti.clone(),
+        });
         let release = (self.clock)();
         current(release, &context, &presented)?;
         if release >= expires_at {
@@ -420,6 +441,7 @@ impl<
     }
 }
 struct Presented {
+    issuer: String,
     aud: String,
     ps: String,
     sub: String,
@@ -457,6 +479,7 @@ fn presented(compact: &str, keys: &dyn AgentKeyResolver, now: i64) -> Result<Pre
                     return Err(TokenError::InvalidJwt);
                 }
                 Ok(Presented {
+                    issuer: c.iss.clone(),
                     aud: c.aud.clone(),
                     ps: c.iss.clone(),
                     sub: c.sub.clone(),
@@ -475,6 +498,7 @@ fn presented(compact: &str, keys: &dyn AgentKeyResolver, now: i64) -> Result<Pre
                     return Err(TokenError::InvalidJwt);
                 }
                 Ok(Presented {
+                    issuer: c.iss.clone(),
                     aud: c.aud.clone(),
                     ps: c.ps.clone(),
                     sub: c.sub.clone(),

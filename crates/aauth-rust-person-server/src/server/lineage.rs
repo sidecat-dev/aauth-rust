@@ -13,9 +13,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             Jws::parse(compact).map_err(|error| Failure::token(error.into(), parameter, now))?;
         let value = match parsed.header().get("typ").and_then(Value::as_str) {
             Some("aa-person+jwt") => {
-                let token = PersonToken::parse(compact)
-                    .and_then(|token| token.verify(&self.resolver(), now))
+                let parsed = PersonToken::parse(compact)
                     .map_err(|error| Failure::token(error, parameter, now))?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.resolver(), now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.token_revoked(&issuer, &jti, now) => {
+                        return Err(super::revocation::revoked_parameter(parameter));
+                    }
+                    Err(error) => return Err(Failure::token(error, parameter, now)),
+                };
+                if self.token_revoked(&issuer, &jti, now) {
+                    return Err(super::revocation::revoked_parameter(parameter));
+                }
                 let c = token.claims();
                 if unsupported(&c.extra) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
@@ -36,9 +47,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 }
             }
             Some("aa-auth+jwt") => {
-                let token = AuthToken::parse(compact)
-                    .and_then(|token| token.verify(&self.resolver(), now))
+                let parsed = AuthToken::parse(compact)
                     .map_err(|error| Failure::token(error, parameter, now))?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.resolver(), now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.token_revoked(&issuer, &jti, now) => {
+                        return Err(super::revocation::revoked_parameter(parameter));
+                    }
+                    Err(error) => return Err(Failure::token(error, parameter, now)),
+                };
+                if self.token_revoked(&issuer, &jti, now) {
+                    return Err(super::revocation::revoked_parameter(parameter));
+                }
                 let c = token.claims();
                 let valid_role = if self.federation.is_some() {
                     c.dwk == "aauth-access.json" && c.ps == self.config.issuer

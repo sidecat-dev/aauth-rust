@@ -371,4 +371,18 @@ impl Store for RedbStore {
             .map_err(unavailable)?;
         transaction.commit().map_err(unavailable)
     }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        let read = self.database.begin_read().map_err(unavailable)?;
+        let table = read.open_table(TOKENS).map_err(unavailable)?;
+        let mut records = Vec::new();
+        for item in table.range::<&str>(..).map_err(unavailable)? {
+            let (_key, value) = item.map_err(unavailable)?;
+            let record: TokenRecord = decode(value.value())?;
+            record
+                .validate_for_commit(false)
+                .map_err(|_| StoreError::Unavailable)?;
+            records.push(record);
+        }
+        Ok(records)
+    }
 }

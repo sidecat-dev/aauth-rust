@@ -8,10 +8,12 @@ pub use subagents::Subagent;
 
 mod polling;
 pub use polling::{PollError, PollSession};
+mod attempts;
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
+pub use attempts::ResourceTokenAttempts;
 use http::Request;
 pub use requirements::{Requirement, RequirementError};
 use std::sync::Arc;

@@ -1055,6 +1055,7 @@ let first = person_server.handle(&admitted_child.auth_request(
     &person_compact,
     &trust,
     NOW,
+    &aauth_rust_agent::ResourceTokenAttempts::new(),
 )?);
 ```
 

@@ -12,6 +12,9 @@ use aauth_rust_signature_key::{
 use http::{Request, Response, StatusCode};
 use serde_json::json;
 
+#[path = "resource_revocation.rs"]
+mod revocation;
+
 /// Named captured-state policy for a PS-authorized Resource in application state.
 pub type BoxedAuthPolicy = Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
 
@@ -92,6 +95,11 @@ impl<T> AuthAuthorized<T> {
 pub enum AuthDecision<T = ()> {
     /// No Person/Auth credential was verified; obtain a Person token first.
     PersonTokenRequired,
+    /// A verified person or auth token is revoked. No resource token is issued.
+    Revoked {
+        /// The refused credential was an auth token, so the requirement is a person token.
+        auth_token: bool,
+    },
     /// Verified Person identity requires PS authorization before application use.
     AuthTokenRequired {
         /// Resource-signed challenge to exchange with the actual presented token.
@@ -110,6 +118,10 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PersonTokenRequired => f.write_str("PersonTokenRequired"),
+            Self::Revoked { auth_token } => f
+                .debug_struct("Revoked")
+                .field("auth_token", auth_token)
+                .finish(),
             Self::AuthTokenRequired { .. } => {
                 f.debug_struct("AuthTokenRequired").finish_non_exhaustive()
             }
@@ -153,6 +165,22 @@ impl<T> AuthDecision<T> {
                     "aauth-requirement",
                     "requirement=person-token".parse().unwrap(),
                 );
+                response
+            }
+            Self::Revoked { auth_token } => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "revoked_jwt");
+                response.headers_mut().insert(
+                    "signature-error",
+                    "error=revoked_jwt".parse().expect("static signature error"),
+                );
+                if auth_token {
+                    response.headers_mut().insert(
+                        "aauth-requirement",
+                        "requirement=person-token"
+                            .parse()
+                            .expect("static requirement"),
+                    );
+                }
                 response
             }
             Self::AuthTokenRequired { resource_token } => {
@@ -248,6 +276,7 @@ pub struct PsAuthorizationResource<K, P> {
     access_server: Option<String>,
     scope_descriptions: Option<std::collections::BTreeMap<String, String>>,
     mission_context: bool,
+    revocation: Option<revocation::Gate>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -297,6 +326,7 @@ where
             access_server: None,
             scope_descriptions: None,
             mission_context: false,
+            revocation: None,
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
@@ -350,13 +380,17 @@ where
         self
     }
     /// Accurate public metadata; serve at the published Resource well-known path.
-    /// This Resource publishes no revocation or explicit authorization endpoint;
+    /// `revocation_endpoint` is present only after [`Self::with_revocation`].
+    /// This Resource publishes no explicit authorization endpoint;
     /// AS selection is carried by its signed challenge audience.
     ///
     /// # Errors
     /// Returns a serialization error as InvalidJwt.
     pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
         let mut metadata = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"access_mode":"auth-token","signature_window":60});
+        if self.revocation.is_some() {
+            metadata["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
         if let Some(descriptions) = &self.scope_descriptions {
             metadata["scope_descriptions"] = json!(descriptions);
         }
@@ -477,9 +511,23 @@ where
                 Ok(AuthDecision::PersonTokenRequired)
             }
             Some("aa-person+jwt") => {
-                let token = PersonToken::parse(compact)
-                    .and_then(|token| token.verify(&self.keys, now))
-                    .map_err(SignatureFailure::Token)?;
+                let parsed = PersonToken::parse(compact).map_err(SignatureFailure::Token)?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.keys, now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.presented_revoked(&issuer, &jti, now) => {
+                        proof
+                            .verify(&parsed.unverified_claims().cnf.jwk)
+                            .map_err(SignatureFailure::Proof)?;
+                        check_iat(parsed.unverified_claims().iat, now)?;
+                        if parsed.unverified_claims().aud != self.config.issuer {
+                            return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                        }
+                        return Ok(AuthDecision::Revoked { auth_token: false });
+                    }
+                    Err(error) => return Err(SignatureFailure::Token(error)),
+                };
                 let claims = token.claims();
                 proof
                     .verify(&claims.cnf.jwk)
@@ -487,6 +535,9 @@ where
                 check_iat(claims.iat, now)?;
                 if claims.aud != self.config.issuer {
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if self.presented_revoked(&issuer, &jti, now) {
+                    return Ok(AuthDecision::Revoked { auth_token: false });
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
                     || unsupported_companion(&claims.extra)
@@ -537,9 +588,23 @@ where
                 }
             }
             Some("aa-auth+jwt") => {
-                let token = AuthToken::parse(compact)
-                    .and_then(|token| token.verify(&self.keys, now))
-                    .map_err(SignatureFailure::Token)?;
+                let parsed = AuthToken::parse(compact).map_err(SignatureFailure::Token)?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.keys, now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.presented_revoked(&issuer, &jti, now) => {
+                        proof
+                            .verify(&parsed.unverified_claims().cnf.jwk)
+                            .map_err(SignatureFailure::Proof)?;
+                        check_iat(parsed.unverified_claims().iat, now)?;
+                        if parsed.unverified_claims().aud != self.config.issuer {
+                            return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                        }
+                        return Ok(AuthDecision::Revoked { auth_token: true });
+                    }
+                    Err(error) => return Err(SignatureFailure::Token(error)),
+                };
                 let claims = token.claims();
                 proof
                     .verify(&claims.cnf.jwk)
@@ -547,6 +612,9 @@ where
                 check_iat(claims.iat, now)?;
                 if claims.aud != self.config.issuer {
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if self.presented_revoked(&issuer, &jti, now) {
+                    return Ok(AuthDecision::Revoked { auth_token: true });
                 }
                 let valid_role = match &self.access_server {
                     Some(issuer) => claims.dwk == "aauth-access.json" && &claims.iss == issuer,
