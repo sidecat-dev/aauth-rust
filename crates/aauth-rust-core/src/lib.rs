@@ -4,6 +4,7 @@
 pub mod continuation;
 mod discovery;
 mod identifiers;
+pub mod interaction;
 mod mission;
 pub mod revocation;
 pub mod session;

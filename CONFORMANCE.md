@@ -174,6 +174,14 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   Held invocation retention does execute. The first poll of an auth token `jti`
   runs the invocation once. A repeated poll at the same pending id returns that
   result through the token's `exp` and does not run it again.
+  A resource interaction redirect does execute. The resource sends the browser
+  to `callback` when the flow ends, with `error` when it did not finish.
+  `access_denied` polls as `denied`, `user_abandoned` as `abandoned`,
+  `interaction_expired` as `expired`, and both `server_error` and
+  `temporarily_unavailable` as `server_error`. `person_server_redirect` and
+  `receive_callback` are helpers; no Person Server route calls them. Callback
+  targets must be HTTPS. `http://localhost` and `http://127.0.0.1` are refused.
+  A callback that carries `error` does not complete the pending request.
   Opt-in mission creation, update, completion, authenticated approval and owner audit do execute.
   Opt-in interaction, permission, and audit posts do execute. Interaction and payment relays return `424 interaction_unavailable`. Presented interaction codes are correlated, not consent.
   Opt-in revocation does execute. The ledger is process memory, and downstream

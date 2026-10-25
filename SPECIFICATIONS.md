@@ -28,7 +28,15 @@ auth token `jti` through `exp`. During a clarification, `updated_request`
 replaces the pending resource token only after the new pair verifies, the
 resource identity matches the original (`iss`, `ps`, `sub`, `agent_jkt`,
 `mission_s256`, and `tenant`), and consent allows that replacement. A refusal
-leaves the stored request unchanged and does not call the access server. Settlement and
+leaves the stored request unchanged and does not call the access server.
+A resource interaction sends the browser to its `callback`, adding `error`
+when the flow did not finish. `access_denied` polls as `denied`,
+`user_abandoned` as `abandoned`, `interaction_expired` as `expired`, and both
+`server_error` and `temporarily_unavailable` as `server_error`.
+`person_server_redirect` and `receive_callback` are helpers; no Person Server
+route calls them. Callback targets are HTTPS, so `http://localhost` and
+`http://127.0.0.1` are refused. A callback that carries `error` does not
+complete the pending request. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal
