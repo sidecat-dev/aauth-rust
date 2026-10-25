@@ -233,6 +233,9 @@ does not add consumption. The cap is per auth-token `jti`. A high per-person
 total does not refuse a request that fits its token. `POST` on the usage
 endpoint answers a caller who appears as `iss` or `ps` on a metered token. The
 caller signs with `jwks_uri`, covering `content-type` and `content-digest`.
+While a reservation is open, `as_of` stays at the newest commit time and does not
+move backward when a later commit carries an earlier timestamp. With no
+reservation open, `as_of` is the request time.
 The response signature covers `@status`, `content-type`, `content-digest`,
 `@authority;req`, and `@path;req`. An unrecognized scope or a zero total omits
 `usage`. An unknown key thumbprint is omitted. Intermediary rewriting,

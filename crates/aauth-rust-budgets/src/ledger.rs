@@ -363,7 +363,8 @@ impl Ledger {
 
     /// Unix time through which committed figures are complete.
     ///
-    /// An outstanding reservation keeps `as_of` at the previous commit.
+    /// An outstanding reservation keeps `as_of` at the newest commit time.
+    /// A later commit whose timestamp is earlier does not move that mark backward.
     pub fn as_of(&self, now: i64) -> i64 {
         if self.holds.is_empty() {
             now
@@ -466,7 +467,7 @@ impl Ledger {
                 }
             }
         }
-        self.last_commit = Some(at);
+        self.last_commit = Some(self.last_commit.map(|prev| prev.max(at)).unwrap_or(at));
         self.assert_caps();
         let state = self.tokens.get(&jti).expect("token present");
         let remaining = state.account.grant.amount() - state.committed - state.reserved;

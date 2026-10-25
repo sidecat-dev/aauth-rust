@@ -281,6 +281,10 @@ fn unreported_allocation_counts_as_fully_consumed_until_a_figure_replaces_it() {
     book.note_revocation("c", RevocationSettlement::Unsupported);
     assert_eq!(book.free(1_000, 30, 100), 1_000 - 30 - 100 - 7);
     assert_eq!(book.free(1_000, 30, 150), 1_000 - 30 - 100);
+    book.insert("d", 9, 180);
+    book.note_revocation("d", RevocationSettlement::Unavailable);
+    assert_eq!(book.free(1_000, 30, 150), 1_000 - 30 - 100 - 9);
+    assert_eq!(book.free(1_000, 30, 180), 1_000 - 30 - 100);
 }
 
 #[test]
@@ -420,7 +424,9 @@ fn usage_counters_follow_utc_calendars_and_omit_unknown_keys() {
     let mut quiet_key = account("quiet", 10, "ada");
     quiet_key.jkt = "zero".into();
     ledger.open(quiet_key).unwrap();
+    let mut retained = ledger.clone();
     ledger.prune_keys(1_792_886_400 + 7_200, 86_400);
+    retained.prune_keys(1_792_886_400 + 7_200, 86_400 * 40);
     let caller = Caller {
         id: "https://as.example".into(),
         role: KeyRole::AccessServer,
@@ -443,6 +449,13 @@ fn usage_counters_follow_utc_calendars_and_omit_unknown_keys() {
     assert_eq!(keys.get("zero"), Some(&0));
     assert!(!keys.contains_key("missing"));
     assert!(!keys.contains_key("old"));
+    let kept = answer_usage(&retained, &caller, &query, 1_792_886_400 + 7_200, &usd(0))
+        .jkts
+        .unwrap();
+    assert!(kept.contains_key("old"));
+    assert_eq!(ledger.as_of(1_792_886_400 + 9_000), 1_792_886_400 + 9_000);
+    let _parked = ledger.reserve("day", 1).unwrap();
+    assert_eq!(ledger.as_of(1_792_886_400 + 9_000), 1_792_886_400 + 3_600);
     let quiet = parse_usage_query(
         &json!({"sub": "nobody", "ps": "https://ps.example"}),
         KeyRole::AccessServer,
@@ -465,6 +478,13 @@ fn usage_counters_follow_utc_calendars_and_omit_unknown_keys() {
         )
         .is_err()
     );
+    let both = parse_usage_query(
+        &json!({"sub": "ada", "ps": "https://ps.example", "jkts": ["known"]}),
+        KeyRole::AccessServer,
+    )
+    .unwrap();
+    assert_eq!(both.sub.as_deref(), Some("ada"));
+    assert_eq!(both.jkts.unwrap(), vec!["known".to_owned()]);
 }
 
 #[test]

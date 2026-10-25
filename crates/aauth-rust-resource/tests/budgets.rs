@@ -237,6 +237,8 @@ fn buffered_requests_meter_the_token_cap_and_keep_its_signed_scale() {
     assert_eq!(challenge_claims["budget_consumed"]["jti"], "meter");
     assert_eq!(challenge_claims["budget_consumed"]["consumed"], 1_500);
     assert_eq!(challenge_claims["budget"]["decimals"], 6);
+    assert_eq!(challenge_claims["budget"]["amount"], 5_000_000);
+    assert_ne!(challenge_claims["budget"]["amount"], 1_500);
 
     let finish = resource
         .authorize(
