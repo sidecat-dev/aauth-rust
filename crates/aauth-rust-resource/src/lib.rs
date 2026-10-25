@@ -7,7 +7,7 @@ use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_com
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,
-    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError,
+    ProactiveDecision, PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError,
 };
 pub use session::{SessionAdmit, SessionLedger};
 

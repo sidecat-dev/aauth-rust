@@ -6,8 +6,8 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_resource::{
-    AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig,
-    PsAuthorizationResource,
+    AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, Deny, ProactiveDecision,
+    PsAuthorizationConfig, PsAuthorizationResource,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
@@ -1028,4 +1028,367 @@ fn same_subject_from_another_person_server_does_not_match_the_ask() {
             .into_response(),
     );
     assert_eq!(federated_calls.load(Ordering::SeqCst), 1);
+}
+
+fn assert_proactive_failure(response: &http::Response<Vec<u8>>, code: &str) {
+    assert_eq!(
+        response.status(),
+        401,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let error = response.headers()["signature-error"].to_str().unwrap();
+    assert!(
+        error.split(',').next().unwrap() == format!("error={code}"),
+        "{error}"
+    );
+    assert!(!response.headers().contains_key("aauth-requirement"));
+    assert!(
+        !response
+            .body()
+            .windows(15)
+            .any(|bytes| bytes == b"resource_token")
+    );
+}
+
+fn authorize_body(token: Option<&str>, scope: Option<&str>) -> Request<Vec<u8>> {
+    let body = match scope {
+        Some(scope) => json!({ "scope": scope }),
+        None => json!({}),
+    };
+    authorize_json(token, body)
+}
+
+fn authorize_json(token: Option<&str>, body: Value) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("{ORIGIN}/authorize"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    if let Some(token) = token {
+        sign_request(
+            &mut request,
+            &SigningKey::from_seed([2; 32]),
+            KeyMaterial::Jwt(token.into()),
+            NOW,
+        )
+        .unwrap();
+    }
+    request
+}
+
+#[test]
+fn proactive_authorization_verifies_the_person_token_and_requires_scope() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let plain = resource(calls.clone(), true);
+    let metadata: Value = serde_json::from_slice(&plain.metadata().unwrap()).unwrap();
+    assert!(metadata.get("authorization_endpoint").is_none());
+    let resource = plain.with_authorization_endpoint();
+    let metadata: Value = serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata["authorization_endpoint"],
+        format!("{RESOURCE}/authorize")
+    );
+
+    for request in [
+        authorize_body(None, Some("records.read")),
+        authorize_body(Some(agent().token()), Some("records.read")),
+    ] {
+        let response = resource
+            .authorize_endpoint(&request, NOW, "proactive-1")
+            .into_response();
+        assert_eq!(response.status(), 401);
+        assert_eq!(
+            response.headers()["aauth-requirement"],
+            "requirement=person-token"
+        );
+        assert!(
+            !response
+                .body()
+                .windows(15)
+                .any(|bytes| bytes == b"resource_token")
+        );
+    }
+
+    let forged = authorize_body(Some(&person()), Some("records.read"));
+    let mut forged = forged;
+    forged.headers_mut().insert(
+        "signature",
+        "sig=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==:".parse().unwrap(),
+    );
+    let rejected = resource
+        .authorize_endpoint(&forged, NOW, "proactive-1")
+        .into_response();
+    assert_eq!(rejected.status(), 401);
+    assert!(rejected.headers().contains_key("signature-error"));
+    assert!(!rejected.headers().contains_key("aauth-requirement"));
+
+    let mut tampered = person();
+    let (prefix, signature) = tampered.rsplit_once('.').unwrap();
+    let mut signature = signature.as_bytes().to_vec();
+    signature[0] = if signature[0] == b'A' { b'B' } else { b'A' };
+    tampered = format!("{prefix}.{}", std::str::from_utf8(&signature).unwrap());
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&tampered), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "invalid_jwt",
+    );
+
+    let mut expired_claims = person_claims();
+    expired_claims.iat = 900;
+    expired_claims.exp = NOW;
+    expired_claims.jti = "person-expired-forged".into();
+    let mut forged_expired =
+        mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &expired_claims).unwrap();
+    let (prefix, signature) = forged_expired.rsplit_once('.').unwrap();
+    let mut signature = signature.as_bytes().to_vec();
+    signature[0] = if signature[0] == b'A' { b'B' } else { b'A' };
+    forged_expired = format!("{prefix}.{}", std::str::from_utf8(&signature).unwrap());
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&forged_expired), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "invalid_jwt",
+    );
+
+    let mut wrong_audience = person_claims();
+    wrong_audience.aud = "https://other.example".into();
+    wrong_audience.jti = "person-audience".into();
+    let wrong_audience =
+        mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &wrong_audience).unwrap();
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&wrong_audience), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "invalid_jwt",
+    );
+
+    let mut expired = person_claims();
+    expired.iat = 900;
+    expired.exp = NOW;
+    expired.jti = "person-expired".into();
+    let expired = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &expired).unwrap();
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&expired), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "expired_jwt",
+    );
+
+    let mut untrusted = person_claims();
+    untrusted.iss = "https://evil.example".into();
+    untrusted.jti = "person-untrusted".into();
+    let untrusted =
+        mint_person_token(&SigningKey::from_seed([9; 32]), "evil-1", &untrusted).unwrap();
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&untrusted), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "invalid_key",
+    );
+
+    assert_proactive_failure(
+        &resource
+            .authorize_endpoint(
+                &authorize_body(Some(&auth(&auth_claims())), Some("records.read")),
+                NOW,
+                "proactive-1",
+            )
+            .into_response(),
+        "invalid_jwt",
+    );
+
+    let missing = resource
+        .authorize_endpoint(&authorize_body(Some(&person()), None), NOW, "proactive-1")
+        .into_response();
+    assert_eq!(missing.status(), 400);
+    assert!(
+        missing
+            .body()
+            .windows(15)
+            .any(|bytes| bytes == b"invalid_request")
+    );
+
+    let unknown = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&person()), Some("admin")),
+            NOW,
+            "proactive-1",
+        )
+        .into_response();
+    assert_eq!(unknown.status(), 400);
+    assert!(
+        unknown
+            .body()
+            .windows(13)
+            .any(|bytes| bytes == b"invalid_scope")
+    );
+
+    let response = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&person()), Some("records.read")),
+            NOW,
+            "proactive-1",
+        )
+        .into_response();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    let compact = body["resource_token"].as_str().unwrap();
+    let verified = ResourceToken::parse(compact)
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(verified.claims().scope.as_deref(), Some("records.read"));
+    assert_eq!(verified.claims().presented_jti, "person-1");
+    assert_eq!(verified.claims().ps, PS);
+    assert_eq!(verified.claims().sub, "directed-person");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        resource.authorize_endpoint(&authorize_body(Some(&person()), None), NOW, "proactive-1"),
+        ProactiveDecision::InvalidRequest
+    ));
+}
+
+#[test]
+fn proactive_scope_may_be_a_subset_while_an_auth_token_must_name_every_scope() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut profile = config();
+    profile.scopes = vec!["records.read".into(), "records.write".into()];
+    let calls_for_policy = calls.clone();
+    let resource = PsAuthorizationResource::new(
+        profile,
+        keys(),
+        Box::new(
+            move |_token: &VerifiedAuthToken, _request: &Request<Vec<u8>>| {
+                calls_for_policy.fetch_add(1, Ordering::SeqCst);
+                Ok("host-context".into())
+            },
+        ) as Policy,
+    )
+    .unwrap()
+    .with_authorization_endpoint();
+    let subset = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&person()), Some("records.read")),
+            NOW,
+            "subset-1",
+        )
+        .into_response();
+    assert_eq!(
+        subset.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(subset.body())
+    );
+    let issued: Value = serde_json::from_slice(subset.body()).unwrap();
+    let issued = ResourceToken::parse(issued["resource_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(issued.claims().scope.as_deref(), Some("records.read"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let mut partial = auth_claims();
+    partial.jti = "auth-partial".into();
+    partial.scope = Some("records.read".into());
+    let refused = resource
+        .authorize(&signed(&auth(&partial)), NOW, "unused")
+        .into_response();
+    assert_eq!(
+        refused.status(),
+        403,
+        "{}",
+        String::from_utf8_lossy(refused.body())
+    );
+    assert!(
+        refused
+            .body()
+            .windows(13)
+            .any(|bytes| bytes == b"access_denied")
+    );
+    assert!(!refused.headers().contains_key("signature-error"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let mut complete = auth_claims();
+    complete.jti = "auth-complete".into();
+    complete.scope = Some("records.read records.write".into());
+    resource
+        .authorize(&signed(&auth(&complete)), NOW, "unused")
+        .into_result()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let mut repeated_member = Request::builder()
+        .method("POST")
+        .uri(format!("{ORIGIN}/authorize"))
+        .header("content-type", "application/json")
+        .body(br#"{"scope":"records.read","scope":"records.write"}"#.to_vec())
+        .unwrap();
+    sign_request(
+        &mut repeated_member,
+        &SigningKey::from_seed([2; 32]),
+        KeyMaterial::Jwt(person()),
+        NOW,
+    )
+    .unwrap();
+    let repeated_member = resource
+        .authorize_endpoint(&repeated_member, NOW, "repeated-member")
+        .into_response();
+    assert_eq!(repeated_member.status(), 400);
+    assert!(
+        repeated_member
+            .body()
+            .windows(15)
+            .any(|bytes| bytes == b"invalid_request")
+    );
+    assert!(
+        !repeated_member
+            .body()
+            .windows(14)
+            .any(|bytes| bytes == b"resource_token")
+    );
+
+    let repeated_token = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&person()), Some("records.read records.read")),
+            NOW,
+            "repeated-token",
+        )
+        .into_response();
+    assert_eq!(repeated_token.status(), 400);
+    assert!(
+        repeated_token
+            .body()
+            .windows(15)
+            .any(|bytes| bytes == b"invalid_request")
+    );
+    assert!(
+        !repeated_token
+            .body()
+            .windows(13)
+            .any(|bytes| bytes == b"invalid_scope")
+    );
 }

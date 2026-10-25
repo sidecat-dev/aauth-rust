@@ -78,6 +78,12 @@ same request before it can return the bound subject. An unverified presentation
 does not reveal the subject. A later
 `AAuth-Access` value replaces the previous token. Empty values, embedded
 whitespace, control characters, and more than one credential are rejected.
+Opt-in `authorization_endpoint` executes. The agent presents a person token.
+The resource verifies it before reading `scope`. A request without a person
+token is `requirement=person-token`. Missing `scope` is `invalid_request`.
+A recognized scope returns a resource token. An unrecognized scope is
+`invalid_scope`. A duplicate JSON member and a repeated scope token are
+`invalid_request`.
 A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant
