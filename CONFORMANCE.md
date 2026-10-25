@@ -312,7 +312,7 @@ a general delegation lifecycle or automatic sub-agent process supervision.
 
 Both roles require separate explicit continuation stores. Pending deadlines are
 capped by the original parent Agent, optional child Agent, presented and Resource expiry; long-wait request
-refresh/decision reuse and clarification `updated_request` are not implemented.
+refresh/decision reuse is not implemented. A clarification `updated_request` replaces the pending resource token only after the new pair verifies, the resource identity matches the original, and consent allows the replacement. Denied consent leaves the stored request unchanged and does not call the access server.
 The supported chat action is `clarification_response`, bounded to five rounds,
 plus signed cancellation. AS and PS each retain their own round counter and
 absolute question deadline; repeating an unanswered question never restarts it,

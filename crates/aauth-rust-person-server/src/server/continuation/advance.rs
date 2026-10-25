@@ -62,7 +62,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 )
             }
             FederationInput::Poll => {
-                if let Some(answer) = value["queued"].as_str() {
+                if value
+                    .get("updated_request")
+                    .is_some_and(|body| body.is_object())
+                {
+                    ("POST", Some(value["updated_request"].clone()))
+                } else if let Some(answer) = value["queued"].as_str() {
                     (
                         "POST",
                         Some(
@@ -222,6 +227,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 value["as_pending"] =
                     serde_json::to_value(next).map_err(|_| Failure::internal())?;
                 value["queued"] = Value::Null;
+                value["updated_request"] = Value::Null;
                 value["retrying"] = json!(false);
                 waiting = true;
                 return Ok(response);

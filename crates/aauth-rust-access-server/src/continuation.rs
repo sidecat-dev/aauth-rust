@@ -220,6 +220,22 @@ impl<
             let object = body
                 .as_object()
                 .ok_or_else(|| Failure::parameter("invalid_request"))?;
+            if object.get("action").and_then(Value::as_str) == Some("updated_request") {
+                if !matches!(previous.requirement, Requirement::Clarification { .. }) {
+                    return Err(Failure::parameter("invalid_request"));
+                }
+                value["request"] =
+                    self.verified_updated_request(&value["request"], object, &owner, now)?;
+                if !d
+                    .config
+                    .store
+                    .replace(id, snapshot.revision, Some(value.clone()))
+                    .map_err(|_| Failure::internal())?
+                {
+                    return Ok(throttled(1));
+                }
+                return pending_wire(&previous, &value, now);
+            }
             if [
                 "agent_token",
                 "subagent_token",
@@ -404,6 +420,63 @@ impl<
         }
         Ok(response)
     }
+
+    /// Verify the posted pair, then return the request that should replace custody.
+    fn verified_updated_request(
+        &self,
+        stored: &Value,
+        object: &Map<String, Value>,
+        owner: &str,
+        now: i64,
+    ) -> Result<Value, Failure> {
+        if object.keys().any(|key| {
+            ![
+                "action",
+                "resource_token",
+                "presented_token",
+                "justification",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        let resource_token = object
+            .get("resource_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| Failure::parameter("invalid_request"))?;
+        let presented_token = object
+            .get("presented_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| Failure::parameter("invalid_request"))?;
+        if let Some(justification) = object.get("justification")
+            && justification
+                .as_str()
+                .is_none_or(|text| text.is_empty() || text.len() > 65536)
+        {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        let mut candidate = stored.clone();
+        candidate["resource_token"] = json!(resource_token);
+        candidate["presented_token"] = json!(presented_token);
+        let (context, _) = self.authorize_body(&candidate, owner, now)?;
+        let original = ResourceToken::parse(required(stored, "resource_token")?)
+            .and_then(|token| token.verify(&self.resolver(), now))
+            .map_err(|_| Failure::internal())?;
+        if !same_updated_resource(original.claims(), context.resource.claims()) {
+            return Err(Failure::parameter("invalid_resource_token"));
+        }
+        Ok(candidate)
+    }
+}
+fn same_updated_resource(left: &ResourceClaims, right: &ResourceClaims) -> bool {
+    left.iss == right.iss
+        && left.ps == right.ps
+        && left.sub == right.sub
+        && left.agent_jkt == right.agent_jkt
+        && left.mission_s256 == right.mission_s256
+        && left.tenant == right.tenant
 }
 fn safe_id(id: &str) -> bool {
     !id.is_empty()

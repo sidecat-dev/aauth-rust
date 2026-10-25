@@ -23,7 +23,12 @@ the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses
 a Resource `202` `requirement=auth-token` and polls it with a retained auth
-token. The Resource does not hold that invocation. Settlement and
+token. A host that holds the invocation replays one stored result for that
+auth token `jti` through `exp`. During a clarification, `updated_request`
+replaces the pending resource token only after the new pair verifies, the
+resource identity matches the original (`iss`, `ps`, `sub`, `agent_jkt`,
+`mission_s256`, and `tenant`), and consent allows that replacement. A refusal
+leaves the stored request unchanged and does not call the access server. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal

@@ -1395,3 +1395,201 @@ fn accepted_answer_retires_its_question_deadline_during_policy_processing() {
         410
     );
 }
+
+#[test]
+fn updated_request_verifies_the_pair_before_replacing_the_pending_request() {
+    let store = Arc::new(MemoryContinuations::new(4));
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        || 1000,
+        || "opaque".into(),
+    )
+    .unwrap()
+    .with_deferred(config(store.clone()), |context: &DeferredContext| {
+        Ok(if context.clarifications.is_empty() {
+            Some(Requirement::Clarification {
+                question: "Why read?".into(),
+                timeout: Some(30),
+                options: vec![],
+            })
+        } else {
+            None
+        })
+    })
+    .unwrap();
+    let response = server.handle(&request(good()));
+    assert_eq!(response.status(), 202);
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
+    let stored = || {
+        store.load("opaque").unwrap().unwrap().value["request"]["resource_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let original = stored();
+    let error = |body: Value| {
+        let response = server.handle(&poll(&pending.location, "POST", Some(body), 1000));
+        assert_eq!(
+            response.status(),
+            400,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        serde_json::from_slice::<Value>(response.body()).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        error(json!({"action":"updated_request","resource_token":original})),
+        "invalid_request"
+    );
+    assert_eq!(stored(), original);
+    let mut resource = super::resource_claims();
+    resource.presented_jti = "other".into();
+    let mismatched = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &resource,
+    )
+    .unwrap();
+    let presented = good()["presented_token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        error(json!({
+            "action": "updated_request",
+            "resource_token": mismatched,
+            "presented_token": presented
+        })),
+        "invalid_resource_token"
+    );
+    assert_eq!(stored(), original);
+    let mut person = super::person_claims();
+    person.sub = "other-person".into();
+    let mut resource = super::resource_claims();
+    resource.sub = "other-person".into();
+    let other_presented =
+        aauth_rust_core::mint_person_token(&SigningKey::from_seed([3; 32]), "ps", &person).unwrap();
+    let other_resource = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &resource,
+    )
+    .unwrap();
+    assert_eq!(
+        error(json!({
+            "action": "updated_request",
+            "resource_token": other_resource,
+            "presented_token": other_presented
+        })),
+        "invalid_resource_token"
+    );
+    assert_eq!(stored(), original);
+    for mutate in [
+        |claims: &mut ResourceClaims| claims.ps = "https://other.example".into(),
+        |claims: &mut ResourceClaims| {
+            claims.agent_jkt = SigningKey::from_seed([9; 32])
+                .public_jwk()
+                .thumbprint()
+                .unwrap();
+        },
+        |claims: &mut ResourceClaims| {
+            claims.mission_s256 = Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
+        },
+        |claims: &mut ResourceClaims| claims.tenant = Some("other-tenant".into()),
+    ] {
+        let mut claims = super::resource_claims();
+        mutate(&mut claims);
+        let token = aauth_rust_core::mint_resource_token(
+            &SigningKey::from_seed([5; 32]),
+            "resource",
+            &claims,
+        )
+        .unwrap();
+        assert_eq!(
+            error(json!({
+                "action": "updated_request",
+                "resource_token": token,
+                "presented_token": presented
+            })),
+            "invalid_resource_token"
+        );
+        assert_eq!(stored(), original);
+    }
+    let mut person = super::person_claims();
+    person.jti = "person-tenant".into();
+    person.tenant = Some("other-tenant".into());
+    let mut resource = super::resource_claims();
+    resource.presented_jti = "person-tenant".into();
+    resource.tenant = Some("other-tenant".into());
+    let tenant_presented =
+        aauth_rust_core::mint_person_token(&SigningKey::from_seed([3; 32]), "ps", &person).unwrap();
+    let tenant_resource = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &resource,
+    )
+    .unwrap();
+    assert_eq!(
+        error(json!({
+            "action": "updated_request",
+            "resource_token": tenant_resource,
+            "presented_token": tenant_presented
+        })),
+        "invalid_resource_token"
+    );
+    assert_eq!(stored(), original);
+    let mut person = super::person_claims();
+    person.jti = "person-2".into();
+    let mut resource = super::resource_claims();
+    resource.presented_jti = "person-2".into();
+    resource.account = Some("reduced".into());
+    let next_presented =
+        aauth_rust_core::mint_person_token(&SigningKey::from_seed([3; 32]), "ps", &person).unwrap();
+    let next_resource = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &resource,
+    )
+    .unwrap();
+    let accepted = server.handle(&poll(
+        &pending.location,
+        "POST",
+        Some(json!({
+            "action": "updated_request",
+            "resource_token": next_resource,
+            "presented_token": next_presented,
+            "justification": "read only"
+        })),
+        1000,
+    ));
+    assert_eq!(
+        accepted.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(accepted.body())
+    );
+    assert_eq!(stored(), next_resource);
+    let granted = server.handle(&poll(
+        &pending.location,
+        "POST",
+        Some(json!({"action":"clarification_response","clarification_response":"read only"})),
+        1000,
+    ));
+    assert_eq!(
+        granted.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(granted.body())
+    );
+    let token = AuthToken::parse(
+        serde_json::from_slice::<Value>(granted.body()).unwrap()["auth_token"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap()
+    .verify(&Keys, 1000)
+    .unwrap();
+    assert_eq!(token.claims().account.as_deref(), Some("reduced"));
+}
