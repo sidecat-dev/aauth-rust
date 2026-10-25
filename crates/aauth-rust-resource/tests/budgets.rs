@@ -274,6 +274,55 @@ fn buffered_requests_meter_the_token_cap_and_keep_its_signed_scale() {
 }
 
 #[test]
+fn a_conflicting_grant_for_the_same_jti_is_500_and_omits_the_budget_header() {
+    let resource = resource();
+    let first = resource
+        .authorize(
+            &present(&auth("clash", Some(2_000), "read"), None),
+            NOW,
+            "clash-1",
+        )
+        .into_response();
+    assert_eq!(first.status(), 200);
+    assert!(first.headers().contains_key("aauth-budget"));
+
+    let conflict = resource
+        .authorize(
+            &present(&auth("clash", Some(5_000), "read"), None),
+            NOW,
+            "clash-2",
+        )
+        .into_response();
+    assert_eq!(
+        conflict.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(conflict.body())
+    );
+    assert!(!conflict.headers().contains_key("aauth-budget"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(conflict.body()).unwrap()["error"],
+        "server_error"
+    );
+
+    let again = resource
+        .authorize(
+            &present(&auth("clash", Some(2_000), "read"), None),
+            NOW,
+            "clash-3",
+        )
+        .into_response();
+    assert_eq!(
+        again.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(again.body())
+    );
+    let header = again.headers()["aauth-budget"].to_str().unwrap();
+    assert!(header.contains("cost=1000"), "{header}");
+}
+
+#[test]
 fn streaming_hold_and_replay_do_not_pass_the_grant() {
     let resource = resource();
     let token = AuthToken::parse(&auth("stream", Some(5_000), "read"))
