@@ -69,7 +69,16 @@ code is compared after stripping hyphens and folding Crockford aliases and case.
 Presenting the code correlates the session and does not itself approve or deny. After that code is consumed, one POST signed as this Person Server stores the decision, and a second decision is refused. `InteractionCompletion` and `PermissionDecision` are agent helpers; no library poller calls them.
 The code is single-use. Three failed attempts make it terminally `invalid_code`.
 A code whose pending interaction has expired is `408 expired`. The host supplies
-the emitted code. The code table is process memory. A Resource that asks for a
+the emitted code. The code table is process memory. Opt-in resource session
+tokens execute. The resource binds an opaque `token68` value to one verified
+agent subject and returns it in one `AAuth-Access` header. The agent keeps the
+latest value and sends `Authorization: AAuth` on the next request. The signature
+covers `authorization`. `AgentIdentityResource::admit_session` verifies that
+same request before it can return the bound subject. An unverified presentation
+does not reveal the subject. A later
+`AAuth-Access` value replaces the previous token. Empty values, embedded
+whitespace, control characters, and more than one credential are rejected.
+A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant
 differs is refused with `403` `access_denied` and no `Signature-Error` header.

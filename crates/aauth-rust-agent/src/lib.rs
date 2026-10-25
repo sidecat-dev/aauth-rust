@@ -1,6 +1,7 @@
 //! Buffered request signing and immediate PS credential-context verification.
 //! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
+mod access;
 mod credentials;
 pub use credentials::FederatedContext;
 mod subagents;
@@ -14,6 +15,7 @@ mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
+pub use access::AccessSession;
 pub use attempts::ResourceTokenAttempts;
 pub use governance::{ChannelError, InteractionCompletion, PermissionDecision};
 use http::Request;
