@@ -84,6 +84,11 @@ token is `requirement=person-token`. Missing `scope` is `invalid_request`.
 A recognized scope returns a resource token. An unrecognized scope is
 `invalid_scope`. A duplicate JSON member and a repeated scope token are
 `invalid_request`.
+A held invocation runs once for an auth token `jti`. A repeated presentation
+of that token at the same pending id returns the stored result through the
+token's `exp` and does not run the invocation again. The host passes only the
+`jti` and `exp` of an auth token this resource already verified, including the
+HTTP proof. The ledger accepts a `jti` of `[A-Za-z0-9_-]{1,128}`.
 A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant

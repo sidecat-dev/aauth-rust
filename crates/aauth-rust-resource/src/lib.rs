@@ -1,9 +1,11 @@
 //! Agent-identity and PS-authorization Resources. Verification precedes host policy.
 #![deny(missing_docs)]
+mod held;
 mod ps_authorization;
 mod session;
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
+pub use held::{HeldError, HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,
