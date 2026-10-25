@@ -49,7 +49,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(child) = &context.subagent {
             body["subagent_token"] = json!(child.compact());
         }
-        let sent = self.narrow_offer(prepared.offer.as_ref())?;
+        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss)?;
         if let Some(sent) = &sent {
             body["budget"] = sent.to_value();
         }
@@ -224,7 +224,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(failed(Reason::InvalidGrant));
         }
-        let sent = self.narrow_offer(prepared.offer.as_ref())?;
+        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss)?;
         let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
         if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {
             return Err(failed(Reason::InvalidGrant));
@@ -236,7 +236,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .accounts
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .insert(c.jti.clone(), budget.amount(), c.exp);
+                .insert_owned(
+                    c.jti.clone(),
+                    budget.amount(),
+                    c.exp,
+                    super::budget_owner(&c.sub, &c.aud),
+                );
         }
         let mut record = self.record(
             compact,

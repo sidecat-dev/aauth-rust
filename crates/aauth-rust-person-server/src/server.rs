@@ -219,8 +219,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.federation = Some(Box::new(adapter));
         self
     }
-    /// Account for budgets. `policy.cap` is this server's ceiling. An empty
-    /// `policy.units` cache accepts the scale signed on the resource token.
+    /// Account for budgets. `policy.cap` is this server's per-token maximum and
+    /// the standing sum of outstanding grants for one subject at one resource.
+    /// An empty `policy.units` cache accepts the scale signed on the resource token.
     ///
     /// # Errors
     /// Returns [`ConfigurationError`] when `cap` is outside the carrier.
@@ -831,7 +832,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
             expires_at = expires_at.min(exp);
         }
-        let granted_budget = self.narrow_offer(offer.as_ref())?;
+        let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss)?;
         let mut extra = std::collections::BTreeMap::new();
         if let Some(budget) = &granted_budget {
             extra.insert("budget".into(), budget.to_value());
@@ -862,7 +863,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .accounts
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .insert(claims.jti.clone(), budget.amount(), expires_at);
+                .insert_owned(
+                    claims.jti.clone(),
+                    budget.amount(),
+                    expires_at,
+                    budget_owner(&claims.sub, &claims.aud),
+                );
         }
         let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
             .map_err(|_| Failure::internal())?;
@@ -935,14 +941,31 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         Ok(claims.budget)
     }
-    fn narrow_offer(&self, offer: Option<&Budget>) -> Result<Option<Budget>, Failure> {
+    fn narrow_offer(
+        &self,
+        offer: Option<&Budget>,
+        subject: &str,
+        resource: &str,
+    ) -> Result<Option<Budget>, Failure> {
         let Some(state) = &self.budgets else {
             return Ok(None);
         };
         let Some(offer) = offer else {
             return Ok(None);
         };
-        narrow_to(offer, state.policy.cap)
+        let cap = match state.policy.cap {
+            Some(ceiling) => {
+                let room = state
+                    .accounts
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .free_owned(ceiling, 0, (self.clock)(), &budget_owner(subject, resource))
+                    .max(0);
+                Some(room)
+            }
+            None => None,
+        };
+        narrow_to(offer, cap)
             .map(Some)
             .map_err(|_| Failure::parameter("invalid_budget"))
     }
@@ -962,6 +985,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         Ok(())
     }
+}
+fn budget_owner(subject: &str, resource: &str) -> String {
+    format!("{subject}\u{1f}{resource}")
 }
 fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str, Failure> {
     value

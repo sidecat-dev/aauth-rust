@@ -200,6 +200,89 @@ fn person_server_narrows_amount_without_changing_unit_or_decimals() {
     assert_ne!(figure.amount, figure.description);
 }
 
+fn person_token(server: &Server) -> String {
+    let person = call(
+        server,
+        "/person",
+        json!({"resource": RESOURCE, "capabilities": ["budget"]}),
+    );
+    assert_eq!(
+        person.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(person.body())
+    );
+    serde_json::from_slice::<Value>(person.body()).unwrap()["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn issued_amount(server: &Server, person_token: &str, challenge: &str) -> i64 {
+    let parsed = aauth_rust_jose::Jws::parse(person_token).unwrap();
+    let claims: Value = serde_json::from_slice(parsed.payload()).unwrap();
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert(
+        "budget".into(),
+        json!({"amount": 5_000_000, "unit": "USD", "decimals": 6}),
+    );
+    let resource = ResourceClaims {
+        iss: RESOURCE.into(),
+        dwk: "aauth-resource.json".into(),
+        aud: PS.into(),
+        ps: PS.into(),
+        sub: "directed".into(),
+        jti: challenge.into(),
+        presented_jti: claims["jti"].as_str().unwrap().into(),
+        agent_jkt: agent().public_jwk().thumbprint().unwrap(),
+        iat: 1000,
+        exp: 1300,
+        scope: Some("read".into()),
+        account: None,
+        login_hint: None,
+        nbf: None,
+        tenant: None,
+        mission_s256: None,
+        extra,
+    };
+    let resource_token =
+        mint_resource_token(&SigningKey::from_seed([5; 32]), "resource", &resource).unwrap();
+    let response = call(
+        server,
+        "/token",
+        json!({
+            "resource_token": resource_token,
+            "presented_token": person_token,
+            "capabilities": ["budget"]
+        }),
+    );
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let auth = serde_json::from_slice::<Value>(response.body()).unwrap()["auth_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token = AuthToken::parse(&auth)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    token.claims().extra["budget"]["amount"].as_i64().unwrap()
+}
+
+#[test]
+fn a_second_grant_for_the_same_person_stays_inside_the_ceiling() {
+    let server = server();
+    let first = issued_amount(&server, &person_token(&server), "challenge-a");
+    let second = issued_amount(&server, &person_token(&server), "challenge-b");
+    assert_eq!(first, 2_000_000);
+    assert_eq!(second, 0);
+    assert_eq!(server.budget_accounted(), Some(2_000_000));
+}
+
 struct RaisedGrant;
 impl Federation for RaisedGrant {
     fn endpoint(&self, access_server: &str) -> Result<String, FederationError> {

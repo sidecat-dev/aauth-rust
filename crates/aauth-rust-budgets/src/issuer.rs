@@ -78,6 +78,9 @@ pub struct Allocation {
     exp: i64,
     consumed: Option<i64>,
     revocation: Option<RevocationSettlement>,
+    /// Subject and resource this allocation counts against. Absent on a book
+    /// that only tracks a single ceiling.
+    owner: Option<String>,
 }
 
 /// What the issuer learned from revocation.
@@ -112,6 +115,26 @@ impl AllocationBook {
             exp,
             consumed: None,
             revocation: None,
+            owner: None,
+        });
+    }
+
+    /// Remember a new allocation against one subject at one resource.
+    ///
+    /// A repeated `jti` keeps the first amount, expiry, and owner.
+    pub fn insert_owned(
+        &mut self,
+        jti: impl Into<String>,
+        amount: i64,
+        exp: i64,
+        owner: impl Into<String>,
+    ) {
+        self.items.entry(jti.into()).or_insert(Allocation {
+            amount,
+            exp,
+            consumed: None,
+            revocation: None,
+            owner: Some(owner.into()),
         });
     }
 
@@ -132,6 +155,7 @@ impl AllocationBook {
                 exp: 0,
                 consumed: None,
                 revocation: None,
+                owner: None,
             });
         entry.consumed = Some(record.consumed());
         Ok(())
@@ -162,6 +186,19 @@ impl AllocationBook {
             .items
             .values()
             .filter(|allocation| !settled(allocation, as_of))
+            .map(|allocation| allocation.amount)
+            .sum();
+        ceiling - metered - reserved
+    }
+
+    /// [`Self::free`] counted only for allocations recorded with `owner`.
+    pub fn free_owned(&self, ceiling: i64, metered: i64, as_of: i64, owner: &str) -> i64 {
+        let reserved: i64 = self
+            .items
+            .values()
+            .filter(|allocation| {
+                allocation.owner.as_deref() == Some(owner) && !settled(allocation, as_of)
+            })
             .map(|allocation| allocation.amount)
             .sum();
         ceiling - metered - reserved

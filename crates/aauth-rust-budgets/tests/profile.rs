@@ -285,6 +285,11 @@ fn unreported_allocation_counts_as_fully_consumed_until_a_figure_replaces_it() {
     book.note_revocation("d", RevocationSettlement::Unavailable);
     assert_eq!(book.free(1_000, 30, 150), 1_000 - 30 - 100 - 9);
     assert_eq!(book.free(1_000, 30, 180), 1_000 - 30 - 100);
+    assert_eq!(book.free_owned(1_000, 30, 100, "ada"), 1_000 - 30);
+    book.insert_owned("e", 40, 200, "ada");
+    book.insert_owned("f", 10, 200, "bob");
+    assert_eq!(book.free_owned(1_000, 30, 100, "ada"), 1_000 - 30 - 40);
+    assert_eq!(book.free_owned(1_000, 30, 100, "bob"), 1_000 - 30 - 10);
 }
 
 #[test]
