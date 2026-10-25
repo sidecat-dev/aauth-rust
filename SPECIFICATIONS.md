@@ -77,7 +77,16 @@ When the header is absent, a problem body still supplies `error`. A JSON
 comes from `s-maxage`, then `max-age`, otherwise 300 seconds, and is at most
 86400 seconds. `no-store` and
 `no-cache` do not leave a reusable body. Another fetch of that issuer and `dwk`, or of that URL,
-waits 60 seconds, and the cache holds only the bound given at open. Direct
+waits 60 seconds, and the cache holds only the bound given at open. A
+discovery fetch is admitted only for HTTPS, to one pinned globally routable
+unicast address, with a response cap of at most 65536 bytes and a timeout of
+at most 30 seconds. Those bounds are checked again at admission. Embedded
+IPv4 in mapped, compatible, well-known NAT64 (`64:ff9b::/96`), 6to4, and Teredo
+forms is classified as that IPv4 address. The local-use prefix `64:ff9b:1::/48`
+is refused as a whole. Anything else needs an explicit allowance, as does a JWKS
+host that differs from the metadata host. Redirects stay on that host, including a different port, and stop after three. A
+parsed `jwks_uri` `id` is an origin name; an empty allowlist does not
+authorize it. Direct
 agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,

@@ -1,8 +1,13 @@
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
+use std::net::IpAddr;
+use std::time::Duration;
+
 use aauth_rust_signature_key::{
-    AssertionCache, CacheRequest, CachedDocument, Error, KeyCache, KeyCacheAnswer, KeyCacheStore,
-    KeyMaterial, PreparedRequest, RequestSignature, choose_presented_scheme, present_issued_cid,
-    recognized_tokens, select_presented_scheme, sign_request, sign_requests, signature_error_code,
+    AssertionCache, CacheRequest, CachedDocument, DiscoveryFetch, EgressLimits, Error, KeyCache,
+    KeyCacheAnswer, KeyCacheStore, KeyMaterial, PreparedRequest, RequestSignature,
+    accept_pinned_peer, accept_response, admit_fetch, admit_redirect, choose_presented_scheme,
+    origin_is_allowed, origin_pseudonym, present_issued_cid, recognized_tokens,
+    select_presented_scheme, sign_request, sign_requests, signature_error_code,
 };
 use http::Request;
 use serde_json::json;
@@ -3110,6 +3115,217 @@ fn key_cache_expires_and_refuses_a_refetch_inside_one_minute() {
             )
             .unwrap(),
         KeyCacheStore::Wait { until: 70 }
+    );
+}
+
+#[test]
+fn egress_admission_pins_a_public_address_and_a_parsed_origin_is_not_authorization() {
+    let five = Duration::from_secs(5);
+    assert_eq!(
+        EgressLimits::bounded(0, five).unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        EgressLimits::bounded(65_537, five).unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        EgressLimits::bounded(1024, Duration::ZERO).unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        EgressLimits::bounded(1024, Duration::from_secs(31)).unwrap_err(),
+        Error::InvalidInput
+    );
+    let limits = EgressLimits::bounded(1024, five).unwrap();
+    let public_ip: IpAddr = "8.8.8.8".parse().unwrap();
+    let metadata = "https://issuer.example/.well-known/aauth-agent.json";
+    let pinned = admit_fetch(
+        &limits,
+        DiscoveryFetch::Metadata { url: metadata },
+        public_ip,
+    )
+    .unwrap();
+    assert_eq!(pinned.address, public_ip);
+    assert_eq!(pinned.timeout, five);
+    assert_eq!(pinned.max_response_bytes, 1024);
+    accept_pinned_peer(&pinned, public_ip).unwrap();
+    assert_eq!(
+        accept_pinned_peer(&pinned, "1.1.1.1".parse().unwrap()).unwrap_err(),
+        Error::InvalidKey
+    );
+    accept_response(&pinned, 1024).unwrap();
+    assert_eq!(
+        accept_response(&pinned, 1025).unwrap_err(),
+        Error::InvalidInput
+    );
+    for refused in [
+        "0.0.0.0",
+        "10.0.0.1",
+        "100.100.100.200",
+        "127.0.0.1",
+        "169.254.1.1",
+        "192.0.0.1",
+        "192.0.2.1",
+        "192.168.0.1",
+        "198.18.0.1",
+        "198.51.100.1",
+        "203.0.113.1",
+        "172.16.5.1",
+        "224.0.0.1",
+        "240.0.0.1",
+        "255.255.255.255",
+        "::",
+        "::1",
+        "fe80::1",
+        "fec0::1",
+        "fd00::1",
+        "ff00::1",
+        "2001:db8::1",
+        "::ffff:0.0.0.0",
+        "::ffff:127.0.0.1",
+        "::7f00:1",
+        "64:ff9b::7f00:1",
+        "64:ff9b:1:7f00:0:100::",
+        "64:ff9b:1:808:8:800::",
+        "64:ff9b:1:808:8:800:7f00:1",
+        "2002:7f00:1::",
+        "2001::80ff:fffe",
+    ] {
+        let address: IpAddr = refused.parse().unwrap();
+        assert_eq!(
+            admit_fetch(&limits, DiscoveryFetch::Metadata { url: metadata }, address).unwrap_err(),
+            Error::InvalidKey,
+            "{refused}"
+        );
+    }
+    admit_fetch(
+        &limits,
+        DiscoveryFetch::Metadata { url: metadata },
+        "172.32.5.1".parse().unwrap(),
+    )
+    .unwrap();
+    admit_fetch(
+        &limits,
+        DiscoveryFetch::Metadata { url: metadata },
+        "::ffff:8.8.8.8".parse().unwrap(),
+    )
+    .unwrap();
+    for admitted in [
+        "64:ff9b::808:808",
+        "2002:808:808::",
+        "::808:808",
+        "2001::f7f7:f7f7",
+        "2001:4860:4860::8888",
+    ] {
+        let address: IpAddr = admitted.parse().unwrap();
+        admit_fetch(&limits, DiscoveryFetch::Metadata { url: metadata }, address).unwrap();
+    }
+    let mut unbounded = limits.clone();
+    unbounded.max_response_bytes = usize::MAX;
+    assert_eq!(
+        admit_fetch(
+            &unbounded,
+            DiscoveryFetch::Metadata { url: metadata },
+            public_ip
+        )
+        .unwrap_err(),
+        Error::InvalidInput
+    );
+    let mut forever = limits.clone();
+    forever.timeout = Duration::MAX;
+    assert_eq!(
+        admit_fetch(
+            &forever,
+            DiscoveryFetch::Metadata { url: metadata },
+            public_ip
+        )
+        .unwrap_err(),
+        Error::InvalidInput
+    );
+    let mut allowed = limits.clone();
+    allowed.allow_restricted_addresses = true;
+    admit_fetch(
+        &allowed,
+        DiscoveryFetch::Metadata { url: metadata },
+        "10.1.2.3".parse().unwrap(),
+    )
+    .unwrap();
+    for refused in [
+        "http://issuer.example/jwks",
+        "https://user:pass@issuer.example/jwks",
+        "https://issuer.example/jwks#frag",
+    ] {
+        assert_eq!(
+            admit_fetch(&limits, DiscoveryFetch::Jwks { url: refused }, public_ip).unwrap_err(),
+            Error::InvalidKey,
+            "{refused}"
+        );
+    }
+    let redirected = admit_redirect(
+        &pinned,
+        "https://Issuer.example/jwks",
+        "9.9.9.9".parse().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(redirected.address, "9.9.9.9".parse::<IpAddr>().unwrap());
+    assert_eq!(
+        admit_redirect(&pinned, "https://other.example/jwks", public_ip).unwrap_err(),
+        Error::InvalidKey
+    );
+    let port_change = admit_redirect(
+        &redirected,
+        "https://issuer.example:8443/jwks",
+        "9.9.9.9".parse().unwrap(),
+    )
+    .unwrap();
+    let third = admit_redirect(
+        &port_change,
+        "https://issuer.example/keys",
+        "9.9.9.9".parse().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        admit_redirect(&third, "https://issuer.example/more", public_ip).unwrap_err(),
+        Error::InvalidInput
+    );
+    let same = DiscoveryFetch::JwksFromMetadata {
+        metadata_url: metadata,
+        jwks_url: "https://issuer.example/jwks",
+    };
+    admit_fetch(&limits, same, public_ip).unwrap();
+    let cross = DiscoveryFetch::JwksFromMetadata {
+        metadata_url: metadata,
+        jwks_url: "https://keys.example/jwks",
+    };
+    assert_eq!(
+        admit_fetch(&limits, cross, public_ip).unwrap_err(),
+        Error::InvalidKey
+    );
+    let mut cross_ok = limits.clone();
+    cross_ok.allow_cross_origin_jwks = true;
+    admit_fetch(&cross_ok, cross, public_ip).unwrap();
+    assert_eq!(
+        admit_redirect(
+            &admit_fetch(&cross_ok, cross, public_ip).unwrap(),
+            "https://elsewhere.example/jwks",
+            public_ip
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+    let origin = origin_pseudonym("https://attacker.example").unwrap();
+    assert_eq!(origin.id(), "https://attacker.example");
+    assert!(!origin_is_allowed(&origin, &[]));
+    assert!(!origin_is_allowed(&origin, &["https://good.example"]));
+    assert!(origin_is_allowed(&origin, &["https://attacker.example"]));
+    assert_eq!(
+        origin_pseudonym("https://attacker.example/path").unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        origin_pseudonym("http://attacker.example").unwrap_err(),
+        Error::InvalidKey
     );
 }
 

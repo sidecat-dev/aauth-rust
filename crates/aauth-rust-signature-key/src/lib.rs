@@ -4,6 +4,7 @@
 mod cache;
 mod client;
 mod content_digest;
+mod egress;
 mod jkt;
 mod jwks;
 mod key_cache;
@@ -14,6 +15,11 @@ pub use cache::{
     present_issued_cid, select_presented_scheme,
 };
 pub use client::{choose_presented_scheme, recognized_tokens, signature_error_code};
+pub use egress::{
+    DiscoveryFetch, EgressLimits, MAX_DISCOVERY_REDIRECTS, MAX_DISCOVERY_RESPONSE,
+    MAX_FETCH_TIMEOUT, OriginPseudonym, PinnedFetch, accept_pinned_peer, accept_response,
+    admit_fetch, admit_redirect, origin_is_allowed, origin_pseudonym,
+};
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
 pub use key_cache::{
