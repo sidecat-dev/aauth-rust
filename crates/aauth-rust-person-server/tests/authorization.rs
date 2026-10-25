@@ -512,6 +512,21 @@ fn token_parameter_lineage_failures_are_typed_and_precede_policy() {
 }
 
 #[test]
+fn an_expired_presented_token_is_refused_before_policy() {
+    let f = Fixture::new();
+    let s = f.server(1);
+    let a = agent(false);
+    let p = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    let r = resource(&a, &p, "orders.read", |_| {});
+    f.host.now.store(1001, Ordering::SeqCst);
+    let response = f.exchange(&s, &a, &r, &p, None);
+    assert_eq!(response.status(), 400);
+    assert_eq!(output(&response)["error"], "expired_presented_token");
+    assert!(!response.headers().contains_key("signature-error"));
+    assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn refusal_bad_grants_and_policy_expiry_never_release_credentials() {
     for (mode, status, code) in [
         (1, 403, "access_denied"),

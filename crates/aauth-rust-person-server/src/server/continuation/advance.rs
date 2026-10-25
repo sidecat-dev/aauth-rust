@@ -172,6 +172,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         ),
                     )
                 })?;
+                if matches!(next.requirement, Requirement::AuthToken { .. }) {
+                    return Err(super::federation::unreachable(
+                        &prepared.resource.claims().aud,
+                        Some(response.status()),
+                        crate::FederationFailureReason::MalformedResponse(
+                            "auth-token delivery is not an AS continuation",
+                        ),
+                    ));
+                }
                 if next.location != pending.location {
                     return Err(super::federation::unreachable(
                         &prepared.resource.claims().aud,

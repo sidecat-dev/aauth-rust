@@ -184,7 +184,7 @@ fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
 /// `ps` is that Person Server. A Person token must carry it as `iss` and an
 /// Auth token must carry it as `ps`. `sub` and `tenant` are compared only in
 /// that namespace, so the same subject string from another server does not
-/// match. `sub` is required on every ask; omitting it is a host error and
+/// match. `sub` is a required field; an empty subject is a host error and
 /// authorizes no one. `login_hint` is copied into the resource-token challenge
 /// and is not an Auth subject. `account` and `tenant` are exact expectations,
 /// including when they are absent.
@@ -195,8 +195,8 @@ pub struct AuthorizationAsk {
     /// Hint forwarded unchanged. An empty string is a host error.
     pub login_hint: Option<String>,
     /// Directed subject required on the Person token and the Auth token.
-    /// `None` and an empty string are host errors, not wildcards.
-    pub sub: Option<String>,
+    /// An empty string is a host error, not a wildcard.
+    pub sub: String,
     /// Account placed in the challenge and required again on the Auth token.
     pub account: Option<String>,
     /// Tenant required on the Person token and the Auth token, under `ps`.
@@ -205,7 +205,7 @@ pub struct AuthorizationAsk {
 impl AuthorizationAsk {
     fn host_error(&self) -> bool {
         validate_server_identifier(&self.ps).is_err()
-            || self.sub.as_ref().is_none_or(|sub| sub.is_empty())
+            || self.sub.is_empty()
             || self.login_hint.as_ref().is_some_and(|hint| hint.is_empty())
             || self
                 .account
@@ -214,7 +214,7 @@ impl AuthorizationAsk {
             || self.tenant.as_ref().is_some_and(|tenant| tenant.is_empty())
     }
     fn person_differs(&self, iss: &str, sub: &str, tenant: Option<&str>) -> bool {
-        self.ps != iss || self.sub.as_deref() != Some(sub) || self.tenant.as_deref() != tenant
+        self.ps != iss || self.sub != sub || self.tenant.as_deref() != tenant
     }
     fn auth_differs(
         &self,
@@ -224,7 +224,7 @@ impl AuthorizationAsk {
         tenant: Option<&str>,
     ) -> bool {
         self.ps != ps
-            || self.sub.as_deref() != Some(sub)
+            || self.sub != sub
             || self.account.as_deref() != account
             || self.tenant.as_deref() != tenant
     }

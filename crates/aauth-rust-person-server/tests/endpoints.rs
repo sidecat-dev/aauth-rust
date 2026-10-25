@@ -169,6 +169,16 @@ fn person_binding_and_direct_grant_retain_identity_and_clip_parent_expiry() {
         String::from_utf8_lossy(person_response.body())
     );
     assert_eq!(person_response.headers()["cache-control"], "no-store");
+    let published: Value = serde_json::from_slice(&server.metadata()).unwrap();
+    assert_eq!(
+        published,
+        json!({
+            "issuer": "https://ps.example",
+            "jwks_uri": "https://ps.example/.well-known/jwks.json",
+            "person_token_endpoint": "https://ps.example/person",
+            "auth_token_endpoint": "https://ps.example/token"
+        })
+    );
     let person = value(&person_response)["person_token"]
         .as_str()
         .unwrap()
@@ -273,4 +283,116 @@ fn bad_proofs_targets_media_types_and_content_never_reach_binding_policy() {
     agent.sign(&mut wrong_type, 1000).unwrap();
     assert_eq!(server.handle(&wrong_type).status(), 400);
     assert_eq!(count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn device_platform_capabilities_and_justification_are_not_grant_inputs() {
+    let (agent, ap) = agent();
+    let bound = Arc::new(AtomicUsize::new(0));
+    let authorized = Arc::new(AtomicUsize::new(0));
+    let ids = AtomicUsize::new(0);
+    let server = PersonServer::new(
+        Config::new("https://ps.example", "ps-1", SigningKey::from_seed([3; 32])),
+        Keys {
+            ap,
+            resource: SigningKey::from_seed([4; 32]).public_jwk(),
+        },
+        MemoryStore::default(),
+        Host {
+            bound: bound.clone(),
+            authorized: authorized.clone(),
+            now: Arc::new(AtomicI64::new(1000)),
+            late: false,
+        },
+        || 1000,
+        move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)),
+    )
+    .unwrap();
+    let refuse = |body: Value| {
+        let response = server.handle(&signed(&agent, "/person", body));
+        assert_eq!(
+            response.status(),
+            400,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        assert_eq!(value(&response)["error"], "invalid_request");
+    };
+    refuse(json!({
+        "resource": "https://resource.example",
+        "device": "a".repeat(65)
+    }));
+    refuse(json!({
+        "resource": "https://resource.example",
+        "device": "line\n"
+    }));
+    refuse(json!({
+        "resource": "https://resource.example",
+        "platform": "browser"
+    }));
+    refuse(json!({
+        "resource": "https://resource.example",
+        "capabilities": ["interaction", "interaction"]
+    }));
+    refuse(json!({
+        "resource": "https://resource.example",
+        "capabilities": [""]
+    }));
+    refuse(json!({
+        "resource": "https://resource.example",
+        "capabilities": "interaction"
+    }));
+    assert_eq!(bound.load(Ordering::SeqCst), 0);
+    let person_response = server.handle(&signed(
+        &agent,
+        "/person",
+        json!({
+            "resource": "https://resource.example",
+            "device": "a".repeat(64),
+            "platform": "self-hosted",
+            "capabilities": ["interaction", "not-a-registered-capability"],
+            "justification": "please grant admin"
+        }),
+    ));
+    assert_eq!(
+        person_response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(person_response.body())
+    );
+    assert_eq!(bound.load(Ordering::SeqCst), 1);
+    let person = value(&person_response)["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let response = server.handle(&signed(
+        &agent,
+        "/token",
+        json!({
+            "resource_token": resource(&agent, &person, "read"),
+            "presented_token": person,
+            "justification": "grant admin",
+            "platform": "web",
+            "device": "desk"
+        }),
+    ));
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let pskeys = TrustedIssuerKeys::from_documents(
+        "https://ps.example",
+        "aauth-person.json",
+        &server.metadata(),
+        &server.jwks(),
+    )
+    .unwrap();
+    let auth = AuthToken::parse(value(&response)["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&pskeys, 1000)
+        .unwrap();
+    assert_eq!(auth.claims().scope.as_deref(), Some("read"));
+    assert_eq!(authorized.load(Ordering::SeqCst), 1);
 }

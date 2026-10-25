@@ -60,6 +60,11 @@ where
         Requirement::Claims(names) => return Ok(HostStep::NeedsClaims(names.clone())),
         // Poll also sends an Agent clarification answer already queued at PS.
         Requirement::Clarification { .. } | Requirement::Waiting => true,
+        Requirement::AuthToken { .. } => {
+            return Err(
+                "deferred auth-token delivery is a resource hold, not a PS federation step".into(),
+            );
+        }
     };
     if !ready {
         return Ok(HostStep::RetryAfter(retry));

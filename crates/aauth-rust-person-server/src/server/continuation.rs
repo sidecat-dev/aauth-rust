@@ -95,6 +95,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 crate::FederationFailureReason::MalformedResponse("invalid AS continuation"),
             )
         })?;
+        if matches!(pending.requirement, Requirement::AuthToken { .. }) {
+            return Err(super::federation::unreachable(
+                &resource.claims().aud,
+                Some(response.status()),
+                crate::FederationFailureReason::MalformedResponse(
+                    "auth-token delivery is not an AS continuation",
+                ),
+            ));
+        }
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
         self.subagent_current(agent, context.subagent.as_ref(), now)?;

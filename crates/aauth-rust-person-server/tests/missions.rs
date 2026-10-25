@@ -8,7 +8,7 @@ use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
     AgentIdentity, AuthorizationRequest, Binding, Config, Grant, MemoryStore, MissionRecord,
     MissionState, MissionStore, MissionStoreError, Person, PersonRequest, PersonServer, Policy,
-    PolicyError, Store, StoreError, TokenRecord, TokenReference,
+    PolicyError, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{Request, Response};
@@ -417,6 +417,69 @@ fn current_mission_auth_refuses_stripping_substitution_and_broadened_grant() {
     store.mode.store(5, Ordering::SeqCst);
     let response = auth(&s, &a, &p, &resource(&a, &p, Some(m.document.s256())));
     assert_eq!(response.status(), 500);
+}
+
+#[test]
+fn empty_termination_reason_leaves_the_active_mission_unchanged() {
+    let store = MemoryStore::default();
+    let owner = owner();
+    store
+        .commit(
+            TokenRecord {
+                parent_agent: None,
+                person_server: None,
+                token: TokenTie {
+                    reference: TokenReference {
+                        issuer: PS.into(),
+                        jti: "person-1".into(),
+                    },
+                    compact_sha256: "digest".into(),
+                },
+                kind: TokenKind::Person,
+                resource: RESOURCE.into(),
+                subject: "directed-person".into(),
+                person_id: "private-person".into(),
+                tenant: None,
+                agent: owner.clone(),
+                principal: owner.clone(),
+                agent_token_jti: "agent".into(),
+                agent_jkt: "thumbprint".into(),
+                issued_at: 1000,
+                expires_at: 2000,
+                retain_until: 3000,
+                presented: None,
+                upstream: None,
+            },
+            true,
+        )
+        .unwrap();
+    let bytes = br#"{"agent":"aauth:Reader@ap.example","approved_at":"1970-01-01T00:16:39Z","description":"still active"}"#;
+    let mission = MissionRecord {
+        person_server: PS.into(),
+        owner: owner.clone(),
+        person_id: "private-person".into(),
+        state: MissionState::Active,
+        document: ApprovedMission::decode(
+            &URL_SAFE_NO_PAD.encode(Sha256::digest(bytes)),
+            &URL_SAFE_NO_PAD.encode(bytes),
+        )
+        .unwrap(),
+    };
+    store.install_approved_mission(mission.clone()).unwrap();
+    let digest = mission.document.s256();
+    assert_eq!(
+        store.terminate_mission(PS, &owner, digest, ""),
+        Err(MissionStoreError::Conflict)
+    );
+    assert_eq!(
+        store.load_mission(PS, &owner, digest, 1000).unwrap().state,
+        MissionState::Active
+    );
+    store.terminate_mission(PS, &owner, digest, "user").unwrap();
+    assert!(matches!(
+        store.load_mission(PS, &owner, digest, 1000),
+        Err(MissionStoreError::Terminated(reason)) if reason == "user"
+    ));
 }
 
 #[test]

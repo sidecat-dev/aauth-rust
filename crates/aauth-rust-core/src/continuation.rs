@@ -39,6 +39,12 @@ pub enum Requirement {
     },
     /// Host is obtaining approval without directing the person at the Agent.
     Approval,
+    /// Resource held the invocation and requires an auth token before it runs.
+    /// The resource token is the challenge; the later poll presents the auth token.
+    AuthToken {
+        /// Compact resource token from the `resource-token` parameter.
+        resource_token: String,
+    },
     /// Payment details are opaque and settlement belongs to the host.
     Payment {
         /// Exact bounded WWW-Authenticate value supplied by the AS.
@@ -190,6 +196,15 @@ impl PendingResponse {
                             Requirement::Interaction { url, code }
                         }
                         "approval" => Requirement::Approval,
+                        "auth-token" => {
+                            let resource_token = match item.params.get("resource-token") {
+                                Some(BareItem::String(value)) if !value.as_str().is_empty() => {
+                                    value.as_str().to_owned()
+                                }
+                                _ => return Err(PendingError),
+                            };
+                            Requirement::AuthToken { resource_token }
+                        }
                         _ => return Err(PendingError),
                     }
                 }
@@ -272,6 +287,10 @@ impl PendingResponse {
         let field = match &self.requirement {
             Requirement::Waiting => None,
             Requirement::Approval => Some("requirement=approval".into()),
+            Requirement::AuthToken { resource_token } => Some(format!(
+                "requirement=auth-token; resource-token={}",
+                sf_string(resource_token)?
+            )),
             Requirement::Claims(_) => Some("requirement=claims".into()),
             Requirement::Clarification { .. } => Some("requirement=clarification".into()),
             Requirement::Interaction { url, code } => Some(format!(

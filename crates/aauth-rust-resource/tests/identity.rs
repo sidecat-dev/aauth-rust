@@ -71,6 +71,29 @@ fn direct_identity_is_verified_before_policy_sees_it() {
 }
 
 #[test]
+fn unknown_capabilities_are_ignored_and_absence_assumes_none() {
+    let (agent, resource) = composition();
+    let mut without = request();
+    agent.sign(&mut without, 1000).unwrap();
+    let mut with = request();
+    agent.sign(&mut with, 1000).unwrap();
+    with.headers_mut().insert(
+        "aauth-capabilities",
+        "interaction; detail=\"ignored\", not-a-registered-capability"
+            .parse()
+            .unwrap(),
+    );
+    let Decision::Granted(plain) = resource.authorize(&without, 1000) else {
+        panic!("absent capabilities denied")
+    };
+    let Decision::Granted(declared) = resource.authorize(&with, 1000) else {
+        panic!("unknown capabilities denied")
+    };
+    assert_eq!(plain.claims().sub, declared.claims().sub);
+    assert_eq!(plain.claims().sub, "aauth:Agent@ap.example");
+}
+
+#[test]
 fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
     let (_, resource) = composition();
     let key = SigningKey::from_seed([2; 32]);
@@ -80,6 +103,19 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
         req.headers()["signature-key"].clone(),
         "sig=future;value=token".parse().unwrap(),
         "sig=hwk".parse().unwrap(),
+        "sig=cached;cid=\"abc\"".parse().unwrap(),
+        "sig=jwks;url=\"https://keys.example/jwks\";kid=\"k\""
+            .parse()
+            .unwrap(),
+        "sig=jkt-jwt;jwt=\"eyJhbGciOiJFZDI1NTE5In0.e30.c2ln\""
+            .parse()
+            .unwrap(),
+        "sig=self-jwt;jwt=\"eyJhbGciOiJFZDI1NTE5In0.e30.c2ln\""
+            .parse()
+            .unwrap(),
+        "sig=x509;x5u=\"https://keys.example/cert\";x5t=:AA:"
+            .parse()
+            .unwrap(),
     ] {
         req.headers_mut().insert("signature-key", header);
         let response = resource.authorize(&req, 1000).into_response();
@@ -89,6 +125,7 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
             "error=unsupported_scheme"
         );
         assert_eq!(response.headers()["accept-signature-scheme"], "jwt");
+        assert!(response.headers().get("signature-key-cache").is_none());
     }
 }
 

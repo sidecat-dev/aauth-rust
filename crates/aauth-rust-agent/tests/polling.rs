@@ -309,3 +309,51 @@ fn a_429_preserves_the_servers_longer_retry_after_minimum() {
     ));
     assert!(session.request(&a, 1035).is_ok());
 }
+
+#[test]
+fn a_held_invocation_is_polled_with_the_auth_token() {
+    let a = agent();
+    let resource_token = "eyJhbGciOiJFZDI1NTE5In0.e30.c2ln";
+    let held = PendingResponse::new(
+        "https://resource.example/records",
+        "/pending/opaque",
+        5,
+        Requirement::AuthToken {
+            resource_token: resource_token.into(),
+        },
+    )
+    .unwrap()
+    .response()
+    .unwrap();
+    let session = PollSession::new("https://resource.example/records", &held, 1000, 1100).unwrap();
+    let auth = aauth_rust_core::mint_auth_token(
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &aauth_rust_core::AuthClaims {
+            iss: "https://ps.example".into(),
+            dwk: "aauth-person.json".into(),
+            aud: "https://resource.example".into(),
+            sub: "directed-person".into(),
+            jti: "auth-1".into(),
+            iat: 1000,
+            exp: 2000,
+            ps: "https://ps.example".into(),
+            cnf: aauth_rust_core::Confirmation {
+                jwk: a.public_jwk(),
+            },
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            scope: Some("read".into()),
+            account: None,
+            extra: Default::default(),
+        },
+    )
+    .unwrap();
+    let presenting = a.with_token(auth).unwrap();
+    let request = session.request(&presenting, 1005).unwrap();
+    let proof = PreparedRequest::prepare(&request, "sig", 1005, 60).unwrap();
+    assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == presenting.token()));
+    proof.verify(&presenting.public_jwk()).unwrap();
+    assert_ne!(presenting.token(), a.token());
+}

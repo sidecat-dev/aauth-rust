@@ -375,6 +375,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(Failure::parameter("invalid_request"));
             }
+            if name == "platform"
+                && value.as_str().is_none_or(|value| {
+                    !["web", "mobile", "desktop", "workload", "self-hosted"].contains(&value)
+                })
+            {
+                return Err(Failure::parameter("invalid_request"));
+            }
         }
         Ok(())
     }

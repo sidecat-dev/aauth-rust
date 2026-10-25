@@ -328,6 +328,11 @@ impl MemoryStore {
         s256: &str,
         reason: &str,
     ) -> Result<(), MissionStoreError> {
+        // An empty reason is not a termination record. The draft leaves the
+        // empty string unspecified; this store refuses it before any write.
+        if reason.is_empty() {
+            return Err(MissionStoreError::Conflict);
+        }
         let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
         let record = state
             .missions
