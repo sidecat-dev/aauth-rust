@@ -57,6 +57,18 @@ impl Jwk {
     }
 
     fn verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey, Error> {
+        if self.alg.is_empty()
+            || self.kty == "oct"
+            || matches!(self.alg.as_str(), "none" | "HS256" | "HS384" | "HS512")
+        {
+            return Err(Error::UnsupportedAlgorithm);
+        }
+        // AKP and any other unrecognized key type take the unsupported-algorithm
+        // path, including when `alg` itself is a known name. A known type that
+        // disagrees with `alg` is an inconsistent key, not an unknown one.
+        if !matches!(self.kty.as_str(), "OKP" | "EC" | "RSA") {
+            return Err(Error::UnsupportedAlgorithm);
+        }
         if self.alg != "Ed25519" {
             return Err(Error::UnsupportedAlgorithm);
         }

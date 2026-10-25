@@ -110,6 +110,16 @@ pub enum KeyMaterial {
     },
 }
 
+/// Algorithms this profile accepts. Servers advertise exactly this set in
+/// `Accept-Signature-Alg` and no other algorithm, including `none` and the
+/// symmetric MAC names.
+pub const ACCEPTED_SIGNATURE_ALGS: &[&str] = &["Ed25519"];
+
+/// `Accept-Signature-Alg` field value: the accepted algorithms, in preference order.
+pub fn accept_signature_alg_header() -> String {
+    ACCEPTED_SIGNATURE_ALGS.join(", ")
+}
+
 /// Maximum actual content bytes signed or verified by this buffered profile.
 /// Hosts must also bound collection before allocating a request body.
 pub const MAX_BODY_BYTES: usize = 1_048_576;
@@ -183,34 +193,7 @@ fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
         return Err(Error::InvalidKey);
     };
     match scheme.as_str() {
-        "hwk" => {
-            if item.params.contains_key("kid") {
-                return Err(Error::InvalidKey);
-            }
-            let alg = match item.params.get("alg") {
-                None => return Err(Error::UnsupportedAlgorithm),
-                Some(BareItem::String(value)) => value.as_str(),
-                _ => return Err(Error::InvalidKey),
-            };
-            if alg != "Ed25519" {
-                return Err(Error::UnsupportedAlgorithm);
-            }
-            let key = Jwk {
-                kty: text(&item.params, "kty")?.into(),
-                crv: text(&item.params, "crv")?.into(),
-                x: text(&item.params, "x")?.into(),
-                alg: alg.into(),
-                extra: Default::default(),
-            };
-            if ["d", "k", "p", "q", "dp", "dq", "qi", "oth"]
-                .iter()
-                .any(|name| item.params.contains_key(*name))
-            {
-                return Err(Error::InvalidKey);
-            }
-            key.validate().map_err(|_| Error::InvalidKey)?;
-            Ok(KeyMaterial::Hwk(key))
-        }
+        "hwk" => parse_hwk(item),
         "jwt" => Ok(KeyMaterial::Jwt(text(&item.params, "jwt")?.into())),
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
@@ -243,6 +226,53 @@ fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
         }
     }
 }
+fn parse_hwk(item: &sfv::Item) -> Result<KeyMaterial, Error> {
+    if item.params.contains_key("kid") {
+        return Err(Error::InvalidKey);
+    }
+    if ["d", "k", "p", "q", "dp", "dq", "qi", "oth"]
+        .iter()
+        .any(|name| item.params.contains_key(*name))
+    {
+        return Err(Error::InvalidKey);
+    }
+    let alg = match item.params.get("alg") {
+        None => return Err(Error::UnsupportedAlgorithm),
+        Some(BareItem::String(value)) => value.as_str(),
+        _ => return Err(Error::InvalidKey),
+    };
+    let kty = match item.params.get("kty") {
+        Some(BareItem::String(value)) => value.as_str(),
+        _ => return Err(Error::InvalidKey),
+    };
+    // `none` and symmetric MAC algorithms are prohibited. An unrecognized key
+    // type, including AKP, is `unsupported_algorithm` rather than a parse failure.
+    if kty == "oct" || matches!(alg, "none" | "HS256" | "HS384" | "HS512") {
+        return Err(Error::UnsupportedAlgorithm);
+    }
+    if !matches!(kty, "OKP" | "EC" | "RSA") {
+        return Err(Error::UnsupportedAlgorithm);
+    }
+    if alg != "Ed25519" {
+        return Err(Error::UnsupportedAlgorithm);
+    }
+    if kty != "OKP" {
+        return Err(Error::InvalidKey);
+    }
+    let key = Jwk {
+        kty: kty.into(),
+        crv: text(&item.params, "crv")?.into(),
+        x: text(&item.params, "x")?.into(),
+        alg: alg.into(),
+        extra: Default::default(),
+    };
+    key.validate().map_err(|err| match err {
+        aauth_rust_jose::Error::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,
+        _ => Error::InvalidKey,
+    })?;
+    Ok(KeyMaterial::Hwk(key))
+}
+
 fn quoted(value: &str) -> Result<String, Error> {
     if value.is_empty() || !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
         return Err(Error::InvalidKey);

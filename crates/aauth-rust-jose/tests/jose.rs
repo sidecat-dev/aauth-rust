@@ -85,6 +85,38 @@ fn jwk_algorithm_and_shape_are_checked_at_use() {
 }
 
 #[test]
+fn unknown_kty_and_symmetric_algs_are_unsupported_not_inconsistent() {
+    let key = SigningKey::from_seed([7; 32]);
+    let original = serde_json::to_value(key.public_jwk()).unwrap();
+    for (member, value) in [
+        ("kty", json!("AKP")),
+        ("kty", json!("oct")),
+        ("alg", json!("none")),
+        ("alg", json!("HS256")),
+        ("alg", json!("HS384")),
+        ("alg", json!("HS512")),
+    ] {
+        let mut bad = original.clone();
+        bad[member] = value;
+        let jwk: Jwk = serde_json::from_value(bad).unwrap();
+        assert!(
+            matches!(
+                jwk.validate(),
+                Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+            ),
+            "{member}"
+        );
+    }
+    let mut inconsistent = original;
+    inconsistent["kty"] = json!("EC");
+    let jwk: Jwk = serde_json::from_value(inconsistent).unwrap();
+    assert!(matches!(
+        jwk.validate(),
+        Err(aauth_rust_jose::Error::InvalidKey)
+    ));
+}
+
+#[test]
 fn thumbprint_ignores_optional_jwk_metadata() {
     let key = SigningKey::from_seed([7; 32]);
     let mut jwk = key.public_jwk();

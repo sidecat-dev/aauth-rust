@@ -130,6 +130,51 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
 }
 
 #[test]
+fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
+    use aauth_rust_core::TokenError;
+    use aauth_rust_resource::SignatureFailure;
+    use aauth_rust_signature_key::{
+        ACCEPTED_SIGNATURE_ALGS, Error, PreparedRequest, accept_signature_alg_header,
+    };
+    let key = SigningKey::from_seed([2; 32]);
+    let x = key.public_jwk().x.clone();
+    let mut req = request();
+    sign_request(&mut req, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    let cases = [
+        format!(r#"sig=hwk;kty="OKP";crv="Ed25519";x="{x}";alg="none""#),
+        format!(r#"sig=hwk;kty="OKP";crv="Ed25519";x="{x}";alg="HS256""#),
+        format!(r#"sig=hwk;kty="OKP";crv="Ed25519";x="{x}";alg="HS384""#),
+        format!(r#"sig=hwk;kty="OKP";crv="Ed25519";x="{x}";alg="HS512""#),
+        r#"sig=hwk;kty="oct";alg="HS256""#.to_string(),
+        format!(r#"sig=hwk;kty="oct";crv="Ed25519";x="{x}";alg="Ed25519""#),
+        r#"sig=hwk;kty="AKP";alg="ML-DSA-44""#.to_string(),
+        format!(r#"sig=hwk;kty="AKP";crv="Ed25519";x="{x}";alg="Ed25519""#),
+    ];
+    for header in cases {
+        req.headers_mut()
+            .insert("signature-key", header.parse().unwrap());
+        let err = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err();
+        assert_eq!(err, Error::UnsupportedAlgorithm, "{header}");
+        assert_eq!(err.code(), "unsupported_algorithm");
+    }
+    let advertised = accept_signature_alg_header();
+    assert_eq!(ACCEPTED_SIGNATURE_ALGS, ["Ed25519"]);
+    assert_eq!(advertised, "Ed25519");
+    for banned in ["none", "HS256", "HS384", "HS512"] {
+        assert!(!ACCEPTED_SIGNATURE_ALGS.contains(&banned));
+        assert!(!advertised.split(',').any(|token| token.trim() == banned));
+    }
+    let response =
+        Decision::<()>::SignatureFailure(SignatureFailure::Token(TokenError::UnsupportedAlgorithm))
+            .into_response();
+    assert_eq!(response.headers()["accept-signature-alg"], advertised);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=unsupported_algorithm"
+    );
+}
+
+#[test]
 fn verification_failure_never_invokes_host_policy() {
     use std::sync::{
         Arc,

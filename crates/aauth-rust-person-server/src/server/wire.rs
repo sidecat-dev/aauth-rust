@@ -1,6 +1,8 @@
 use super::PolicyError;
 use aauth_rust_core::TokenError;
-use aauth_rust_signature_key::{Error as ProofError, required_components};
+use aauth_rust_signature_key::{
+    Error as ProofError, accept_signature_alg_header, required_components,
+};
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json};
 
@@ -151,9 +153,10 @@ impl Failure {
                 .insert("accept-signature-scheme", "jwt".parse().unwrap());
         }
         if local_signature_failure && self.code == "unsupported_algorithm" {
-            response
-                .headers_mut()
-                .insert("accept-signature-alg", "Ed25519".parse().unwrap());
+            response.headers_mut().insert(
+                "accept-signature-alg",
+                accept_signature_alg_header().parse().unwrap(),
+            );
         }
         if let Some(now) = self.date {
             add_date(&mut response, now);
