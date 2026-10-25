@@ -219,6 +219,27 @@ fn selected_unknown_key_algorithm_has_defined_feedback() {
             .unwrap(),
         TokenError::UnsupportedAlgorithm
     );
+    let x = keys
+        .key("https://ap.example", "aauth-agent.json", "ap-1")
+        .unwrap()
+        .x;
+    let ec = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        br#"{"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}"#,
+        serde_json::to_vec(&json!({"keys":[{
+            "kty":"EC","crv":"P-256","alg":"ES256","kid":"ec",
+            "x": x, "y": x
+        }]}))
+        .unwrap()
+        .as_slice(),
+    )
+    .unwrap();
+    assert_eq!(
+        ec.key("https://ap.example", "aauth-agent.json", "ec")
+            .err()
+            .unwrap(),
+        TokenError::UnsupportedAlgorithm
+    );
 }
 
 #[test]
@@ -226,6 +247,20 @@ fn missing_confirmation_algorithm_is_not_inferred_or_misclassified() {
     let (ap, _, claims, _) = fixture();
     let mut value = serde_json::to_value(claims).unwrap();
     value["cnf"]["jwk"].as_object_mut().unwrap().remove("alg");
+    let raw = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-1"}),
+        &serde_json::to_vec(&value).unwrap(),
+        &ap,
+    )
+    .unwrap();
+    assert_eq!(
+        AgentToken::parse(&raw).err().unwrap(),
+        TokenError::UnsupportedAlgorithm
+    );
+    value["cnf"]["jwk"]["alg"] = json!("ES256");
+    value["cnf"]["jwk"]["kty"] = json!("EC");
+    value["cnf"]["jwk"]["crv"] = json!("P-256");
+    value["cnf"]["jwk"]["y"] = value["cnf"]["jwk"]["x"].clone();
     let raw = Jws::sign(
         &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-1"}),
         &serde_json::to_vec(&value).unwrap(),

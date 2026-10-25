@@ -213,7 +213,11 @@ fn confirmation_jwk(cnf: Option<&Value>) -> Result<Jwk, Error> {
     if !jwk.is_object() {
         return Err(Error::InvalidJwt);
     }
-    serde_json::from_value(jwk.clone()).map_err(|_| Error::InvalidJwt)
+    let parsed: Jwk = serde_json::from_value(jwk.clone()).map_err(|_| Error::InvalidJwt)?;
+    if parsed.alg != "Ed25519" {
+        return Err(Error::UnsupportedAlgorithm);
+    }
+    Ok(parsed)
 }
 
 fn optional_jti(value: Option<&Value>) -> Result<Option<String>, Error> {

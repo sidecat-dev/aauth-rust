@@ -22,4 +22,5 @@ sha2.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+ring.workspace = true
 serde_json.workspace = true

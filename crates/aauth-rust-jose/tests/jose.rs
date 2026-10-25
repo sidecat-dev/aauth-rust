@@ -46,6 +46,15 @@ fn compact_jws_preserves_original_bytes_and_rejects_substitution() {
             .verify(&SigningKey::from_seed([8; 32]).public_jwk())
             .is_err()
     );
+    let mut ec = key.public_jwk();
+    ec.kty = "EC".into();
+    ec.crv = "P-256".into();
+    ec.alg = "ES256".into();
+    ec.y = ec.x.clone();
+    assert!(matches!(
+        parsed.verify(&ec),
+        Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+    ));
     for alg in ["EdDSA", "none", "HS256"] {
         assert!(Jws::sign(&json!({"alg":alg}), b"{}", &key).is_err());
     }

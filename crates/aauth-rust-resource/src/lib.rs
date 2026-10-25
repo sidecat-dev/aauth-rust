@@ -5,7 +5,7 @@ mod ps_authorization;
 mod session;
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
 use aauth_rust_signature_key::{
-    Error, KeyMaterial, PreparedRequest, accept_signature_alg_header, required_components,
+    Error, KeyMaterial, PreparedRequest, required_components, role_signature_alg_header,
 };
 pub use held::{HeldError, HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
@@ -241,7 +241,7 @@ impl<T> Decision<T> {
                 ) {
                     response.headers_mut().insert(
                         "accept-signature-alg",
-                        accept_signature_alg_header().parse().unwrap(),
+                        role_signature_alg_header().parse().unwrap(),
                     );
                 }
                 if matches!(failure, SignatureFailure::Proof(Error::UnsupportedScheme)) {

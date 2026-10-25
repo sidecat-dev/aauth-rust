@@ -86,6 +86,9 @@ impl PreparedRequest {
             aauth_rust_jose::Error::InvalidKey => Error::InvalidKey,
             _ => Error::InvalidKey,
         })?;
+        if key.alg != "Ed25519" {
+            return Err(Error::UnsupportedAlgorithm);
+        }
         self.verify(&key)?;
         Ok(JwksIdentity {
             url: url.clone(),

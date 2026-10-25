@@ -1370,6 +1370,28 @@ fn jkt_jwt_delegates_signing_and_binds_the_enclave_thumbprint() {
         Error::InvalidJwt,
         "jkt-s256+jwt requires the sha-256 issuer prefix"
     );
+    let mut ec_cnf = ephemeral.public_jwk();
+    ec_cnf.kty = "EC".into();
+    ec_cnf.crv = "P-256".into();
+    ec_cnf.alg = "ES256".into();
+    ec_cnf.y = ec_cnf.x.clone();
+    let delegated = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"jkt-s256+jwt","jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&json!({
+            "iss": issuer,
+            "iat": 1000,
+            "exp": 2000,
+            "cnf": {"jwk": ec_cnf}
+        }))
+        .unwrap(),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_presented_jkt(&delegated, &ephemeral).unwrap_err(),
+        Error::UnsupportedAlgorithm,
+        "jkt confirmation is Ed25519"
+    );
 
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let foreign = format!(
@@ -1704,7 +1726,7 @@ fn self_jwt_uses_the_discovered_key_and_rejects_confirmation() {
     assert_eq!(unknown, Error::UnknownKey);
     assert_eq!(calls.get(), 1);
     let mut unsupported = key.public_jwk();
-    unsupported.alg = "ES256".into();
+    unsupported.alg = "ES512".into();
     assert_eq!(
         prepared
             .verify_self_jwt(
@@ -1849,11 +1871,333 @@ fn direct_jwks_keeps_the_url_bytes_as_the_signer_identity() {
         );
     }
     let mut unsupported = key.public_jwk();
-    unsupported.alg = "ES256".into();
+    unsupported.alg = "ES512".into();
     assert_eq!(
         prepared
             .verify_jwks(&|_: &str, _: &str| Ok(unsupported.clone()))
             .unwrap_err(),
         Error::UnsupportedAlgorithm
     );
+    let mut ec = key.public_jwk();
+    ec.kty = "EC".into();
+    ec.crv = "P-256".into();
+    ec.alg = "ES256".into();
+    ec.y = ec.x.clone();
+    assert_eq!(
+        prepared
+            .verify_jwks(&|_: &str, _: &str| Ok(ec.clone()))
+            .unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+}
+
+fn hwk_proof(header: &str, len: usize, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Request<Vec<u8>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut req = request();
+    req.headers_mut()
+        .insert("signature-key", header.parse().unwrap());
+    req.headers_mut().insert(
+        "signature-input",
+        "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1000"
+            .parse()
+            .unwrap(),
+    );
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode(vec![1u8; len]))
+            .parse()
+            .unwrap(),
+    );
+    let base = PreparedRequest::prepare(&req, "sig", 1000, 60)
+        .unwrap()
+        .signature_base()
+        .to_vec();
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode(sign(&base)))
+            .parse()
+            .unwrap(),
+    );
+    req
+}
+
+fn hwk_error(header: &str) -> Error {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let mut req = request();
+    req.headers_mut()
+        .insert("signature-key", header.parse().unwrap());
+    req.headers_mut().insert(
+        "signature-input",
+        "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1000"
+            .parse()
+            .unwrap(),
+    );
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode([1u8; 64]))
+            .parse()
+            .unwrap(),
+    );
+    PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err()
+}
+
+#[test]
+fn ec_and_rsa_header_keys_require_their_parameters_and_verify() {
+    use ring::signature::KeyPair;
+
+    let rng = ring::rand::SystemRandom::new();
+    let p256_doc = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let p256 = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        p256_doc.as_ref(),
+        &rng,
+    )
+    .unwrap();
+    let p256_pub = p256.public_key().as_ref();
+    assert_eq!(p256_pub.len(), 65);
+    assert_eq!(p256_pub[0], 0x04);
+    let x256 = base64_url(&p256_pub[1..33]);
+    let y256 = base64_url(&p256_pub[33..]);
+    let es256 = format!(r#"sig=hwk;kty="EC";crv="P-256";x="{x256}";y="{y256}";alg="ES256""#);
+    let req = hwk_proof(&es256, 64, |base| {
+        p256.sign(&rng, base).unwrap().as_ref().to_vec()
+    });
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+        panic!("ec key");
+    };
+    assert_eq!(jwk.kty, "EC");
+    assert_eq!(jwk.crv, "P-256");
+    assert_eq!(jwk.x, x256);
+    assert_eq!(jwk.y, y256);
+    assert_eq!(jwk.alg, "ES256");
+    prepared.verify(&jwk).unwrap();
+    let mut flipped = req.clone();
+    flipped.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", base64_std(&[2u8; 64])).parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&flipped, "sig", 1000, 60)
+            .unwrap()
+            .verify(&jwk)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    let p384_doc = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let p384 = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        p384_doc.as_ref(),
+        &rng,
+    )
+    .unwrap();
+    let p384_pub = p384.public_key().as_ref();
+    assert_eq!(p384_pub.len(), 97);
+    let x384 = base64_url(&p384_pub[1..49]);
+    let y384 = base64_url(&p384_pub[49..]);
+    let es384 = format!(r#"sig=hwk;kty="EC";crv="P-384";x="{x384}";y="{y384}";alg="ES384""#);
+    let req = hwk_proof(&es384, 96, |base| {
+        p384.sign(&rng, base).unwrap().as_ref().to_vec()
+    });
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+        panic!("p384 key");
+    };
+    assert_eq!(jwk.alg, "ES384");
+    assert_eq!(jwk.crv, "P-384");
+    prepared.verify(&jwk).unwrap();
+    assert_eq!(
+        hwk_error(&format!(
+            r#"sig=hwk;kty="EC";crv="P-256";x="{x384}";y="{y384}";alg="ES384""#
+        )),
+        Error::InvalidKey
+    );
+
+    for header in [
+        format!(r#"sig=hwk;crv="P-256";x="{x256}";y="{y256}";alg="ES256""#),
+        format!(r#"sig=hwk;kty="EC";x="{x256}";y="{y256}";alg="ES256""#),
+        format!(r#"sig=hwk;kty="EC";crv="P-256";y="{y256}";alg="ES256""#),
+        format!(r#"sig=hwk;kty="EC";crv="P-256";x="{x256}";alg="ES256""#),
+        format!(r#"sig=hwk;kty="EC";crv="P-384";x="{x256}";y="{y256}";alg="ES256""#),
+        format!(r#"sig=hwk;kty="OKP";crv="Ed25519";x="{x256}";y="{y256}";alg="Ed25519""#),
+    ] {
+        assert_eq!(hwk_error(&header), Error::InvalidKey, "{header}");
+    }
+    assert_eq!(
+        hwk_error(&format!(
+            r#"sig=hwk;kty="EC";crv="P-256";x="{x256}";y="{y256}""#
+        )),
+        Error::UnsupportedAlgorithm
+    );
+    assert_eq!(
+        hwk_error(&format!(
+            r#"sig=hwk;kty="EC";crv="P-521";x="{x256}";y="{y256}";alg="ES512""#
+        )),
+        Error::UnsupportedAlgorithm
+    );
+
+    let rsa = ring::rsa::KeyPair::from_der(include_bytes!("fixtures/rsa-2048.der")).unwrap();
+    let public = ring::signature::RsaPublicKeyComponents::<Vec<u8>>::from(rsa.public());
+    let modulus = base64_url(&public.n);
+    let exponent = base64_url(&public.e);
+    let rs256 = format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="{exponent}";alg="RS256""#);
+    let ps256 = format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="{exponent}";alg="PS256""#);
+    let pkcs1 = hwk_proof(&rs256, rsa.public().modulus_len(), |base| {
+        let mut signature = vec![0u8; rsa.public().modulus_len()];
+        rsa.sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &rng,
+            base,
+            &mut signature,
+        )
+        .unwrap();
+        signature
+    });
+    let prepared = PreparedRequest::prepare(&pkcs1, "sig", 1000, 60).unwrap();
+    let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+        panic!("rsa key");
+    };
+    assert_eq!(jwk.kty, "RSA");
+    assert_eq!(jwk.n, modulus);
+    assert_eq!(jwk.e, exponent);
+    assert_eq!(jwk.alg, "RS256");
+    prepared.verify(&jwk).unwrap();
+    let pss = hwk_proof(&ps256, rsa.public().modulus_len(), |base| {
+        let mut signature = vec![0u8; rsa.public().modulus_len()];
+        rsa.sign(&ring::signature::RSA_PSS_SHA256, &rng, base, &mut signature)
+            .unwrap();
+        signature
+    });
+    let prepared = PreparedRequest::prepare(&pss, "sig", 1000, 60).unwrap();
+    let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+        panic!("pss key");
+    };
+    assert_eq!(jwk.alg, "PS256");
+    prepared.verify(&jwk).unwrap();
+    let pkcs1_under_ps256 = hwk_proof(&ps256, rsa.public().modulus_len(), |base| {
+        let mut signature = vec![0u8; rsa.public().modulus_len()];
+        rsa.sign(
+            &ring::signature::RSA_PKCS1_SHA256,
+            &rng,
+            base,
+            &mut signature,
+        )
+        .unwrap();
+        signature
+    });
+    let prepared = PreparedRequest::prepare(&pkcs1_under_ps256, "sig", 1000, 60).unwrap();
+    let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+        panic!("padding");
+    };
+    assert_eq!(prepared.verify(&jwk).unwrap_err(), Error::InvalidSignature);
+
+    assert_eq!(public.n.len(), 256);
+    assert_ne!(public.n[0], 0);
+    assert_ne!(public.e[0], 0);
+    let mut exponent_value = 0u64;
+    for byte in &public.e {
+        exponent_value = (exponent_value << 8) | u64::from(*byte);
+    }
+    assert!(exponent_value >= 3 && exponent_value % 2 == 1);
+    let mut padded_n = vec![0];
+    padded_n.extend_from_slice(&public.n);
+    let mut padded_e = vec![0];
+    padded_e.extend_from_slice(&public.e);
+    let mut short = vec![0u8; 255];
+    short[0] = 0x80;
+    let mut minimum = vec![0u8; 256];
+    minimum[0] = 0x80;
+    let mut longest = vec![0u8; 1024];
+    longest[0] = 0x80;
+    let mut oversized = vec![0u8; 1025];
+    oversized[0] = 0x80;
+    for header in [
+        format!(
+            r#"sig=hwk;kty="RSA";n="{}";e="{exponent}";alg="RS256""#,
+            base64_url(&padded_n)
+        ),
+        format!(
+            r#"sig=hwk;kty="RSA";n="{modulus}";e="{}";alg="RS256""#,
+            base64_url(&padded_e)
+        ),
+        format!(
+            r#"sig=hwk;kty="RSA";n="{}";e="Aw";alg="RS256""#,
+            base64_url(&short)
+        ),
+        format!(
+            r#"sig=hwk;kty="RSA";n="{}";e="Aw";alg="RS256""#,
+            base64_url(&oversized)
+        ),
+        format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="AQ";alg="RS256""#),
+        format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="Ag";alg="RS256""#),
+        format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="AA";alg="RS256""#),
+    ] {
+        assert_eq!(hwk_error(&header), Error::InvalidKey, "{header}");
+    }
+    for (raw, len) in [(minimum, 256usize), (longest, 1024)] {
+        let header = format!(
+            r#"sig=hwk;kty="RSA";n="{}";e="Aw";alg="RS256""#,
+            base64_url(&raw)
+        );
+        let mut req = request();
+        req.headers_mut()
+            .insert("signature-key", header.parse().unwrap());
+        req.headers_mut().insert(
+            "signature-input",
+            "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1000"
+                .parse()
+                .unwrap(),
+        );
+        req.headers_mut().insert(
+            "signature",
+            format!("sig=:{}:", base64_std(&vec![1u8; len]))
+                .parse()
+                .unwrap(),
+        );
+        let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+        let KeyMaterial::Hwk(jwk) = prepared.key().clone() else {
+            panic!("boundary modulus");
+        };
+        assert_eq!(jwk.signature_len().unwrap(), len);
+    }
+
+    for header in [
+        format!(r#"sig=hwk;n="{modulus}";e="{exponent}";alg="RS256""#),
+        format!(r#"sig=hwk;kty="RSA";e="{exponent}";alg="RS256""#),
+        format!(r#"sig=hwk;kty="RSA";n="{modulus}";alg="RS256""#),
+        format!(r#"sig=hwk;kty="RSA";n="{modulus}";e="{exponent}";alg="Ed25519""#),
+    ] {
+        assert_eq!(hwk_error(&header), Error::InvalidKey, "{header}");
+    }
+    assert_eq!(
+        hwk_error(&format!(
+            r#"sig=hwk;kty="RSA";n="{modulus}";e="{exponent}""#
+        )),
+        Error::UnsupportedAlgorithm
+    );
+    assert_eq!(
+        hwk_error(&format!(
+            r#"sig=hwk;kty="RSA";n="{modulus}";e="{exponent}";alg="RSA""#
+        )),
+        Error::UnsupportedAlgorithm
+    );
+}
+
+fn base64_url(bytes: &[u8]) -> String {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn base64_std(bytes: &[u8]) -> String {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD.encode(bytes)
 }

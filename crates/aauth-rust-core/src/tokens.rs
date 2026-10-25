@@ -299,7 +299,7 @@ impl PersonClaims {
                 "account",
             ],
         )?;
-        self.cnf.jwk.validate()?;
+        crate::require_ed25519(&self.cnf.jwk)?;
         Ok(())
     }
 }
@@ -357,7 +357,7 @@ impl AuthClaims {
         if self.dwk == "aauth-person.json" && self.iss != self.ps {
             return Err(TokenError::IssuerMismatch);
         }
-        self.cnf.jwk.validate()?;
+        crate::require_ed25519(&self.cnf.jwk)?;
         validate_scope(self.scope.as_deref())?;
         reject_reserved(
             &self.extra,

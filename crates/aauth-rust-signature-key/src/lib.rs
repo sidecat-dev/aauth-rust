@@ -44,7 +44,7 @@ pub enum Error {
     /// The selected key-conveyance scheme is not accepted.
     UnsupportedScheme,
     #[error(
-        "unsupported or missing key alg: set alg to the string Ed25519; algorithms are not inferred from key shape"
+        "unsupported or missing key alg: use Ed25519, ES256, ES384, RS256, or PS256; algorithms are not inferred from key shape"
     )]
     /// The key algorithm is absent or unsupported.
     UnsupportedAlgorithm,
@@ -164,14 +164,20 @@ pub enum KeyMaterial {
     },
 }
 
-/// Algorithms this profile accepts. Servers advertise exactly this set in
-/// `Accept-Signature-Alg` and no other algorithm, including `none` and the
-/// symmetric MAC names.
-pub const ACCEPTED_SIGNATURE_ALGS: &[&str] = &["Ed25519"];
+/// Algorithms an `hwk` member may name. Compact JWS and the `jwt`, `jkt-jwt`,
+/// `self-jwt`, `jwks`, and `jwks_uri` schemes accept only Ed25519. Resource,
+/// person server, and access server advertise only Ed25519.
+pub const ACCEPTED_SIGNATURE_ALGS: &[&str] = &["Ed25519", "ES256", "ES384", "RS256", "PS256"];
 
-/// `Accept-Signature-Alg` field value: the accepted algorithms, in preference order.
+/// `Accept-Signature-Alg` value for the `hwk` algorithm set, in preference order.
 pub fn accept_signature_alg_header() -> String {
     ACCEPTED_SIGNATURE_ALGS.join(", ")
+}
+
+/// `Accept-Signature-Alg` value sent by the Resource, Person Server, and Access Server.
+/// Those roles accept Ed25519 proofs only.
+pub fn role_signature_alg_header() -> &'static str {
+    "Ed25519"
 }
 
 /// Maximum actual content bytes signed or verified by this buffered profile.
@@ -234,8 +240,12 @@ fn dictionary(req: &Request<Vec<u8>>, name: &str) -> Result<Dictionary, Error> {
         .map_err(|_| error)
 }
 fn text<'a>(params: &'a Parameters, name: &str) -> Result<&'a str, Error> {
+    optional_text(params, name)?.ok_or(Error::InvalidKey)
+}
+fn optional_text<'a>(params: &'a Parameters, name: &str) -> Result<Option<&'a str>, Error> {
     match params.get(name) {
-        Some(BareItem::String(s)) => Ok(s.as_str()),
+        None => Ok(None),
+        Some(BareItem::String(s)) => Ok(Some(s.as_str())),
         _ => Err(Error::InvalidKey),
     }
 }
@@ -328,16 +338,13 @@ fn parse_hwk(item: &sfv::Item) -> Result<KeyMaterial, Error> {
     if !matches!(kty, "OKP" | "EC" | "RSA") {
         return Err(Error::UnsupportedAlgorithm);
     }
-    if alg != "Ed25519" {
-        return Err(Error::UnsupportedAlgorithm);
-    }
-    if kty != "OKP" {
-        return Err(Error::InvalidKey);
-    }
     let key = Jwk {
         kty: kty.into(),
-        crv: text(&item.params, "crv")?.into(),
-        x: text(&item.params, "x")?.into(),
+        crv: optional_text(&item.params, "crv")?.unwrap_or("").into(),
+        x: optional_text(&item.params, "x")?.unwrap_or("").into(),
+        y: optional_text(&item.params, "y")?.unwrap_or("").into(),
+        n: optional_text(&item.params, "n")?.unwrap_or("").into(),
+        e: optional_text(&item.params, "e")?.unwrap_or("").into(),
         alg: alg.into(),
         extra: Default::default(),
     };
@@ -571,7 +578,14 @@ impl PreparedRequest {
         let BareItem::ByteSequence(bytes) = &signature.bare_item else {
             return Err(Error::InvalidSignature);
         };
-        if bytes.len() != 64 || !signature.params.is_empty() {
+        let expected_len = match &key {
+            KeyMaterial::Hwk(jwk) => jwk.signature_len().map_err(|err| match err {
+                aauth_rust_jose::Error::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,
+                _ => Error::InvalidKey,
+            })?,
+            _ => 64,
+        };
+        if bytes.len() != expected_len || !signature.params.is_empty() {
             return Err(Error::InvalidSignature);
         }
         Ok(Self {
@@ -594,6 +608,13 @@ impl PreparedRequest {
     /// # Errors
     /// Returns algorithm/key errors or `InvalidSignature` for a bad proof.
     pub fn verify(&self, key: &Jwk) -> Result<(), Error> {
+        let allowed = match &self.key {
+            KeyMaterial::Hwk(header) => header.alg == key.alg,
+            _ => key.alg == "Ed25519",
+        };
+        if !allowed {
+            return Err(Error::UnsupportedAlgorithm);
+        }
         key.verify(&self.base, &self.signature)
             .map_err(|e| match e {
                 aauth_rust_jose::Error::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,

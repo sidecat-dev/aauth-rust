@@ -135,6 +135,7 @@ fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
     use aauth_rust_resource::SignatureFailure;
     use aauth_rust_signature_key::{
         ACCEPTED_SIGNATURE_ALGS, Error, PreparedRequest, accept_signature_alg_header,
+        role_signature_alg_header,
     };
     let key = SigningKey::from_seed([2; 32]);
     let x = key.public_jwk().x.clone();
@@ -158,8 +159,11 @@ fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
         assert_eq!(err.code(), "unsupported_algorithm");
     }
     let advertised = accept_signature_alg_header();
-    assert_eq!(ACCEPTED_SIGNATURE_ALGS, ["Ed25519"]);
-    assert_eq!(advertised, "Ed25519");
+    assert_eq!(
+        ACCEPTED_SIGNATURE_ALGS,
+        ["Ed25519", "ES256", "ES384", "RS256", "PS256"]
+    );
+    assert_eq!(advertised, "Ed25519, ES256, ES384, RS256, PS256");
     for banned in ["none", "HS256", "HS384", "HS512"] {
         assert!(!ACCEPTED_SIGNATURE_ALGS.contains(&banned));
         assert!(!advertised.split(',').any(|token| token.trim() == banned));
@@ -167,7 +171,10 @@ fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
     let response =
         Decision::<()>::SignatureFailure(SignatureFailure::Token(TokenError::UnsupportedAlgorithm))
             .into_response();
-    assert_eq!(response.headers()["accept-signature-alg"], advertised);
+    assert_eq!(
+        response.headers()["accept-signature-alg"],
+        role_signature_alg_header()
+    );
     assert_eq!(
         response.headers()["signature-error"],
         "error=unsupported_algorithm"
@@ -249,11 +256,13 @@ fn missing_coverage_feedback_includes_query_and_authorization_requirements() {
 fn wire_failures_have_problem_details_and_safe_recovery_hints() {
     use aauth_rust_core::TokenError;
     use aauth_rust_resource::SignatureFailure;
+    use aauth_rust_signature_key::role_signature_alg_header;
+    let algs = role_signature_alg_header();
     for (failure, code, hint) in [
         (
             SignatureFailure::Token(TokenError::UnsupportedAlgorithm),
             "unsupported_algorithm",
-            Some(("accept-signature-alg", "Ed25519")),
+            Some(("accept-signature-alg", algs)),
         ),
         (
             SignatureFailure::Token(TokenError::IssuerMissing),
