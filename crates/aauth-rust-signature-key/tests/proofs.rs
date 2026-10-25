@@ -2192,6 +2192,424 @@ fn ec_and_rsa_header_keys_require_their_parameters_and_verify() {
     );
 }
 
+#[test]
+fn x509_checks_the_chain_and_selects_one_algorithm() {
+    let url = "https://Client.example/certs/leaf.pem";
+    let seed = [9u8; 32];
+    let leaf_key = rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(
+        &pkcs8_pem(&ed25519_pkcs8(&seed)),
+        &rcgen::PKCS_ED25519,
+    )
+    .unwrap();
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let ca = ca_cert("ca.example", &ca_key);
+    let leaf = issued(
+        "leaf.example",
+        &leaf_key,
+        &ca,
+        &ca_key,
+        (1970, 1, 1),
+        (2099, 1, 1),
+    );
+    let trust = ca.der().as_ref().to_vec();
+    let der = leaf.der().as_ref().to_vec();
+    let x5t = sha256(&der);
+    let pem = leaf.pem();
+    let mut req = request();
+    sign_request(
+        &mut req,
+        &SigningKey::from_seed(seed),
+        KeyMaterial::X509 {
+            x5u: url.into(),
+            x5t: x5t.clone(),
+        },
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    let prepared = prepare_x509(&req).unwrap();
+    let identity = prepared
+        .verify_x509(&pem, &[trust.as_slice()], 1000)
+        .unwrap();
+    assert_eq!(identity.url, url);
+    assert_eq!(identity.thumbprint, x5t);
+    assert_eq!(identity.key.alg, "Ed25519");
+    assert_eq!(identity.key.kty, "OKP");
+    assert_eq!(identity.key.crv, "Ed25519");
+
+    let other_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let other = ca_cert("other.example", &other_key);
+    assert_eq!(
+        prepared
+            .verify_x509(&pem, &[other.der().as_ref()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        prepared
+            .verify_x509(&pem, &[der.as_slice()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        prepared.verify_x509(&pem, &[], 1000).unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        prepared
+            .verify_x509("not a certificate", &[trust.as_slice()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let mut wrong_thumb = req.clone();
+    wrong_thumb.headers_mut().insert(
+        "signature-key",
+        x509_header(url, &[7u8; 32]).parse().unwrap(),
+    );
+    assert_eq!(
+        prepare_x509(&wrong_thumb)
+            .unwrap()
+            .verify_x509(&pem, &[trust.as_slice()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    let mut bad_sig = req.clone();
+    bad_sig.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", base64_std(&[2u8; 64])).parse().unwrap(),
+    );
+    assert_eq!(
+        prepare_x509(&bad_sig)
+            .unwrap()
+            .verify_x509(&pem, &[trust.as_slice()], 1000)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    let expired = issued(
+        "expired.example",
+        &leaf_key,
+        &ca,
+        &ca_key,
+        (1970, 1, 1),
+        (1970, 1, 2),
+    );
+    let expired_der = expired.der().as_ref().to_vec();
+    let mut expired_req = request();
+    sign_request(
+        &mut expired_req,
+        &SigningKey::from_seed(seed),
+        KeyMaterial::X509 {
+            x5u: url.into(),
+            x5t: sha256(&expired_der),
+        },
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        prepare_x509(&expired_req)
+            .unwrap()
+            .verify_x509(&expired.pem(), &[trust.as_slice()], 86_401)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    let pending = issued(
+        "pending.example",
+        &leaf_key,
+        &ca,
+        &ca_key,
+        (2090, 1, 1),
+        (2099, 1, 1),
+    );
+    let pending_der = pending.der().as_ref().to_vec();
+    let mut pending_req = request();
+    sign_request(
+        &mut pending_req,
+        &SigningKey::from_seed(seed),
+        KeyMaterial::X509 {
+            x5u: url.into(),
+            x5t: sha256(&pending_der),
+        },
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        prepare_x509(&pending_req)
+            .unwrap()
+            .verify_x509(&pending.pem(), &[trust.as_slice()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let x5t_b64 = base64_std(&x5t);
+    for header in [
+        format!("sig=x509;x5t=:{x5t_b64}:"),
+        format!("sig=x509;x5u=\"{url}\""),
+        format!("sig=x509;x5u=\"http://client.example/cert.pem\";x5t=:{x5t_b64}:"),
+        format!("sig=x509;x5u=\"https://client.example/cert.pem#frag\";x5t=:{x5t_b64}:"),
+        format!("sig=x509;x5u=\"https://user@client.example/cert.pem\";x5t=:{x5t_b64}:"),
+        format!("sig=x509;x5u=\"{url}\";x5t=\"{x5t_b64}\""),
+        format!("sig=x509;x5u=\"{url}\";x5t=:AA:"),
+    ] {
+        assert_eq!(
+            prepare_x509(&x509_request(&header, &[1u8; 64])).unwrap_err(),
+            Error::InvalidKey,
+            "{header}"
+        );
+    }
+
+    let root_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let root = ca_cert("root.example", &root_key);
+    let mid_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let mut mid_params = rcgen::CertificateParams::new(vec!["mid.example".into()]).unwrap();
+    mid_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    stamp(&mut mid_params, (1970, 1, 1), (2099, 1, 1));
+    let mid = mid_params.signed_by(&mid_key, &root, &root_key).unwrap();
+    let chained = issued(
+        "chained.example",
+        &leaf_key,
+        &mid,
+        &mid_key,
+        (1970, 1, 1),
+        (2099, 1, 1),
+    );
+    let chained_der = chained.der().as_ref().to_vec();
+    let chained_thumb = sha256(&chained_der);
+    let mut chained_req = request();
+    sign_request(
+        &mut chained_req,
+        &SigningKey::from_seed(seed),
+        KeyMaterial::X509 {
+            x5u: url.into(),
+            x5t: chained_thumb.clone(),
+        },
+        1000,
+    )
+    .unwrap();
+    let chained_pem = format!("{}{}", chained.pem(), mid.pem());
+    let chained_proof = prepare_x509(&chained_req).unwrap();
+    let chained_id = chained_proof
+        .verify_x509(&chained_pem, &[root.der().as_ref()], 1000)
+        .unwrap();
+    assert_eq!(chained_id.thumbprint, chained_thumb);
+    assert_eq!(
+        chained_proof
+            .verify_x509(&chained.pem(), &[root.der().as_ref()], 1000)
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        chained_proof
+            .verify_x509(
+                &format!("{}{}", mid.pem(), chained.pem()),
+                &[root.der().as_ref()],
+                1000,
+            )
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    ec_certificate(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+        "ES256",
+        "P-256",
+        64,
+    );
+    ec_certificate(
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        &rcgen::PKCS_ECDSA_P384_SHA384,
+        "ES384",
+        "P-384",
+        96,
+    );
+
+    let rsa_key = rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(
+        &pkcs8_pem(&rsa_pkcs8(include_bytes!("fixtures/rsa-2048.der"))),
+        &rcgen::PKCS_RSA_SHA256,
+    )
+    .unwrap();
+    let rsa_leaf = issued(
+        "rsa.example",
+        &rsa_key,
+        &ca,
+        &ca_key,
+        (1970, 1, 1),
+        (2099, 1, 1),
+    );
+    let rsa_header = x509_header(url, &sha256(rsa_leaf.der().as_ref()));
+    for len in [64, 256] {
+        assert_eq!(
+            prepare_x509(&x509_request(&rsa_header, &vec![1u8; len]))
+                .unwrap()
+                .verify_x509(&rsa_leaf.pem(), &[trust.as_slice()], 1000)
+                .unwrap_err(),
+            Error::UnsupportedAlgorithm,
+            "rsa signature length {len}"
+        );
+    }
+}
+
+fn ec_certificate(
+    signing: &'static ring::signature::EcdsaSigningAlgorithm,
+    cert_alg: &'static rcgen::SignatureAlgorithm,
+    alg: &str,
+    crv: &str,
+    len: usize,
+) {
+    let rng = ring::rand::SystemRandom::new();
+    let doc = ring::signature::EcdsaKeyPair::generate_pkcs8(signing, &rng).unwrap();
+    let pair = ring::signature::EcdsaKeyPair::from_pkcs8(signing, doc.as_ref(), &rng).unwrap();
+    let key =
+        rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem(doc.as_ref()), cert_alg).unwrap();
+    let ca_key = rcgen::KeyPair::generate_for(cert_alg).unwrap();
+    let ca = ca_cert("ec-ca.example", &ca_key);
+    let leaf = issued(
+        "ec-leaf.example",
+        &key,
+        &ca,
+        &ca_key,
+        (1970, 1, 1),
+        (2099, 1, 1),
+    );
+    let header = x509_header(
+        "https://client.example/ec.pem",
+        &sha256(leaf.der().as_ref()),
+    );
+    let req = x509_proof(&header, len, |base| {
+        pair.sign(&rng, base).unwrap().as_ref().to_vec()
+    });
+    let identity = prepare_x509(&req)
+        .unwrap()
+        .verify_x509(&leaf.pem(), &[ca.der().as_ref()], 1000)
+        .unwrap();
+    assert_eq!(identity.key.alg, alg);
+    assert_eq!(identity.key.crv, crv);
+    assert_eq!(identity.url, "https://client.example/ec.pem");
+    let wrong_len = if len == 64 { 96 } else { 64 };
+    assert_eq!(
+        prepare_x509(&x509_request(&header, &vec![1u8; wrong_len]))
+            .unwrap()
+            .verify_x509(&leaf.pem(), &[ca.der().as_ref()], 1000)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+}
+
+fn ca_cert(name: &str, key: &rcgen::KeyPair) -> rcgen::Certificate {
+    let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    stamp(&mut params, (1970, 1, 1), (2099, 1, 1));
+    params.self_signed(key).unwrap()
+}
+
+fn issued(
+    name: &str,
+    key: &rcgen::KeyPair,
+    issuer: &rcgen::Certificate,
+    issuer_key: &rcgen::KeyPair,
+    before: (i32, u8, u8),
+    after: (i32, u8, u8),
+) -> rcgen::Certificate {
+    let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    stamp(&mut params, before, after);
+    params.signed_by(key, issuer, issuer_key).unwrap()
+}
+
+fn stamp(params: &mut rcgen::CertificateParams, before: (i32, u8, u8), after: (i32, u8, u8)) {
+    params.not_before = rcgen::date_time_ymd(before.0, before.1, before.2);
+    params.not_after = rcgen::date_time_ymd(after.0, after.1, after.2);
+}
+
+fn prepare_x509(req: &Request<Vec<u8>>) -> Result<PreparedRequest, Error> {
+    PreparedRequest::prepare_with_schemes(req, "sig", 1000, 60, &["x509"])
+}
+
+fn x509_header(url: &str, x5t: &[u8]) -> String {
+    format!("sig=x509;x5u=\"{url}\";x5t=:{}:", base64_std(x5t))
+}
+
+fn x509_request(header: &str, signature: &[u8]) -> Request<Vec<u8>> {
+    let mut req = request();
+    req.headers_mut()
+        .insert("signature-key", header.parse().unwrap());
+    req.headers_mut().insert(
+        "signature-input",
+        "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1000"
+            .parse()
+            .unwrap(),
+    );
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", base64_std(signature)).parse().unwrap(),
+    );
+    req
+}
+
+fn x509_proof(header: &str, len: usize, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Request<Vec<u8>> {
+    let base = prepare_x509(&x509_request(header, &vec![1u8; len]))
+        .unwrap()
+        .signature_base()
+        .to_vec();
+    x509_request(header, &sign(&base))
+}
+
+fn sha256(bytes: &[u8]) -> Vec<u8> {
+    ring::digest::digest(&ring::digest::SHA256, bytes)
+        .as_ref()
+        .to_vec()
+}
+
+fn rsa_pkcs8(pkcs1: &[u8]) -> Vec<u8> {
+    let algorithm = der_tlv(
+        0x30,
+        &[
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+        ],
+    );
+    let mut body = der_tlv(0x02, &[0x00]);
+    body.extend(algorithm);
+    body.extend(der_tlv(0x04, pkcs1));
+    der_tlv(0x30, &body)
+}
+
+fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let len = body.len();
+    if len < 128 {
+        out.push(len as u8);
+    } else if len < 256 {
+        out.extend([0x81, len as u8]);
+    } else {
+        out.extend([0x82, (len >> 8) as u8, len as u8]);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+fn ed25519_pkcs8(seed: &[u8; 32]) -> Vec<u8> {
+    let mut der = vec![
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
+        0x20,
+    ];
+    der.extend_from_slice(seed);
+    der
+}
+
+fn pkcs8_pem(der: &[u8]) -> String {
+    let encoded = base64_std(der);
+    let mut body = String::new();
+    for chunk in encoded.as_bytes().chunks(64) {
+        body.push_str(std::str::from_utf8(chunk).unwrap());
+        body.push('\n');
+    }
+    format!("-----BEGIN PRIVATE KEY-----\n{body}-----END PRIVATE KEY-----\n")
+}
+
 fn base64_url(bytes: &[u8]) -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     URL_SAFE_NO_PAD.encode(bytes)

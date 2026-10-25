@@ -41,7 +41,15 @@ library does not fetch the JWKS. An EC header key carries `kty`, `crv`,
 `x`, `y`, and `alg` (`ES256` with `P-256`, or `ES384` with `P-384`). An RSA
 header key carries `kty`, `n`, `e`, and an `alg` that names both padding and
 hash (`RS256` or `PS256`). `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. A missing parameter or a curve that disagrees with
-`alg` is rejected. Compact JWS remains Ed25519. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+`alg` is rejected. An `x509` member names an HTTPS `x5u` and a 32-byte `x5t`.
+The URL is kept as presented and is not fetched. The host passes the PEM
+chain and the DER trust anchors. The first certificate is the end entity. The
+chain must validate to one of those anchors at the verifier clock, and `x5t`
+must be the SHA-256 of that certificate, before the HTTP signature is checked.
+That certificate's key selects one algorithm: Ed25519, P-256 as ES256, or
+P-384 as ES384. An RSA certificate is `unsupported_algorithm` because
+`rsaEncryption` names neither padding nor hash. Revocation is host-owned.
+Compact JWS remains Ed25519. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses

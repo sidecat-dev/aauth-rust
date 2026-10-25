@@ -1,13 +1,15 @@
-//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod content_digest;
 mod jkt;
 mod jwks;
 mod self_jwt;
+mod x509;
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
+pub use x509::X509Identity;
 
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -162,6 +164,13 @@ pub enum KeyMaterial {
         /// Key identifier inside that JWKS.
         kid: String,
     },
+    /// X.509 certificate. The host resolves `x5u`; this value does not fetch it.
+    X509 {
+        /// Exact HTTPS PEM URL. Not canonicalized.
+        x5u: String,
+        /// SHA-256 of the DER-encoded end-entity certificate.
+        x5t: Vec<u8>,
+    },
 }
 
 /// Algorithms an `hwk` member may name. Compact JWS and the `jwt`, `jkt-jwt`,
@@ -242,6 +251,12 @@ fn dictionary(req: &Request<Vec<u8>>, name: &str) -> Result<Dictionary, Error> {
 fn text<'a>(params: &'a Parameters, name: &str) -> Result<&'a str, Error> {
     optional_text(params, name)?.ok_or(Error::InvalidKey)
 }
+fn byte_sequence(params: &Parameters, name: &str) -> Result<Vec<u8>, Error> {
+    match params.get(name) {
+        Some(BareItem::ByteSequence(bytes)) => Ok(bytes.clone()),
+        _ => Err(Error::InvalidKey),
+    }
+}
 fn optional_text<'a>(params: &'a Parameters, name: &str) -> Result<Option<&'a str>, Error> {
     match params.get(name) {
         None => Ok(None),
@@ -278,6 +293,12 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
             jwks::validate(&url, &kid)?;
             Ok(KeyMaterial::Jwks { url, kid })
         }
+        "x509" => {
+            let x5u = text(&item.params, "x5u")?.to_owned();
+            let x5t = byte_sequence(&item.params, "x5t")?;
+            x509::validate(&x5u, &x5t)?;
+            Ok(KeyMaterial::X509 { x5u, x5t })
+        }
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
             let dwk = text(&item.params, "dwk")?;
@@ -295,7 +316,7 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
 /// Identifier the Signature-Key member itself carries. `hwk` has none.
 fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
-        KeyMaterial::Hwk(_) => Ok(None),
+        KeyMaterial::Hwk(_) | KeyMaterial::X509 { .. } => Ok(None),
         KeyMaterial::JwksUri { kid, .. } | KeyMaterial::Jwks { kid, .. } => Ok(Some(kid.clone())),
         KeyMaterial::Jwt(compact)
         | KeyMaterial::JktJwt { jwt: compact, .. }
@@ -578,14 +599,27 @@ impl PreparedRequest {
         let BareItem::ByteSequence(bytes) = &signature.bare_item else {
             return Err(Error::InvalidSignature);
         };
-        let expected_len = match &key {
-            KeyMaterial::Hwk(jwk) => jwk.signature_len().map_err(|err| match err {
-                aauth_rust_jose::Error::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,
-                _ => Error::InvalidKey,
-            })?,
-            _ => 64,
+        if !signature.params.is_empty() {
+            return Err(Error::InvalidSignature);
+        }
+        // `x509` names its HTTP algorithm only after the certificate is
+        // checked. Ed25519 and ES256 are 64 bytes, ES384 is 96, and a
+        // modulus-sized signature is accepted here so an RSA certificate can
+        // still be classified as `unsupported_algorithm`.
+        let accepted_len = match &key {
+            KeyMaterial::Hwk(jwk) => {
+                bytes.len()
+                    == jwk.signature_len().map_err(|err| match err {
+                        aauth_rust_jose::Error::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,
+                        _ => Error::InvalidKey,
+                    })?
+            }
+            KeyMaterial::X509 { .. } => {
+                matches!(bytes.len(), 64 | 96) || (256..=1024).contains(&bytes.len())
+            }
+            _ => bytes.len() == 64,
         };
-        if bytes.len() != expected_len || !signature.params.is_empty() {
+        if !accepted_len {
             return Err(Error::InvalidSignature);
         }
         Ok(Self {
@@ -610,6 +644,7 @@ impl PreparedRequest {
     pub fn verify(&self, key: &Jwk) -> Result<(), Error> {
         let allowed = match &self.key {
             KeyMaterial::Hwk(header) => header.alg == key.alg,
+            KeyMaterial::X509 { .. } => matches!(key.alg.as_str(), "Ed25519" | "ES256" | "ES384"),
             _ => key.alg == "Ed25519",
         };
         if !allowed {
@@ -694,6 +729,14 @@ pub fn sign_request(
             self_jwt::assert_signable(&jwt, key)?;
             format!("sig=self-jwt;jwt=\"{jwt}\"")
         }
+        KeyMaterial::X509 { x5u, x5t } => {
+            x509::validate(&x5u, &x5t)?;
+            format!(
+                "sig=x509;x5u={};x5t=:{}:",
+                quoted(&x5u)?,
+                STANDARD.encode(x5t)
+            )
+        }
     };
     let mut covered = vec!["@method", "@authority", "@path"];
     if req.uri().query().is_some() {
@@ -753,6 +796,7 @@ impl std::fmt::Debug for PreparedRequest {
             KeyMaterial::Jwks { .. } => "jwks",
             KeyMaterial::JktJwt { .. } => "jkt-jwt",
             KeyMaterial::SelfJwt { .. } => "self-jwt",
+            KeyMaterial::X509 { .. } => "x509",
         };
         f.debug_struct("PreparedRequest")
             .field("scheme", &scheme)
