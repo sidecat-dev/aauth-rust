@@ -5,9 +5,9 @@ use std::time::Duration;
 use aauth_rust_signature_key::{
     AssertionCache, CacheRequest, CachedDocument, DiscoveryFetch, EgressLimits, Error, KeyCache,
     KeyCacheAnswer, KeyCacheStore, KeyMaterial, PreparedRequest, RequestSignature,
-    accept_pinned_peer, accept_response, admit_fetch, admit_redirect, choose_presented_scheme,
-    origin_is_allowed, origin_pseudonym, present_issued_cid, recognized_tokens,
-    select_presented_scheme, sign_request, sign_requests, signature_error_code,
+    ServerKeyBinding, accept_pinned_peer, accept_response, admit_fetch, admit_redirect,
+    choose_presented_scheme, origin_is_allowed, origin_pseudonym, present_issued_cid,
+    recognized_tokens, select_presented_scheme, sign_request, sign_requests, signature_error_code,
 };
 use http::Request;
 use serde_json::json;
@@ -3327,6 +3327,47 @@ fn egress_admission_pins_a_public_address_and_a_parsed_origin_is_not_authorizati
         origin_pseudonym("http://attacker.example").unwrap_err(),
         Error::InvalidKey
     );
+}
+
+#[test]
+fn pseudonym_keys_are_distinct_for_distinct_servers() {
+    let mut binding = ServerKeyBinding::open();
+    let one = SigningKey::from_seed([1; 32]).public_jwk();
+    let two = SigningKey::from_seed([2; 32]).public_jwk();
+    assert_ne!(one.thumbprint().unwrap(), two.thumbprint().unwrap());
+    binding.admit("https://one.example/a?x=1", &one).unwrap();
+    binding.admit("https://ONE.example:443/b", &one).unwrap();
+    assert_eq!(
+        binding.admit("https://two.example", &one).unwrap_err(),
+        Error::InvalidKey
+    );
+    binding.admit("https://one.example/again", &one).unwrap();
+    binding.admit("https://two.example/z", &two).unwrap();
+    assert_eq!(
+        binding.admit("https://one.example:8443", &one).unwrap_err(),
+        Error::InvalidKey
+    );
+    let third = SigningKey::from_seed([3; 32]).public_jwk();
+    binding.admit("https://one.example:8443/c", &third).unwrap();
+    assert_eq!(
+        binding.admit("https://one.example", &third).unwrap_err(),
+        Error::InvalidKey
+    );
+    let fourth = SigningKey::from_seed([4; 32]).public_jwk();
+    binding.admit("https://one.example", &fourth).unwrap();
+    let mut ec = one.clone();
+    ec.kty = "EC".into();
+    ec.crv = "P-256".into();
+    ec.alg = "ES256".into();
+    assert_eq!(
+        binding.admit("https://fresh.example", &ec).unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        binding.admit("http://one.example", &two).unwrap_err(),
+        Error::InvalidUri
+    );
+    binding.admit("https://two.example", &two).unwrap();
 }
 
 fn cache_request(

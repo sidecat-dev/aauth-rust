@@ -86,7 +86,11 @@ forms is classified as that IPv4 address. The local-use prefix `64:ff9b:1::/48`
 is refused as a whole. Anything else needs an explicit allowance, as does a JWKS
 host that differs from the metadata host. Redirects stay on that host, including a different port, and stop after three. A
 parsed `jwks_uri` `id` is an origin name; an empty allowlist does not
-authorize it. Direct
+authorize it. A pseudonym client admits each Ed25519 thumbprint
+for one canonical HTTPS authority. The same host with port 443, any path, and
+any query is that server. A different port is a different server. The same
+server may rotate to a new key. `jkt-jwt` binds the enclave key, not the
+ephemeral confirmation key. `sign_request` does not keep this table. Direct
 agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,

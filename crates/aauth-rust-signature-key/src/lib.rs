@@ -9,6 +9,7 @@ mod jkt;
 mod jwks;
 mod key_cache;
 mod self_jwt;
+mod server_keys;
 mod x509;
 pub use cache::{
     AssertionCache, CacheGrant, CacheRequest, CachedAssertion, MAX_CACHEABLE_LIFETIME,
@@ -27,6 +28,7 @@ pub use key_cache::{
     MIN_REFETCH_INTERVAL,
 };
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
+pub use server_keys::ServerKeyBinding;
 pub use x509::X509Identity;
 
 use aauth_rust_jose::{Jwk, SigningKey};
