@@ -73,7 +73,12 @@ case-sensitively, and does not sign when none remain. `Signature-Error`
 contributes its `error` token; other members are ignored. On a non-success
 response the Person Server takes that token and does not require a JSON body.
 When the header is absent, a problem body still supplies `error`. A JSON
-`detail` may be present. `clock_skew` still requires `Date`. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+`detail` may be present. `clock_skew` still requires `Date`. `KeyCache` stores a JWKS document the host fetched. It does not open a connection and cannot retract that fetch. A `jwks_uri` entry is keyed by issuer and `dwk`. Freshness
+comes from `s-maxage`, then `max-age`, otherwise 300 seconds, and is at most
+86400 seconds. `no-store` and
+`no-cache` do not leave a reusable body. Another fetch of that issuer and `dwk`, or of that URL,
+waits 60 seconds, and the cache holds only the bound given at open. Direct
+agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses

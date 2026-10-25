@@ -1,8 +1,8 @@
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_signature_key::{
-    AssertionCache, CacheRequest, Error, KeyMaterial, PreparedRequest, RequestSignature,
-    choose_presented_scheme, present_issued_cid, recognized_tokens, select_presented_scheme,
-    sign_request, sign_requests, signature_error_code,
+    AssertionCache, CacheRequest, CachedDocument, Error, KeyCache, KeyCacheAnswer, KeyCacheStore,
+    KeyMaterial, PreparedRequest, RequestSignature, choose_presented_scheme, present_issued_cid,
+    recognized_tokens, select_presented_scheme, sign_request, sign_requests, signature_error_code,
 };
 use http::Request;
 use serde_json::json;
@@ -2763,6 +2763,353 @@ fn client_ignores_unknown_accept_tokens_and_signature_error_members() {
     assert_eq!(
         signature_error_code("note=1").unwrap_err(),
         Error::InvalidInput
+    );
+}
+
+#[test]
+fn key_cache_expires_and_refuses_a_refetch_inside_one_minute() {
+    assert_eq!(KeyCache::open(0).unwrap_err(), Error::InvalidInput);
+    let mut cache = KeyCache::open(2).unwrap();
+    let issuer = CachedDocument::JwksUriIssuer {
+        issuer: "https://issuer.example",
+        dwk: "aauth-access.json",
+    };
+    let other = CachedDocument::JwksUriIssuer {
+        issuer: "https://other.example",
+        dwk: "aauth-access.json",
+    };
+    let third = CachedDocument::JwksUriIssuer {
+        issuer: "https://third.example",
+        dwk: "aauth-access.json",
+    };
+    let url = CachedDocument::JwksUrl("https://keys.example/jwks?v=1");
+    assert_eq!(cache.lookup(issuer, 1_000).unwrap(), KeyCacheAnswer::Fetch);
+    assert_eq!(
+        cache
+            .store(issuer, br#"{"keys":[]}"#, Some("max-age=30"), 1_000)
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 1_030,
+            fresh: true
+        }
+    );
+    assert!(matches!(
+        cache.lookup(issuer, 1_029).unwrap(),
+        KeyCacheAnswer::Fresh {
+            expires_at: 1_030,
+            ..
+        }
+    ));
+    assert_eq!(
+        cache.lookup(issuer, 1_030).unwrap(),
+        KeyCacheAnswer::Wait { until: 1_060 }
+    );
+    assert_eq!(
+        cache
+            .store(issuer, br#"{"keys":[1]}"#, Some("max-age=30"), 1_059)
+            .unwrap(),
+        KeyCacheStore::Wait { until: 1_060 }
+    );
+    assert!(matches!(
+        cache.lookup(issuer, 1_059).unwrap(),
+        KeyCacheAnswer::Wait { until: 1_060 }
+    ));
+    assert_eq!(cache.lookup(issuer, 1_060).unwrap(), KeyCacheAnswer::Fetch);
+    cache
+        .store(issuer, br#"{"keys":[2]}"#, Some("max-age=10"), 1_060)
+        .unwrap();
+    assert_eq!(cache.lookup(other, 1_060).unwrap(), KeyCacheAnswer::Fetch);
+    cache
+        .store(other, br#"{"keys":[]}"#, Some("max-age=100"), 1_060)
+        .unwrap();
+    assert_eq!(cache.lookup(third, 1_060).unwrap(), KeyCacheAnswer::Full);
+    assert_eq!(
+        cache
+            .store(third, br#"{"keys":[]}"#, Some("max-age=100"), 1_060)
+            .unwrap(),
+        KeyCacheStore::Full
+    );
+    assert_eq!(cache.lookup(url, 1_060).unwrap(), KeyCacheAnswer::Full);
+    assert_eq!(cache.lookup(issuer, 1_120).unwrap(), KeyCacheAnswer::Fetch);
+    assert_eq!(cache.lookup(third, 1_120).unwrap(), KeyCacheAnswer::Fetch);
+    assert_eq!(
+        cache
+            .store(url, br#"{"keys":[]}"#, Some("max-age=1"), 4_000)
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 4_001,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        cache.lookup(url, 4_001).unwrap(),
+        KeyCacheAnswer::Wait { until: 4_060 }
+    );
+    assert_eq!(
+        cache
+            .store(issuer, br#"{"keys":[]}"#, Some("no-store"), 5_000)
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 5_000,
+            fresh: false
+        }
+    );
+    assert_eq!(
+        cache.lookup(issuer, 5_000).unwrap(),
+        KeyCacheAnswer::Wait { until: 5_060 }
+    );
+    assert_eq!(
+        cache.store(other, br#"{"keys":[]}"#, None, 6_000).unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 6_300,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        cache
+            .store(
+                other,
+                br#"{"keys":[]}"#,
+                Some("s-maxage=15, max-age=90"),
+                6_400
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 6_415,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        cache
+            .store(url, br#"{"keys":[]}"#, Some("No-Cache, public"), 7_000)
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 7_000,
+            fresh: false
+        }
+    );
+    assert_eq!(
+        cache
+            .store(url, b"x", Some("max-age=foo"), 8_000)
+            .unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        cache
+            .lookup(
+                CachedDocument::JwksUriIssuer {
+                    issuer: "http://issuer.example",
+                    dwk: "aauth-access.json",
+                },
+                8_000
+            )
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        cache
+            .store(issuer, &vec![b'a'; 65_537], Some("max-age=60"), 9_000)
+            .unwrap_err(),
+        Error::InvalidInput
+    );
+    let mut roles = KeyCache::open(2).unwrap();
+    let access = CachedDocument::JwksUriIssuer {
+        issuer: "https://shared.example",
+        dwk: "aauth-access.json",
+    };
+    let person = CachedDocument::JwksUriIssuer {
+        issuer: "https://shared.example",
+        dwk: "aauth-person.json",
+    };
+    assert_eq!(
+        roles
+            .store(
+                access,
+                br#"{"keys":[{"kid":"a"}]}"#,
+                Some("max-age=30"),
+                1_000
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 1_030,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        roles
+            .store(
+                person,
+                br#"{"keys":[{"kid":"p"}]}"#,
+                Some("max-age=30"),
+                1_000
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 1_030,
+            fresh: true
+        }
+    );
+    match roles.lookup(access, 1_000).unwrap() {
+        KeyCacheAnswer::Fresh { body, .. } => assert_eq!(body, br#"{"keys":[{"kid":"a"}]}"#),
+        other => panic!("access document was not kept: {other:?}"),
+    }
+    match roles.lookup(person, 1_000).unwrap() {
+        KeyCacheAnswer::Fresh { body, .. } => assert_eq!(body, br#"{"keys":[{"kid":"p"}]}"#),
+        other => panic!("person document was not stored: {other:?}"),
+    }
+    assert_eq!(
+        roles
+            .lookup(
+                CachedDocument::JwksUriIssuer {
+                    issuer: "https://shared.example",
+                    dwk: "",
+                },
+                1_000
+            )
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    let mut responses = KeyCache::open(4).unwrap();
+    let quote = CachedDocument::JwksUrl("https://quote.example/jwks");
+    assert_eq!(
+        responses
+            .store_response(
+                quote,
+                br#"{"keys":[]}"#,
+                aauth_rust_signature_key::FetchedHeaders {
+                    cache_control: Some("max-age=\"60\""),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                8_100
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 8_160,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        responses
+            .store_response(
+                quote,
+                b"{}",
+                aauth_rust_signature_key::FetchedHeaders {
+                    cache_control: Some("max-age=\"no\""),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                8_200
+            )
+            .unwrap_err(),
+        Error::InvalidInput
+    );
+    let aged = CachedDocument::JwksUrl("https://age.example/jwks");
+    assert_eq!(
+        responses
+            .store_response(
+                aged,
+                br#"{"keys":[]}"#,
+                aauth_rust_signature_key::FetchedHeaders {
+                    cache_control: Some("max-age=40"),
+                    age: Some("10"),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                8_300
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 8_330,
+            fresh: true
+        }
+    );
+    assert!(matches!(
+        responses.lookup(aged, 8_329).unwrap(),
+        KeyCacheAnswer::Fresh {
+            expires_at: 8_330,
+            ..
+        }
+    ));
+    let spent = CachedDocument::JwksUrl("https://spent.example/jwks");
+    assert_eq!(
+        responses
+            .store_response(
+                spent,
+                br#"{"keys":[]}"#,
+                aauth_rust_signature_key::FetchedHeaders {
+                    cache_control: Some("max-age=5"),
+                    age: Some("9"),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                8_400
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 8_400,
+            fresh: false
+        }
+    );
+    assert_eq!(
+        responses.lookup(spent, 8_400).unwrap(),
+        KeyCacheAnswer::Wait { until: 8_460 }
+    );
+    let dated = CachedDocument::JwksUrl("https://dated.example/jwks");
+    assert_eq!(
+        responses
+            .store_response(
+                dated,
+                br#"{"keys":[]}"#,
+                aauth_rust_signature_key::FetchedHeaders {
+                    age: Some("15"),
+                    expires: Some("Sun, 06 Nov 1994 08:50:37 GMT"),
+                    date: Some("Sun, 06 Nov 1994 08:49:37 GMT"),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                1_700_000_000
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 1_700_000_045,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        responses
+            .store_response(
+                CachedDocument::JwksUrl("https://baddate.example/jwks"),
+                br#"{"keys":[]}"#,
+                aauth_rust_signature_key::FetchedHeaders {
+                    expires: Some("not-a-date"),
+                    ..aauth_rust_signature_key::FetchedHeaders::default()
+                },
+                1_700_000_100
+            )
+            .unwrap_err(),
+        Error::InvalidInput
+    );
+    let mut capped = KeyCache::open(1).unwrap();
+    assert_eq!(
+        capped
+            .store(
+                CachedDocument::JwksUrl("https://keys.example/jwks"),
+                br#"{"keys":[]}"#,
+                Some("max-age=200000"),
+                10
+            )
+            .unwrap(),
+        KeyCacheStore::Stored {
+            expires_at: 86_410,
+            fresh: true
+        }
+    );
+    assert_eq!(
+        capped
+            .store(
+                CachedDocument::JwksUrl("https://keys.example/jwks"),
+                br#"{"keys":[]}"#,
+                Some("s-maxage=90000, max-age=10"),
+                20
+            )
+            .unwrap(),
+        KeyCacheStore::Wait { until: 70 }
     );
 }
 

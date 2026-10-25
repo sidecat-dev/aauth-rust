@@ -6,6 +6,7 @@ mod client;
 mod content_digest;
 mod jkt;
 mod jwks;
+mod key_cache;
 mod self_jwt;
 mod x509;
 pub use cache::{
@@ -15,6 +16,10 @@ pub use cache::{
 pub use client::{choose_presented_scheme, recognized_tokens, signature_error_code};
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
+pub use key_cache::{
+    CachedDocument, DEFAULT_KEY_TTL, FetchedHeaders, KeyCache, KeyCacheAnswer, KeyCacheStore,
+    MIN_REFETCH_INTERVAL,
+};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
 pub use x509::X509Identity;
 
