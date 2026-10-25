@@ -229,7 +229,9 @@ carries `AAuth-Budget` with `cost`. A scope or policy denial of a verified
 budgeted token still carries the header and does not draw down. A person-token
 challenge does not carry it. A metering-layer failure is `500` and omits the
 header. A subagent person or auth request declares `budget` in `capabilities`
-and sends `AAuth-Capabilities: budget`. Streaming is `budget_reserve`, `budget_stream_header` (`reserved`, no
+and sends `AAuth-Capabilities: budget`. `auth_request_with_justification`
+copies a host-supplied explanation of at most 65536 bytes and does not invent one.
+A challenge issued for an auth token carries that token's consumption record. Streaming is `budget_reserve`, `budget_stream_header` (`reserved`, no
 `cost`), `budget_commit`, and `budget_trailer` (`cost` only, with trailer name
 `aauth-budget`). Held completion stores one cost for a pending id and a replay
 does not add consumption. The cap is per auth-token `jti`. A high per-person

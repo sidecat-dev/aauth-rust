@@ -314,6 +314,36 @@ fn request_builders_preserve_exact_child_credentials_and_use_parent_proof() {
     assert_eq!(body["login_hint"], "person@example.com");
     assert_eq!(body["capabilities"], json!(["budget"]));
     assert_eq!(auth_request.headers()["aauth-capabilities"], "budget");
+    assert!(body.get("justification").is_none());
+    let explained = child
+        .auth_request_with_justification(
+            &parent,
+            "https://ps.example/auth",
+            &resource,
+            &person,
+            &Keys,
+            1000,
+            &ResourceTokenAttempts::new(),
+            Some("the grant is spent"),
+        )
+        .unwrap();
+    let explained_body: Value = serde_json::from_slice(explained.body()).unwrap();
+    assert_eq!(explained_body["justification"], "the grant is spent");
+    assert_eq!(explained_body["resource_token"], resource.compact());
+    assert!(
+        child
+            .auth_request_with_justification(
+                &parent,
+                "https://ps.example/auth",
+                &resource,
+                &person,
+                &Keys,
+                1000,
+                &ResourceTokenAttempts::new(),
+                Some(""),
+            )
+            .is_err()
+    );
     for request in [person_request, auth_request] {
         let proof = PreparedRequest::prepare(&request, "sig", 1000, 60).unwrap();
         assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == parent.token()));

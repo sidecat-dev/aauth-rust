@@ -251,6 +251,9 @@ impl Subagent {
     /// metadata, then send these bytes unchanged. No transport or retry occurs.
     /// `attempts` is the set of resource tokens already refused as
     /// `revoked_resource_token`. The host records that error before calling again.
+    /// This build omits `justification`. Use
+    /// [`Self::auth_request_with_justification`] when the host is explaining a
+    /// larger budget.
     ///
     /// # Errors
     /// Rejects a remembered revoked resource token, stale identities/challenge,
@@ -266,6 +269,37 @@ impl Subagent {
         keys: &dyn AgentKeyResolver,
         now: i64,
         attempts: &ResourceTokenAttempts,
+    ) -> Result<Request<Vec<u8>>, TokenError> {
+        self.auth_request_with_justification(
+            parent,
+            endpoint,
+            resource,
+            presented_compact,
+            keys,
+            now,
+            attempts,
+            None,
+        )
+    }
+    /// Same request as [`Self::auth_request`], plus a host-supplied `justification`.
+    ///
+    /// `None` omits the member. The library copies `Some` text unchanged and does
+    /// not invent an explanation.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::auth_request`]. An empty explanation,
+    /// or one longer than 65536 bytes, is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn auth_request_with_justification(
+        &self,
+        parent: &Agent,
+        endpoint: &str,
+        resource: &VerifiedResourceToken,
+        presented_compact: &str,
+        keys: &dyn AgentKeyResolver,
+        now: i64,
+        attempts: &ResourceTokenAttempts,
+        justification: Option<&str>,
     ) -> Result<Request<Vec<u8>>, TokenError> {
         if !attempts.may_submit(resource.compact()) {
             return Err(TokenError::InvalidJwt);
@@ -301,6 +335,12 @@ impl Subagent {
         let mut body = json!({"resource_token":resource.compact(),"presented_token":presented_compact,"subagent_token":self.child.compact(),"capabilities":["budget"]});
         if let Some(hint) = &c.login_hint {
             body["login_hint"] = json!(hint);
+        }
+        if let Some(text) = justification {
+            if text.is_empty() || text.len() > 65536 {
+                return Err(TokenError::InvalidJwt);
+            }
+            body["justification"] = json!(text);
         }
         self.request(parent, endpoint, body, now)
     }
