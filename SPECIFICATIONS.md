@@ -64,7 +64,10 @@ more than 86400 seconds left is not cached. `self-jwt` rejects `cache`. A
 caller presents `cid` only as the exact string issued, and does not present
 `cached` merely because `Accept-Signature-Scheme` lists it first. Direct agent
 identity, the person server, and the access server do not accept `cached`.
-Compact JWS remains Ed25519. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+Compact JWS remains Ed25519. When a request carries more than one signature,
+the signer writes the complete Signature-Key dictionary before creating any
+signature, and each signature covers that field. The verifier still checks
+one selected label. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses

@@ -1,7 +1,7 @@
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_signature_key::{
-    AssertionCache, CacheRequest, Error, KeyMaterial, PreparedRequest, present_issued_cid,
-    select_presented_scheme, sign_request,
+    AssertionCache, CacheRequest, Error, KeyMaterial, PreparedRequest, RequestSignature,
+    present_issued_cid, select_presented_scheme, sign_request, sign_requests,
 };
 use http::Request;
 use serde_json::json;
@@ -2611,6 +2611,118 @@ fn pkcs8_pem(der: &[u8]) -> String {
         body.push('\n');
     }
     format!("-----BEGIN PRIVATE KEY-----\n{body}-----END PRIVATE KEY-----\n")
+}
+
+#[test]
+fn multiple_signatures_cover_the_complete_signature_key_dictionary() {
+    let first = SigningKey::from_seed([4; 32]);
+    let second = SigningKey::from_seed([5; 32]);
+    let first_x = first.public_jwk().x;
+    let second_x = second.public_jwk().x;
+    assert_ne!(first_x, second_x);
+    let mut req = request();
+    sign_requests(
+        &mut req,
+        &[
+            RequestSignature {
+                label: "sig1",
+                key: &first,
+                material: KeyMaterial::Hwk(first.public_jwk()),
+            },
+            RequestSignature {
+                label: "sig2",
+                key: &second,
+                material: KeyMaterial::Hwk(second.public_jwk()),
+            },
+        ],
+        1_000,
+    )
+    .unwrap();
+    let key_header = req
+        .headers()
+        .get("signature-key")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(key_header.starts_with("sig1=hwk"));
+    assert!(key_header.contains(", sig2=hwk"));
+    assert_eq!(key_header.matches(second_x.as_str()).count(), 1);
+    let input = req
+        .headers()
+        .get("signature-input")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(input.matches("\"signature-key\"").count(), 2);
+    let proof1 = PreparedRequest::prepare(&req, "sig1", 1_000, 60).unwrap();
+    proof1.verify(&first.public_jwk()).unwrap();
+    let proof2 = PreparedRequest::prepare(&req, "sig2", 1_000, 60).unwrap();
+    proof2.verify(&second.public_jwk()).unwrap();
+    assert_eq!(
+        proof1.verify(&second.public_jwk()).unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    let mut tampered = req.clone();
+    tampered.headers_mut().insert(
+        "signature-key",
+        key_header.replacen(&second_x, &first_x, 1).parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&tampered, "sig1", 1_000, 60)
+            .unwrap()
+            .verify(&first.public_jwk())
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+    assert_eq!(
+        PreparedRequest::prepare(&tampered, "sig2", 1_000, 60)
+            .unwrap()
+            .verify(&second.public_jwk())
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+    assert_eq!(
+        sign_requests(&mut request(), &[], 1_000).unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        sign_requests(
+            &mut request(),
+            &[
+                RequestSignature {
+                    label: "sig1",
+                    key: &first,
+                    material: KeyMaterial::Hwk(first.public_jwk()),
+                },
+                RequestSignature {
+                    label: "sig1",
+                    key: &second,
+                    material: KeyMaterial::Hwk(second.public_jwk()),
+                },
+            ],
+            1_000,
+        )
+        .unwrap_err(),
+        Error::InvalidInput
+    );
+    let mut bad_label = request();
+    assert_eq!(
+        sign_requests(
+            &mut bad_label,
+            &[RequestSignature {
+                label: "Sig",
+                key: &first,
+                material: KeyMaterial::Hwk(first.public_jwk()),
+            }],
+            1_000,
+        )
+        .unwrap_err(),
+        Error::InvalidInput
+    );
+    assert!(bad_label.headers().get("signature-key").is_none());
 }
 
 fn cache_request(

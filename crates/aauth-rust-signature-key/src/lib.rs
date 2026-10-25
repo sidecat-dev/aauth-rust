@@ -693,6 +693,17 @@ impl PreparedRequest {
     }
 }
 
+/// One labeled signature. The Signature-Key member and the HTTP signature
+/// share `label`.
+pub struct RequestSignature<'a> {
+    /// Dictionary key shared by Signature-Key, Signature-Input, and Signature.
+    pub label: &'a str,
+    /// Key that signs this label's signature base.
+    pub key: &'a SigningKey,
+    /// Signature-Key member for this label.
+    pub material: KeyMaterial,
+}
+
 /// Sign once, without sending, retrying or obtaining credentials.
 /// `now` is Unix seconds in 0..=8589934591 (through 2242). Contemporary
 /// millisecond timestamps are outside this local profile. This replaces
@@ -711,8 +722,35 @@ pub fn sign_request(
     material: KeyMaterial,
     now: i64,
 ) -> Result<(), Error> {
-    if req.body().len() > MAX_BODY_BYTES {
-        return Err(Error::BodyTooLarge);
+    sign_requests(
+        req,
+        &[RequestSignature {
+            label: "sig",
+            key,
+            material,
+        }],
+        now,
+    )
+}
+
+/// Sign every label after the complete Signature-Key dictionary is in place.
+///
+/// Each signature covers `signature-key`, so each one protects every member,
+/// not only its own. `now` is Unix seconds in 0..=8589934591.
+///
+/// # Errors
+/// As for [`sign_request`]. Also rejects an empty set or a repeated label.
+pub fn sign_requests(
+    req: &mut Request<Vec<u8>>,
+    parts: &[RequestSignature<'_>],
+    now: i64,
+) -> Result<(), Error> {
+    if parts.is_empty() || req.body().len() > MAX_BODY_BYTES {
+        return Err(if parts.is_empty() {
+            Error::InvalidInput
+        } else {
+            Error::BodyTooLarge
+        });
     }
     if req.uri().scheme_str() != Some("https") {
         return Err(Error::InvalidUri);
@@ -720,68 +758,21 @@ pub fn sign_request(
     if !(0..=(1_i64 << 33) - 1).contains(&now) {
         return Err(Error::InvalidClock);
     }
-    let key_header = match material {
-        KeyMaterial::Hwk(jwk) => {
-            jwk.validate().map_err(|_| Error::InvalidKey)?;
-            if jwk.thumbprint().ok() != key.public_jwk().thumbprint().ok() {
-                return Err(Error::InvalidKey);
-            }
-            format!(
-                "sig=hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"{}\";alg=\"Ed25519\"",
-                jwk.x
-            )
+    let mut seen = BTreeSet::new();
+    let mut members = Vec::with_capacity(parts.len());
+    for part in parts {
+        if !seen.insert(part.label) {
+            return Err(Error::InvalidInput);
         }
-        KeyMaterial::JwksUri { id, dwk, kid } => {
-            validate_reference(&id, &dwk, &kid)?;
-            format!(
-                "sig=jwks_uri;id={};dwk={};kid={}",
-                quoted(&id)?,
-                quoted(&dwk)?,
-                quoted(&kid)?
-            )
-        }
-        KeyMaterial::Jwks { url, kid } => {
-            jwks::validate(&url, &kid)?;
-            format!("sig=jwks;url={};kid={}", quoted(&url)?, quoted(&kid)?)
-        }
-        KeyMaterial::Jwt(jwt) => {
-            aauth_rust_jose::Jws::parse(&jwt).map_err(|_| Error::InvalidKey)?;
-            format!("sig=jwt;jwt=\"{jwt}\"")
-        }
-        KeyMaterial::JktJwt { jwt, cache } => {
-            let delegation = jkt::parse_jkt(&jwt, cache)?;
-            if delegation.confirmation.thumbprint().ok() != key.public_jwk().thumbprint().ok() {
-                return Err(Error::InvalidKey);
-            }
-            let mut header = format!("sig=jkt-jwt;jwt=\"{jwt}\"");
-            if cache {
-                header.push_str(";cache");
-            }
-            header
-        }
-        KeyMaterial::SelfJwt { jwt } => {
-            self_jwt::assert_signable(&jwt, key)?;
-            format!("sig=self-jwt;jwt=\"{jwt}\"")
-        }
-        KeyMaterial::X509 { x5u, x5t } => {
-            x509::validate(&x5u, &x5t)?;
-            format!(
-                "sig=x509;x5u={};x5t=:{}:",
-                quoted(&x5u)?,
-                STANDARD.encode(x5t)
-            )
-        }
-        KeyMaterial::Cached { cid } => {
-            quoted(&cid)?;
-            format!("sig=cached;cid={}", quoted(&cid)?)
-        }
-    };
+        cache::token(part.label).map_err(|_| Error::InvalidInput)?;
+        members.push(signature_member(part)?);
+    }
     let mut covered = vec!["@method", "@authority", "@path"];
     if req.uri().query().is_some() {
-        covered.push("@query")
+        covered.push("@query");
     }
     if req.headers().contains_key("authorization") {
-        covered.push("authorization")
+        covered.push("authorization");
     }
     if content_digest::needed(req) {
         let digest = content_digest::field(req.body());
@@ -795,34 +786,106 @@ pub fn sign_request(
         }
     }
     covered.push("signature-key");
-    let input = format!(
-        "sig=({});created={now}",
-        covered
-            .iter()
-            .map(|s| format!("\"{s}\""))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    let covered = covered
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
     req.headers_mut().insert(
         "signature-key",
-        key_header.parse().map_err(|_| Error::InvalidInput)?,
+        members
+            .join(", ")
+            .parse()
+            .map_err(|_| Error::InvalidInput)?,
     );
+    let input = parts
+        .iter()
+        .map(|part| format!("{}=({covered});created={now}", part.label))
+        .collect::<Vec<_>>()
+        .join(", ");
     req.headers_mut().insert(
         "signature-input",
         input.parse().map_err(|_| Error::InvalidInput)?,
     );
-    let inputs = dictionary(req, "signature-input")?;
-    let Some(ListEntry::InnerList(inner)) = inputs.get("sig") else {
-        return Err(Error::InvalidInput);
-    };
-    let base = build_base(req, inner)?;
+    let mut signatures = Vec::with_capacity(parts.len());
+    for part in parts {
+        let inputs = dictionary(req, "signature-input")?;
+        let Some(ListEntry::InnerList(inner)) = inputs.get(part.label) else {
+            return Err(Error::InvalidInput);
+        };
+        let base = build_base(req, inner)?;
+        signatures.push(format!(
+            "{}=:{}:",
+            part.label,
+            STANDARD.encode(part.key.sign(&base))
+        ));
+    }
     req.headers_mut().insert(
         "signature",
-        format!("sig=:{}:", STANDARD.encode(key.sign(&base)))
+        signatures
+            .join(", ")
             .parse()
             .map_err(|_| Error::InvalidInput)?,
     );
     Ok(())
+}
+
+fn signature_member(part: &RequestSignature<'_>) -> Result<String, Error> {
+    cache::token(part.label)?;
+    let body = match &part.material {
+        KeyMaterial::Hwk(jwk) => {
+            jwk.validate().map_err(|_| Error::InvalidKey)?;
+            if jwk.thumbprint().ok() != part.key.public_jwk().thumbprint().ok() {
+                return Err(Error::InvalidKey);
+            }
+            format!(
+                "hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"{}\";alg=\"Ed25519\"",
+                jwk.x
+            )
+        }
+        KeyMaterial::JwksUri { id, dwk, kid } => {
+            validate_reference(id, dwk, kid)?;
+            format!(
+                "jwks_uri;id={};dwk={};kid={}",
+                quoted(id)?,
+                quoted(dwk)?,
+                quoted(kid)?
+            )
+        }
+        KeyMaterial::Jwks { url, kid } => {
+            jwks::validate(url, kid)?;
+            format!("jwks;url={};kid={}", quoted(url)?, quoted(kid)?)
+        }
+        KeyMaterial::Jwt(jwt) => {
+            aauth_rust_jose::Jws::parse(jwt).map_err(|_| Error::InvalidKey)?;
+            format!("jwt;jwt=\"{jwt}\"")
+        }
+        KeyMaterial::JktJwt { jwt, cache } => {
+            let delegation = jkt::parse_jkt(jwt, *cache)?;
+            if delegation.confirmation.thumbprint().ok() != part.key.public_jwk().thumbprint().ok()
+            {
+                return Err(Error::InvalidKey);
+            }
+            let mut header = format!("jkt-jwt;jwt=\"{jwt}\"");
+            if *cache {
+                header.push_str(";cache");
+            }
+            header
+        }
+        KeyMaterial::SelfJwt { jwt } => {
+            self_jwt::assert_signable(jwt, part.key)?;
+            format!("self-jwt;jwt=\"{jwt}\"")
+        }
+        KeyMaterial::X509 { x5u, x5t } => {
+            x509::validate(x5u, x5t)?;
+            format!("x509;x5u={};x5t=:{}:", quoted(x5u)?, STANDARD.encode(x5t))
+        }
+        KeyMaterial::Cached { cid } => {
+            quoted(cid)?;
+            format!("cached;cid={}", quoted(cid)?)
+        }
+    };
+    Ok(format!("{}={body}", part.label))
 }
 
 impl std::fmt::Debug for PreparedRequest {

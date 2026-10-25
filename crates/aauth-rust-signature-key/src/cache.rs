@@ -609,7 +609,7 @@ fn unseal(key: &[u8; 32], cid: &str) -> Result<CachedAssertion, Error> {
     })
 }
 
-fn token(label: &str) -> Result<(), Error> {
+pub(crate) fn token(label: &str) -> Result<(), Error> {
     let mut chars = label.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '*' => {}
