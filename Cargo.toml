@@ -20,6 +20,7 @@ aauth-rust-core = { version = "0.1.0-alpha.1", path = "crates/aauth-rust-core" }
 aauth-rust-agent = { version = "0.1.0-alpha.1", path = "crates/aauth-rust-agent" }
 aauth-rust-agent-provider = { version = "0.1.0-alpha.1", path = "crates/aauth-rust-agent-provider" }
 base64 = "0.22"
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 p256 = "=0.13.2"
 p384 = "=0.13.1"

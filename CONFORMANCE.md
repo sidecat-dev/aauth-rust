@@ -38,7 +38,7 @@ executable scenes; those tests are outside the workspace test total.
 | AS deferred authorization | Explicit policy for 202 claims/clarification/interaction/approval or 402 payment, independently authenticated PS polls, exact retained tokens, bounded claims/chat, atomic single-consumer result, cancellation/expiry and rechecked issuer trust; native PS continuation verified separately | `aauth-rust-access-server/tests/endpoint.rs` (34 tests, including child approval/payment, trust/expiry fences and omitted presented_token) |
 | Deferred wire and state primitives | Bounded 202 claims/clarification/interaction/approval/auth-token and 402 payment parsing, same-origin pending URLs, host-owned settlement details, atomic revision transitions and one-consumer removal; separate AS/PS role custody. An auth-token requirement from an Access Server is not a federation continuation | `aauth-rust-core/tests/continuation.rs` (14 tests), `payment.rs` (10 tests) |
 | RFC 7515 | Compact JWS, exact signed segments, no unsupported critical headers or unencoded payload profile; duplicate JSON members refused | Same JOSE tests |
-| Signature-Key | `hwk` for Ed25519, ES256, ES384, RS256, and PS256 (each required parameter is present; RSA `alg` selects PKCS#1 v1.5 or PSS with SHA-256), `jwt`, Ed25519 `jkt-s256+jwt` (thumbprint `iss`, `cnf.jwk` request key, bare `cache` requires `jti`; no cache identifier is issued), Ed25519 `self-jwt` (host resolves exact `iss`, `dwk`, and header `kid` only after the JWT parses; `cnf` and `cache` are rejected; no cache identifier is issued; the same key verifies the JWT and the HTTP signature), direct `jwks` (exact `url` and `kid`; the URL is not canonicalized), `x509` (HTTPS `x5u` is not fetched or rewritten; `x5t` is the SHA-256 of the first certificate's DER; the host supplies the PEM chain and trust anchors; chain validation runs before the signature; the end-entity key selects Ed25519, ES256, or ES384; an RSA certificate is `unsupported_algorithm`), explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member. Compact JWS and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519. Direct agent identity still accepts only `jwt` | `aauth-rust-signature-key/tests/proofs.rs` (34 tests), TLS journey |
+| Signature-Key | `hwk` for Ed25519, ES256, ES384, RS256, and PS256 (each required parameter is present; RSA `alg` selects PKCS#1 v1.5 or PSS with SHA-256), `jwt`, Ed25519 `jkt-s256+jwt` (thumbprint `iss`, `cnf.jwk` request key, bare `cache` requires `jti`; a host that opts in receives a sealed cache identifier), Ed25519 `self-jwt` (host resolves exact `iss`, `dwk`, and header `kid` only after the JWT parses; `cnf` and `cache` are rejected; no cache identifier is issued; the same key verifies the JWT and the HTTP signature), direct `jwks` (exact `url` and `kid`; the URL is not canonicalized), `x509` (HTTPS `x5u` is not fetched or rewritten; `x5t` is the SHA-256 of the first certificate's DER; the host supplies the PEM chain and trust anchors; chain validation runs before the signature; the end-entity key selects Ed25519, ES256, or ES384; an RSA certificate is `unsupported_algorithm`), `cached` (`cid` is presented unchanged; a local index or a ChaCha20-Poly1305 seal resolves it; the HTTP signature is then checked with the Ed25519 confirmation key; unknown, evicted, and unopenable identifiers are `cache_miss`; a held assertion past `exp` is `expired_jwt`; `expires` is not later than the assertion `exp` and is honored through that second; an assertion with more than 86400 seconds left is not cached; a client does not present `cached` until an identifier was issued), explicit `jwks_uri`, selected-label correlation, required key coverage, unknown unselected scheme ignored, defined unsupported-scheme/algorithm errors, `keyid` accepted only when it names that same member. Compact JWS and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519. Direct agent identity still accepts only `jwt` | `aauth-rust-signature-key/tests/proofs.rs` (35 tests), TLS journey |
 | RFC 9421 / AAuth Signing | Buffered requests covering method, authority, path, Signature-Key; query and Authorization coverage when present; exact ±60-second `created` window; canonical field values (outer OWS trimmed, repeated lines combined) | Proof tests, independently stated signature-base fixture |
 | Agent token / Common Verification | `aa-agent+jwt`, `Ed25519`, named issuer key, expected `dwk`, required claims, exact identifiers including local length and case, `exp` without leeway, `nbf`, public confirmation key, optional PS syntax | `aauth-rust-core/tests/agent_tokens.rs` (18 tests) |
 | Person, Resource and Auth tokens | Role-specific typ/dwk, required and forbidden claims, public confirmation keys, exact signed bytes, Person/Auth one-hour ceiling and expiry/nbf; Core verification does not grant application access | `aauth-rust-core/tests/role_tokens.rs` (10 tests) |
@@ -204,8 +204,25 @@ a general delegation lifecycle or automatic sub-agent process supervision.
 - Header web keys verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS
   and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519.
   ES512, Ed448, and other RSA hashes are `unsupported_algorithm`. Private/HSM
-  signer adapters and the remaining Signature-Key scheme (`cached`)
-  are absent.
+  signer adapters are absent.
+  `cached` executes in this crate when the host opts in. The identifier is a
+  XChaCha20-Poly1305 seal of the scheme, issuer, optional subject, SHA-256 of
+  the verified compact assertion, the `jti`, the assertion `exp`, the retention
+  time, and the Ed25519 confirmation key, plus 192 random bits. It does not
+  contain the `jti` in the clear. A local index records what this process has
+  not evicted; a peer that holds the same key opens the seal without that
+  index. Opening the seal is not authentication: the HTTP signature is checked
+  next. An unknown, evicted, tampered, or unopenable identifier is `cache_miss`.
+  The identifier is honored through its `expires` second and is a miss after
+  that. An assertion still held at `exp` fails as `expired_jwt`. `expires` is
+  not later than the assertion `exp`. An assertion with more than 86400 seconds
+  remaining is not cached, and there is no separate revocation list. A full
+  index, or a confirmation key that already has its per-key allotment, also
+  issues nothing. `self-jwt` still rejects `cache`. Direct agent identity, the
+  person server, and the access server do not accept `cached` and emit no
+  `Signature-Key-Cache`. A client helper skips `cached` until an identifier
+  was issued, including when `cached` is listed first, and presents that
+  identifier unchanged.
   `x509` executes in this crate: the host supplies the PEM chain and the trust
   anchors, and this library does not fetch `x5u` or a revocation source. The
   first certificate is the end entity. Its chain must validate before `x5t` is

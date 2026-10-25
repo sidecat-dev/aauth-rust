@@ -1,5 +1,8 @@
-use aauth_rust_jose::{Jws, SigningKey};
-use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, sign_request};
+use aauth_rust_jose::{Jwk, Jws, SigningKey};
+use aauth_rust_signature_key::{
+    AssertionCache, CacheRequest, Error, KeyMaterial, PreparedRequest, present_issued_cid,
+    select_presented_scheme, sign_request,
+};
 use http::Request;
 use serde_json::json;
 
@@ -2608,6 +2611,352 @@ fn pkcs8_pem(der: &[u8]) -> String {
         body.push('\n');
     }
     format!("-----BEGIN PRIVATE KEY-----\n{body}-----END PRIVATE KEY-----\n")
+}
+
+fn cache_request(
+    identity: &SigningKey,
+    confirmation: &Jwk,
+    jti: Option<&str>,
+    assertion_exp: i64,
+    retain_until: i64,
+) -> Result<CacheRequest, Error> {
+    let mut payload = json!({
+        "iss": "https://ps.example",
+        "sub": "person-1",
+        "exp": assertion_exp,
+        "cnf": {"jwk": confirmation},
+    });
+    if let Some(jti) = jti {
+        payload["jti"] = json!(jti);
+    }
+    let compact = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"jwt"}),
+        &serde_json::to_vec(&payload).unwrap(),
+        identity,
+    )
+    .map_err(|_| Error::InvalidJwt)?;
+    CacheRequest::verified_jwt("sig", &compact, &identity.public_jwk(), retain_until, 1_000)
+}
+
+#[test]
+fn assertion_cache_resolves_a_sealed_identifier_and_keeps_misses_distinct() {
+    let marker = "jti-cache-marker-9f3a";
+    let key = SigningKey::from_seed([4; 32]);
+    let public = key.public_jwk();
+    let mut cache = AssertionCache::open([7; 32], 16, 8).unwrap();
+    let shown = format!("{cache:?}");
+    assert!(!shown.contains("070707"));
+    assert_eq!(
+        AssertionCache::open([7; 32], 0, 1).unwrap_err(),
+        Error::InvalidKey
+    );
+    let grant = cache
+        .issue_requested(
+            true,
+            cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(grant.expires <= 5_000);
+    assert_eq!(grant.expires, 4_000);
+    assert_ne!(grant.cid, marker);
+    assert!(!grant.cid.contains(marker));
+    let header = grant.field_value().unwrap();
+    assert!(header.starts_with("sig="));
+    assert!(header.contains(&format!("jti=\"{marker}\"")));
+    assert!(header.contains("expires=4000"));
+    let again = cache
+        .issue_requested(
+            true,
+            cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_ne!(grant.cid, again.cid);
+    assert!(!again.cid.contains(marker));
+
+    let req = cached_request(&key, &grant.cid);
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1_000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    let prepared =
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1_000, 60, &["cached"]).unwrap();
+    let resolved = prepared.verify_cached(&cache, 1_000).unwrap();
+    assert_eq!(resolved.jti, marker);
+    assert_eq!(resolved.scheme, "jwt");
+    assert_eq!(resolved.issuer, "https://ps.example");
+    assert_eq!(resolved.subject.as_deref(), Some("person-1"));
+    assert_eq!(resolved.assertion_sha256.len(), 32);
+    assert_eq!(
+        prepared
+            .verify_cached_sealed(&AssertionCache::open([7; 32], 16, 8).unwrap(), 1_000)
+            .unwrap()
+            .issuer,
+        "https://ps.example"
+    );
+    let peer = AssertionCache::open([7; 32], 16, 8).unwrap();
+    assert_eq!(
+        prepared.verify_cached_sealed(&peer, 1_000).unwrap().jti,
+        marker
+    );
+    let stranger = AssertionCache::open([8; 32], 16, 8).unwrap();
+    assert_eq!(
+        prepared.verify_cached_sealed(&stranger, 1_000).unwrap_err(),
+        Error::CacheMiss
+    );
+
+    let foreign = cached_request(&SigningKey::from_seed([5; 32]), &grant.cid);
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&foreign, "sig", 1_000, 60, &["cached"])
+            .unwrap()
+            .verify_cached(&cache, 1_000)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+    let mut bad_sig = req.clone();
+    bad_sig.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", base64_std(&[3u8; 64])).parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&bad_sig, "sig", 1_000, 60, &["cached"])
+            .unwrap()
+            .verify_cached(&cache, 1_000)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+    let mut tampered = req.clone();
+    tampered.headers_mut().insert(
+        "signature-key",
+        format!("sig=cached;cid=\"{}a\"", grant.cid)
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&tampered, "sig", 1_000, 60, &["cached"])
+            .unwrap()
+            .verify_cached(&cache, 1_000)
+            .unwrap_err(),
+        Error::CacheMiss
+    );
+    assert_eq!(Error::CacheMiss.code(), "cache_miss");
+
+    let retained = cache
+        .issue_requested(
+            true,
+            cache_request(&key, &public, Some(marker), 5_000, 1_500).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    let retained_req = cached_request(&key, &retained.cid);
+    let retained_proof =
+        PreparedRequest::prepare_with_schemes(&retained_req, "sig", 1_000, 60, &["cached"])
+            .unwrap();
+    retained_proof.verify_cached(&cache, 1_500).unwrap();
+    assert_eq!(
+        retained_proof.verify_cached(&cache, 1_501).unwrap_err(),
+        Error::CacheMiss
+    );
+    let expiring = cache
+        .issue_requested(
+            true,
+            cache_request(&key, &public, Some(marker), 2_000, 2_000).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    let expiring_req = cached_request(&key, &expiring.cid);
+    let expiring_proof =
+        PreparedRequest::prepare_with_schemes(&expiring_req, "sig", 1_000, 60, &["cached"])
+            .unwrap();
+    expiring_proof.verify_cached(&cache, 1_999).unwrap();
+    assert_eq!(
+        expiring_proof.verify_cached(&cache, 2_000).unwrap_err(),
+        Error::ExpiredJwt
+    );
+    assert_eq!(
+        expiring_proof.verify_cached(&cache, 2_001).unwrap_err(),
+        Error::CacheMiss
+    );
+
+    assert!(cache.evict(&grant.cid));
+    assert_eq!(
+        prepared.verify_cached(&cache, 1_000).unwrap_err(),
+        Error::CacheMiss
+    );
+    assert_eq!(
+        prepared.verify_cached_sealed(&cache, 1_000).unwrap().jti,
+        marker
+    );
+
+    assert!(
+        cache
+            .issue_requested(
+                false,
+                cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        cache_request(&key, &public, None, 5_000, 4_000).unwrap_err(),
+        Error::InvalidJwt
+    );
+    assert_eq!(
+        cache
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 2_000, 2_001).unwrap()
+            )
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert!(
+        cache
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 1_000 + 86_401, 2_000).unwrap()
+            )
+            .unwrap()
+            .is_none()
+    );
+
+    let mut bounded = AssertionCache::open([7; 32], 1, 1).unwrap();
+    assert!(
+        bounded
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        bounded
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        bounded
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some("after-expiry"), 9_000, 8_000)
+                    .unwrap()
+                    .at(4_000)
+            )
+            .unwrap()
+            .is_some()
+    );
+    let other = SigningKey::from_seed([6; 32]);
+    let other_public = other.public_jwk();
+    let mut per_key = AssertionCache::open([7; 32], 4, 1).unwrap();
+    assert!(
+        per_key
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        per_key
+            .issue_requested(
+                true,
+                cache_request(&key, &public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        per_key
+            .issue_requested(
+                true,
+                cache_request(&other, &other_public, Some(marker), 5_000, 4_000).unwrap()
+            )
+            .unwrap()
+            .is_some()
+    );
+
+    assert_eq!(
+        select_presented_scheme(&["cached", "jwt"], None),
+        Some("jwt")
+    );
+    assert_eq!(select_presented_scheme(&["cached"], None), None);
+    assert_eq!(
+        select_presented_scheme(&["cached", "jwt"], Some(&grant.cid)),
+        Some("cached")
+    );
+    present_issued_cid(Some(grant.cid.as_str()), &grant.cid).unwrap();
+    assert_eq!(
+        present_issued_cid(None, &grant.cid).unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        present_issued_cid(Some(grant.cid.as_str()), &format!("{}a", grant.cid)).unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let jose = serde_json::json!({"alg": "Ed25519"});
+    let with_jti = Jws::sign(
+        &jose,
+        format!(r#"{{"exp":5000,"jti":"{marker}"}}"#).as_bytes(),
+        &key,
+    )
+    .unwrap();
+    let without_jti = Jws::sign(&jose, br#"{"exp":5000}"#, &key).unwrap();
+    let cached_jwt = x509_request(&format!(r#"sig=jwt;jwt="{with_jti}";cache"#), &[1u8; 64]);
+    let prepared_jwt = PreparedRequest::prepare(&cached_jwt, "sig", 1_000, 60).unwrap();
+    assert!(prepared_jwt.cache_requested());
+    assert_eq!(
+        PreparedRequest::prepare(
+            &x509_request(&format!(r#"sig=jwt;jwt="{without_jti}";cache"#), &[1u8; 64]),
+            "sig",
+            1_000,
+            60,
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    assert_eq!(
+        PreparedRequest::prepare(
+            &x509_request(&format!(r#"sig=jwt;jwt="{with_jti}";cache=?1"#), &[1u8; 64],),
+            "sig",
+            1_000,
+            60,
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(
+            &x509_request("sig=cached", &[1u8; 64]),
+            "sig",
+            1_000,
+            60,
+            &["cached"],
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+}
+
+fn cached_request(key: &SigningKey, cid: &str) -> Request<Vec<u8>> {
+    let mut req = request();
+    sign_request(
+        &mut req,
+        key,
+        KeyMaterial::Cached {
+            cid: cid.to_owned(),
+        },
+        1_000,
+    )
+    .unwrap();
+    req
 }
 
 fn base64_url(bytes: &[u8]) -> String {

@@ -1,11 +1,16 @@
-//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, `cached`, and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
+mod cache;
 mod content_digest;
 mod jkt;
 mod jwks;
 mod self_jwt;
 mod x509;
+pub use cache::{
+    AssertionCache, CacheGrant, CacheRequest, CachedAssertion, MAX_CACHEABLE_LIFETIME,
+    present_issued_cid, select_presented_scheme,
+};
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
@@ -101,6 +106,9 @@ pub enum Error {
     #[error("Signature-Key kid is not in the issuer's JWKS: refresh that set or correct kid")]
     /// Selected `kid` is absent from the issuer's key set.
     UnknownKey,
+    #[error("Signature-Key cache identifier could not be resolved: resend the assertion in full")]
+    /// The cache identifier is unknown, evicted, or failed to open.
+    CacheMiss,
 }
 impl Error {
     /// Stable Signature-Error code; Display is a local explanation.
@@ -123,6 +131,7 @@ impl Error {
             Self::IssuerMissing => "issuer_missing",
             Self::IssuerMismatch => "issuer_mismatch",
             Self::UnknownKey => "unknown_key",
+            Self::CacheMiss => "cache_miss",
         }
     }
 }
@@ -170,6 +179,11 @@ pub enum KeyMaterial {
         x5u: String,
         /// SHA-256 of the DER-encoded end-entity certificate.
         x5t: Vec<u8>,
+    },
+    /// Reference to an assertion this verifier previously cached.
+    Cached {
+        /// Cache identifier exactly as issued. It is not parsed here.
+        cid: String,
     },
 }
 
@@ -264,7 +278,7 @@ fn optional_text<'a>(params: &'a Parameters, name: &str) -> Result<Option<&'a st
         _ => Err(Error::InvalidKey),
     }
 }
-fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial, Error> {
+fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<(KeyMaterial, bool), Error> {
     let ListEntry::Item(item) = entry else {
         return Err(Error::InvalidKey);
     };
@@ -272,43 +286,61 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
         return Err(Error::InvalidKey);
     };
     match scheme.as_str() {
-        "hwk" => parse_hwk(item),
-        "jwt" => Ok(KeyMaterial::Jwt(text(&item.params, "jwt")?.into())),
+        "hwk" => Ok((parse_hwk(item)?, false)),
+        "jwt" => {
+            let jwt = text(&item.params, "jwt")?.to_owned();
+            let cache = jkt::cache_flag(header, label, &item.params)?;
+            if cache {
+                cache::require_cacheable_jwt(&jwt)?;
+            }
+            Ok((KeyMaterial::Jwt(jwt), cache))
+        }
         "jkt-jwt" => {
             let jwt = text(&item.params, "jwt")?.to_owned();
             let cache = jkt::cache_flag(header, label, &item.params)?;
-            Ok(KeyMaterial::JktJwt { jwt, cache })
+            Ok((KeyMaterial::JktJwt { jwt, cache }, cache))
         }
         "self-jwt" => {
             if item.params.contains_key("cache") {
                 return Err(Error::InvalidKey);
             }
-            Ok(KeyMaterial::SelfJwt {
-                jwt: text(&item.params, "jwt")?.to_owned(),
-            })
+            Ok((
+                KeyMaterial::SelfJwt {
+                    jwt: text(&item.params, "jwt")?.to_owned(),
+                },
+                false,
+            ))
         }
         "jwks" => {
             let url = text(&item.params, "url")?.to_owned();
             let kid = text(&item.params, "kid")?.to_owned();
             jwks::validate(&url, &kid)?;
-            Ok(KeyMaterial::Jwks { url, kid })
+            Ok((KeyMaterial::Jwks { url, kid }, false))
         }
         "x509" => {
             let x5u = text(&item.params, "x5u")?.to_owned();
             let x5t = byte_sequence(&item.params, "x5t")?;
             x509::validate(&x5u, &x5t)?;
-            Ok(KeyMaterial::X509 { x5u, x5t })
+            Ok((KeyMaterial::X509 { x5u, x5t }, false))
+        }
+        "cached" => {
+            let cid = text(&item.params, "cid")?.to_owned();
+            quoted(&cid)?;
+            Ok((KeyMaterial::Cached { cid }, false))
         }
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
             let dwk = text(&item.params, "dwk")?;
             let kid = text(&item.params, "kid")?;
             validate_reference(id, dwk, kid)?;
-            Ok(KeyMaterial::JwksUri {
-                id: id.into(),
-                dwk: dwk.into(),
-                kid: kid.into(),
-            })
+            Ok((
+                KeyMaterial::JwksUri {
+                    id: id.into(),
+                    dwk: dwk.into(),
+                    kid: kid.into(),
+                },
+                false,
+            ))
         }
         _ => Err(Error::UnsupportedScheme),
     }
@@ -316,7 +348,7 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
 /// Identifier the Signature-Key member itself carries. `hwk` has none.
 fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
-        KeyMaterial::Hwk(_) | KeyMaterial::X509 { .. } => Ok(None),
+        KeyMaterial::Hwk(_) | KeyMaterial::X509 { .. } | KeyMaterial::Cached { .. } => Ok(None),
         KeyMaterial::JwksUri { kid, .. } | KeyMaterial::Jwks { kid, .. } => Ok(Some(kid.clone())),
         KeyMaterial::Jwt(compact)
         | KeyMaterial::JktJwt { jwt: compact, .. }
@@ -503,6 +535,7 @@ pub struct PreparedRequest {
     base: Vec<u8>,
     signature: Vec<u8>,
     window: i64,
+    cache: bool,
 }
 impl PreparedRequest {
     /// Capture a selected hwk/jwt assertion at `now` with a window in Unix seconds.
@@ -582,7 +615,7 @@ impl PreparedRequest {
         if !accepted.contains(&scheme.as_str()) {
             return Err(Error::UnsupportedScheme);
         }
-        let key = parse_key(entry, &key_header, label)?;
+        let (key, cache) = parse_key(entry, &key_header, label)?;
         if let Some(keyid) = input.params.get("keyid") {
             let BareItem::String(keyid) = keyid else {
                 return Err(Error::InvalidSignature);
@@ -627,6 +660,7 @@ impl PreparedRequest {
             base: build_base(req, input)?,
             signature: bytes.clone(),
             window,
+            cache,
         })
     }
     /// Selected unverified material for role-specific token/key resolution.
@@ -737,6 +771,10 @@ pub fn sign_request(
                 STANDARD.encode(x5t)
             )
         }
+        KeyMaterial::Cached { cid } => {
+            quoted(&cid)?;
+            format!("sig=cached;cid={}", quoted(&cid)?)
+        }
     };
     let mut covered = vec!["@method", "@authority", "@path"];
     if req.uri().query().is_some() {
@@ -797,6 +835,7 @@ impl std::fmt::Debug for PreparedRequest {
             KeyMaterial::JktJwt { .. } => "jkt-jwt",
             KeyMaterial::SelfJwt { .. } => "self-jwt",
             KeyMaterial::X509 { .. } => "x509",
+            KeyMaterial::Cached { .. } => "cached",
         };
         f.debug_struct("PreparedRequest")
             .field("scheme", &scheme)

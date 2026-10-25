@@ -264,7 +264,7 @@ fn pem_certs(pem: &str) -> Result<Vec<Vec<u8>>, Error> {
 }
 
 fn public_key(der: &[u8]) -> Result<Jwk, Error> {
-    let (oid, params, raw) = subject_public_key(der)?;
+    let SubjectPublicKey { oid, params, raw } = subject_public_key(der)?;
     // `rsaEncryption` names neither the padding nor the hash. Choosing RS256
     // or PS256 here would be the polymorphic selection the draft forbids.
     if oid == RSA_ENCRYPTION {
@@ -313,7 +313,13 @@ fn public_key(der: &[u8]) -> Result<Jwk, Error> {
     Err(Error::UnsupportedAlgorithm)
 }
 
-fn subject_public_key(der: &[u8]) -> Result<(&[u8], Option<(u8, &[u8])>, &[u8]), Error> {
+struct SubjectPublicKey<'a> {
+    oid: &'a [u8],
+    params: Option<(u8, &'a [u8])>,
+    raw: &'a [u8],
+}
+
+fn subject_public_key(der: &[u8]) -> Result<SubjectPublicKey<'_>, Error> {
     let mut certificate = Reader::new(der);
     let mut certificate = certificate.sequence()?;
     let mut body = certificate.sequence()?;
@@ -332,7 +338,7 @@ fn subject_public_key(der: &[u8]) -> Result<(&[u8], Option<(u8, &[u8])>, &[u8]),
         Some(algorithm.tlv()?)
     };
     let raw = spki.bit_string()?;
-    Ok((oid, params, raw))
+    Ok(SubjectPublicKey { oid, params, raw })
 }
 
 struct Reader<'a> {

@@ -23,8 +23,8 @@ self-issued delegation, plus explicit
 `urn:jkt:sha-256:` from the header `jwk` and comparing it to `iss`, then
 verifying the assertion and the HTTP signature under `cnf.jwk`. `iat` uses
 the same window as `created`. `exp` must be strictly after the verifier
-clock. The bare `cache` flag requires `jti`; this profile does not yet issue
-`Signature-Key-Cache`. A `self-jwt` member is the same kind of proof with one
+clock. The bare `cache` flag requires `jti`. When the host opts in, the library
+issues a sealed `Signature-Key-Cache` identifier. A `self-jwt` member is the same kind of proof with one
 key: after the compact JWT parses, `typ` matches the caller's deployment
 policy, `exp` is after the verifier clock, an optional `iat` uses the same
 window as `created`, `iss` is an HTTPS origin kept
@@ -49,6 +49,21 @@ must be the SHA-256 of that certificate, before the HTTP signature is checked.
 That certificate's key selects one algorithm: Ed25519, P-256 as ES256, or
 P-384 as ES384. An RSA certificate is `unsupported_algorithm` because
 `rsaEncryption` names neither padding nor hash. Revocation is host-owned.
+A `jwt` or `jkt-jwt` member may carry a bare `cache` flag. On `jwt` the flag
+requires a nonempty `jti` and a nonnegative `exp`. The host may then ask
+`AssertionCache` for a `Signature-Key-Cache` value. The identifier is a
+XChaCha20-Poly1305 seal under a verifier key: 192 random bits, the scheme,
+issuer, optional subject, SHA-256 of the verified compact assertion, the
+`jti`, both expiries, and the Ed25519 confirmation key. `expires` is the retention time
+and is not later than the assertion `exp`. It is honored through that second.
+After it, or after this process evicts the entry, resolution is `cache_miss`.
+A held assertion whose `exp` is not after the verifier clock fails as
+`expired_jwt` once the HTTP signature has verified. A bad HTTP signature is
+`invalid_signature`, including when the identifier resolves. An assertion with
+more than 86400 seconds left is not cached. `self-jwt` rejects `cache`. A
+caller presents `cid` only as the exact string issued, and does not present
+`cached` merely because `Accept-Signature-Scheme` lists it first. Direct agent
+identity, the person server, and the access server do not accept `cached`.
 Compact JWS remains Ed25519. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
