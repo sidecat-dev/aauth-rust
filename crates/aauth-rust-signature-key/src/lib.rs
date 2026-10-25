@@ -1,9 +1,11 @@
-//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod content_digest;
 mod jkt;
+mod self_jwt;
 pub use jkt::JktDelegation;
+pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
 
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -73,7 +75,7 @@ pub enum Error {
     /// Signed request target differs from the configured Resource endpoint.
     TargetMismatch,
     #[error(
-        "invalid Signature-Key JWT: check compact serialization, required claims, the enclave signature, and that iss is the thumbprint of the header jwk"
+        "invalid Signature-Key JWT: check compact serialization, required claims, and the assertion signature"
     )]
     /// JWT carried by Signature-Key is malformed or its signature failed.
     InvalidJwt,
@@ -82,6 +84,19 @@ pub enum Error {
     )]
     /// JWT `exp` is not strictly after the verifier clock.
     ExpiredJwt,
+    #[error(
+        "discovery metadata has no issuer: pass the document named by dwk before resolving a key"
+    )]
+    /// Discovery metadata has no `issuer` member.
+    IssuerMissing,
+    #[error(
+        "discovery metadata issuer differs from the assertion iss: refuse a key from a different document"
+    )]
+    /// Discovery metadata `issuer` is not the assertion `iss`.
+    IssuerMismatch,
+    #[error("Signature-Key kid is not in the issuer's JWKS: refresh that set or correct kid")]
+    /// Selected `kid` is absent from the issuer's key set.
+    UnknownKey,
 }
 impl Error {
     /// Stable Signature-Error code; Display is a local explanation.
@@ -101,6 +116,9 @@ impl Error {
             Self::UnsupportedAlgorithm => "unsupported_algorithm",
             Self::InvalidJwt => "invalid_jwt",
             Self::ExpiredJwt => "expired_jwt",
+            Self::IssuerMissing => "issuer_missing",
+            Self::IssuerMismatch => "issuer_mismatch",
+            Self::UnknownKey => "unknown_key",
         }
     }
 }
@@ -129,6 +147,11 @@ pub enum KeyMaterial {
         jwt: String,
         /// Caller asked for a cache identifier. Issuance is a separate step.
         cache: bool,
+    },
+    /// Self-issued JWT. The discovered issuer key signs both the assertion and the request.
+    SelfJwt {
+        /// Compact JWT. It must not carry `cnf`, and this scheme has no `cache` parameter.
+        jwt: String,
     },
 }
 
@@ -222,6 +245,14 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial
             let cache = jkt::cache_flag(header, label, &item.params)?;
             Ok(KeyMaterial::JktJwt { jwt, cache })
         }
+        "self-jwt" => {
+            if item.params.contains_key("cache") {
+                return Err(Error::InvalidKey);
+            }
+            Ok(KeyMaterial::SelfJwt {
+                jwt: text(&item.params, "jwt")?.to_owned(),
+            })
+        }
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
             let dwk = text(&item.params, "dwk")?;
@@ -241,7 +272,9 @@ fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
         KeyMaterial::Hwk(_) => Ok(None),
         KeyMaterial::JwksUri { kid, .. } => Ok(Some(kid.clone())),
-        KeyMaterial::Jwt(compact) | KeyMaterial::JktJwt { jwt: compact, .. } => {
+        KeyMaterial::Jwt(compact)
+        | KeyMaterial::JktJwt { jwt: compact, .. }
+        | KeyMaterial::SelfJwt { jwt: compact } => {
             let header = aauth_rust_jose::Jws::parse(compact)
                 .map_err(|_| Error::InvalidKey)?
                 .header()
@@ -318,15 +351,22 @@ fn validate_reference(id: &str, dwk: &str, kid: &str) -> Result<(), Error> {
         || dwk.is_empty()
         || dwk == "."
         || dwk == ".."
-        || !dwk
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        || !discovery_name(dwk)
     {
         return Err(Error::InvalidKey);
     }
     quoted(kid)?;
     Ok(())
 }
+pub(crate) fn discovery_name(dwk: &str) -> bool {
+    !dwk.is_empty()
+        && dwk != "."
+        && dwk != ".."
+        && dwk
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
 fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
     let mut result = Vec::new();
     let mut seen = BTreeSet::new();
@@ -610,6 +650,10 @@ pub fn sign_request(
             }
             header
         }
+        KeyMaterial::SelfJwt { jwt } => {
+            self_jwt::assert_signable(&jwt, key)?;
+            format!("sig=self-jwt;jwt=\"{jwt}\"")
+        }
     };
     let mut covered = vec!["@method", "@authority", "@path"];
     if req.uri().query().is_some() {
@@ -667,6 +711,7 @@ impl std::fmt::Debug for PreparedRequest {
             KeyMaterial::Jwt(_) => "jwt",
             KeyMaterial::JwksUri { .. } => "jwks_uri",
             KeyMaterial::JktJwt { .. } => "jkt-jwt",
+            KeyMaterial::SelfJwt { .. } => "self-jwt",
         };
         f.debug_struct("PreparedRequest")
             .field("scheme", &scheme)

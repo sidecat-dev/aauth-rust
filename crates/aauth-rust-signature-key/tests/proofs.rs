@@ -1392,3 +1392,336 @@ fn jkt_jwt_delegates_signing_and_binds_the_enclave_thumbprint() {
         Error::UnsupportedAlgorithm
     );
 }
+
+fn self_compact(key: &SigningKey, header: serde_json::Value, payload: serde_json::Value) -> String {
+    Jws::sign(&header, &serde_json::to_vec(&payload).unwrap(), key).unwrap()
+}
+
+fn self_request(compact: &str, key: &SigningKey) -> Request<Vec<u8>> {
+    let mut req = request();
+    sign_request(
+        &mut req,
+        key,
+        KeyMaterial::SelfJwt {
+            jwt: compact.into(),
+        },
+        1000,
+    )
+    .unwrap();
+    req
+}
+
+#[test]
+fn self_jwt_uses_the_discovered_key_and_rejects_confirmation() {
+    use std::cell::Cell;
+
+    let key = SigningKey::from_seed([6; 32]);
+    let issuer = "https://Issuer.example";
+    let dwk = "aauth-resource.json";
+    let kid = "r1";
+    let header = json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid});
+    let payload = json!({"iss": issuer, "dwk": dwk, "exp": 2000, "aud": "https://agent.example"});
+    let compact = self_compact(&key, header, payload);
+    let req = self_request(&compact, &key);
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    assert!(
+        !req.headers()["signature-key"]
+            .to_str()
+            .unwrap()
+            .contains("cache")
+    );
+    let calls = Cell::new(0u32);
+    let metadata = format!(r#"{{"issuer":"{issuer}"}}"#);
+    let public = key.public_jwk();
+    let resolver = |iss: &str, document: &str, key_id: &str| {
+        calls.set(calls.get() + 1);
+        if iss == issuer && document == dwk && key_id == kid {
+            Ok(public.clone())
+        } else {
+            Err(Error::UnknownKey)
+        }
+    };
+    let prepared =
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["self-jwt"]).unwrap();
+    let assertion = prepared
+        .verify_self_jwt(metadata.as_bytes(), &resolver, 1000, "aa-event+jwt")
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(assertion.issuer, issuer);
+    assert_eq!(assertion.discovery_document, dwk);
+    assert_eq!(assertion.key_id, kid);
+    assert_eq!(assertion.expires_at, 2000);
+    assert_eq!(assertion.compact, compact);
+    assert!(assertion.cache_identifier().is_none());
+    let mut copied = assertion.payload();
+    copied[0] = b'x';
+    assert_ne!(copied, assertion.payload());
+    assert_eq!(
+        prepared
+            .verify_self_jwt(metadata.as_bytes(), &resolver, 1999, "aa-event+jwt")
+            .unwrap()
+            .expires_at,
+        2000
+    );
+
+    let mut wrong_http = req.clone();
+    resign_with(
+        &mut wrong_http,
+        &SigningKey::from_seed([9; 32]),
+        &["self-jwt"],
+    );
+    calls.set(0);
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&wrong_http, "sig", 1000, 60, &["self-jwt"])
+            .unwrap()
+            .verify_self_jwt(metadata.as_bytes(), &resolver, 1000, "aa-event+jwt")
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+    assert_eq!(calls.get(), 1);
+
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &SigningKey::from_seed([9; 32]),
+            KeyMaterial::SelfJwt {
+                jwt: compact.clone()
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let refuse = |_: &str, _: &str, _: &str| -> Result<_, Error> {
+        panic!("resolver ran before the JWT was acceptable");
+    };
+    let reject = |compact: String, now: i64, want: Error| {
+        let mut forged = req.clone();
+        forged.headers_mut().insert(
+            "signature-key",
+            format!("sig=self-jwt;jwt=\"{compact}\"").parse().unwrap(),
+        );
+        assert_eq!(
+            PreparedRequest::prepare_with_schemes(&forged, "sig", now, 60, &["self-jwt"])
+                .unwrap()
+                .verify_self_jwt(metadata.as_bytes(), &refuse, now, "aa-event+jwt")
+                .unwrap_err(),
+            want
+        );
+    };
+    let confirmed = self_compact(
+        &key,
+        json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+        json!({"iss": issuer, "dwk": dwk, "exp": 2000, "cnf": {"jwk": key.public_jwk()}}),
+    );
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &key,
+            KeyMaterial::SelfJwt {
+                jwt: confirmed.clone()
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"dwk": dwk, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": "http://Issuer.example", "dwk": dwk, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": "https://Issuer.example/path", "dwk": dwk, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": "../private", "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt"}),
+            json!({"iss": issuer, "dwk": dwk, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-other+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": dwk, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": dwk, "exp": 2000, "cnf": {"jwk": key.public_jwk()}}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": dwk, "exp": 1000}),
+        ),
+        1000,
+        Error::ExpiredJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": dwk, "iat": 1061, "exp": 2000}),
+        ),
+        1000,
+        Error::ClockSkew,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "exp": 2000}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    reject(
+        self_compact(
+            &key,
+            json!({"alg":"Ed25519","typ":"aa-event+jwt","kid":kid}),
+            json!({"iss": issuer, "dwk": dwk}),
+        ),
+        1000,
+        Error::InvalidJwt,
+    );
+    calls.set(0);
+    assert_eq!(
+        prepared
+            .verify_self_jwt(b"{}", &resolver, 1000, "aa-event+jwt")
+            .unwrap_err(),
+        Error::IssuerMissing
+    );
+    assert_eq!(calls.get(), 0);
+    assert_eq!(
+        prepared
+            .verify_self_jwt(
+                br#"{"issuer":"https://other.example"}"#,
+                &resolver,
+                1000,
+                "aa-event+jwt",
+            )
+            .unwrap_err(),
+        Error::IssuerMismatch
+    );
+    assert_eq!(calls.get(), 0);
+
+    let mut missing = req.clone();
+    missing
+        .headers_mut()
+        .insert("signature-key", "sig=self-jwt".parse().unwrap());
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&missing, "sig", 1000, 60, &["self-jwt"])
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    let mut malformed = req.clone();
+    malformed.headers_mut().insert(
+        "signature-key",
+        "sig=self-jwt;jwt=\"not-a-jwt\"".parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&malformed, "sig", 1000, 60, &["self-jwt"])
+            .unwrap()
+            .verify_self_jwt(metadata.as_bytes(), &refuse, 1000, "aa-event+jwt")
+            .unwrap_err(),
+        Error::InvalidJwt
+    );
+    for suffix in [";cache", ";cache=?1", ";cache=?0"] {
+        let mut cached = req.clone();
+        let header = format!(
+            "{}{suffix}",
+            cached.headers()["signature-key"].to_str().unwrap()
+        );
+        cached
+            .headers_mut()
+            .insert("signature-key", header.parse().unwrap());
+        assert_eq!(
+            PreparedRequest::prepare_with_schemes(&cached, "sig", 1000, 60, &["self-jwt"])
+                .unwrap_err(),
+            Error::InvalidKey,
+            "{suffix}"
+        );
+    }
+
+    calls.set(0);
+    let unknown = prepared
+        .verify_self_jwt(
+            metadata.as_bytes(),
+            &|iss: &str, document: &str, key_id: &str| {
+                calls.set(calls.get() + 1);
+                let _ = (iss, document, key_id);
+                Err(Error::UnknownKey)
+            },
+            1000,
+            "aa-event+jwt",
+        )
+        .unwrap_err();
+    assert_eq!(unknown, Error::UnknownKey);
+    assert_eq!(calls.get(), 1);
+    let mut unsupported = key.public_jwk();
+    unsupported.alg = "ES256".into();
+    assert_eq!(
+        prepared
+            .verify_self_jwt(
+                metadata.as_bytes(),
+                &|_: &str, _: &str, _: &str| Ok(unsupported.clone()),
+                1000,
+                "aa-event+jwt"
+            )
+            .unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+    calls.set(0);
+    assert_eq!(
+        prepared
+            .verify_self_jwt(metadata.as_bytes(), &resolver, 1000, "")
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(calls.get(), 0);
+}

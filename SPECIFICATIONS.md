@@ -24,7 +24,16 @@ self-issued delegation, plus explicit
 verifying the assertion and the HTTP signature under `cnf.jwk`. `iat` uses
 the same window as `created`. `exp` must be strictly after the verifier
 clock. The bare `cache` flag requires `jti`; this profile does not yet issue
-`Signature-Key-Cache`. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
+`Signature-Key-Cache`. A `self-jwt` member is the same kind of proof with one
+key: after the compact JWT parses, `typ` matches the caller's deployment
+policy, `exp` is after the verifier clock, an optional `iat` uses the same
+window as `created`, `iss` is an HTTPS origin kept
+byte for byte, `dwk` is a discovery-document name, the header `kid` is
+present, and `cnf` is absent, the metadata document's `issuer` must equal
+`iss` or the resolver is not called. The host resolver is then asked for that
+exact `iss`, `dwk`, and `kid`. That key verifies the JWT and then the HTTP
+signature. A `cache` parameter is rejected and no cache identifier is issued.
+The library does not fetch the issuer. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses
