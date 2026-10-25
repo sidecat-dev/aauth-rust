@@ -979,10 +979,11 @@ impl aauth_rust_person_server::Federation for AccessTransport {
         if issuer != "https://as.example" {
             return Err(aauth_rust_person_server::FederationError);
         }
-        Ok(if self.mode == 11 {
-            "http://as.example/token"
-        } else {
-            "https://as.example/token"
+        Ok(match self.mode {
+            11 => "http://as.example/token",
+            28 => "https://as.example/token?x=1",
+            29 => "https://as.example/token#fragment",
+            _ => "https://as.example/token",
         }
         .into())
     }
@@ -1498,6 +1499,42 @@ fn delivery_rejects_foreign_as_issuer_even_when_its_resigned_token_verifies() {
                 })
                 .unwrap()
                 .is_none()
+        );
+    }
+}
+
+#[test]
+fn auth_token_endpoint_must_be_https_without_query_or_fragment() {
+    use aauth_rust_person_server::{FederationFailure, FederationFailureReason as Reason};
+    let f = Fixture::new();
+    let published: Value = serde_json::from_slice(&f.server(2000).metadata()).unwrap();
+    for field in ["person_token_endpoint", "auth_token_endpoint", "jwks_uri"] {
+        let url = published[field].as_str().unwrap();
+        assert!(url.starts_with("https://"), "{field} {url}");
+        assert!(!url.contains('?') && !url.contains('#'), "{field} {url}");
+    }
+    for mode in [11, 28, 29] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let server = f.server(2000).with_federation(AccessTransport {
+            mode,
+            calls: calls.clone(),
+            now: f.host.now.clone(),
+        });
+        let holder = agent(false);
+        let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+        let challenge = resource(&holder, &person, "read", |r| {
+            r.aud = "https://as.example".into()
+        });
+        let response = f.exchange(&server, &holder, &challenge, &person, None);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "mode{mode}");
+        assert_eq!(
+            response
+                .extensions()
+                .get::<FederationFailure>()
+                .expect("host diagnostic")
+                .reason,
+            Reason::InvalidEndpoint,
+            "mode{mode}"
         );
     }
 }
