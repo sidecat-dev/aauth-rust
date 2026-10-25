@@ -1,5 +1,6 @@
 use aauth_rust_core::continuation::{
     ContinuationStore, MemoryContinuations, PendingResponse, Requirement, StoreError,
+    canonical_interaction_code,
 };
 use http::Response;
 use serde_json::json;
@@ -358,4 +359,20 @@ fn interaction_codes_preserve_case_and_optional_hyphens() {
             requirement,
         );
     }
+}
+
+#[test]
+fn canonical_interaction_code_strips_hyphens_and_folds_aliases() {
+    let folded = canonical_interaction_code("ai-b2-c3d4").unwrap();
+    assert_eq!(folded, "A1B2C3D4");
+    assert_eq!(
+        canonical_interaction_code("ALB2C3D4").as_deref(),
+        Some("A1B2C3D4")
+    );
+    assert_eq!(
+        canonical_interaction_code("ao-b2-c3d4").as_deref(),
+        Some("A0B2C3D4")
+    );
+    assert!(canonical_interaction_code("short").is_none());
+    assert!(canonical_interaction_code("C0DE8X4U").is_none());
 }

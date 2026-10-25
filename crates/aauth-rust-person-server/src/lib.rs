@@ -68,7 +68,8 @@ pub use policy::{
     Policy, PolicyError, UpstreamContext,
 };
 pub use server::{
-    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, PersonServer,
+    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, Governance,
+    GovernanceError, InteractionDecision, PersonServer,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,

@@ -58,7 +58,18 @@ read the exact mission bytes and the accepted updates. A different owner receive
 the same `404` as a missing mission. Proposals are process memory. MemoryStore and
 redb persist the approved document. `mission_control_endpoint`, `person_tokens`
 and `capabilities` are not produced. AS, child, upstream and federated mission
-paths do not execute. A Resource that asks for a
+paths do not execute. Opt-in interaction, permission, and audit endpoints execute.
+The agent signs each POST with `jwt`. `type` is required on interaction. `action`
+is required on permission and audit, and audit also requires `mission_s256`.
+A denied permission does not authorize the action. For a resource-hosted interaction,
+the resource pending URL remains the completion signal after the Person Server relay
+resolves. `interaction` and `payment` return `424 interaction_unavailable` because
+this library has no user channel. A `question` is answered by the host. An interaction
+code is compared after stripping hyphens and folding Crockford aliases and case.
+Presenting the code correlates the session and does not itself approve or deny. After that code is consumed, one POST signed as this Person Server stores the decision, and a second decision is refused. `InteractionCompletion` and `PermissionDecision` are agent helpers; no library poller calls them.
+The code is single-use. Three failed attempts make it terminally `invalid_code`.
+A code whose pending interaction has expired is `408 expired`. The host supplies
+the emitted code. The code table is process memory. A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant
 differs is refused with `403` `access_denied` and no `Signature-Error` header.

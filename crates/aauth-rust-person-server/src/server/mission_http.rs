@@ -325,7 +325,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         Ok(json_response(StatusCode::OK, value))
     }
 
-    fn verify_approver(&self, request: &Request<Vec<u8>>, now: i64) -> Result<(), Failure> {
+    pub(super) fn verify_approver(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<(), Failure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
             .map_err(|error| Failure::proof(error, request, now))?;
         let base = std::str::from_utf8(proof.signature_base())

@@ -322,7 +322,35 @@ fn valid_interaction_code(code: &str) -> bool {
             _ => return false,
         }
     }
-    symbols >= 8
+    (8..=128).contains(&symbols)
+}
+
+/// Comparison value of an interaction code.
+/// Hyphens are removed. Case is folded. Crockford aliases `I` and `L` become `1`,
+/// and `O` becomes `0`. The result is `None` unless eight to 128 symbols remain
+/// from the Crockford alphabet after that folding.
+pub fn canonical_interaction_code(code: &str) -> Option<String> {
+    let mut out = String::new();
+    for byte in code.bytes() {
+        let upper = byte.to_ascii_uppercase();
+        let symbol = match upper {
+            b'-' => continue,
+            b'I' | b'L' => b'1',
+            b'O' => b'0',
+            b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z' => {
+                upper
+            }
+            _ => return None,
+        };
+        out.push(char::from(symbol));
+    }
+    (8..=128).contains(&out.len()).then_some(out)
+}
+
+/// True when a server may emit this code. Aliases `I`, `L`, and `O` are rejected.
+/// Hyphens are allowed and do not count as symbols.
+pub fn is_emitted_interaction_code(code: &str) -> bool {
+    valid_interaction_code(code)
 }
 fn sf_string(value: &str) -> Result<String, PendingError> {
     if !value.bytes().all(|v| (0x20..=0x7e).contains(&v)) {

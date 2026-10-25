@@ -1,8 +1,10 @@
 mod continuation;
 mod federation;
+mod governance;
 mod mission_http;
 mod revocation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
+pub use governance::{Governance, GovernanceError, InteractionDecision};
 mod lineage;
 mod missions;
 mod subagents;
@@ -83,6 +85,7 @@ pub struct PersonServer<K, S, P, C, I> {
     deferred: Option<DeferredConfig>,
     revocation: Option<revocation::Gate>,
     mission_http: Option<mission_http::Gate>,
+    governance: Option<governance::Gate>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -194,6 +197,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             deferred: None,
             revocation: None,
             mission_http: None,
+            governance: None,
         })
     }
     /// Enable AS federation for every /token request, including
@@ -211,6 +215,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         if self.mission_http.is_some() {
             value["mission_endpoint"] = json!(format!("{}/mission", self.config.issuer));
+        }
+        if self.governance.is_some() {
+            value["interaction_endpoint"] = json!(format!("{}/interaction", self.config.issuer));
+            value["permission_endpoint"] = json!(format!("{}/permission", self.config.issuer));
+            value["audit_endpoint"] = json!(format!("{}/audit", self.config.issuer));
         }
         value.to_string().into_bytes()
     }
@@ -251,6 +260,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Ok(response);
         }
         if let Some(response) = self.route_mission(request, now)? {
+            return Ok(response);
+        }
+        if let Some(response) = self.route_governance(request, now)? {
             return Ok(response);
         }
         match (request.method().as_str(), request.uri().path()) {
