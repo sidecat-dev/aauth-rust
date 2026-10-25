@@ -90,7 +90,11 @@ fn fed_ids() -> String {
 
 type Server = PersonServer<Keys, MemoryStore, Host, fn() -> i64, fn() -> String>;
 
-fn server() -> Server {
+fn dollars() -> Vec<UnitDeclaration> {
+    vec![UnitDeclaration::with_max("USD", 6, 10_000_000, "dollars").unwrap()]
+}
+
+fn server_with(policy: IssuerPolicy) -> Server {
     PersonServer::new(
         Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
         Keys,
@@ -100,11 +104,12 @@ fn server() -> Server {
         ids as fn() -> String,
     )
     .unwrap()
-    .with_budgets(IssuerPolicy::capped(
-        2_000_000,
-        vec![UnitDeclaration::with_max("USD", 6, 10_000_000, "dollars").unwrap()],
-    ))
+    .with_budgets(policy)
     .unwrap()
+}
+
+fn server() -> Server {
+    server_with(IssuerPolicy::capped(2_000_000, dollars()))
 }
 
 fn call(server: &Server, path: &str, body: Value) -> http::Response<Vec<u8>> {
@@ -218,7 +223,11 @@ fn person_token(server: &Server) -> String {
         .to_owned()
 }
 
-fn issued_amount(server: &Server, person_token: &str, challenge: &str) -> i64 {
+fn issue(
+    server: &Server,
+    person_token: &str,
+    challenge: &str,
+) -> aauth_rust_core::VerifiedAuthToken {
     let parsed = aauth_rust_jose::Jws::parse(person_token).unwrap();
     let claims: Value = serde_json::from_slice(parsed.payload()).unwrap();
     let mut extra = std::collections::BTreeMap::new();
@@ -266,11 +275,16 @@ fn issued_amount(server: &Server, person_token: &str, challenge: &str) -> i64 {
         .as_str()
         .unwrap()
         .to_owned();
-    let token = AuthToken::parse(&auth)
+    AuthToken::parse(&auth)
         .unwrap()
         .verify(&Keys, 1000)
-        .unwrap();
-    token.claims().extra["budget"]["amount"].as_i64().unwrap()
+        .unwrap()
+}
+
+fn issued_amount(server: &Server, person_token: &str, challenge: &str) -> i64 {
+    issue(server, person_token, challenge).claims().extra["budget"]["amount"]
+        .as_i64()
+        .unwrap()
 }
 
 #[test]
@@ -281,6 +295,17 @@ fn a_second_grant_for_the_same_person_stays_inside_the_ceiling() {
     assert_eq!(first, 2_000_000);
     assert_eq!(second, 0);
     assert_eq!(server.budget_accounted(), Some(2_000_000));
+}
+
+#[test]
+fn a_calendar_boundary_ends_the_grant() {
+    let open_server = server();
+    let open = issue(&open_server, &person_token(&open_server), "open");
+    assert!(open.claims().exp > 1_100, "{}", open.claims().exp);
+    let bounded = server_with(IssuerPolicy::capped(2_000_000, dollars()).until(1_100));
+    let token = issue(&bounded, &person_token(&bounded), "bounded");
+    assert_eq!(token.claims().exp, 1_100);
+    assert_eq!(token.claims().extra["budget"]["amount"], 2_000_000);
 }
 
 struct RaisedGrant;

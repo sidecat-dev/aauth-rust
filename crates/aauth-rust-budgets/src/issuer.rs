@@ -10,6 +10,9 @@ pub struct IssuerPolicy {
     pub cap: Option<i64>,
     /// Cached resource declarations. Empty means proceed on the signed scale.
     pub units: Vec<UnitDeclaration>,
+    /// Latest Unix second an issued auth token may expire. A calendar-period
+    /// ceiling passes the period boundary. `None` leaves the other lifetimes alone.
+    pub period_end: Option<i64>,
 }
 
 impl IssuerPolicy {
@@ -23,7 +26,16 @@ impl IssuerPolicy {
         Self {
             cap: Some(cap),
             units,
+            period_end: None,
         }
+    }
+
+    /// Do not issue an auth token past `period_end`.
+    ///
+    /// Other lifetimes still apply. This bound does not extend an expiry.
+    pub fn until(mut self, period_end: i64) -> Self {
+        self.period_end = Some(period_end);
+        self
     }
 }
 

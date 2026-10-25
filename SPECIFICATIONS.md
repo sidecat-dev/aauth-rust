@@ -210,7 +210,9 @@ malformed object is `400` `invalid_budget`. Omitting `budget` uses the profile
 default offer, capped by the first unit's `max`. The person server copies that
 unit and decimals and narrows the amount to its cap. That cap is also the
 standing ceiling for one subject at one resource: a later grant is narrowed to
-what outstanding allocations still leave. It records the issued
+what outstanding allocations still leave. `IssuerPolicy::until` stops the
+issued auth token at that Unix second, which is the period boundary for a
+calendar ceiling. It records the issued
 amount as fully consumed until a consumption record replaces that figure. In a
 four-party exchange it sends the narrowed object as the `budget` parameter.
 The access server issues a budget only when that parameter is present, copies

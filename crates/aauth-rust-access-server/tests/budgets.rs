@@ -224,3 +224,44 @@ fn decimals_mismatch_amount_above_offer_and_a_budget_without_an_offer_are_reject
     assert_eq!(malformed.status(), 400);
     assert_eq!(error(&malformed), "invalid_budget");
 }
+
+#[test]
+fn a_calendar_boundary_ends_the_access_server_grant() {
+    let bounded = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |_: &aauth_rust_access_server::AuthorizationRequest| {
+            Ok(Decision {
+                scopes: vec!["read".into()],
+                lifetime: 600,
+            })
+        },
+        || 1000,
+        || "auth-period".into(),
+    )
+    .unwrap()
+    .with_budgets(
+        IssuerPolicy::capped(
+            2_000,
+            vec![UnitDeclaration::with_max("USD", 6, 10_000, "dollars").unwrap()],
+        )
+        .until(1_100),
+    )
+    .unwrap();
+    let mut extra = BTreeMap::new();
+    extra.insert("budget".into(), budget(5_000, 6));
+    let response = bounded.handle(&request(extra, Some(budget(3_000, 6))));
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let value: Value = serde_json::from_slice(response.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().exp, 1_100);
+    assert_eq!(token.claims().extra["budget"]["amount"], 2_000);
+}

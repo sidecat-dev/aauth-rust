@@ -487,11 +487,14 @@ impl<
         }
         let issued_at = (self.clock)();
         current(issued_at, &context, &presented)?;
-        let expires_at = issued_at
+        let mut expires_at = issued_at
             .saturating_add(decision.lifetime)
             .min(context.agent.claims().exp)
             .min(holder.claims().exp)
             .min(presented.exp);
+        if let Some(end) = self.budgets.as_ref().and_then(|policy| policy.period_end) {
+            expires_at = expires_at.min(end);
+        }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-access.json".into(),

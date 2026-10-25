@@ -832,6 +832,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
             expires_at = expires_at.min(exp);
         }
+        if let Some(end) = self
+            .budgets
+            .as_ref()
+            .and_then(|state| state.policy.period_end)
+        {
+            expires_at = expires_at.min(end);
+        }
         let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss)?;
         let mut extra = std::collections::BTreeMap::new();
         if let Some(budget) = &granted_budget {
