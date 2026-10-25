@@ -56,7 +56,10 @@ mod policy;
 pub use federation::{
     BoxedFederation, Federation, FederationError, FederationFailure, FederationFailureReason,
 };
-pub use mission::{MissionRecord, MissionState, MissionStore, MissionStoreError};
+pub use mission::{
+    MissionAudit, MissionAuditError, MissionEdit, MissionRecord, MissionState, MissionStore,
+    MissionStoreError, MissionUpdateBytes,
+};
 mod server;
 mod store;
 pub mod storetest;
@@ -65,7 +68,8 @@ pub use policy::{
     Policy, PolicyError, UpstreamContext,
 };
 pub use server::{
-    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, PersonServer,
+    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, Governance,
+    GovernanceError, InteractionDecision, PersonServer,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,

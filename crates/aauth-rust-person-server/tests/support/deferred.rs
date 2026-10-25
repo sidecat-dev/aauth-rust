@@ -1318,6 +1318,237 @@ fn forwarded_answer_survives_agent_polls_after_its_old_question_timeout() {
     ));
 }
 
+#[test]
+fn updated_request_verifies_the_pair_before_replacing_the_pending_request() {
+    let f = Fixture::new();
+    let transport = NativeTransport::new(&f, 5, 0);
+    let store = Arc::new(MemoryContinuations::new(16));
+    let server = f
+        .server(2000)
+        .with_federation(transport.clone())
+        .with_deferred(config(store.clone()))
+        .unwrap();
+    let holder = agent(false);
+    let (person, challenge, response) = initial(&f, &server, &holder);
+    assert_eq!(response.status(), 202);
+    let pending = PendingResponse::parse(&format!("{PS}/token"), &response).unwrap();
+    let id = pending.location.rsplit('/').next().unwrap();
+    let stored = |store: &MemoryContinuations| {
+        store.load(id).unwrap().unwrap().value["parameters"]["resource_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(stored(&store), challenge);
+    let rejected = poll(
+        &server,
+        &holder,
+        &pending.location,
+        "POST",
+        Some(json!({"action":"updated_request","resource_token":challenge})),
+        1000,
+    );
+    assert_eq!(rejected.status(), 400);
+    assert_eq!(output(&rejected)["error"], "invalid_request");
+    assert_eq!(stored(&store), challenge);
+    let mismatched_jti = resource(&holder, &person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.presented_jti = "other".into();
+    });
+    let step3 = poll(
+        &server,
+        &holder,
+        &pending.location,
+        "POST",
+        Some(json!({
+            "action": "updated_request",
+            "resource_token": mismatched_jti,
+            "presented_token": person
+        })),
+        1000,
+    );
+    assert_eq!(step3.status(), 400);
+    assert_eq!(output(&step3)["error"], "invalid_resource_token");
+    assert_eq!(stored(&store), challenge);
+    let other_person = compact(&f.person(&server, &holder, INVENTORY, None), "person_token");
+    let other_resource = resource(&holder, &other_person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+    });
+    let different_resource = poll(
+        &server,
+        &holder,
+        &pending.location,
+        "POST",
+        Some(json!({
+            "action": "updated_request",
+            "resource_token": other_resource,
+            "presented_token": other_person,
+            "justification": "a different resource"
+        })),
+        1000,
+    );
+    assert_eq!(different_resource.status(), 400);
+    assert_eq!(
+        output(&different_resource)["error"],
+        "invalid_resource_token"
+    );
+    assert_eq!(stored(&store), challenge);
+    let refuse = |token: String| {
+        let response = poll(
+            &server,
+            &holder,
+            &pending.location,
+            "POST",
+            Some(json!({
+                "action": "updated_request",
+                "resource_token": token,
+                "presented_token": person
+            })),
+            1000,
+        );
+        assert_eq!(
+            response.status(),
+            400,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        assert_eq!(output(&response)["error"], "invalid_resource_token");
+        assert_eq!(stored(&store), challenge);
+    };
+    refuse(resource(&holder, &person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.ps = "https://other.example".into();
+    }));
+    refuse(resource(&holder, &person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.agent_jkt = SigningKey::from_seed([9; 32])
+            .public_jwk()
+            .thumbprint()
+            .unwrap();
+    }));
+    refuse(resource(&holder, &person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.mission_s256 = Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into());
+    }));
+    refuse(resource(&holder, &person, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.tenant = Some("other-tenant".into());
+    }));
+    let person2 = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let replacement = resource(&holder, &person2, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.account = Some("reduced".into());
+    });
+    let accepted = poll(
+        &server,
+        &holder,
+        &pending.location,
+        "POST",
+        Some(json!({
+            "action": "updated_request",
+            "resource_token": replacement,
+            "presented_token": person2,
+            "justification": "read only"
+        })),
+        1000,
+    );
+    assert_eq!(
+        accepted.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(accepted.body())
+    );
+    assert_eq!(stored(&store), replacement);
+    let payload = |token: &str| -> Value {
+        serde_json::from_slice(aauth_rust_jose::Jws::parse(token).unwrap().payload()).unwrap()
+    };
+    assert_ne!(
+        payload(&challenge)["presented_jti"],
+        payload(&replacement)["presented_jti"]
+    );
+    assert_eq!(
+        payload(&replacement)["presented_jti"],
+        payload(&person2)["jti"]
+    );
+    assert_eq!(payload(&replacement)["account"], "reduced");
+    let forwarded = server
+        .advance_federation(&pending.location, FederationInput::Poll)
+        .unwrap();
+    assert_eq!(forwarded.status(), 202);
+    transport.stage.store(2, Ordering::SeqCst);
+    let granted = server
+        .advance_federation(&pending.location, FederationInput::Poll)
+        .unwrap();
+    assert_eq!(
+        granted.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(granted.body())
+    );
+    let auth = aauth_rust_core::AuthToken::parse(output(&granted)["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(auth.claims().account.as_deref(), Some("reduced"));
+}
+
+#[test]
+fn updated_request_consent_denial_keeps_the_stored_request() {
+    let f = Fixture::new();
+    let transport = NativeTransport::new(&f, 5, 0);
+    let store = Arc::new(MemoryContinuations::new(16));
+    let server = f
+        .server(2000)
+        .with_federation(transport.clone())
+        .with_deferred(config(store.clone()))
+        .unwrap();
+    let holder = agent(false);
+    let (_person, challenge, response) = initial(&f, &server, &holder);
+    assert_eq!(response.status(), 202);
+    let pending = PendingResponse::parse(&format!("{PS}/token"), &response).unwrap();
+    let id = pending.location.rsplit('/').next().unwrap();
+    let stored = store.load(id).unwrap().unwrap().value["parameters"]["resource_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(stored, challenge);
+    let calls = transport.calls.load(Ordering::SeqCst);
+    f.host.mode.store(1, Ordering::SeqCst);
+    let person2 = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let replacement = resource(&holder, &person2, "read", |claims| {
+        claims.aud = "https://as.example".into();
+        claims.account = Some("reduced".into());
+    });
+    let denied = poll(
+        &server,
+        &holder,
+        &pending.location,
+        "POST",
+        Some(json!({
+            "action": "updated_request",
+            "resource_token": replacement,
+            "presented_token": person2,
+            "justification": "narrower account"
+        })),
+        1000,
+    );
+    assert_eq!(
+        denied.status(),
+        403,
+        "{}",
+        String::from_utf8_lossy(denied.body())
+    );
+    assert_eq!(output(&denied)["error"], "access_denied");
+    assert_eq!(
+        store.load(id).unwrap().unwrap().value["parameters"]["resource_token"]
+            .as_str()
+            .unwrap(),
+        challenge
+    );
+    assert!(store.load(id).unwrap().unwrap().value["queued"].is_null());
+    assert_eq!(transport.calls.load(Ordering::SeqCst), calls);
+}
+
 #[path = "post_gate.rs"]
 mod post_gate;
 

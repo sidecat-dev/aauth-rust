@@ -7,6 +7,7 @@ pub(super) const TOKENS: TableDefinition<&str, &[u8]> = TableDefinition::new("aa
 pub(super) const BINDINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("aauth_ps_bindings");
 pub(super) const DIRECTED: TableDefinition<&str, &str> = TableDefinition::new("aauth_ps_directed");
 pub(super) const SUBJECTS: TableDefinition<&str, &str> = TableDefinition::new("aauth_ps_subjects");
+pub(super) const MISSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("aauth_ps_missions");
 
 fn table_error(error: redb::TableError) -> OpenError {
     match error {
@@ -33,7 +34,9 @@ pub(super) fn initialize(database: &Database) -> Result<(), OpenError> {
         return Err(OpenError::UnsupportedSchema);
     }
     let new = names.is_empty();
-    let expected: BTreeSet<_> = [
+    // Schema version 1 gained the mission-audit table. A database written before
+    // that table is still version 1; opening it creates the table.
+    let legacy: BTreeSet<_> = [
         META.name(),
         TOKENS.name(),
         BINDINGS.name(),
@@ -43,7 +46,9 @@ pub(super) fn initialize(database: &Database) -> Result<(), OpenError> {
     .into_iter()
     .map(str::to_owned)
     .collect();
-    if !new && names != expected {
+    let mut current = legacy.clone();
+    current.insert(MISSIONS.name().to_owned());
+    if !new && names != legacy && names != current {
         return Err(OpenError::UnsupportedSchema);
     }
     {
@@ -64,5 +69,6 @@ pub(super) fn initialize(database: &Database) -> Result<(), OpenError> {
     transaction.open_table(BINDINGS).map_err(table_error)?;
     transaction.open_table(DIRECTED).map_err(table_error)?;
     transaction.open_table(SUBJECTS).map_err(table_error)?;
+    transaction.open_table(MISSIONS).map_err(table_error)?;
     transaction.commit().map_err(|_| OpenError::Unavailable)
 }

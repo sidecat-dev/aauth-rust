@@ -342,19 +342,30 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let object = body
                 .as_object()
                 .ok_or_else(|| Failure::parameter("invalid_request"))?;
-            if object.get("action").and_then(Value::as_str) != Some("clarification_response")
-                || object
-                    .keys()
-                    .any(|k| !["action", "clarification_response"].contains(&k.as_str()))
-            {
-                return Err(Failure::parameter("invalid_request"));
+            match object.get("action").and_then(Value::as_str) {
+                Some("clarification_response") => {
+                    if object
+                        .keys()
+                        .any(|k| !["action", "clarification_response"].contains(&k.as_str()))
+                    {
+                        return Err(Failure::parameter("invalid_request"));
+                    }
+                    let answer = object
+                        .get("clarification_response")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && s.len() <= 65536)
+                        .ok_or_else(|| Failure::parameter("invalid_request"))?;
+                    value["queued"] = json!(answer);
+                }
+                Some("updated_request") => self.queue_updated_request(
+                    &mut value,
+                    object,
+                    &original_agent,
+                    &prepared.resource,
+                    now,
+                )?,
+                _ => return Err(Failure::parameter("invalid_request")),
             }
-            let answer = object
-                .get("clarification_response")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty() && s.len() <= 65536)
-                .ok_or_else(|| Failure::parameter("invalid_request"))?;
-            value["queued"] = json!(answer);
             // This POST only queues the answer; it is not the AS's next round.
             // Stop presenting the answered question until explicit host advance
             // publishes a fresh AS requirement, even if its text is identical.
@@ -430,6 +441,69 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         pending_wire(&pending, &value, (self.clock)(), d.retry_after)
     }
+
+    /// Verify the replacement pair before any custody write.
+    fn queue_updated_request(
+        &self,
+        value: &mut Value,
+        object: &serde_json::Map<String, Value>,
+        agent: &VerifiedAgentToken,
+        original: &VerifiedResourceToken,
+        now: i64,
+    ) -> Result<(), Failure> {
+        if object.keys().any(|key| {
+            ![
+                "action",
+                "resource_token",
+                "presented_token",
+                "justification",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return Err(Failure::parameter("invalid_request"));
+        }
+        let resource_token = object
+            .get("resource_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| Failure::parameter("invalid_request"))?;
+        let presented_token = object
+            .get("presented_token")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| Failure::parameter("invalid_request"))?;
+        let mut parameters = value["parameters"].clone();
+        if let Some(justification) = object.get("justification") {
+            let text = justification
+                .as_str()
+                .filter(|text| !text.is_empty() && text.len() <= 65536)
+                .ok_or_else(|| Failure::parameter("invalid_request"))?;
+            parameters["justification"] = json!(text);
+        }
+        parameters["resource_token"] = json!(resource_token);
+        parameters["presented_token"] = json!(presented_token);
+        let updated = self.prepare_authorization(agent, parameters.clone(), now, None)?;
+        if !same_updated_resource(original, &updated.resource) {
+            return Err(Failure::parameter("invalid_resource_token"));
+        }
+        self.policy
+            .consent(&updated.context)
+            .map_err(Failure::policy)?;
+        value["parameters"] = parameters;
+        value["updated_request"] = Value::Object(object.clone());
+        value["queued"] = json!(true);
+        Ok(())
+    }
+}
+fn same_updated_resource(left: &VerifiedResourceToken, right: &VerifiedResourceToken) -> bool {
+    let left = left.claims();
+    let right = right.claims();
+    left.iss == right.iss
+        && left.ps == right.ps
+        && left.sub == right.sub
+        && left.agent_jkt == right.agent_jkt
+        && left.mission_s256 == right.mission_s256
+        && left.tenant == right.tenant
 }
 fn safe_id(s: &str) -> bool {
     !s.is_empty()

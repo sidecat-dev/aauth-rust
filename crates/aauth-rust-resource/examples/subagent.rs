@@ -545,6 +545,7 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         &person_compact,
         &trust,
         NOW,
+        &aauth_rust_agent::ResourceTokenAttempts::new(),
     )?);
     // END guide-child-exchange
     let mut agent_statuses = vec![first.status().as_u16()];

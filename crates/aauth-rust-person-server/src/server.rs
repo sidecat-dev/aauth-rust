@@ -1,6 +1,10 @@
 mod continuation;
 mod federation;
+mod governance;
+mod mission_http;
+mod revocation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
+pub use governance::{Governance, GovernanceError, InteractionDecision};
 mod lineage;
 mod missions;
 mod subagents;
@@ -79,6 +83,9 @@ pub struct PersonServer<K, S, P, C, I> {
     ids: I,
     federation: Option<crate::BoxedFederation>,
     deferred: Option<DeferredConfig>,
+    revocation: Option<revocation::Gate>,
+    mission_http: Option<mission_http::Gate>,
+    governance: Option<governance::Gate>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -188,6 +195,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             ids,
             federation: None,
             deferred: None,
+            revocation: None,
+            mission_http: None,
+            governance: None,
         })
     }
     /// Enable AS federation for every /token request, including
@@ -199,7 +209,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
     /// Public PS metadata; only implemented Person/Auth endpoints are advertised.
     pub fn metadata(&self) -> Vec<u8> {
-        json!({"issuer":self.config.issuer,"person_token_endpoint":format!("{}/person",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer),"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer)}).to_string().into_bytes()
+        let mut value = json!({"issuer":self.config.issuer,"person_token_endpoint":format!("{}/person",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer),"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer)});
+        if self.revocation.is_some() {
+            value["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
+        if self.mission_http.is_some() {
+            value["mission_endpoint"] = json!(format!("{}/mission", self.config.issuer));
+        }
+        if self.governance.is_some() {
+            value["interaction_endpoint"] = json!(format!("{}/interaction", self.config.issuer));
+            value["permission_endpoint"] = json!(format!("{}/permission", self.config.issuer));
+            value["audit_endpoint"] = json!(format!("{}/audit", self.config.issuer));
+        }
+        value.to_string().into_bytes()
     }
     /// Public signing key and kid, never secret material.
     pub fn jwks(&self) -> Vec<u8> {
@@ -233,6 +255,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         if self.deferred.is_some() && request.uri().path().starts_with("/token/pending/") {
             return self.pending(request, now);
+        }
+        if let Some(response) = self.route_revocation(request, now)? {
+            return Ok(response);
+        }
+        if let Some(response) = self.route_mission(request, now)? {
+            return Ok(response);
+        }
+        if let Some(response) = self.route_governance(request, now)? {
+            return Ok(response);
         }
         match (request.method().as_str(), request.uri().path()) {
             ("GET", "/.well-known/aauth-person.json") => {
@@ -305,9 +336,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let KeyMaterial::Jwt(compact) = proof.key() else {
             return Err(Failure::proof(ProofError::UnsupportedScheme, request, now));
         };
-        let token = AgentToken::parse(compact)
-            .and_then(|token| token.verify(&self.resolver(), now))
-            .map_err(Failure::credential)?;
+        let parsed = AgentToken::parse(compact).map_err(Failure::credential)?;
+        let agent_issuer = parsed.unverified_claims().iss.clone();
+        let agent_jti = parsed.unverified_claims().jti.clone();
+        let token = match parsed.verify(&self.resolver(), now) {
+            Ok(token) => token,
+            Err(TokenError::ExpiredJwt) if self.token_revoked(&agent_issuer, &agent_jti, now) => {
+                return Err(Failure::revoked_jwt());
+            }
+            Err(error) => return Err(Failure::credential(error)),
+        };
+        if self.token_revoked(&agent_issuer, &agent_jti, now) {
+            return Err(Failure::revoked_jwt());
+        }
         proof
             .verify(&token.claims().cnf.jwk)
             .map_err(|error| Failure::proof(error, request, now))?;
@@ -587,9 +628,22 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let holder = subagent.as_ref().unwrap_or(agent);
         let resource_compact = required_string(&parameters, "resource_token")?;
         let presented_compact = required_string(&parameters, "presented_token")?;
-        let resource = ResourceToken::parse(resource_compact)
-            .and_then(|token| token.verify(&self.resolver(), verified_at))
+        let parsed = ResourceToken::parse(resource_compact)
             .map_err(|error| Failure::token(error, "resource", verified_at))?;
+        let resource_issuer = parsed.unverified_claims().iss.clone();
+        let resource_jti = parsed.unverified_claims().jti.clone();
+        let resource = match parsed.verify(&self.resolver(), verified_at) {
+            Ok(token) => token,
+            Err(TokenError::ExpiredJwt)
+                if self.token_revoked(&resource_issuer, &resource_jti, verified_at) =>
+            {
+                return Err(revocation::revoked_parameter("resource"));
+            }
+            Err(error) => return Err(Failure::token(error, "resource", verified_at)),
+        };
+        if self.token_revoked(&resource_issuer, &resource_jti, verified_at) {
+            return Err(revocation::revoked_parameter("resource"));
+        }
         let r = resource.claims();
         check_parameter_iat(r.iat, verified_at)?;
         if r.ps != self.config.issuer

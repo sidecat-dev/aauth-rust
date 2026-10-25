@@ -1055,6 +1055,7 @@ let first = person_server.handle(&admitted_child.auth_request(
     &person_compact,
     &trust,
     NOW,
+    &aauth_rust_agent::ResourceTokenAttempts::new(),
 )?);
 ```
 
@@ -1447,9 +1448,11 @@ with its own effect storage; continuation custody does not provide that guarante
 
 This missionless Core-scope profile supports top-level Agents and one-level
 parent-mediated children. Deadlines are capped by all original credentials,
-including both Agent tokens for a child and the Resource challenge. Long-wait refresh and
-clarification `updated_request` need a later profile; submit a fresh original
-request after expiry. AS and PS independently enforce five clarification rounds,
+including both Agent tokens for a child and the Resource challenge. Long-wait refresh needs a later profile; submit a fresh original
+request after expiry. A clarification `updated_request` replaces the pending
+resource and presented tokens after the pair verifies and the new resource
+token keeps the original `iss`, `ps`, `sub`, `agent_jkt`, `mission_s256`, and
+`tenant`. AS and PS independently enforce five clarification rounds,
 preserve unanswered question deadlines and advertise remaining timeout seconds. There is no durable AS/PS continuation adapter in this
 release. Custom stores must preserve atomic revisions, bounded records and
 role namespaces across restart, collect expiry and reconcile uncertain in-flight

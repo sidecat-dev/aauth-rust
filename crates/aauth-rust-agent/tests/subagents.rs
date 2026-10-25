@@ -1,4 +1,4 @@
-use aauth_rust_agent::{Agent, FederatedContext, Subagent};
+use aauth_rust_agent::{Agent, FederatedContext, ResourceTokenAttempts, Subagent};
 use aauth_rust_core::{AgentKeyResolver, TokenError};
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_signature_key::{KeyMaterial, PreparedRequest};
@@ -303,6 +303,7 @@ fn request_builders_preserve_exact_child_credentials_and_use_parent_proof() {
             &person,
             &Keys,
             1000,
+            &ResourceTokenAttempts::new(),
         )
         .unwrap();
     let body: Value = serde_json::from_slice(auth_request.body()).unwrap();
@@ -377,7 +378,8 @@ fn requests_refuse_wrong_parent_endpoint_and_expired_dependencies() {
                 &resource,
                 &person,
                 &Keys,
-                1300
+                1300,
+                &ResourceTokenAttempts::new(),
             )
             .is_err()
     );

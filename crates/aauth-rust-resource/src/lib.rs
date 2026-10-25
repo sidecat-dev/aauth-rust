@@ -1,13 +1,17 @@
 //! Agent-identity and PS-authorization Resources. Verification precedes host policy.
 #![deny(missing_docs)]
+mod held;
 mod ps_authorization;
+mod session;
 use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
+pub use held::{HeldError, HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,
-    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError,
+    ProactiveDecision, PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError,
 };
+pub use session::{SessionAdmit, SessionLedger};
 
 /// Invalid host configuration, separate from a caller's proof or token failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,6 +451,28 @@ where
         match (self.policy)(&token, request).into_admission() {
             Ok(admitted) => Decision::Granted(Box::new(Authorized { token, admitted })),
             Err(Deny) => Decision::Forbidden,
+        }
+    }
+
+    /// Verify `request` and admit its session token in one call.
+    ///
+    /// The bound subject is returned only when [`Self::authorize`] grants this
+    /// request. A caller-supplied subject is not accepted. An unverified
+    /// presentation is [`SessionAdmit::Standalone`] and does not reveal the
+    /// wrapped subject.
+    pub fn admit_session(
+        &self,
+        ledger: &SessionLedger,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> SessionAdmit {
+        let token = match session::presented_token(request) {
+            Ok(token) => token,
+            Err(outcome) => return outcome,
+        };
+        match self.authorize(request, now) {
+            Decision::Granted(authorized) => ledger.grant(&token, authorized.claims().sub.as_str()),
+            _ => SessionAdmit::Standalone,
         }
     }
 }

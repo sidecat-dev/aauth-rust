@@ -4,11 +4,23 @@
 pub mod continuation;
 mod discovery;
 mod identifiers;
+pub mod interaction;
 mod mission;
+pub mod resource_link;
+pub mod revocation;
+pub mod session;
 pub use mission::{ApprovedMission, MissionError};
 mod tokens;
 pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};
+pub use revocation::{
+    CallOutcome, DownstreamReport, RevocationBody, RevocationDirectory, RevocationLedger,
+    RevocationLimits,
+};
+pub use session::{
+    SessionTokenError, format_aauth_access, format_session_authorization, parse_aauth_access,
+    parse_session_authorization,
+};
 pub use tokens::{
     AuthClaims, AuthToken, PersonClaims, PersonToken, ResourceClaims, ResourceToken,
     VerifiedAuthToken, VerifiedPersonToken, VerifiedResourceToken, mint_auth_token,
@@ -281,12 +293,13 @@ impl AgentToken {
     pub fn unverified_claims(&self) -> &AgentClaims {
         &self.claims
     }
-    /// Verify the issuer signature and exp/nbf at `now` in Unix seconds.
+    /// Verify the issuer signature, then exp/nbf, at `now` in Unix seconds.
     /// This does not verify a holder request or make an application policy decision.
+    /// An invalid signature stays an invalid signature when `exp` has also passed.
     ///
     /// # Errors
-    /// Returns expiry/not-before failures, resolver trust/key errors, or invalid
-    /// issuer signatures. A future iat is not itself a Core validity failure.
+    /// Returns resolver trust/key errors, invalid issuer signatures, then
+    /// expiry/not-before failures. A future iat is not itself a Core validity failure.
     pub fn verify(
         &self,
         keys: &dyn AgentKeyResolver,
@@ -295,14 +308,14 @@ impl AgentToken {
         if now < 0 {
             return Err(TokenError::InvalidJwt);
         }
+        let key = keys.key(&self.claims.iss, &self.claims.dwk, &self.kid)?;
+        self.jws.verify(&key)?;
         if self.claims.exp <= now {
             return Err(TokenError::ExpiredJwt);
         }
         if self.claims.nbf.is_some_and(|nbf| nbf > now) {
             return Err(TokenError::InvalidJwt);
         }
-        let key = keys.key(&self.claims.iss, &self.claims.dwk, &self.kid)?;
-        self.jws.verify(&key)?;
         Ok(VerifiedAgentToken {
             claims: self.claims.clone(),
             compact: self.jws.compact().into(),

@@ -23,7 +23,27 @@ the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses
 a Resource `202` `requirement=auth-token` and polls it with a retained auth
-token. The Resource does not hold that invocation. Settlement and
+token. A host that holds the invocation replays one stored result for that
+auth token `jti` through `exp`. During a clarification, `updated_request`
+replaces the pending resource token only after the new pair verifies, the
+resource identity matches the original (`iss`, `ps`, `sub`, `agent_jkt`,
+`mission_s256`, and `tenant`), and consent allows that replacement. A refusal
+leaves the stored request unchanged and does not call the access server.
+A resource interaction sends the browser to its `callback`, adding `error`
+when the flow did not finish. `access_denied` polls as `denied`,
+`user_abandoned` as `abandoned`, `interaction_expired` as `expired`, and both
+`server_error` and `temporarily_unavailable` as `server_error`.
+`person_server_redirect` and `receive_callback` are helpers; no Person Server
+route calls them. Callback targets are HTTPS, so `http://localhost` and
+`http://127.0.0.1` are refused. A callback that carries `error` does not
+complete the pending request. A resource that must propagate a downstream
+interaction returns its own `202`, with its own code and pending URL. The host
+binds that poll to the opener it already verified. The stored result is
+returned once, at or before `exp`, and a later poll is `410`. A different
+caller receives an empty `404`. An `aauth-resource` link helper returns a
+target only when it is a server identifier plus
+`/.well-known/aauth-resource.json`. The library fetches nothing. The link is
+not an `AAuth-Requirement`. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal
@@ -36,9 +56,60 @@ store transaction as Person and Auth issuance. The decoder refuses an empty
 description, a negative approval time, and an expiry that is not strictly later
 than approval. Installing a record that is not active writes no person binding.
 An empty administrative termination reason is refused before the record changes. The direct Resource can opt in to
-carrying that signed digest. Mission creation, update, completion and control
-endpoints do not execute. AS, child, upstream and federated mission paths do not
-execute. A Resource that asks for a
+carrying that signed digest. Opt-in revocation executes for a Person Server, an Access Server, and a Resource.
+The caller signs as a server. The recipient keys `(iss, jti)` by the verified caller, ignores an `iss` body field, and keeps the first `exp`.
+The ledger is process memory. Downstream calls are a host-supplied directory, not an HTTP client in this library.
+A recipient with nothing downstream answers an empty `200` and never `202`. A Resource refuses a revoked person or auth token with `401` `revoked_jwt` and does not issue a resource token; a revoked auth token asks for a person token.
+An agent helper remembers a resource token refused as `revoked_resource_token`. `Subagent::auth_request` consults that set and does not build another request for that same token. The host records the token-endpoint error before the next build. Another error does not ban the token.
+Opt-in mission creation, update, completion, approval and owner audit execute.
+The agent proposes with a signed `jwt` POST and receives `202` with `Location`,
+`Retry-After`, and `Cache-Control: no-store`. Approval is a separate POST signed
+as this Person Server; a missing or different signature does not approve.
+The proposing agent polls that location once and receives `s256` and the base64url
+mission bytes the server persists. A later poll is `410 gone`. A denied proposal's
+first poll is `403 access_denied` and the next is `410 gone`. The approval POST
+does not return those bytes. The first signed approval claims the proposal before
+the audit write, so a second approval is `404 mission_not_found` and does not
+write another audit. An update or completion POST requires `action`; a missing or
+unrecognized action is `400 invalid_request`. Update requires `description` and
+returns that update's digest without changing the mission digest. Completion
+requires `summary` and terminates with reason `completed`. The owning agent can
+read the exact mission bytes and the accepted updates. A different owner receives
+the same `404` as a missing mission. Proposals are process memory. MemoryStore and
+redb persist the approved document. `mission_control_endpoint`, `person_tokens`
+and `capabilities` are not produced. AS, child, upstream and federated mission
+paths do not execute. Opt-in interaction, permission, and audit endpoints execute.
+The agent signs each POST with `jwt`. `type` is required on interaction. `action`
+is required on permission and audit, and audit also requires `mission_s256`.
+A denied permission does not authorize the action. For a resource-hosted interaction,
+the resource pending URL remains the completion signal after the Person Server relay
+resolves. `interaction` and `payment` return `424 interaction_unavailable` because
+this library has no user channel. A `question` is answered by the host. An interaction
+code is compared after stripping hyphens and folding Crockford aliases and case.
+Presenting the code correlates the session and does not itself approve or deny. After that code is consumed, one POST signed as this Person Server stores the decision, and a second decision is refused. `InteractionCompletion` and `PermissionDecision` are agent helpers; no library poller calls them.
+The code is single-use. Three failed attempts make it terminally `invalid_code`.
+A code whose pending interaction has expired is `408 expired`. The host supplies
+the emitted code. The code table is process memory. Opt-in resource session
+tokens execute. The resource binds an opaque `token68` value to one verified
+agent subject and returns it in one `AAuth-Access` header. The agent keeps the
+latest value and sends `Authorization: AAuth` on the next request. The signature
+covers `authorization`. `AgentIdentityResource::admit_session` verifies that
+same request before it can return the bound subject. An unverified presentation
+does not reveal the subject. A later
+`AAuth-Access` value replaces the previous token. Empty values, embedded
+whitespace, control characters, and more than one credential are rejected.
+Opt-in `authorization_endpoint` executes. The agent presents a person token.
+The resource verifies it before reading `scope`. A request without a person
+token is `requirement=person-token`. Missing `scope` is `invalid_request`.
+A recognized scope returns a resource token. An unrecognized scope is
+`invalid_scope`. A duplicate JSON member and a repeated scope token are
+`invalid_request`.
+A held invocation runs once for an auth token `jti`. A repeated presentation
+of that token at the same pending id returns the stored result through the
+token's `exp` and does not run the invocation again. The host passes only the
+`jti` and `exp` of an auth token this resource already verified, including the
+HTTP proof. The ledger accepts a `jti` of `[A-Za-z0-9_-]{1,128}`.
+A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant
 differs is refused with `403` `access_denied` and no `Signature-Error` header.

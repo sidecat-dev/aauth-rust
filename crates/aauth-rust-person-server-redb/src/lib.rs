@@ -5,6 +5,8 @@
 //! use immediate durability. Files retain internal person identity and all token
 //! lineage indefinitely; hosts own filesystem permissions, backup and capacity.
 //! No signing keys or compact credential bytes are stored.
+//! `aauth_ps_missions` stores an approved mission document and its accepted
+//! updates. A version-1 database that predates that table gains it on open.
 //! This adapter requires Unix and a filesystem supporting directory `sync_all`.
 //! Open synchronizes the database's parent after initializing its file; the host
 //! must durably provision that directory. Other platforms fail closed at open.
@@ -40,12 +42,13 @@ mod failure_tests;
 mod open_tests;
 mod schema;
 use aauth_rust_person_server::{
-    AgentIdentity, Binding, Store, StoreError, TokenRecord, TokenReference,
+    AgentIdentity, Binding, MissionAudit, MissionAuditError, MissionEdit, Store, StoreError,
+    TokenRecord, TokenReference,
 };
 use redb::{
     Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
 };
-use schema::{BINDINGS, DIRECTED, SUBJECTS, TOKENS};
+use schema::{BINDINGS, DIRECTED, MISSIONS, SUBJECTS, TOKENS};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     io,
@@ -370,5 +373,106 @@ impl Store for RedbStore {
             .insert(binding_key.as_str(), encode(&binding)?.as_slice())
             .map_err(unavailable)?;
         transaction.commit().map_err(unavailable)
+    }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        let read = self.database.begin_read().map_err(unavailable)?;
+        let table = read.open_table(TOKENS).map_err(unavailable)?;
+        let mut records = Vec::new();
+        for item in table.range::<&str>(..).map_err(unavailable)? {
+            let (_key, value) = item.map_err(unavailable)?;
+            let record: TokenRecord = decode(value.value())?;
+            record
+                .validate_for_commit(false)
+                .map_err(|_| StoreError::Unavailable)?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+    fn write_mission_audit(&self, audit: &MissionAudit) -> Result<(), StoreError> {
+        audit.validate()?;
+        let encoded = encode(audit)?;
+        if encoded.len() > MAX_RECORD_BYTES {
+            return Err(StoreError::InvalidRecord);
+        }
+        let key = key(&(
+            &audit.person_server,
+            &audit.owner_issuer,
+            &audit.owner_subject,
+            &audit.s256,
+        ))?;
+        let mut transaction = self.database.begin_write().map_err(unavailable)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(unavailable)?;
+        if let Some(existing) = get_bytes(&transaction, MISSIONS, &key)? {
+            let current: MissionAudit = decode(&existing)?;
+            return if current == *audit {
+                Ok(())
+            } else {
+                Err(StoreError::Conflict)
+            };
+        }
+        transaction
+            .open_table(MISSIONS)
+            .map_err(unavailable)?
+            .insert(key.as_str(), encoded.as_slice())
+            .map_err(unavailable)?;
+        transaction.commit().map_err(unavailable)
+    }
+    fn read_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+    ) -> Result<Option<MissionAudit>, StoreError> {
+        let key = key(&(person_server, owner_issuer, owner_subject, s256))?;
+        let read = self.database.begin_read().map_err(unavailable)?;
+        let table = read.open_table(MISSIONS).map_err(unavailable)?;
+        let Some(value) = table.get(key.as_str()).map_err(unavailable)? else {
+            return Ok(None);
+        };
+        let audit: MissionAudit = decode(value.value())?;
+        audit.validate()?;
+        Ok(Some(audit))
+    }
+    fn edit_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+        edit: MissionEdit,
+    ) -> Result<MissionAudit, MissionAuditError> {
+        let key = key(&(person_server, owner_issuer, owner_subject, s256))
+            .map_err(|_| MissionAuditError::Unavailable)?;
+        let mut transaction = self
+            .database
+            .begin_write()
+            .map_err(|_| MissionAuditError::Unavailable)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(|_| MissionAuditError::Unavailable)?;
+        let Some(existing) =
+            get_bytes(&transaction, MISSIONS, &key).map_err(|_| MissionAuditError::Unavailable)?
+        else {
+            return Err(MissionAuditError::NotFound);
+        };
+        let mut audit: MissionAudit =
+            decode(&existing).map_err(|_| MissionAuditError::Unavailable)?;
+        audit.apply(edit)?;
+        let encoded = encode(&audit).map_err(|_| MissionAuditError::Unavailable)?;
+        if encoded.len() > MAX_RECORD_BYTES {
+            return Err(MissionAuditError::Invalid);
+        }
+        transaction
+            .open_table(MISSIONS)
+            .map_err(|_| MissionAuditError::Unavailable)?
+            .insert(key.as_str(), encoded.as_slice())
+            .map_err(|_| MissionAuditError::Unavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| MissionAuditError::Unavailable)?;
+        Ok(audit)
     }
 }

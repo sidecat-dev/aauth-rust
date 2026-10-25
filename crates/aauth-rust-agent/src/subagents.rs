@@ -1,5 +1,5 @@
 //! Parent-mediated one-level Core requests and public-key delivery verification.
-use crate::{Agent, FederatedContext, credentials::CredentialVerifier};
+use crate::{Agent, FederatedContext, ResourceTokenAttempts, credentials::CredentialVerifier};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceToken, TokenError,
     VerifiedAgentToken, VerifiedAuthToken, VerifiedPersonToken, VerifiedResourceToken,
@@ -245,10 +245,14 @@ impl Subagent {
     /// `resource` must come from challenge verification against the host's
     /// intended identities. The host must admit `endpoint` from trusted PS
     /// metadata, then send these bytes unchanged. No transport or retry occurs.
+    /// `attempts` is the set of resource tokens already refused as
+    /// `revoked_resource_token`. The host records that error before calling again.
     ///
     /// # Errors
-    /// Rejects stale identities/challenge, another parent, invalid endpoint,
-    /// mission/context/key mismatch, oversized serialization or failed signing.
+    /// Rejects a remembered revoked resource token, stale identities/challenge,
+    /// another parent, an invalid endpoint, mission/context/key mismatch,
+    /// oversized serialization or failed signing.
+    #[allow(clippy::too_many_arguments)]
     pub fn auth_request(
         &self,
         parent: &Agent,
@@ -257,7 +261,11 @@ impl Subagent {
         presented_compact: &str,
         keys: &dyn AgentKeyResolver,
         now: i64,
+        attempts: &ResourceTokenAttempts,
     ) -> Result<Request<Vec<u8>>, TokenError> {
+        if !attempts.may_submit(resource.compact()) {
+            return Err(TokenError::InvalidJwt);
+        }
         self.current(keys, now)?;
         let resource = ResourceToken::parse(resource.compact())?.verify(keys, now)?;
         self.person_server(&resource.claims().ps)?;
