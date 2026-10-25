@@ -17,8 +17,14 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
-four-party federation. The proof subset is Ed25519 `hwk`/`jwt` plus explicit
-`jwks_uri` service proofs. A `keyid` parameter is accepted only when it equals
+four-party federation. The proof subset is Ed25519 `hwk`/`jwt`, Ed25519 `jkt-s256+jwt`
+self-issued delegation, plus explicit
+`jwks_uri` service proofs. A `jkt-jwt` member is verified by recomputing
+`urn:jkt:sha-256:` from the header `jwk` and comparing it to `iss`, then
+verifying the assertion and the HTTP signature under `cnf.jwk`. `iat` uses
+the same window as `created`. `exp` must be strictly after the verifier
+clock. The bare `cache` flag requires `jti`; this profile does not yet issue
+`Signature-Key-Cache`. Direct agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
 Signature-Key. Opt-in AS/PS continuations cover bounded claims, clarification, interaction,
 approval and WWW-Authenticate payment with signed polling. An Agent also parses

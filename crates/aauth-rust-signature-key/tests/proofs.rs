@@ -917,3 +917,478 @@ fn jwks_uri_parameters_cannot_inject_headers_or_discovery_paths() {
         );
     }
 }
+
+fn jkt_assertion(
+    identity: &SigningKey,
+    confirmation: &aauth_rust_jose::Jwk,
+    iat: i64,
+    exp: i64,
+    issuer: &str,
+    jti: Option<&str>,
+    typ: &str,
+) -> String {
+    let mut payload = json!({
+        "iss": issuer,
+        "iat": iat,
+        "exp": exp,
+        "cnf": {"jwk": confirmation},
+    });
+    if let Some(jti) = jti {
+        payload["jti"] = json!(jti);
+    }
+    Jws::sign(
+        &json!({"alg":"Ed25519","typ":typ,"jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&payload).unwrap(),
+        identity,
+    )
+    .unwrap()
+}
+
+fn jkt_request(cache: bool, jti: Option<&str>) -> (Request<Vec<u8>>, SigningKey, SigningKey) {
+    let identity = SigningKey::from_seed([4; 32]);
+    let ephemeral = SigningKey::from_seed([5; 32]);
+    let issuer = format!(
+        "urn:jkt:sha-256:{}",
+        identity.public_jwk().thumbprint().unwrap()
+    );
+    let jwt = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1000,
+        2000,
+        &issuer,
+        jti,
+        "jkt-s256+jwt",
+    );
+    let mut req = request();
+    sign_request(
+        &mut req,
+        &ephemeral,
+        KeyMaterial::JktJwt { jwt, cache },
+        1000,
+    )
+    .unwrap();
+    (req, identity, ephemeral)
+}
+
+fn verify_presented_jkt(
+    jwt: &str,
+    signer: &SigningKey,
+) -> Result<aauth_rust_signature_key::JktDelegation, Error> {
+    let (mut req, _, _) = jkt_request(false, None);
+    req.headers_mut().insert(
+        "signature-key",
+        format!("sig=jkt-jwt;jwt=\"{jwt}\"").parse().unwrap(),
+    );
+    resign_with(&mut req, signer, &["jkt-jwt"]);
+    PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jkt-jwt"])
+        .unwrap()
+        .verify_jkt_jwt(1000)
+}
+
+#[test]
+fn jkt_jwt_delegates_signing_and_binds_the_enclave_thumbprint() {
+    let (req, identity, ephemeral) = jkt_request(false, None);
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::UnsupportedScheme
+    );
+    let prepared =
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jkt-jwt"]).unwrap();
+    let delegation = prepared.verify_jkt_jwt(1000).unwrap();
+    assert_eq!(
+        delegation.issuer,
+        format!(
+            "urn:jkt:sha-256:{}",
+            identity.public_jwk().thumbprint().unwrap()
+        )
+    );
+    assert_eq!(delegation.confirmation.x, ephemeral.public_jwk().x);
+    assert_eq!(delegation.identity.x, identity.public_jwk().x);
+    assert_eq!(delegation.confirmation.alg, "Ed25519");
+    assert_eq!(delegation.identity.alg, "Ed25519");
+    assert!(!delegation.cache);
+    assert!(delegation.jti.is_none());
+    assert_eq!(prepared.verify_jkt_jwt(1999).unwrap().expires_at, 2000);
+    assert_eq!(
+        prepared.verify_jkt_jwt(2000).unwrap_err(),
+        Error::ExpiredJwt
+    );
+
+    let mut wrong_http = req.clone();
+    resign_with(&mut wrong_http, &identity, &["jkt-jwt"]);
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&wrong_http, "sig", 1000, 60, &["jkt-jwt"])
+            .unwrap()
+            .verify_jkt_jwt(1000)
+            .unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &identity,
+            KeyMaterial::JktJwt {
+                jwt: req.headers()["signature-key"]
+                    .to_str()
+                    .unwrap()
+                    .split_once("jwt=\"")
+                    .unwrap()
+                    .1
+                    .trim_end_matches('"')
+                    .into(),
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let mut missing = req.clone();
+    missing
+        .headers_mut()
+        .insert("signature-key", "sig=jkt-jwt".parse().unwrap());
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&missing, "sig", 1000, 60, &["jkt-jwt"]).unwrap_err(),
+        Error::InvalidKey
+    );
+    let mut malformed = req.clone();
+    malformed.headers_mut().insert(
+        "signature-key",
+        "sig=jkt-jwt;jwt=\"not-a-jwt\"".parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&malformed, "sig", 1000, 60, &["jkt-jwt"])
+            .unwrap()
+            .verify_jkt_jwt(1000)
+            .unwrap_err(),
+        Error::InvalidJwt
+    );
+
+    let (cached, _, _) = jkt_request(true, Some("delegation-1"));
+    let cached_proof =
+        PreparedRequest::prepare_with_schemes(&cached, "sig", 1000, 60, &["jkt-jwt"])
+            .unwrap()
+            .verify_jkt_jwt(1000)
+            .unwrap();
+    assert!(cached_proof.cache);
+    assert_eq!(cached_proof.jti.as_deref(), Some("delegation-1"));
+    assert!(
+        cached.headers()["signature-key"]
+            .to_str()
+            .unwrap()
+            .ends_with(";cache")
+    );
+
+    let identity = SigningKey::from_seed([4; 32]);
+    let ephemeral = SigningKey::from_seed([5; 32]);
+    let issuer = format!(
+        "urn:jkt:sha-256:{}",
+        identity.public_jwk().thumbprint().unwrap()
+    );
+    let without_jti = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1000,
+        2000,
+        &issuer,
+        None,
+        "jkt-s256+jwt",
+    );
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: without_jti,
+                cache: true
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    let mut assigned = cached.clone();
+    let header = assigned.headers()["signature-key"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assigned.headers_mut().insert(
+        "signature-key",
+        header.replace(";cache", ";cache=?1").parse().unwrap(),
+    );
+    assert_eq!(
+        PreparedRequest::prepare_with_schemes(&assigned, "sig", 1000, 60, &["jkt-jwt"])
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+
+    let skewed = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1061,
+        2000,
+        &issuer,
+        None,
+        "jkt-s256+jwt",
+    );
+    let mut skewed_req = request();
+    sign_request(
+        &mut skewed_req,
+        &ephemeral,
+        KeyMaterial::JktJwt {
+            jwt: skewed,
+            cache: false,
+        },
+        1000,
+    )
+    .unwrap();
+    let skewed_proof =
+        PreparedRequest::prepare_with_schemes(&skewed_req, "sig", 1000, 60, &["jkt-jwt"]).unwrap();
+    assert_eq!(
+        skewed_proof.verify_jkt_jwt(1000).unwrap_err(),
+        Error::ClockSkew
+    );
+    let on_window = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1060,
+        2000,
+        &issuer,
+        None,
+        "jkt-s256+jwt",
+    );
+    let mut on_window_req = request();
+    sign_request(
+        &mut on_window_req,
+        &ephemeral,
+        KeyMaterial::JktJwt {
+            jwt: on_window,
+            cache: false,
+        },
+        1000,
+    )
+    .unwrap();
+    PreparedRequest::prepare_with_schemes(&on_window_req, "sig", 1000, 60, &["jkt-jwt"])
+        .unwrap()
+        .verify_jkt_jwt(1000)
+        .unwrap();
+
+    let wrong_iss = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1000,
+        2000,
+        "urn:jkt:sha-256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        None,
+        "jkt-s256+jwt",
+    );
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: wrong_iss,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    let wrong_typ = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1000,
+        2000,
+        &issuer,
+        None,
+        "jkt-s512+jwt",
+    );
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: wrong_typ,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+
+    let mut no_jwk = json!({"alg":"Ed25519","typ":"jkt-s256+jwt"});
+    let compact = Jws::sign(&no_jwk, b"{}", &identity).unwrap();
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: compact,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
+    no_jwk = json!({"alg":"Ed25519","typ":"jkt-s256+jwt","jwk":identity.public_jwk()});
+    let mut claims = json!({"iss":issuer,"iat":1000,"exp":2000});
+    let compact = Jws::sign(&no_jwk, &serde_json::to_vec(&claims).unwrap(), &identity).unwrap();
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: compact,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::InvalidJwt,
+        "cnf is required"
+    );
+    claims["cnf"] = json!({"jwk":{"kty":"OKP","crv":"Ed25519","x":ephemeral.public_jwk().x}});
+    let compact = Jws::sign(&no_jwk, &serde_json::to_vec(&claims).unwrap(), &identity).unwrap();
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: compact,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::UnsupportedAlgorithm,
+        "confirmation alg is required"
+    );
+
+    let other = SigningKey::from_seed([9; 32]);
+    let forged = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"jkt-s256+jwt","jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&json!({
+            "iss": issuer,
+            "iat": 1000,
+            "exp": 2000,
+            "cnf": {"jwk": ephemeral.public_jwk()}
+        }))
+        .unwrap(),
+        &other,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_presented_jkt(&forged, &ephemeral).unwrap_err(),
+        Error::InvalidJwt,
+        "header jwk is the root of trust"
+    );
+    let omitted_typ = Jws::sign(
+        &json!({"alg":"Ed25519","jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&json!({
+            "iss": issuer,
+            "iat": 1000,
+            "exp": 2000,
+            "cnf": {"jwk": ephemeral.public_jwk()}
+        }))
+        .unwrap(),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_presented_jkt(&omitted_typ, &ephemeral).unwrap_err(),
+        Error::InvalidJwt,
+        "typ is required"
+    );
+    let payload = serde_json::to_vec(&json!({
+        "iss": issuer,
+        "iat": 1000,
+        "exp": 2000,
+        "cnf": {"jwk": ephemeral.public_jwk()}
+    }))
+    .unwrap();
+    let omitted_alg = format!(
+        "{}.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"typ":"jkt-s256+jwt","jwk":{}}"#),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&payload),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 64])
+    );
+    assert_eq!(
+        verify_presented_jkt(&omitted_alg, &ephemeral).unwrap_err(),
+        Error::UnsupportedAlgorithm,
+        "alg is required"
+    );
+    let omitted_iat = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"jkt-s256+jwt","jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&json!({
+            "iss": issuer,
+            "exp": 2000,
+            "cnf": {"jwk": ephemeral.public_jwk()}
+        }))
+        .unwrap(),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_presented_jkt(&omitted_iat, &ephemeral).unwrap_err(),
+        Error::InvalidJwt,
+        "iat is required"
+    );
+    let omitted_exp = Jws::sign(
+        &json!({"alg":"Ed25519","typ":"jkt-s256+jwt","jwk":identity.public_jwk()}),
+        &serde_json::to_vec(&json!({
+            "iss": issuer,
+            "iat": 1000,
+            "cnf": {"jwk": ephemeral.public_jwk()}
+        }))
+        .unwrap(),
+        &identity,
+    )
+    .unwrap();
+    assert_eq!(
+        verify_presented_jkt(&omitted_exp, &ephemeral).unwrap_err(),
+        Error::InvalidJwt,
+        "exp is required"
+    );
+    let sha512 = jkt_assertion(
+        &identity,
+        &ephemeral.public_jwk(),
+        1000,
+        2000,
+        "urn:jkt:sha-512:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        None,
+        "jkt-s256+jwt",
+    );
+    assert_eq!(
+        verify_presented_jkt(&sha512, &ephemeral).unwrap_err(),
+        Error::InvalidJwt,
+        "jkt-s256+jwt requires the sha-256 issuer prefix"
+    );
+
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let foreign = format!(
+        "{}.{}.{}",
+        URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256","typ":"jkt-s256+jwt"}"#),
+        URL_SAFE_NO_PAD.encode(b"{}"),
+        URL_SAFE_NO_PAD.encode([1u8; 64])
+    );
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: foreign,
+                cache: false
+            },
+            1000
+        )
+        .unwrap_err(),
+        Error::UnsupportedAlgorithm
+    );
+}

@@ -1,7 +1,9 @@
-//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt` and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with Ed25519 `hwk`, `jwt`, `jkt-jwt`, and explicit `jwks_uri` schemes.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod content_digest;
+mod jkt;
+pub use jkt::JktDelegation;
 
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -70,6 +72,16 @@ pub enum Error {
     )]
     /// Signed request target differs from the configured Resource endpoint.
     TargetMismatch,
+    #[error(
+        "invalid Signature-Key JWT: check compact serialization, required claims, the enclave signature, and that iss is the thumbprint of the header jwk"
+    )]
+    /// JWT carried by Signature-Key is malformed or its signature failed.
+    InvalidJwt,
+    #[error(
+        "Signature-Key JWT has expired: mint a new assertion whose exp is after the verifier clock"
+    )]
+    /// JWT `exp` is not strictly after the verifier clock.
+    ExpiredJwt,
 }
 impl Error {
     /// Stable Signature-Error code; Display is a local explanation.
@@ -87,6 +99,8 @@ impl Error {
             Self::InvalidKey => "invalid_key",
             Self::UnsupportedScheme => "unsupported_scheme",
             Self::UnsupportedAlgorithm => "unsupported_algorithm",
+            Self::InvalidJwt => "invalid_jwt",
+            Self::ExpiredJwt => "expired_jwt",
         }
     }
 }
@@ -107,6 +121,14 @@ pub enum KeyMaterial {
         dwk: String,
         /// Nonempty exact key identifier in the admitted issuer's JWKS.
         kid: String,
+    },
+    /// Self-issued `jkt-jwt` delegation. `jwt` is the compact assertion.
+    /// `cache` is the bare `cache` flag; it requires `jti` at verification.
+    JktJwt {
+        /// Compact `jkt-s256+jwt` assertion.
+        jwt: String,
+        /// Caller asked for a cache identifier. Issuance is a separate step.
+        cache: bool,
     },
 }
 
@@ -185,7 +207,7 @@ fn text<'a>(params: &'a Parameters, name: &str) -> Result<&'a str, Error> {
         _ => Err(Error::InvalidKey),
     }
 }
-fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
+fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<KeyMaterial, Error> {
     let ListEntry::Item(item) = entry else {
         return Err(Error::InvalidKey);
     };
@@ -195,6 +217,11 @@ fn parse_key(entry: &ListEntry) -> Result<KeyMaterial, Error> {
     match scheme.as_str() {
         "hwk" => parse_hwk(item),
         "jwt" => Ok(KeyMaterial::Jwt(text(&item.params, "jwt")?.into())),
+        "jkt-jwt" => {
+            let jwt = text(&item.params, "jwt")?.to_owned();
+            let cache = jkt::cache_flag(header, label, &item.params)?;
+            Ok(KeyMaterial::JktJwt { jwt, cache })
+        }
         "jwks_uri" => {
             let id = text(&item.params, "id")?;
             let dwk = text(&item.params, "dwk")?;
@@ -214,7 +241,7 @@ fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
         KeyMaterial::Hwk(_) => Ok(None),
         KeyMaterial::JwksUri { kid, .. } => Ok(Some(kid.clone())),
-        KeyMaterial::Jwt(compact) => {
+        KeyMaterial::Jwt(compact) | KeyMaterial::JktJwt { jwt: compact, .. } => {
             let header = aauth_rust_jose::Jws::parse(compact)
                 .map_err(|_| Error::InvalidKey)?
                 .header()
@@ -392,6 +419,7 @@ pub struct PreparedRequest {
     key: KeyMaterial,
     base: Vec<u8>,
     signature: Vec<u8>,
+    window: i64,
 }
 impl PreparedRequest {
     /// Capture a selected hwk/jwt assertion at `now` with a window in Unix seconds.
@@ -457,7 +485,10 @@ impl PreparedRequest {
                 _ => return Err(Error::InvalidSignature),
             }
         }
-        let keys = dictionary(req, "signature-key")?;
+        let key_header = header(req, "signature-key").map_err(|_| Error::InvalidKey)?;
+        let keys = Parser::new(&key_header)
+            .parse::<Dictionary>()
+            .map_err(|_| Error::InvalidKey)?;
         let entry = keys.get(label).ok_or(Error::InvalidSignature)?;
         let ListEntry::Item(item) = entry else {
             return Err(Error::InvalidKey);
@@ -468,7 +499,7 @@ impl PreparedRequest {
         if !accepted.contains(&scheme.as_str()) {
             return Err(Error::UnsupportedScheme);
         }
-        let key = parse_key(entry)?;
+        let key = parse_key(entry, &key_header, label)?;
         if let Some(keyid) = input.params.get("keyid") {
             let BareItem::String(keyid) = keyid else {
                 return Err(Error::InvalidSignature);
@@ -492,6 +523,7 @@ impl PreparedRequest {
             key,
             base: build_base(req, input)?,
             signature: bytes.clone(),
+            window,
         })
     }
     /// Selected unverified material for role-specific token/key resolution.
@@ -567,6 +599,17 @@ pub fn sign_request(
             aauth_rust_jose::Jws::parse(&jwt).map_err(|_| Error::InvalidKey)?;
             format!("sig=jwt;jwt=\"{jwt}\"")
         }
+        KeyMaterial::JktJwt { jwt, cache } => {
+            let delegation = jkt::parse_jkt(&jwt, cache)?;
+            if delegation.confirmation.thumbprint().ok() != key.public_jwk().thumbprint().ok() {
+                return Err(Error::InvalidKey);
+            }
+            let mut header = format!("sig=jkt-jwt;jwt=\"{jwt}\"");
+            if cache {
+                header.push_str(";cache");
+            }
+            header
+        }
     };
     let mut covered = vec!["@method", "@authority", "@path"];
     if req.uri().query().is_some() {
@@ -623,6 +666,7 @@ impl std::fmt::Debug for PreparedRequest {
             KeyMaterial::Hwk(_) => "hwk",
             KeyMaterial::Jwt(_) => "jwt",
             KeyMaterial::JwksUri { .. } => "jwks_uri",
+            KeyMaterial::JktJwt { .. } => "jkt-jwt",
         };
         f.debug_struct("PreparedRequest")
             .field("scheme", &scheme)
