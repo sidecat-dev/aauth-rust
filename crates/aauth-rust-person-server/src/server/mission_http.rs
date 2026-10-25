@@ -5,8 +5,12 @@ use aauth_rust_jose::strict_json;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+/// Owner issuer, owner subject, and proposal id. A poll looks up this whole key,
+/// so a missing id and another agent's id are the same miss.
+type ProposalKey = (String, String, String);
+
 pub(super) struct Gate {
-    proposals: Mutex<BTreeMap<String, Proposal>>,
+    proposals: Mutex<BTreeMap<ProposalKey, Proposal>>,
 }
 
 struct Proposal {
@@ -146,12 +150,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let owner = agent.claims();
         let location = self.proposal_location(id);
         let mut proposals = self.proposals()?;
-        let Some(proposal) = proposals.get_mut(id) else {
+        let Some(proposal) = proposals.get_mut(&proposal_key(&owner.iss, &owner.sub, id)) else {
             return Err(mission_not_found());
         };
-        if proposal.owner_issuer != owner.iss || proposal.owner_subject != owner.sub {
-            return Err(mission_not_found());
-        }
         if proposal.delivered {
             return Err(Failure::status(StatusCode::GONE, "gone"));
         }
@@ -188,7 +189,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         };
         let (owner_subject, owner_issuer, description) = {
             let mut proposals = self.proposals()?;
-            let Some(proposal) = proposals.get_mut(id) else {
+            let Some(proposal) = find_proposal(&mut proposals, id) else {
                 return Err(mission_not_found());
             };
             if !matches!(proposal.status, Status::Pending) {
@@ -232,7 +233,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
         };
         let mut proposals = self.proposals()?;
-        let Some(proposal) = proposals.get_mut(id) else {
+        let Some(proposal) = find_proposal(&mut proposals, id) else {
             return Err(Failure::internal());
         };
         if !matches!(proposal.status, Status::Approving) {
@@ -363,14 +364,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Ok(mut proposals) = self.proposals() else {
             return;
         };
-        if let Some(proposal) = proposals.get_mut(id)
+        if let Some(proposal) = find_proposal(&mut proposals, id)
             && matches!(proposal.status, Status::Approving)
         {
             proposal.status = Status::Pending;
         }
     }
 
-    fn proposals(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, Proposal>>, Failure> {
+    fn proposals(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<ProposalKey, Proposal>>, Failure> {
         self.mission_http
             .as_ref()
             .ok_or_else(Failure::internal)?
@@ -381,10 +384,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 
     fn insert_proposal(&self, id: String, proposal: Proposal) -> Result<(), Failure> {
         let mut proposals = self.proposals()?;
-        if proposals.contains_key(&id) {
+        if proposals.keys().any(|key| key.2 == id) {
             return Err(Failure::internal());
         }
-        proposals.insert(id, proposal);
+        let key = proposal_key(&proposal.owner_issuer, &proposal.owner_subject, &id);
+        proposals.insert(key, proposal);
         Ok(())
     }
 
@@ -450,6 +454,22 @@ fn update_bytes(field: &str, text: &str) -> Result<MissionUpdateBytes, Failure> 
     object.insert(field.into(), Value::String(text.into()));
     let bytes = serde_json::to_vec(&Value::Object(object)).map_err(|_| Failure::internal())?;
     MissionUpdateBytes::from_exact(&bytes).map_err(stored)
+}
+
+fn proposal_key(owner_issuer: &str, owner_subject: &str, id: &str) -> ProposalKey {
+    (
+        owner_issuer.to_owned(),
+        owner_subject.to_owned(),
+        id.to_owned(),
+    )
+}
+
+fn find_proposal<'a>(
+    proposals: &'a mut BTreeMap<ProposalKey, Proposal>,
+    id: &str,
+) -> Option<&'a mut Proposal> {
+    let key = proposals.keys().find(|key| key.2 == id).cloned()?;
+    proposals.get_mut(&key)
 }
 
 fn mission_not_found() -> Failure {

@@ -662,3 +662,82 @@ fn simultaneous_approvals_write_one_audit() {
     assert_eq!(again.status(), 410);
     assert_eq!(error_of(&again), "gone");
 }
+
+fn same_response(left: &Response<Vec<u8>>, right: &Response<Vec<u8>>) {
+    assert_eq!(left.status(), right.status());
+    assert_eq!(left.headers(), right.headers());
+    assert_eq!(left.body(), right.body());
+}
+
+#[test]
+fn missing_and_unowned_missions_match_and_auth_precedes_lookup() {
+    let fixture = fixture(true);
+    let proposal = propose(&fixture, "draft the note");
+    let stranger_poll = fixture.server.handle(&signed(
+        &fixture.other,
+        "GET",
+        &format!("/mission/proposal/{proposal}"),
+        None,
+    ));
+    let missing_poll = fixture.server.handle(&signed(
+        &fixture.owner,
+        "GET",
+        "/mission/proposal/no-such-proposal",
+        None,
+    ));
+    same_response(&stranger_poll, &missing_poll);
+    assert_eq!(stranger_poll.status(), 404);
+    assert_eq!(error_of(&stranger_poll), "mission_not_found");
+
+    let approved = approve(&fixture, &proposal);
+    let s256 = approved["s256"].as_str().unwrap();
+    let body = serde_json::json!({ "action": "update", "description": "add the appendix" });
+    let stranger_post = fixture.server.handle(&signed(
+        &fixture.other,
+        "POST",
+        &format!("/mission/{s256}"),
+        Some(body.clone()),
+    ));
+    let missing_post = fixture.server.handle(&signed(
+        &fixture.owner,
+        "POST",
+        "/mission/no-such-mission",
+        Some(body),
+    ));
+    same_response(&stranger_post, &missing_post);
+    assert_eq!(stranger_post.status(), 404);
+    assert_eq!(error_of(&stranger_post), "mission_not_found");
+
+    let bad_existing = Request::builder()
+        .method("GET")
+        .uri(format!("https://ps.example/mission/proposal/{proposal}"))
+        .body(Vec::new())
+        .unwrap();
+    let bad_missing = Request::builder()
+        .method("GET")
+        .uri("https://ps.example/mission/proposal/no-such-proposal")
+        .body(Vec::new())
+        .unwrap();
+    let existing = fixture.server.handle(&bad_existing);
+    let missing = fixture.server.handle(&bad_missing);
+    same_response(&existing, &missing);
+    assert_eq!(existing.status(), 401);
+    assert_ne!(error_of(&existing), "mission_not_found");
+
+    let approval = serde_json::json!({ "decision": "approve" });
+    let bad_approval_existing = fixture.server.handle(&signed(
+        &fixture.owner,
+        "POST",
+        &format!("/mission/proposal/{proposal}/approval"),
+        Some(approval.clone()),
+    ));
+    let bad_approval_missing = fixture.server.handle(&signed(
+        &fixture.owner,
+        "POST",
+        "/mission/proposal/no-such-proposal/approval",
+        Some(approval),
+    ));
+    same_response(&bad_approval_existing, &bad_approval_missing);
+    assert_eq!(bad_approval_existing.status(), 401);
+    assert_ne!(error_of(&bad_approval_existing), "mission_not_found");
+}
