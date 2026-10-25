@@ -323,6 +323,41 @@ fn a_conflicting_grant_for_the_same_jti_is_500_and_omits_the_budget_header() {
 }
 
 #[test]
+fn an_insufficient_refusal_can_omit_required() {
+    let resource = resource().without_stated_required();
+    let refused = resource
+        .authorize(
+            &present(&auth("quiet", Some(2_000), "read"), Some(2_500)),
+            NOW,
+            "quiet-1",
+        )
+        .into_response();
+    assert_eq!(refused.status(), 401);
+    let requirement = refused.headers()["aauth-requirement"].to_str().unwrap();
+    assert!(
+        requirement.contains("reason=insufficient-budget"),
+        "{requirement}"
+    );
+    let header = refused.headers()["aauth-budget"].to_str().unwrap();
+    assert!(header.contains("remaining=2000"), "{header}");
+    assert!(!header.contains("required="), "{header}");
+    assert!(!header.contains("cost="), "{header}");
+    let again = resource
+        .authorize(
+            &present(&auth("quiet", Some(2_000), "read"), Some(1_000)),
+            NOW,
+            "quiet-2",
+        )
+        .into_response();
+    assert_eq!(
+        again.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(again.body())
+    );
+}
+
+#[test]
 fn streaming_hold_and_replay_do_not_pass_the_grant() {
     let resource = resource();
     let token = AuthToken::parse(&auth("stream", Some(5_000), "read"))

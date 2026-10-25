@@ -224,7 +224,9 @@ decimals, including after `replace_budget_units`. A buffered call charges
 `AAuth-Max-Cost` when that header is one bare integer, otherwise the profile
 default bound, and sets the cost to that maximum. A bound the grant cannot
 cover is `401` with `reason=insufficient-budget` or `reason=budget-exhausted`,
-an `AAuth-Budget` header, and no draw-down. A successful metered response
+an `AAuth-Budget` header, and no draw-down. The default insufficient refusal
+includes `required`. `without_stated_required` omits that member and still
+sends `remaining`. A successful metered response
 carries `AAuth-Budget` with `cost`. A scope or policy denial of a verified
 budgeted token still carries the header and does not draw down. A person-token
 challenge does not carry it. A metering-layer failure is `500` and omits the

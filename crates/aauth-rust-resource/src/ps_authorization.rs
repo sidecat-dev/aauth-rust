@@ -7,9 +7,9 @@ use std::sync::Mutex;
 use crate::budget_gate::{BudgetGate, metadata_units, problem};
 use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
 use aauth_rust_budgets::{
-    Budget, ChargeError, ConsumptionRecord, KeyRole, MAX_AMOUNT, Reservation, UnitDeclaration,
-    answer_usage, metered_access_mode, parse_budget, parse_usage_query, read_granted,
-    sign_usage_response, validate_endpoint_url,
+    Budget, BudgetHeader, ChargeError, ConsumptionRecord, KeyRole, MAX_AMOUNT, Reservation,
+    UnitDeclaration, answer_usage, metered_access_mode, parse_budget, parse_usage_query,
+    read_granted, sender_field, sign_usage_response, validate_endpoint_url,
 };
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceClaims, TokenError,
@@ -419,6 +419,7 @@ pub struct PsAuthorizationResource<K, P> {
     authorization_endpoint: bool,
     revocation: Option<revocation::Gate>,
     budgets: Option<BudgetGate>,
+    omit_required: bool,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -471,6 +472,7 @@ where
             authorization_endpoint: false,
             revocation: None,
             budgets: None,
+            omit_required: false,
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
@@ -567,9 +569,21 @@ where
             usage_endpoint,
             default_bound,
             default_offer,
+            omit_required: self.omit_required,
             ledger: Mutex::new(aauth_rust_budgets::Ledger::new()),
         });
         Ok(self)
+    }
+    /// Omit `required` on an `insufficient-budget` refusal.
+    ///
+    /// The default sends `required`. Call this when the resource will not state
+    /// a cost bound. Exhaustion already omits `required` because nothing remains.
+    pub fn without_stated_required(mut self) -> Self {
+        self.omit_required = true;
+        if let Some(gate) = &mut self.budgets {
+            gate.omit_required = true;
+        }
+        self
     }
     /// Replace cached `budget_units` after challenges have been issued.
     ///
@@ -1126,7 +1140,17 @@ where
                     aauth_rust_budgets::Refusal::Exhausted { header, .. } => {
                         ("budget-exhausted", header)
                     }
-                    aauth_rust_budgets::Refusal::Insufficient { header, .. } => {
+                    aauth_rust_budgets::Refusal::Insufficient {
+                        remaining, header, ..
+                    } => {
+                        let header = if gate.omit_required {
+                            match unstated_required(&grant, remaining) {
+                                Ok(header) => header,
+                                Err(()) => return Ok(AuthDecision::InternalError),
+                            }
+                        } else {
+                            header
+                        };
                         ("insufficient-budget", header)
                     }
                 };
@@ -1412,6 +1436,11 @@ fn unsupported_companion(claims: &BTreeMap<String, Value>, allow_budget: bool) -
         "budget" => !allow_budget,
         _ => false,
     })
+}
+fn unstated_required(grant: &Budget, remaining: i64) -> Result<String, ()> {
+    let header =
+        BudgetHeader::refusal(remaining, None, grant.unit(), grant.decimals()).map_err(|_| ())?;
+    sender_field(&header, false).map_err(|_| ())
 }
 fn insert_budget(response: &mut Response<Vec<u8>>, header: Option<String>) {
     if let Some(header) = header

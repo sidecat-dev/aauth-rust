@@ -16,6 +16,7 @@ pub(super) struct BudgetGate {
     pub(super) usage_endpoint: String,
     pub(super) default_bound: i64,
     pub(super) default_offer: i64,
+    pub(super) omit_required: bool,
     pub(super) ledger: Mutex<Ledger>,
 }
 
