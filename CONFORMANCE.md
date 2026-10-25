@@ -187,6 +187,10 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   The host binds the poll to the opener it already verified. That caller receives
   the stored result once, at or before `exp`. A later poll is `410`. A different
   caller receives an empty `404` and not the result.
+  `aauth-resource` link helpers return a target only when it is a server
+  identifier followed by `/.well-known/aauth-resource.json`, and the metadata
+  `issuer` is that identifier. The library fetches nothing. The link is not an
+  `AAuth-Requirement`.
   Opt-in mission creation, update, completion, authenticated approval and owner audit do execute.
   Opt-in interaction, permission, and audit posts do execute. Interaction and payment relays return `424 interaction_unavailable`. Presented interaction codes are correlated, not consent.
   Opt-in revocation does execute. The ledger is process memory, and downstream

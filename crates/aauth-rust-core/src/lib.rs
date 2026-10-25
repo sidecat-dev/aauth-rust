@@ -6,6 +6,7 @@ mod discovery;
 mod identifiers;
 pub mod interaction;
 mod mission;
+pub mod resource_link;
 pub mod revocation;
 pub mod session;
 pub use mission::{ApprovedMission, MissionError};

@@ -40,7 +40,10 @@ complete the pending request. A resource that must propagate a downstream
 interaction returns its own `202`, with its own code and pending URL. The host
 binds that poll to the opener it already verified. The stored result is
 returned once, at or before `exp`, and a later poll is `410`. A different
-caller receives an empty `404`. Settlement and
+caller receives an empty `404`. An `aauth-resource` link helper returns a
+target only when it is a server identifier plus
+`/.well-known/aauth-resource.json`. The library fetches nothing. The link is
+not an `AAuth-Requirement`. Settlement and
 interaction/code lifecycle are host-owned. The AS sends payment and claims
 requirements to the PS; the PS host handles them while the Agent sees Approval.
 There is no Agent payment hint or settlement API in this profile. Single terminal
