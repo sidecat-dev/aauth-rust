@@ -1,5 +1,6 @@
 mod continuation;
 mod federation;
+mod mission_http;
 mod revocation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
 mod lineage;
@@ -81,6 +82,7 @@ pub struct PersonServer<K, S, P, C, I> {
     federation: Option<crate::BoxedFederation>,
     deferred: Option<DeferredConfig>,
     revocation: Option<revocation::Gate>,
+    mission_http: Option<mission_http::Gate>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -191,6 +193,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             federation: None,
             deferred: None,
             revocation: None,
+            mission_http: None,
         })
     }
     /// Enable AS federation for every /token request, including
@@ -205,6 +208,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let mut value = json!({"issuer":self.config.issuer,"person_token_endpoint":format!("{}/person",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer),"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer)});
         if self.revocation.is_some() {
             value["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
+        if self.mission_http.is_some() {
+            value["mission_endpoint"] = json!(format!("{}/mission", self.config.issuer));
         }
         value.to_string().into_bytes()
     }
@@ -242,6 +248,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return self.pending(request, now);
         }
         if let Some(response) = self.route_revocation(request, now)? {
+            return Ok(response);
+        }
+        if let Some(response) = self.route_mission(request, now)? {
             return Ok(response);
         }
         match (request.method().as_str(), request.uri().path()) {

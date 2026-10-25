@@ -56,7 +56,10 @@ mod policy;
 pub use federation::{
     BoxedFederation, Federation, FederationError, FederationFailure, FederationFailureReason,
 };
-pub use mission::{MissionRecord, MissionState, MissionStore, MissionStoreError};
+pub use mission::{
+    MissionAudit, MissionAuditError, MissionEdit, MissionRecord, MissionState, MissionStore,
+    MissionStoreError, MissionUpdateBytes,
+};
 mod server;
 mod store;
 pub mod storetest;

@@ -1,4 +1,7 @@
-use crate::{MissionRecord, MissionState, MissionStore, MissionStoreError};
+use crate::{
+    MissionAudit, MissionAuditError, MissionEdit, MissionRecord, MissionState, MissionStore,
+    MissionStoreError,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -241,6 +244,50 @@ pub trait Store: Send + Sync {
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         Ok(Vec::new())
     }
+    /// Persist an approved mission document once per owner and digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::InvalidRecord`] when the document does not match its
+    /// digest, [`StoreError::Conflict`] when different bytes are already stored,
+    /// and [`StoreError::Unavailable`] when this store does not keep mission
+    /// audits or the engine fails. The default refuses the write.
+    fn write_mission_audit(&self, audit: &MissionAudit) -> Result<(), StoreError> {
+        let _ = audit;
+        Err(StoreError::Unavailable)
+    }
+    /// Read one owner's approved document. `Ok(None)` means this store has no row.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Unavailable`] when the engine fails and
+    /// [`StoreError::InvalidRecord`] when a stored row fails its digest checks.
+    fn read_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+    ) -> Result<Option<MissionAudit>, StoreError> {
+        let _ = (person_server, owner_issuer, owner_subject, s256);
+        Ok(None)
+    }
+    /// Append an update or accept completion on an active stored mission.
+    ///
+    /// # Errors
+    ///
+    /// See [`MissionAuditError`]. The default is [`MissionAuditError::Unavailable`].
+    fn edit_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+        edit: MissionEdit,
+    ) -> Result<MissionAudit, MissionAuditError> {
+        let _ = (person_server, owner_issuer, owner_subject, s256, edit);
+        Err(MissionAuditError::Unavailable)
+    }
 }
 
 impl<T: Store + ?Sized> Store for Arc<T> {
@@ -262,11 +309,34 @@ impl<T: Store + ?Sized> Store for Arc<T> {
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         (**self).retained()
     }
+    fn write_mission_audit(&self, audit: &MissionAudit) -> Result<(), StoreError> {
+        (**self).write_mission_audit(audit)
+    }
+    fn read_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+    ) -> Result<Option<MissionAudit>, StoreError> {
+        (**self).read_mission_audit(person_server, owner_issuer, owner_subject, s256)
+    }
+    fn edit_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+        edit: MissionEdit,
+    ) -> Result<MissionAudit, MissionAuditError> {
+        (**self).edit_mission_audit(person_server, owner_issuer, owner_subject, s256, edit)
+    }
 }
 
 #[derive(Default)]
 struct State {
     missions: BTreeMap<(String, AgentIdentity, String), MissionRecord>,
+    audits: BTreeMap<(String, String, String, String), MissionAudit>,
     bindings: BTreeMap<(String, AgentIdentity), Binding>,
     tokens: BTreeMap<TokenReference, TokenRecord>,
     directed: BTreeMap<(String, String, String), String>,
@@ -475,6 +545,76 @@ impl Store for MemoryStore {
             .cloned()
             .collect())
     }
+    fn write_mission_audit(&self, audit: &MissionAudit) -> Result<(), StoreError> {
+        audit.validate()?;
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let key = audit_key(audit);
+        if let Some(existing) = state.audits.get(&key) {
+            return if existing == audit {
+                Ok(())
+            } else {
+                Err(StoreError::Conflict)
+            };
+        }
+        state.audits.insert(key, audit.clone());
+        Ok(())
+    }
+    fn read_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+    ) -> Result<Option<MissionAudit>, StoreError> {
+        let state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let Some(audit) = state
+            .audits
+            .get(&(
+                person_server.into(),
+                owner_issuer.into(),
+                owner_subject.into(),
+                s256.into(),
+            ))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        audit.validate()?;
+        Ok(Some(audit))
+    }
+    fn edit_mission_audit(
+        &self,
+        person_server: &str,
+        owner_issuer: &str,
+        owner_subject: &str,
+        s256: &str,
+        edit: MissionEdit,
+    ) -> Result<MissionAudit, MissionAuditError> {
+        let mut state = self.0.lock().map_err(|_| MissionAuditError::Unavailable)?;
+        let key = (
+            person_server.into(),
+            owner_issuer.into(),
+            owner_subject.into(),
+            s256.into(),
+        );
+        let mut audit = state
+            .audits
+            .get(&key)
+            .cloned()
+            .ok_or(MissionAuditError::NotFound)?;
+        audit.apply(edit)?;
+        state.audits.insert(key, audit.clone());
+        Ok(audit)
+    }
+}
+
+fn audit_key(audit: &MissionAudit) -> (String, String, String, String) {
+    (
+        audit.person_server.clone(),
+        audit.owner_issuer.clone(),
+        audit.owner_subject.clone(),
+        audit.s256.clone(),
+    )
 }
 
 fn commit_locked(

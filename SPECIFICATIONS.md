@@ -41,9 +41,24 @@ The caller signs as a server. The recipient keys `(iss, jti)` by the verified ca
 The ledger is process memory. Downstream calls are a host-supplied directory, not an HTTP client in this library.
 A recipient with nothing downstream answers an empty `200` and never `202`. A Resource refuses a revoked person or auth token with `401` `revoked_jwt` and does not issue a resource token; a revoked auth token asks for a person token.
 An agent helper remembers a resource token refused as `revoked_resource_token`. `Subagent::auth_request` consults that set and does not build another request for that same token. The host records the token-endpoint error before the next build. Another error does not ban the token.
-Mission creation, update, completion and control
-endpoints do not execute. AS, child, upstream and federated mission paths do not
-execute. A Resource that asks for a
+Opt-in mission creation, update, completion, approval and owner audit execute.
+The agent proposes with a signed `jwt` POST and receives `202` with `Location`,
+`Retry-After`, and `Cache-Control: no-store`. Approval is a separate POST signed
+as this Person Server; a missing or different signature does not approve.
+The proposing agent polls that location once and receives `s256` and the base64url
+mission bytes the server persists. A later poll is `410 gone`. A denied proposal's
+first poll is `403 access_denied` and the next is `410 gone`. The approval POST
+does not return those bytes. The first signed approval claims the proposal before
+the audit write, so a second approval is `404 mission_not_found` and does not
+write another audit. An update or completion POST requires `action`; a missing or
+unrecognized action is `400 invalid_request`. Update requires `description` and
+returns that update's digest without changing the mission digest. Completion
+requires `summary` and terminates with reason `completed`. The owning agent can
+read the exact mission bytes and the accepted updates. A different owner receives
+the same `404` as a missing mission. Proposals are process memory. MemoryStore and
+redb persist the approved document. `mission_control_endpoint`, `person_tokens`
+and `capabilities` are not produced. AS, child, upstream and federated mission
+paths do not execute. A Resource that asks for a
 `login_hint` also names the Person Server, directed subject, account and tenant
 it expects. A verified token whose Person Server, subject, account or tenant
 differs is refused with `403` `access_denied` and no `Signature-Error` header.
