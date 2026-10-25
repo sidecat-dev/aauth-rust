@@ -12,17 +12,19 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
 | `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions | Core, Signature-Key, JOSE |
-| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions | Core, Signature-Key, JOSE |
-| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining | Core, Signature-Key, JOSE |
-| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy | Core, Signature-Key, JOSE |
+| `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
+| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering | Core, Signature-Key, Budgets, JOSE |
+| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance | Core, Signature-Key, Budgets, JOSE |
+| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
 Normal role dependencies never import one another; Resource dev-dependencies
 compose the roles for tests and examples. Examples import the roles and compose
 them without a cross-role lifecycle abstraction. The storage adapter imports the
-PS role; the role never imports a database engine. Bootstrap, R3, Events and
-Budgets get boundaries as executing journeys require them; unsupported
-vocabularies and the full-R3 gap are recorded in CONFORMANCE.md.
+PS role; the role never imports a database engine. Bootstrap, R3 and Events
+get boundaries as executing journeys require them. Budgets are the opt-in
+`aauth-rust-budgets` crate. Unsupported vocabularies and the full-R3 gap are
+recorded in CONFORMANCE.md.
 
 ## Facts before policy
 
