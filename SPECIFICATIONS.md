@@ -200,6 +200,44 @@ The same subject at another server does not match. The hint is not that
 subject. The directed subject is a required string; an empty subject authorizes no one.
 Supervision and companion authorization vocabularies remain outside
 this subset.
+Opt-in budgets execute when a host calls `with_budgets`. Servers that do not
+opt in still reject a `budget` claim. The profile does not fetch metadata and
+does not open a connection. A resource publishes `budget_units` and
+`usage_endpoint` and meters only while `access_mode` is `auth-token`. A
+resource token names a unit from that list. On the authorization endpoint an
+amount above `max` is narrowed; an unknown unit, a decimals mismatch, or a
+malformed object is `400` `invalid_budget`. Omitting `budget` uses the profile
+default offer, capped by the first unit's `max`. The person server copies that
+unit and decimals and narrows the amount to its cap. It records the issued
+amount as fully consumed until a consumption record replaces that figure. In a
+four-party exchange it sends the narrowed object as the `budget` parameter.
+The access server issues a budget only when that parameter is present, copies
+unit and decimals, and does not exceed the parameter or its own cap. A
+decimals mismatch, an amount above the resource offer, a malformed object, or
+a parameter when the resource token had no budget is `400` `invalid_budget`.
+Omitting the parameter issues no budget claim. The person server checks the
+delivered claim against what it sent; a mismatch is a delivery failure
+(`as_unreachable`). The resource meters the auth token's signed unit and
+decimals, including after `replace_budget_units`. A buffered call charges
+`AAuth-Max-Cost` when that header is one bare integer, otherwise the profile
+default bound, and sets the cost to that maximum. A bound the grant cannot
+cover is `401` with `reason=insufficient-budget` or `reason=budget-exhausted`,
+an `AAuth-Budget` header, and no draw-down. A successful metered response
+carries `AAuth-Budget` with `cost`. A scope or policy denial of a verified
+budgeted token still carries the header and does not draw down. A person-token
+challenge does not carry it. A metering-layer failure is `500` and omits the
+header. Streaming is `budget_reserve`, `budget_stream_header` (`reserved`, no
+`cost`), `budget_commit`, and `budget_trailer` (`cost` only, with trailer name
+`aauth-budget`). Held completion stores one cost for a pending id and a replay
+does not add consumption. The cap is per auth-token `jti`. A high per-person
+total does not refuse a request that fits its token. `POST` on the usage
+endpoint answers a caller who appears as `iss` or `ps` on a metered token. The
+caller signs with `jwks_uri`, covering `content-type` and `content-digest`.
+The response signature covers `@status`, `content-type`, `content-digest`,
+`@authority;req`, and `@path;req`. An unrecognized scope or a zero total omits
+`usage`. An unknown key thumbprint is omitted. Intermediary rewriting,
+RateLimit prior art, and the TPX client are outside this library.
+See [CONFORMANCE.md](CONFORMANCE.md) and [INTERPRETATIONS.md](INTERPRETATIONS.md).
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).
 

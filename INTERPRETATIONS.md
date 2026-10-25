@@ -40,3 +40,46 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
 
 AS, children, chaining, human review, creation and deferred mission control are
 not implemented by this profile. This is no full R3/latest-edition qualification.
+
+# Selected budget interpretations
+
+Source: `draft-hardt-aauth-budgets` at `70d67375deb0bb002af7da0711fc58f6e8926e7e`.
+These choices are what the opt-in profile executes. They are not a claim that
+the draft required each spelling.
+
+- The draft does not name a request header for the caller's maximum cost.
+  Buffered admission reads one bare Structured Field integer from
+  `AAuth-Max-Cost`. When the header is absent, the host's `default_bound` is
+  that maximum, and the metered cost equals it. A malformed header is a
+  refusal of the call: the grant is not drawn down, and `AAuth-Budget` still
+  reports the untouched remainder.
+- `"$5.00"` does not specify rounding or a currency symbol. USD amounts render
+  with a leading `$` and two digits, half-up from the signed scale. The amount
+  string and the sanitized description stay separate values. There is no wire
+  field for "visually distinct."
+- A usage response that mixes units reports the first declared unit. It does
+  not convert. A counter that would exceed 15 digits is omitted. When
+  `all_time` would exceed that limit, or is zero, the `usage` object is
+  omitted. An unrecognized scope key also omits `usage`, so those two cases
+  are not distinguished on the wire.
+- A JSON number that is not an integer in the i64 range, including `1.0`, is
+  malformed. It is not rounded.
+- Duplicate `budget_units` names are rejected at configuration. An empty unit
+  cache accepts the scale signed on the token. A later cache whose decimals
+  differ does not relabel an already issued grant, a consumption record, or
+  the step-up offer that carries that record.
+- Authorization-endpoint decimals mismatch is not in the error table. This
+  profile returns `400` `invalid_budget` and does not rescale. The same code
+  is used for an unknown unit, a malformed budget object, and an access-server
+  parameter that does not narrow the resource offer.
+- When the agent omits `budget`, the resource offers `min(max, default_offer)`
+  of the first declared unit. The draft does not say which offer that is.
+- An auth token that carries `budget` while budgets are off is still rejected
+  as an unsupported companion claim. Opt-in is per server.
+- The usage response is signed in this crate. Signature-Key's `sign_request`
+  covers a request. The response coverage is `@status`, `content-type`,
+  `content-digest`, `@authority;req`, and `@path;req`. A parser still accepts
+  an unsigned usage body. The resource's `usage` method always signs.
+- This library is not an intermediary, so it does not implement a rule about
+  rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
+  with normative keywords sit in non-normative prior art and are not executed.

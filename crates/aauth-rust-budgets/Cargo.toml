@@ -1,0 +1,25 @@
+[package]
+name = "aauth-rust-budgets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "AAuth Budgets: budget objects, narrowing, metering, and usage counters"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+base64.workspace = true
+http.workspace = true
+serde_json.workspace = true
+sfv.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+aauth-rust-jose.workspace = true

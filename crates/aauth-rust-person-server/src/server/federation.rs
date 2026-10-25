@@ -49,6 +49,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(child) = &context.subagent {
             body["subagent_token"] = json!(child.compact());
         }
+        let sent = self.narrow_offer(prepared.offer.as_ref())?;
+        if let Some(sent) = &sent {
+            body["budget"] = sent.to_value();
+        }
         let mut request = Request::builder()
             .method("POST")
             .uri(uri)
@@ -211,7 +215,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.tenant != r.tenant
             || c.account != r.account
             || c.mission_s256 != r.mission_s256
-            || unsupported(&c.extra)
+            || extra_blocks(&c.extra, self.budgets.is_some(), false)
             || c.exp > agent.claims().exp
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
@@ -219,6 +223,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
             return Err(failed(Reason::InvalidGrant));
+        }
+        let sent = self.narrow_offer(prepared.offer.as_ref())?;
+        let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
+        if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {
+            return Err(failed(Reason::InvalidGrant));
+        }
+        if let Some(budget) = &issued
+            && let Some(state) = &self.budgets
+        {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(c.jti.clone(), budget.amount(), c.exp);
         }
         let mut record = self.record(
             compact,

@@ -1,16 +1,26 @@
 //! Immediate Person-Server authorization with route challenges.
 //! Mission context is opt-in through `with_mission_context`.
+//! Budgets are opt-in through `with_budgets`.
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use crate::budget_gate::{BudgetGate, metadata_units, problem};
 use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
+use aauth_rust_budgets::{
+    Budget, ChargeError, ConsumptionRecord, KeyRole, MAX_AMOUNT, Reservation, UnitDeclaration,
+    answer_usage, metered_access_mode, parse_budget, parse_usage_query, read_granted,
+    sign_usage_response, validate_endpoint_url,
+};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceClaims, TokenError,
     VerifiedAuthToken, mint_resource_token, validate_server_identifier,
 };
-use aauth_rust_jose::{Jws, SigningKey};
+use aauth_rust_jose::{Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
     Error, KeyMaterial, PreparedRequest, canonical_authority, required_components,
 };
 use http::{Request, Response, StatusCode};
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[path = "resource_revocation.rs"]
 mod revocation;
@@ -50,6 +60,8 @@ pub enum PsConfigurationError {
     InvalidScopes,
     /// Expected Access Server identifier is malformed.
     InvalidAccessServer,
+    /// Budget units, bounds, or `usage_endpoint` are not a usable profile.
+    InvalidBudgetProfile,
 }
 impl std::fmt::Display for PsConfigurationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,6 +77,9 @@ impl std::fmt::Display for PsConfigurationError {
             }
             Self::InvalidKeyId => "Resource kid must name its published signing key",
             Self::InvalidScopes => "Resource scopes must be nonempty unique RFC 6749 scope values",
+            Self::InvalidBudgetProfile => {
+                "budget profile needs declared units, a finite bound, and an HTTPS usage endpoint"
+            }
         })
     }
 }
@@ -75,6 +90,7 @@ impl std::error::Error for PsConfigurationError {}
 pub struct AuthAuthorized<T = ()> {
     token: VerifiedAuthToken,
     admitted: T,
+    budget_header: Option<String>,
 }
 impl<T> AuthAuthorized<T> {
     /// Authenticated authorization token whose HTTP holder proof also succeeded.
@@ -84,6 +100,10 @@ impl<T> AuthAuthorized<T> {
     /// Application context produced by the admission policy.
     pub fn admitted(&self) -> &T {
         &self.admitted
+    }
+    /// `AAuth-Budget` field value for this admission, when the request was metered.
+    pub fn budget_header(&self) -> Option<&str> {
+        self.budget_header.as_deref()
     }
     /// Move authenticated token and policy context to the application handler.
     pub fn into_parts(self) -> (VerifiedAuthToken, T) {
@@ -104,11 +124,18 @@ pub enum AuthDecision<T = ()> {
     AuthTokenRequired {
         /// Resource-signed challenge to exchange with the actual presented token.
         resource_token: String,
+        /// `budget-exhausted` or `insufficient-budget` when a grant did not fit.
+        budget_reason: Option<String>,
+        /// `AAuth-Budget` on the challenge. Absent when this step is not metered.
+        budget_header: Option<String>,
     },
     /// JWT or HTTP proof verification failed before host policy.
     SignatureFailure(SignatureFailure),
     /// Verified authorization is insufficient or host policy refused admission.
-    Forbidden,
+    Forbidden {
+        /// `AAuth-Budget` when a budgeted auth token was refused without metering.
+        budget_header: Option<String>,
+    },
     /// Host-supplied challenge identifier/time could not produce a valid token.
     InternalError,
     /// Verified Auth token, holder proof, route scopes and host policy admitted it.
@@ -128,7 +155,7 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
             Self::SignatureFailure(error) => {
                 f.debug_tuple("SignatureFailure").field(error).finish()
             }
-            Self::Forbidden => f.write_str("Forbidden"),
+            Self::Forbidden { .. } => f.write_str("Forbidden"),
             Self::InternalError => f.write_str("InternalError"),
             Self::Granted(value) => f
                 .debug_struct("Granted")
@@ -158,7 +185,11 @@ impl<T> AuthDecision<T> {
                 response.headers_mut().remove("aauth-requirement");
                 response
             }
-            Self::Granted(value) => Response::new(value.token.claims().sub.as_bytes().to_vec()),
+            Self::Granted(value) => {
+                let mut response = Response::new(value.token.claims().sub.as_bytes().to_vec());
+                insert_budget(&mut response, value.budget_header);
+                response
+            }
             Self::PersonTokenRequired => {
                 let mut response = refusal(StatusCode::UNAUTHORIZED, "person_token_required");
                 response.headers_mut().insert(
@@ -183,17 +214,29 @@ impl<T> AuthDecision<T> {
                 }
                 response
             }
-            Self::AuthTokenRequired { resource_token } => {
+            Self::AuthTokenRequired {
+                resource_token,
+                budget_reason,
+                budget_header,
+            } => {
                 let mut response = refusal(StatusCode::UNAUTHORIZED, "auth_token_required");
-                let requirement =
+                let mut requirement =
                     format!("requirement=auth-token;resource-token=\"{resource_token}\"");
+                if let Some(reason) = budget_reason {
+                    requirement.push_str(&format!(";reason={reason}"));
+                }
                 let Ok(value) = requirement.parse() else {
                     return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
                 };
                 response.headers_mut().insert("aauth-requirement", value);
+                insert_budget(&mut response, budget_header);
                 response
             }
-            Self::Forbidden => refusal(StatusCode::FORBIDDEN, "access_denied"),
+            Self::Forbidden { budget_header } => {
+                let mut response = refusal(StatusCode::FORBIDDEN, "access_denied");
+                insert_budget(&mut response, budget_header);
+                response
+            }
             Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         }
     }
@@ -217,6 +260,8 @@ pub enum ProactiveDecision {
     },
     /// The host challenge identifier could not be minted.
     InternalError,
+    /// A budget object was present and could not be narrowed.
+    InvalidBudget,
 }
 impl ProactiveDecision {
     /// Map the decision to the authorization-endpoint HTTP response.
@@ -245,6 +290,7 @@ impl ProactiveDecision {
             }
             Self::InvalidRequest => refusal(StatusCode::BAD_REQUEST, "invalid_request"),
             Self::InvalidScope => refusal(StatusCode::BAD_REQUEST, "invalid_scope"),
+            Self::InvalidBudget => refusal(StatusCode::BAD_REQUEST, "invalid_budget"),
             Self::ResourceToken { resource_token } => {
                 let mut response = Response::new(
                     json!({ "resource_token": resource_token })
@@ -372,6 +418,7 @@ pub struct PsAuthorizationResource<K, P> {
     mission_context: bool,
     authorization_endpoint: bool,
     revocation: Option<revocation::Gate>,
+    budgets: Option<BudgetGate>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -423,6 +470,7 @@ where
             mission_context: false,
             authorization_endpoint: false,
             revocation: None,
+            budgets: None,
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
@@ -476,6 +524,78 @@ where
         self.mission_context = true;
         self
     }
+    /// Meter auth-token requests against a declared budget profile.
+    ///
+    /// `default_bound` is the maximum cost of a buffered request that omits
+    /// `AAuth-Max-Cost`. `default_offer` is the amount placed on a challenge
+    /// when the client does not name one. The first unit is the usage report's
+    /// unit. An empty declaration list is rejected: a resource that meters has
+    /// published `budget_units`.
+    ///
+    /// # Errors
+    /// Returns [`PsConfigurationError::InvalidBudgetProfile`] when the endpoint
+    /// is not HTTPS, a bound is outside the carrier, or the units cannot form an offer.
+    pub fn with_budgets(
+        mut self,
+        units: Vec<UnitDeclaration>,
+        usage_endpoint: impl Into<String>,
+        default_bound: i64,
+        default_offer: i64,
+    ) -> Result<Self, PsConfigurationError> {
+        metered_access_mode("auth-token")
+            .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
+        let usage_endpoint = usage_endpoint.into();
+        validate_endpoint_url(&usage_endpoint)
+            .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
+        if units.is_empty()
+            || !(0..=MAX_AMOUNT).contains(&default_bound)
+            || !(0..=MAX_AMOUNT).contains(&default_offer)
+        {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if units
+            .iter()
+            .any(|unit| !seen.insert(unit.unit().to_owned()))
+        {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        }
+        aauth_rust_budgets::offer_budget(&units, None, default_offer)
+            .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
+        self.budgets = Some(BudgetGate {
+            units: Mutex::new(units),
+            usage_endpoint,
+            default_bound,
+            default_offer,
+            ledger: Mutex::new(aauth_rust_budgets::Ledger::new()),
+        });
+        Ok(self)
+    }
+    /// Replace cached `budget_units` after challenges have been issued.
+    ///
+    /// Later metering still uses the unit and scale on each auth token.
+    ///
+    /// # Errors
+    /// Returns [`PsConfigurationError::InvalidBudgetProfile`] when budgets are
+    /// off or the replacement cannot form an offer.
+    pub fn replace_budget_units(
+        &self,
+        units: Vec<UnitDeclaration>,
+    ) -> Result<(), PsConfigurationError> {
+        let Some(gate) = &self.budgets else {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        };
+        if units.is_empty() {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        }
+        aauth_rust_budgets::offer_budget(&units, None, gate.default_offer)
+            .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
+        *gate
+            .units
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = units;
+        Ok(())
+    }
     /// Publish `{issuer}/authorize` for a proactive scope request.
     ///
     /// The route still requires a verified person token. Metadata omits
@@ -498,6 +618,10 @@ where
         }
         if self.authorization_endpoint {
             metadata["authorization_endpoint"] = json!(format!("{}/authorize", self.config.issuer));
+        }
+        if let Some(gate) = &self.budgets {
+            metadata["budget_units"] = metadata_units(&gate.declarations());
+            metadata["usage_endpoint"] = json!(gate.usage_endpoint);
         }
         if let Some(descriptions) = &self.scope_descriptions {
             metadata["scope_descriptions"] = json!(descriptions);
@@ -648,17 +772,23 @@ where
                     return Ok(AuthDecision::Revoked { auth_token: false });
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra)
+                    || unsupported_companion(&claims.extra, false)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 let (login_hint, account) = if let Some(asked) = asked {
                     if asked.person_differs(&claims.iss, &claims.sub, claims.tenant.as_deref()) {
-                        return Ok(AuthDecision::Forbidden);
+                        return Ok(AuthDecision::Forbidden {
+                            budget_header: None,
+                        });
                     }
                     (asked.login_hint.clone(), asked.account.clone())
                 } else {
                     (None, None)
+                };
+                let extra = match self.idle_offer() {
+                    Ok(extra) => extra,
+                    Err(()) => return Ok(AuthDecision::InternalError),
                 };
                 let challenge = ResourceClaims {
                     iss: self.config.issuer.clone(),
@@ -688,10 +818,14 @@ where
                     } else {
                         None
                     },
-                    extra: Default::default(),
+                    extra,
                 };
                 match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
-                    Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired { resource_token }),
+                    Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired {
+                        resource_token,
+                        budget_reason: None,
+                        budget_header: None,
+                    }),
                     Err(_) => Ok(AuthDecision::InternalError),
                 }
             }
@@ -730,10 +864,12 @@ where
                 };
                 if !valid_role
                     || self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra)
+                    || unsupported_companion(&claims.extra, self.budgets.is_some())
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
+                let grant = read_granted(&claims.extra)
+                    .map_err(|_| SignatureFailure::Token(TokenError::InvalidJwt))?;
                 if let Some(asked) = asked {
                     // The hint is not a subject. The asked Person Server and
                     // claims authorize; a bare subject from another server does not.
@@ -743,7 +879,7 @@ where
                         claims.account.as_deref(),
                         claims.tenant.as_deref(),
                     ) {
-                        return Ok(AuthDecision::Forbidden);
+                        return Ok(self.forbidden_budget(&token, grant.as_ref()));
                     }
                 }
                 let granted: Vec<&str> = claims.scope.as_deref().unwrap_or("").split(' ').collect();
@@ -753,15 +889,9 @@ where
                     .iter()
                     .any(|scope| !granted.contains(&scope.as_str()))
                 {
-                    return Ok(AuthDecision::Forbidden);
+                    return Ok(self.forbidden_budget(&token, grant.as_ref()));
                 }
-                match (self.policy)(&token, request).into_admission() {
-                    Ok(admitted) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
-                        token,
-                        admitted,
-                    }))),
-                    Err(Deny) => Ok(AuthDecision::Forbidden),
-                }
+                self.admit_auth(token, request, now, challenge_jti, grant)
             }
             _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
         }
@@ -868,12 +998,16 @@ where
                     return Ok(ProactiveDecision::Revoked);
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra)
+                    || unsupported_companion(&claims.extra, false)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
                 let scope = match requested_scope(request, &self.config.scopes) {
                     Ok(scope) => scope,
+                    Err(decision) => return Ok(decision),
+                };
+                let extra = match self.proactive_extra(request) {
+                    Ok(extra) => extra,
                     Err(decision) => return Ok(decision),
                 };
                 let challenge = ResourceClaims {
@@ -904,7 +1038,7 @@ where
                     } else {
                         None
                     },
-                    extra: Default::default(),
+                    extra,
                 };
                 match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
                     Ok(resource_token) => Ok(ProactiveDecision::ResourceToken { resource_token }),
@@ -916,6 +1050,348 @@ where
     }
     fn mission_refused(&self, present: bool) -> bool {
         present && (!self.mission_context || self.access_server.is_some())
+    }
+    fn idle_offer(&self) -> Result<BTreeMap<String, Value>, ()> {
+        match &self.budgets {
+            None => Ok(BTreeMap::new()),
+            Some(gate) => gate.challenge_extra(None, None, None).map_err(|_| ()),
+        }
+    }
+    fn proactive_extra(
+        &self,
+        request: &Request<Vec<u8>>,
+    ) -> Result<BTreeMap<String, Value>, ProactiveDecision> {
+        let Some(gate) = &self.budgets else {
+            return Ok(BTreeMap::new());
+        };
+        let value = strict_json(request.body()).map_err(|_| ProactiveDecision::InvalidRequest)?;
+        let requested = match value.get("budget") {
+            None => None,
+            Some(budget) => {
+                Some(parse_budget(budget).map_err(|_| ProactiveDecision::InvalidBudget)?)
+            }
+        };
+        gate.challenge_extra(requested.as_ref(), None, None)
+            .map_err(|_| ProactiveDecision::InvalidBudget)
+    }
+    fn forbidden_budget(
+        &self,
+        token: &VerifiedAuthToken,
+        grant: Option<&Budget>,
+    ) -> AuthDecision<O::Context> {
+        let header = grant.and_then(|grant| {
+            self.budgets
+                .as_ref()
+                .and_then(|gate| gate.untouched_header(token, grant).ok())
+        });
+        AuthDecision::Forbidden {
+            budget_header: header,
+        }
+    }
+    fn admit_auth(
+        &self,
+        token: VerifiedAuthToken,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        grant: Option<Budget>,
+    ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
+        let Some(gate) = &self.budgets else {
+            return self.finish_admission(token, request, None);
+        };
+        let Some(grant) = grant else {
+            return self.finish_admission(token, request, None);
+        };
+        let maximum = match gate.bound(request) {
+            Ok(maximum) => maximum,
+            Err(()) => return Ok(self.forbidden_budget(&token, Some(&grant))),
+        };
+        match gate.reserve(&token, &grant, maximum) {
+            Ok(reservation) => match (self.policy)(&token, request).into_admission() {
+                Ok(admitted) => match gate.commit(&reservation, maximum, now) {
+                    Ok(header) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+                        token,
+                        admitted,
+                        budget_header: Some(header),
+                    }))),
+                    Err(()) => Ok(AuthDecision::InternalError),
+                },
+                Err(Deny) => {
+                    gate.release(&reservation);
+                    Ok(self.forbidden_budget(&token, Some(&grant)))
+                }
+            },
+            Err(ChargeError::Refused(refusal)) => {
+                let (reason, header) = match refusal {
+                    aauth_rust_budgets::Refusal::Exhausted { header, .. } => {
+                        ("budget-exhausted", header)
+                    }
+                    aauth_rust_budgets::Refusal::Insufficient { header, .. } => {
+                        ("insufficient-budget", header)
+                    }
+                };
+                let consumed = gate
+                    .lock()
+                    .committed(token.claims().jti.as_str())
+                    .unwrap_or(0);
+                let record = match ConsumptionRecord::new(token.claims().jti.clone(), consumed) {
+                    Ok(record) => record,
+                    Err(_) => return Ok(AuthDecision::InternalError),
+                };
+                let extra = match gate.challenge_extra(None, Some(&record), Some(&grant)) {
+                    Ok(extra) => extra,
+                    Err(_) => return Ok(AuthDecision::InternalError),
+                };
+                match self.mint_step_up(&token, now, challenge_jti, extra) {
+                    Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired {
+                        resource_token,
+                        budget_reason: Some(reason.to_owned()),
+                        budget_header: Some(header),
+                    }),
+                    Err(()) => Ok(AuthDecision::InternalError),
+                }
+            }
+            Err(ChargeError::Protocol(_)) => Ok(AuthDecision::InternalError),
+        }
+    }
+    fn finish_admission(
+        &self,
+        token: VerifiedAuthToken,
+        request: &Request<Vec<u8>>,
+        budget_header: Option<String>,
+    ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
+        match (self.policy)(&token, request).into_admission() {
+            Ok(admitted) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+                token,
+                admitted,
+                budget_header,
+            }))),
+            Err(Deny) => Ok(AuthDecision::Forbidden {
+                budget_header: None,
+            }),
+        }
+    }
+    fn mint_step_up(
+        &self,
+        token: &VerifiedAuthToken,
+        now: i64,
+        challenge_jti: &str,
+        extra: BTreeMap<String, Value>,
+    ) -> Result<String, ()> {
+        let claims = token.claims();
+        let challenge = ResourceClaims {
+            iss: self.config.issuer.clone(),
+            dwk: "aauth-resource.json".into(),
+            aud: self
+                .access_server
+                .clone()
+                .unwrap_or_else(|| claims.ps.clone()),
+            ps: claims.ps.clone(),
+            sub: claims.sub.clone(),
+            jti: challenge_jti.into(),
+            presented_jti: claims.jti.clone(),
+            agent_jkt: claims.cnf.jwk.thumbprint().map_err(|_| ())?,
+            iat: now,
+            exp: now.saturating_add(300),
+            scope: Some(self.config.scopes.join(" ")),
+            account: claims.account.clone(),
+            login_hint: None,
+            nbf: None,
+            tenant: claims.tenant.clone(),
+            mission_s256: if self.mission_context {
+                claims.mission_s256.clone()
+            } else {
+                None
+            },
+            extra,
+        };
+        mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge).map_err(|_| ())
+    }
+    /// Answer `POST` on the configured usage endpoint.
+    ///
+    /// The caller proves a person-server or access-server key with `jwks_uri`
+    /// and covers `content-type` and `content-digest`. An unrecognized scope and
+    /// a scope that consumed nothing both omit `usage`. The response is signed.
+    pub fn usage(&self, request: &Request<Vec<u8>>, now: i64) -> Response<Vec<u8>> {
+        let Some(gate) = &self.budgets else {
+            return problem(StatusCode::NOT_FOUND, "not_found");
+        };
+        let endpoint: http::Uri = match gate.usage_endpoint.parse() {
+            Ok(uri) => uri,
+            Err(_) => return problem(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+        };
+        if request.method() != http::Method::POST || request.uri().path() != endpoint.path() {
+            return problem(StatusCode::NOT_FOUND, "not_found");
+        }
+        let proof =
+            match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"]) {
+                Ok(proof) => proof,
+                Err(_) => return problem(StatusCode::UNAUTHORIZED, "invalid_signature"),
+            };
+        let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
+            return problem(StatusCode::UNAUTHORIZED, "invalid_key");
+        };
+        let role = match dwk.as_str() {
+            "aauth-person.json" => KeyRole::PersonServer,
+            "aauth-access.json" => KeyRole::AccessServer,
+            _ => return problem(StatusCode::UNAUTHORIZED, "invalid_key"),
+        };
+        let base = std::str::from_utf8(proof.signature_base()).unwrap_or("");
+        if !base
+            .lines()
+            .any(|line| line.starts_with("\"content-type\":"))
+            || !base
+                .lines()
+                .any(|line| line.starts_with("\"content-digest\":"))
+        {
+            return problem(StatusCode::UNAUTHORIZED, "invalid_input");
+        }
+        let key = match self.keys.key(id, dwk, kid) {
+            Ok(key) => key,
+            Err(_) => return problem(StatusCode::UNAUTHORIZED, "untrusted_issuer"),
+        };
+        if proof.verify(&key).is_err() {
+            return problem(StatusCode::UNAUTHORIZED, "invalid_signature");
+        }
+        let Ok(body) = strict_json(request.body()) else {
+            return problem(StatusCode::BAD_REQUEST, "invalid_request");
+        };
+        let Ok(query) = parse_usage_query(&body, role) else {
+            return problem(StatusCode::BAD_REQUEST, "invalid_request");
+        };
+        let Some(report) = gate.reporting_budget() else {
+            return problem(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        };
+        let caller = aauth_rust_budgets::Caller {
+            id: id.clone(),
+            role,
+            ps: query.ps.clone(),
+        };
+        let value = {
+            let ledger = gate.lock();
+            answer_usage(&ledger, &caller, &query, now, &report)
+        };
+        let Ok(bytes) = serde_json::to_vec(&value.to_value()) else {
+            return problem(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        };
+        let authority = canonical_authority(request.uri()).unwrap_or_default();
+        let Ok(signed) = sign_usage_response(
+            &self.config.signing_key,
+            &self.config.issuer,
+            &self.config.kid,
+            &authority,
+            request.uri().path(),
+            &bytes,
+            now,
+        ) else {
+            return problem(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        };
+        let mut response = Response::new(signed.body);
+        *response.status_mut() = StatusCode::OK;
+        let headers = response.headers_mut();
+        if let Ok(value) = "application/json".parse() {
+            headers.insert("content-type", value);
+        }
+        if let Ok(value) = signed.content_digest.parse() {
+            headers.insert("content-digest", value);
+        }
+        if let Ok(value) = signed.signature_input.parse() {
+            headers.insert("signature-input", value);
+        }
+        if let Ok(value) = signed.signature.parse() {
+            headers.insert("signature", value);
+        }
+        if let Ok(value) = signed.signature_key.parse() {
+            headers.insert("signature-key", value);
+        }
+        response
+    }
+    /// Reserve `maximum` against a verified auth token without serving the request.
+    ///
+    /// # Errors
+    /// Returns the refusal when the maximum does not fit. A refusal does not draw down.
+    pub fn budget_reserve(
+        &self,
+        token: &VerifiedAuthToken,
+        maximum: i64,
+    ) -> Result<Reservation, ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        let grant = gate.open_grant(token)?;
+        gate.reserve(token, &grant, maximum)
+    }
+    /// Commit `actual` for a reservation and return the final `AAuth-Budget` field.
+    ///
+    /// # Errors
+    /// Returns a protocol error when the reservation is unknown or `actual` exceeds it.
+    pub fn budget_commit(
+        &self,
+        reservation: &Reservation,
+        actual: i64,
+        at: i64,
+    ) -> Result<String, ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.commit(reservation, actual, at)
+            .map_err(|_| ChargeError::Protocol(aauth_rust_budgets::Error::Malformed))
+    }
+    /// Header for a stream that has reserved and does not yet know `cost`.
+    ///
+    /// # Errors
+    /// Returns a protocol error when the reservation is unknown.
+    pub fn budget_stream_header(&self, reservation: &Reservation) -> Result<String, ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.stream_header(reservation)
+    }
+    /// Trailer naming header and `cost`-only field. The trailer does not restate the header.
+    ///
+    /// # Errors
+    /// Returns a protocol error when `prior` already carried `cost`.
+    pub fn budget_trailer(&self, prior: &str, cost: i64) -> Result<(String, String), ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.trailer(prior, cost).map_err(ChargeError::Protocol)
+    }
+    /// Header for a held invocation. The original token is not reserved.
+    ///
+    /// # Errors
+    /// Returns a protocol error when the token has no budget.
+    pub fn budget_held_header(&self, token: &VerifiedAuthToken) -> Result<String, ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.held_header(token)
+    }
+    /// Meter a held invocation once against the completing token.
+    ///
+    /// A second call reports the stored cost and does not add consumption.
+    ///
+    /// # Errors
+    /// Returns a refusal when the completing token cannot cover `maximum`,
+    /// without recording the invocation as metered.
+    pub fn budget_complete_held(
+        &self,
+        pending: &str,
+        token: &VerifiedAuthToken,
+        maximum: i64,
+        actual: i64,
+        at: i64,
+    ) -> Result<String, ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.complete_held(pending, token, maximum, actual, at)
     }
 }
 fn check_iat(iat: i64, now: i64) -> Result<(), SignatureFailure> {
@@ -930,15 +1406,17 @@ fn scope_value(scope: &str) -> bool {
             .bytes()
             .all(|b| b == 0x21 || (0x23..=0x5b).contains(&b) || (0x5d..=0x7e).contains(&b))
 }
-fn unsupported_companion(claims: &std::collections::BTreeMap<String, serde_json::Value>) -> bool {
-    [
-        "r3_uri",
-        "r3_s256",
-        "r3_granted",
-        "r3_per_call",
-        "budget",
-        "budget_consumed",
-    ]
-    .iter()
-    .any(|name| claims.contains_key(*name))
+fn unsupported_companion(claims: &BTreeMap<String, Value>, allow_budget: bool) -> bool {
+    claims.keys().any(|name| match name.as_str() {
+        "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" | "budget_consumed" => true,
+        "budget" => !allow_budget,
+        _ => false,
+    })
+}
+fn insert_budget(response: &mut Response<Vec<u8>>, header: Option<String>) {
+    if let Some(header) = header
+        && let Ok(value) = header.parse()
+    {
+        response.headers_mut().insert("aauth-budget", value);
+    }
 }

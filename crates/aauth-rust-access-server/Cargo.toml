@@ -16,6 +16,7 @@ description = "AAuth Access Server grants and deferred authorization with authen
 aauth-rust-core.workspace = true
 aauth-rust-jose.workspace = true
 aauth-rust-signature-key.workspace = true
+aauth-rust-budgets.workspace = true
 http.workspace = true
 httpdate = "1"
 serde_json.workspace = true

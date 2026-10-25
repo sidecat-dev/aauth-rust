@@ -15,6 +15,10 @@ use crate::{
     AgentIdentity, AuthorizationRequest, Grant, Person, PersonRequest, Policy, PolicyError, Store,
     StoreError, TokenKind, TokenRecord, TokenReference, TokenTie, UpstreamContext,
 };
+use aauth_rust_budgets::{
+    AllocationBook, Budget, ConsentFigure, IssuerPolicy, MAX_AMOUNT, check_declared, narrow_to,
+    parse_resource_claims, read_granted, verify_delivered,
+};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonClaims, PersonToken,
     ResourceToken, TokenError, VerifiedAgentToken, VerifiedResourceToken, mint_auth_token,
@@ -28,6 +32,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::sync::Mutex;
 
 /// Host-controlled Person Server identity, signing key and lifetime bounds.
 pub struct Config {
@@ -86,6 +91,11 @@ pub struct PersonServer<K, S, P, C, I> {
     revocation: Option<revocation::Gate>,
     mission_http: Option<mission_http::Gate>,
     governance: Option<governance::Gate>,
+    budgets: Option<BudgetState>,
+}
+struct BudgetState {
+    policy: IssuerPolicy,
+    accounts: Mutex<AllocationBook>,
 }
 struct LocalKeys<'a, K> {
     config: &'a Config,
@@ -123,6 +133,7 @@ struct PreparedAuthorization {
     retained: TokenRecord,
     context: AuthorizationRequest,
     binding_context: BindingContext,
+    offer: Option<Budget>,
 }
 struct Issuance<'a> {
     parent_agent: Option<AgentIdentity>,
@@ -198,6 +209,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             revocation: None,
             mission_http: None,
             governance: None,
+            budgets: None,
         })
     }
     /// Enable AS federation for every /token request, including
@@ -206,6 +218,42 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     pub fn with_federation(mut self, adapter: impl crate::Federation + 'static) -> Self {
         self.federation = Some(Box::new(adapter));
         self
+    }
+    /// Account for budgets. `policy.cap` is this server's ceiling. An empty
+    /// `policy.units` cache accepts the scale signed on the resource token.
+    ///
+    /// # Errors
+    /// Returns [`ConfigurationError`] when `cap` is outside the carrier.
+    pub fn with_budgets(mut self, policy: IssuerPolicy) -> Result<Self, ConfigurationError> {
+        if policy
+            .cap
+            .is_some_and(|cap| !(0..=MAX_AMOUNT).contains(&cap))
+        {
+            return Err(ConfigurationError);
+        }
+        self.budgets = Some(BudgetState {
+            policy,
+            accounts: Mutex::new(AllocationBook::new()),
+        });
+        Ok(self)
+    }
+    /// Sum of reported consumption, or the full amount of each allocation that
+    /// has no figure yet. `None` when budgets are off.
+    pub fn budget_accounted(&self) -> Option<i64> {
+        self.budgets.as_ref().map(|state| {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .accounted()
+        })
+    }
+    /// Human amount and sanitized description, kept as separate strings.
+    /// `None` when budgets are off.
+    pub fn budget_consent(&self, budget: &Budget, description: &str) -> Option<ConsentFigure> {
+        self.budgets
+            .as_ref()
+            .map(|_| aauth_rust_budgets::consent_figure(budget, description))
     }
     /// Public PS metadata; only implemented Person/Auth endpoints are advertised.
     pub fn metadata(&self) -> Vec<u8> {
@@ -658,10 +706,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .map_err(|_| Failure::internal())?
             || (r.mission_s256.is_some()
                 && (self.federation.is_some() || upstream.is_some() || subagent.is_some()))
-            || unsupported(&r.extra)
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
+        let offer = self.admit_resource_budget(&r.extra, &r.presented_jti)?;
         let scopes = parse_scopes(
             r.scope
                 .as_deref()
@@ -731,6 +779,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             retained,
             context,
             binding_context,
+            offer,
         })
     }
     fn auth(
@@ -754,6 +803,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             retained,
             context,
             binding_context,
+            offer,
         } = prepared;
         let r = resource.claims();
         let grant = if upstream.is_some() {
@@ -781,6 +831,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
             expires_at = expires_at.min(exp);
         }
+        let granted_budget = self.narrow_offer(offer.as_ref())?;
+        let mut extra = std::collections::BTreeMap::new();
+        if let Some(budget) = &granted_budget {
+            extra.insert("budget".into(), budget.to_value());
+        }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-person.json".into(),
@@ -798,8 +853,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             nbf: None,
             mission_s256: r.mission_s256.clone(),
             tenant: r.tenant.clone(),
-            extra: Default::default(),
+            extra,
         };
+        if let Some(budget) = &granted_budget
+            && let Some(state) = &self.budgets
+        {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(claims.jti.clone(), budget.amount(), expires_at);
+        }
         let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
             .map_err(|_| Failure::internal())?;
         let record = self.record(
@@ -837,6 +901,50 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             compact,
             expires_at - released_at,
         ))
+    }
+    fn admit_resource_budget(
+        &self,
+        extra: &std::collections::BTreeMap<String, Value>,
+        presented_jti: &str,
+    ) -> Result<Option<Budget>, Failure> {
+        let enabled = self.budgets.is_some();
+        if extra_blocks(extra, enabled, enabled) {
+            return Err(Failure::parameter("invalid_resource_token"));
+        }
+        if !enabled {
+            return Ok(None);
+        }
+        let claims = parse_resource_claims(extra, presented_jti)
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        if let Some(budget) = &claims.budget {
+            check_declared(
+                budget,
+                &self.budgets.as_ref().expect("budgets").policy.units,
+            )
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        }
+        if let Some(record) = &claims.consumed {
+            self.budgets
+                .as_ref()
+                .expect("budgets")
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .apply_record(record)
+                .map_err(|_| Failure::parameter("invalid_budget"))?;
+        }
+        Ok(claims.budget)
+    }
+    fn narrow_offer(&self, offer: Option<&Budget>) -> Result<Option<Budget>, Failure> {
+        let Some(state) = &self.budgets else {
+            return Ok(None);
+        };
+        let Some(offer) = offer else {
+            return Ok(None);
+        };
+        narrow_to(offer, state.policy.cap)
+            .map(Some)
+            .map_err(|_| Failure::parameter("invalid_budget"))
     }
     fn inputs_current(
         &self,
@@ -928,18 +1036,17 @@ fn check_upstream_current(upstream: Option<&Upstream>, now: i64) -> Result<(), F
     }
     Ok(())
 }
-fn unsupported(extra: &std::collections::BTreeMap<String, Value>) -> bool {
-    [
-        "interaction",
-        "r3_uri",
-        "r3_s256",
-        "r3_granted",
-        "r3_per_call",
-        "budget",
-        "budget_consumed",
-    ]
-    .iter()
-    .any(|name| extra.contains_key(*name))
+fn extra_blocks(
+    extra: &std::collections::BTreeMap<String, Value>,
+    allow_budget: bool,
+    allow_consumed: bool,
+) -> bool {
+    extra.keys().any(|name| match name.as_str() {
+        "interaction" | "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" => true,
+        "budget" => !allow_budget,
+        "budget_consumed" => !allow_consumed,
+        _ => false,
+    })
 }
 fn digest(compact: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(compact.as_bytes()))

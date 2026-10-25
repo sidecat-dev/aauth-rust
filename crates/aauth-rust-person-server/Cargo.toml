@@ -16,6 +16,7 @@ description = "AAuth Person binding, authorization and immediate call chaining w
 aauth-rust-core.workspace = true
 aauth-rust-jose.workspace = true
 aauth-rust-signature-key.workspace = true
+aauth-rust-budgets.workspace = true
 http.workspace = true
 httpdate = "1"
 serde.workspace = true

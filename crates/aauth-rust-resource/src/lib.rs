@@ -1,5 +1,6 @@
 //! Agent-identity and PS-authorization Resources. Verification precedes host policy.
 #![deny(missing_docs)]
+mod budget_gate;
 mod held;
 mod ps_authorization;
 mod session;
