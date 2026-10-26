@@ -3,17 +3,19 @@
 //! Vocabulary grammar, whole-set algebra, R3 documents, direct grants,
 //! per-call proposals, operation access hints, and the R3 claims of Resource
 //! and Auth tokens. A host registers one codec per vocabulary; codecs for the
-//! seven standard vocabularies are included. This crate does not fetch a
-//! definition or artifact, decide policy, execute a call, or bind a token to a
-//! request.
+//! seven standard vocabularies are included. A role-authenticated artifact
+//! fetcher uses a trusted host HTTPS adapter. This crate does not fetch a
+//! definition, decide policy, execute a call, or bind a token to a request.
 #![deny(missing_docs)]
 
 mod annotation;
+mod artifact;
 mod budget_token;
 mod digest;
 mod document;
 mod envelope;
 mod error;
+mod fetch;
 mod grant;
 mod hints;
 mod issuance;
@@ -26,6 +28,10 @@ mod uri;
 mod vocabulary;
 
 pub use annotation::AnnotationEncoding;
+pub use artifact::{ArtifactKind, ReferencedArtifact};
+pub use fetch::{FetchBody, FetchClient, FetchConfig, FetchEgress, FetchError, FetchIdentity,
+    FetchLimits, FetchResponse, FetchTransport, DEFAULT_ARTIFACT_FETCH_TIMEOUT,
+    DEFAULT_MAXIMUM_DOCUMENT_BYTES};
 pub use budget_token::{
     mint_budget_auth_token, mint_budget_resource_token, verify_budget_auth_token,
     verify_budget_resource_token,
@@ -56,6 +62,8 @@ pub use vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Registry
 
 #[cfg(test)]
 mod artifact_tests;
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(test)]
 mod hints_tests;
 #[cfg(test)]
