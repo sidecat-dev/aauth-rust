@@ -12,6 +12,7 @@ use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const AS: &str = "https://as.example";
 const PS: &str = "https://ps.example";
@@ -264,4 +265,80 @@ fn a_calendar_boundary_ends_the_access_server_grant() {
         .unwrap();
     assert_eq!(token.claims().exp, 1_100);
     assert_eq!(token.claims().extra["budget"]["amount"], 2_000);
+}
+
+static BELOW_CAP: AtomicUsize = AtomicUsize::new(0);
+
+fn below_cap_ids() -> String {
+    format!("below-{}", BELOW_CAP.fetch_add(1, Ordering::SeqCst))
+}
+
+fn issued_amount(response: &http::Response<Vec<u8>>) -> i64 {
+    let value: Value = serde_json::from_slice(response.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    token.claims().extra["budget"]["amount"].as_i64().unwrap()
+}
+
+fn wide_server() -> AccessServer<
+    Keys,
+    impl Fn(&aauth_rust_access_server::AuthorizationRequest) -> Result<Decision, PolicyError>,
+    impl Fn() -> i64,
+    impl Fn() -> String,
+> {
+    AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |_: &aauth_rust_access_server::AuthorizationRequest| {
+            Ok(Decision {
+                scopes: vec!["read".into()],
+                lifetime: 600,
+            })
+        },
+        || 1000,
+        below_cap_ids,
+    )
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        4_000,
+        vec![UnitDeclaration::with_max("USD", 6, 10_000, "dollars").unwrap()],
+    ))
+    .unwrap()
+}
+
+#[test]
+fn access_server_does_not_exceed_a_parameter_below_its_cap() {
+    let mut extra = BTreeMap::new();
+    extra.insert("budget".into(), budget(8_000, 6));
+    let below = wide_server().handle(&request(extra.clone(), Some(budget(1_500, 6))));
+    assert_eq!(
+        below.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(below.body())
+    );
+    let value: Value = serde_json::from_slice(below.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().extra["budget"]["amount"], 1_500);
+    assert_eq!(token.claims().extra["budget"]["unit"], "USD");
+    assert_eq!(token.claims().extra["budget"]["decimals"], 6);
+    assert_ne!(issued_amount(&below), 4_000);
+
+    let at_cap = wide_server().handle(&request(extra.clone(), Some(budget(6_000, 6))));
+    assert_eq!(
+        at_cap.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(at_cap.body())
+    );
+    assert_eq!(issued_amount(&at_cap), 4_000);
+
+    let above_offer = wide_server().handle(&request(extra, Some(budget(9_000, 6))));
+    assert_eq!(above_offer.status(), 400);
+    assert_eq!(error(&above_offer), "invalid_budget");
 }
