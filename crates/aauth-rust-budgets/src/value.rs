@@ -162,7 +162,10 @@ impl UnitDeclaration {
         self.max
     }
 
-    /// Markdown description. Sanitize with [`sanitize_markdown`] before display.
+    /// Resource-supplied description, as published on `budget_units`.
+    ///
+    /// The stored string is not display text. Show [`description_text`] of it.
+    /// That result is plain text, not Markdown.
     pub fn description(&self) -> &str {
         &self.description
     }
@@ -231,12 +234,12 @@ pub struct ResourceBudget {
     pub consumed: Option<ConsumptionRecord>,
 }
 
-/// Human amount and a sanitized description, kept as separate fields.
+/// Human amount and a plain-text description, kept as separate fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsentFigure {
     /// Plain-text amount such as `$5.00`, never the JSON object.
     pub amount: String,
-    /// Resource description after [`sanitize_markdown`].
+    /// Unit description after [`description_text`]. Already HTML-escaped.
     pub description: String,
 }
 
@@ -566,316 +569,90 @@ fn split_digits(amount: i64, decimals: i64) -> (String, String) {
     }
 }
 
-/// Remove raw HTML and link targets whose scheme is not `http`, `https`, or `mailto`.
+/// Characters of normalized description text kept before HTML escaping.
 ///
-/// Character references are decoded until none remain, then tags and control
-/// characters are removed. An inline destination or a reference definition is
-/// kept only when it has no scheme or the scheme is `http`, `https`, or
-/// `mailto` (ASCII case-insensitive). Any other scheme is dropped. `javascript:`,
-/// `data:`, and `vbscript:` are replaced with `#` so removing one occurrence
-/// cannot assemble another, including through a character reference a renderer
-/// would decode. `&` in the result is written as `&amp;`.
-pub fn sanitize_markdown(input: &str) -> String {
-    let decoded = decode_until_stable(input);
-    let stripped = strip_tags_and_controls(&decoded);
-    let neutralized = neutralize_disallowed_schemes(&stripped);
-    allow_list_links(&neutralized).replace('&', "&amp;")
+/// The draft states no length. A consent screen keeps at most this many
+/// Unicode scalar values. A longer description is cut and ends with `…`.
+/// The bound is applied before escaping, so the returned string can be longer.
+pub const DESCRIPTION_TEXT_LIMIT: usize = 1024;
+
+/// Bidirectional formatting characters a consent line must not keep.
+///
+/// Overrides, embeddings, isolates, and marks. Any one of them lets a
+/// resource spoof the direction of the surrounding text.
+fn is_bidi_formatting(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
-fn decode_until_stable(input: &str) -> String {
-    let mut decoded = input.to_owned();
-    loop {
-        let next = decode_entities(&decoded);
-        if next == decoded {
-            return decoded;
-        }
-        decoded = next;
-    }
-}
-
-fn strip_tags_and_controls(input: &str) -> String {
-    let mut stripped = String::with_capacity(input.len());
-    let mut chars = input.chars();
-    while let Some(character) = chars.next() {
-        if character == '<' {
-            for next in chars.by_ref() {
-                if next == '>' {
-                    break;
-                }
+/// Plain text for a resource-supplied unit description.
+///
+/// The draft calls the description Markdown and says to sanitize it before
+/// rendering. This profile does not render Markdown. The result is safe to
+/// insert into HTML as text that is already escaped: `&`, `<`, `>`, `"`, and
+/// `'` become character references. Control characters and bidi formatting
+/// characters are removed. Whitespace, including control whitespace, collapses
+/// to one space, with no leading or trailing space. The normalized text is at
+/// most [`DESCRIPTION_TEXT_LIMIT`] scalar values; a longer description ends
+/// with `…` inside that bound. There is no link rewrite, scheme filter, or
+/// character-reference decode, and the function does not panic.
+pub fn description_text(input: &str) -> String {
+    let mut plain = String::new();
+    let mut count = 0usize;
+    let mut pending_space = false;
+    for character in input.chars() {
+        if character.is_whitespace() {
+            if count > 0 {
+                pending_space = true;
             }
             continue;
         }
-        if character == '>'
-            || character.is_control()
-            || character == '\u{feff}'
-            || character == '\u{200b}'
-        {
+        if character.is_control() || is_bidi_formatting(character) {
             continue;
         }
-        stripped.push(character);
+        let extra = usize::from(pending_space) + 1;
+        if count + extra > DESCRIPTION_TEXT_LIMIT {
+            if count >= DESCRIPTION_TEXT_LIMIT {
+                let _ = plain.pop();
+            }
+            plain.push('\u{2026}');
+            return escape_html(&plain);
+        }
+        if pending_space {
+            plain.push(' ');
+            pending_space = false;
+        }
+        plain.push(character);
+        count += extra;
     }
-    stripped
+    escape_html(&plain)
 }
 
-fn decode_entities(input: &str) -> String {
+fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let Some(end) = rest.find(';') else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        if end > 16 {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        }
-        if let Some(character) = decode_entity(&rest[1..end]) {
-            out.push(character);
-            rest = &rest[end + 1..];
-            continue;
-        }
-        out.push('&');
-        rest = &rest[1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn decode_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "colon" => Some(':'),
-        "nbsp" => Some(' '),
-        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)
-        }
-        _ if let Some(digits) = entity.strip_prefix('#') => {
-            char::from_u32(digits.parse::<u32>().ok()?)
-        }
-        _ => None,
-    }
-}
-
-fn neutralize_disallowed_schemes(input: &str) -> String {
-    const SCHEMES: [&str; 3] = ["javascript:", "data:", "vbscript:"];
-    let mut out = String::with_capacity(input.len());
-    let mut index = 0;
-    let bytes = input.as_bytes();
-    while index < bytes.len() {
-        let mut replaced = false;
-        for scheme in SCHEMES {
-            let scheme_bytes = scheme.as_bytes();
-            if index + scheme_bytes.len() <= bytes.len()
-                && bytes[index..index + scheme_bytes.len()].eq_ignore_ascii_case(scheme_bytes)
-            {
-                // A non-letter stops `java` + `script:` from becoming a new scheme.
-                out.push('#');
-                index += scheme_bytes.len();
-                replaced = true;
-                break;
-            }
-        }
-        if replaced {
-            continue;
-        }
-        let character = input[index..]
-            .chars()
-            .next()
-            .expect("index on a char boundary");
-        out.push(character);
-        index += character.len_utf8();
-    }
-    out
-}
-
-fn scheme_allowed(destination: &str) -> bool {
-    let destination = destination.trim();
-    let bytes = destination.as_bytes();
-    if bytes.first().is_none_or(|byte| !byte.is_ascii_alphabetic()) {
-        return true;
-    }
-    let mut end = 1;
-    while end < bytes.len()
-        && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'+' | b'-' | b'.'))
-    {
-        end += 1;
-    }
-    if end >= bytes.len() || bytes[end] != b':' {
-        return true;
-    }
-    let scheme = &destination[..end];
-    scheme.eq_ignore_ascii_case("http")
-        || scheme.eq_ignore_ascii_case("https")
-        || scheme.eq_ignore_ascii_case("mailto")
-}
-
-fn allow_list_links(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(position) = rest.find("](") {
-        out.push_str(&rest[..position + 2]);
-        rest = &rest[position + 2..];
-        let Some((end, destination)) = consume_inline_link(rest) else {
-            out.push_str(rest);
-            return rewrite_reference_definitions(&out);
-        };
-        if scheme_allowed(&destination) {
-            out.push_str(&rest[..end]);
-        } else {
-            out.push(')');
-        }
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    rewrite_reference_definitions(&out)
-}
-
-fn consume_inline_link(input: &str) -> Option<(usize, String)> {
-    let bytes = input.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    if index < bytes.len() && bytes[index] == b'<' {
-        index += 1;
-        let start = index;
-        while index < bytes.len() && bytes[index] != b'>' && bytes[index] != b'\n' {
-            let character = input[index..].chars().next()?;
-            index += character.len_utf8();
-        }
-        let destination = input[start..index].to_owned();
-        if index < bytes.len() && bytes[index] == b'>' {
-            index += 1;
-        }
-        return Some((skip_title_and_close(input, index)?, destination));
-    }
-    let start = index;
-    let mut depth = 0_i32;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' if index + 1 < bytes.len() => index += 2,
-            b'(' => {
-                depth += 1;
-                index += 1;
-            }
-            b')' if depth == 0 => break,
-            b')' => {
-                depth -= 1;
-                index += 1;
-            }
-            b' ' | b'\t' | b'\n' | b'\r' if depth == 0 => break,
-            _ => {
-                let character = input[index..].chars().next()?;
-                index += character.len_utf8();
-            }
-        }
-    }
-    let destination = input[start..index].to_owned();
-    Some((skip_title_and_close(input, index)?, destination))
-}
-
-fn skip_title_and_close(input: &str, mut index: usize) -> Option<usize> {
-    let bytes = input.as_bytes();
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    if index < bytes.len() && matches!(bytes[index], b'"' | b'\'' | b'(') {
-        let quote = if bytes[index] == b'(' {
-            b')'
-        } else {
-            bytes[index]
-        };
-        index += 1;
-        while index < bytes.len() && bytes[index] != quote {
-            let character = input[index..].chars().next()?;
-            index += character.len_utf8();
-        }
-        if index < bytes.len() && bytes[index] == quote {
-            index += 1;
-        }
-    }
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    (index < bytes.len() && bytes[index] == b')').then_some(index + 1)
-}
-
-fn rewrite_reference_definitions(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for line in input.split_inclusive('\n') {
-        let newline = line.ends_with('\n');
-        let body = line.trim_end_matches('\n');
-        match reference_destination(body) {
-            None => out.push_str(line),
-            Some(destination) if scheme_allowed(&destination) => out.push_str(line),
-            Some(_) => {
-                if let Some(label) = body.find("]:") {
-                    out.push_str(&body[..=label + 1]);
-                } else {
-                    out.push_str(body);
-                }
-                if newline {
-                    out.push('\n');
-                }
-            }
+    for character in input.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(character),
         }
     }
     out
-}
-
-fn reference_destination(line: &str) -> Option<String> {
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() && index < 3 && bytes[index] == b' ' {
-        index += 1;
-    }
-    if index >= bytes.len() || bytes[index] != b'[' {
-        return None;
-    }
-    index += 1;
-    while index < bytes.len() && bytes[index] != b']' && bytes[index] != b'\n' {
-        index += 1;
-    }
-    if index + 1 >= bytes.len() || bytes[index] != b']' || bytes[index + 1] != b':' {
-        return None;
-    }
-    index += 2;
-    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    if index >= bytes.len() {
-        return Some(String::new());
-    }
-    if bytes[index] == b'<' {
-        index += 1;
-        let start = index;
-        while index < bytes.len() && bytes[index] != b'>' && bytes[index] != b'\n' {
-            index += 1;
-        }
-        return Some(line[start..index].to_owned());
-    }
-    let start = index;
-    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
-        index += 1;
-    }
-    Some(line[start..index].to_owned())
 }
 
 /// Amount and description a person server shows at consent.
 ///
-/// The amount is plain text. The description is sanitized Markdown. They are
-/// separate strings so the figure is not part of the resource's Markdown.
+/// The amount is plain text. The description is plain text from
+/// [`description_text`], not Markdown. They are separate strings so the
+/// figure is not part of the resource's description.
 pub fn consent_figure(budget: &Budget, description: &str) -> ConsentFigure {
     ConsentFigure {
         amount: human_amount(budget),
-        description: sanitize_markdown(description),
+        description: description_text(description),
     }
 }

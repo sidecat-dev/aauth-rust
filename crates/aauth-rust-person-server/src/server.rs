@@ -270,8 +270,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .unwrap_or_else(|poison| poison.into_inner()) = AllocationBook::new();
         }
     }
-    /// Human amount and sanitized description, kept as separate strings.
-    /// `None` when budgets are off.
+    /// Human amount and plain-text description, kept as separate strings.
+    ///
+    /// The description is already HTML-escaped plain text, not Markdown.
+    /// Insert it as escaped text: do not render it as Markdown, and do not
+    /// escape it again. The amount is a different string. `None` when budgets
+    /// are off.
     pub fn budget_consent(&self, budget: &Budget, description: &str) -> Option<ConsentFigure> {
         self.budgets
             .as_ref()

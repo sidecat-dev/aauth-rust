@@ -217,15 +217,135 @@ fn person_server_narrows_amount_without_changing_unit_or_decimals() {
         .unwrap();
     assert_eq!(figure.amount, "$5.00");
     assert_ne!(figure.amount, figure.description);
-    assert!(!figure.description.contains('<'));
-    assert!(
-        !figure
-            .description
-            .to_ascii_lowercase()
-            .contains("javascript:")
+    assert_eq!(
+        figure.description,
+        "pay &lt;b&gt;now&lt;/b&gt; [x](javascript:alert(1))"
     );
+    assert!(!figure.description.contains('<'));
+    assert!(!figure.description.contains('>'));
     assert!(!figure.description.contains("$5.00"));
     assert!(!figure.description.contains("5000000"));
+}
+
+#[test]
+fn consent_renders_recheck_descriptions_as_plain_text() {
+    let server = server();
+    let offer = aauth_rust_budgets::Budget::new(5_000_000, "USD", 6).unwrap();
+    let https = server
+        .budget_consent(&offer, "see [docs](https://example.test/a)")
+        .unwrap();
+    assert_eq!(https.amount, "$5.00");
+    assert_eq!(https.description, "see [docs](https://example.test/a)");
+    assert_ne!(https.amount, https.description);
+    let mail = server
+        .budget_consent(&offer, "write [me](mailto:person@example.test)")
+        .unwrap();
+    assert_eq!(mail.amount, "$5.00");
+    assert_eq!(mail.description, "write [me](mailto:person@example.test)");
+    assert_ne!(mail.amount, mail.description);
+    for sample in recheck_descriptions() {
+        let figure = server.budget_consent(&offer, &sample).unwrap();
+        let decoded = decode_amp_and_quotes(&figure.description);
+        assert_eq!(figure.amount, "$5.00", "{sample}");
+        assert_ne!(figure.amount, figure.description, "{sample}");
+        assert!(!figure.description.contains("$5.00"), "{sample}");
+        assert!(!figure.description.contains("5000000"), "{sample}");
+        assert!(!figure.description.contains('<'), "{sample}");
+        assert!(!figure.description.contains('>'), "{sample}");
+        assert!(
+            !decoded.contains('<') && !decoded.contains('>'),
+            "{sample} -> {} -> {decoded}",
+            figure.description
+        );
+        assert!(
+            !is_javascript_link(&figure.description),
+            "{sample} -> {}",
+            figure.description
+        );
+    }
+}
+
+fn recheck_descriptions() -> Vec<String> {
+    let nested = format!(
+        "[x]({}javascript:{}alert(1))",
+        "java".repeat(8),
+        "script:".repeat(8)
+    );
+    let mut samples: Vec<String> = [
+        "[x](javascript\\:alert(1))",
+        "[x](JaVaScRiPt\\:alert(1))",
+        "[x](javascript&#92;:alert(1))",
+        "[x](javascript&#x5c;&#x3a;alert(1))",
+        "![x](data\\:image/svg+xml,hi)",
+        "[x](vbscript\\:msgbox)",
+        "pay [here](javascript\\:fetch(...document.cookie))",
+        "[x](&#1data:06;avascript:alert(1))",
+        "[x](java&#11data:5;cript:alert(1))",
+        "[x](\\é)",
+        "[x](a\\éb)",
+        "[x](&#92;&#233;)",
+        "<script>",
+        "<script>alert(1)</script>",
+        "<javascript:alert(1)>",
+        "<https://example.test>",
+        "[x]: javascript:alert(1)",
+        "[click][id]\n[id]: javascript:alert(1)",
+        "]( [b](file:///etc/passwd)",
+        "[a](https://ok \"t\\\"\") [b](file:///etc/passwd)",
+        "[x](ms\\-msdt:/id)",
+        "JavaScript:alert(1)",
+        "javajavascript:script:alert(1)",
+        "java&#115;cript:alert(1)",
+        "&#106;avascript:alert(1)",
+        "JaVaScRiPt&#58;alert(1)",
+        "data:text/html,hi",
+        "vbscript:msg",
+        "&#xD800;",
+        "&#xDFFF;",
+        "&#55296;",
+        "<a href=\"javascript:alert(1)\">",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    samples.push(nested);
+    samples.push("a".repeat(8192));
+    samples.push("é".repeat(8192));
+    samples.push("<".repeat(8192));
+    samples.push("&#xD800;".repeat(1024));
+    samples
+}
+
+fn decode_amp_and_quotes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix("&amp;") {
+            out.push('&');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("&quot;") {
+            out.push('"');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("&#39;") {
+            out.push('\'');
+            rest = stripped;
+        } else {
+            let Some(character) = rest.chars().next() else {
+                break;
+            };
+            out.push(character);
+            rest = &rest[character.len_utf8()..];
+        }
+    }
+    out
+}
+
+fn is_javascript_link(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<a")
+        || lower.contains("href=\"javascript:")
+        || lower.contains("href='javascript:")
+        || lower.contains("href=javascript:")
 }
 
 fn person_token(server: &Server) -> String {

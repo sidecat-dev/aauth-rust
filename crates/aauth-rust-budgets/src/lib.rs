@@ -31,10 +31,11 @@ pub use usage::{
     parse_usage_query, sign_usage_response, usage_signature_covers, verify_usage_signature,
 };
 pub use value::{
-    Budget, ConsentFigure, ConsumptionRecord, Error, MAX_AMOUNT, ResourceBudget, UnitDeclaration,
-    check_declared, consent_figure, human_amount, metered_access_mode, narrow_to, offer_budget,
-    parse_budget, parse_budget_bytes, parse_consumption, parse_declarations, parse_resource_claims,
-    sanitize_markdown, validate_endpoint_url, validate_narrowing,
+    Budget, ConsentFigure, ConsumptionRecord, DESCRIPTION_TEXT_LIMIT, Error, MAX_AMOUNT,
+    ResourceBudget, UnitDeclaration, check_declared, consent_figure, description_text,
+    human_amount, metered_access_mode, narrow_to, offer_budget, parse_budget, parse_budget_bytes,
+    parse_consumption, parse_declarations, parse_resource_claims, validate_endpoint_url,
+    validate_narrowing,
 };
 
 /// Structured-field and JSON carrier limit from the range-limits section.

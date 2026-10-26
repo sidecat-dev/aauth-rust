@@ -208,7 +208,12 @@ resource token names a unit from that list. On the authorization endpoint an
 amount above `max` is narrowed; an unknown unit, a decimals mismatch, or a
 malformed object is `400` `invalid_budget`. Omitting `budget` uses the profile
 default offer, capped by the first unit's `max`. The person server copies that
-unit and decimals and narrows the amount to its cap. That cap bounds the sum
+unit and decimals and narrows the amount to its cap. At consent it shows that
+amount as its own formatted string and the unit description as plain text from
+`description_text`. The draft says to sanitize that Markdown before rendering.
+This profile does not render Markdown. The text is HTML-escaped, with control
+characters and bidi formatting removed, whitespace collapsed, and the length
+capped. The person server's cap bounds the sum
 of outstanding allocations for one subject at one resource. An allocation
 counts its full issued amount until `exp`, or until a consumption record
 replaces that figure. `IssuerPolicy::until` stops the issued auth token at

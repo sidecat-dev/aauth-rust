@@ -5,15 +5,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use aauth_rust_budgets::{
-    AllocationBook, Budget, BudgetHeader, Caller, ChargeError, ConsumptionRecord, Error,
-    IssuerPolicy, KeyRole, Ledger, MAX_AMOUNT, Refusal, RevocationSettlement, TokenAccount,
-    UnitDeclaration, UsageQuery, act_on_header, answer_usage, assume_lost_cost, balance_after,
-    check_declared, consent_figure, header_is_fresh, human_amount, issue_auth_budget,
-    metered_access_mode, narrow_to, offer_budget, parse_budget, parse_declarations, parse_header,
-    parse_max_cost, parse_resource_claims, parse_usage_query, plan_from_grant, read_granted,
-    recover_omitted_cost, response_complete_without_trailer, sanitize_markdown, sender_field,
-    sign_usage_response, spend_plan, trailer_field, usage_signature_covers, validate_endpoint_url,
-    validate_narrowing, verify_delivered, verify_usage_signature, withhold_budget_header,
+    AllocationBook, Budget, BudgetHeader, Caller, ChargeError, ConsumptionRecord,
+    DESCRIPTION_TEXT_LIMIT, Error, IssuerPolicy, KeyRole, Ledger, MAX_AMOUNT, Refusal,
+    RevocationSettlement, TokenAccount, UnitDeclaration, UsageQuery, act_on_header, answer_usage,
+    assume_lost_cost, balance_after, check_declared, consent_figure, description_text,
+    header_is_fresh, human_amount, issue_auth_budget, metered_access_mode, narrow_to, offer_budget,
+    parse_budget, parse_declarations, parse_header, parse_max_cost, parse_resource_claims,
+    parse_usage_query, plan_from_grant, read_granted, recover_omitted_cost,
+    response_complete_without_trailer, sender_field, sign_usage_response, spend_plan,
+    trailer_field, usage_signature_covers, validate_endpoint_url, validate_narrowing,
+    verify_delivered, verify_usage_signature, withhold_budget_header,
 };
 use aauth_rust_jose::SigningKey;
 use serde_json::json;
@@ -165,37 +166,121 @@ fn consumption_requires_budget_and_the_presented_jti() {
 }
 
 #[test]
-fn consent_keeps_the_amount_out_of_the_sanitized_description() {
-    let figure = consent_figure(
-        &usd(5_000_000),
-        "pay <script>javascript:alert(1)</script> [x](data:text/html,hi)",
-    );
+fn consent_keeps_the_amount_apart_from_the_plain_description() {
+    let raw = "pay <script>javascript:alert(1)</script> [x](data:text/html,hi)";
+    let figure = consent_figure(&usd(5_000_000), raw);
     assert_eq!(figure.amount, "$5.00");
-    assert!(!figure.description.contains('<'));
-    assert!(!figure.description.contains("javascript:"));
-    assert!(!figure.description.contains("data:"));
+    assert_eq!(figure.description, description_text(raw));
+    assert_eq!(
+        figure.description,
+        "pay &lt;script&gt;javascript:alert(1)&lt;/script&gt; [x](data:text/html,hi)"
+    );
     assert_ne!(figure.amount, figure.description);
+    assert!(!figure.description.contains('<'));
+    assert!(!figure.description.contains('>'));
+    assert!(!figure.description.contains("$5.00"));
+    assert!(!figure.description.contains("5000000"));
     assert_eq!(human_amount(&usd(5_000_000)), "$5.00");
     assert_eq!(
         human_amount(&Budget::new(1500, "kWh", 3).unwrap()),
         "1.500 kWh"
     );
-    let cleaned = sanitize_markdown("a <b>b</b> c");
-    assert_eq!(cleaned, "a b c");
-    let kept = sanitize_markdown("see [docs](https://example.test/a)");
-    assert!(kept.contains("https://example.test/a"), "{kept}");
-    let mail = sanitize_markdown("write [me](mailto:person@example.test)");
-    assert!(mail.contains("mailto:person@example.test"), "{mail}");
-    let http = sanitize_markdown("see [x](http://example.test/a)");
-    assert!(http.contains("http://example.test/a"), "{http}");
-    let ftp = sanitize_markdown("see [x](ftp://files.example/a)");
-    assert!(!ftp.to_ascii_lowercase().contains("ftp:"), "{ftp}");
+
+    let https = description_text("see [docs](https://example.test/a)");
+    assert_eq!(https, "see [docs](https://example.test/a)");
+    let mailto = description_text("write [me](mailto:person@example.test)");
+    assert_eq!(mailto, "write [me](mailto:person@example.test)");
+    let http = description_text("see [x](http://example.test/a)");
+    assert_eq!(http, "see [x](http://example.test/a)");
+    for kept in [https, mailto, http] {
+        assert!(!kept.contains('<'), "{kept}");
+        assert!(!kept.contains("href"), "{kept}");
+    }
+    let ftp = description_text("see [x](ftp://files.example/a)");
+    assert_eq!(ftp, "see [x](ftp://files.example/a)");
+    assert!(!ftp.contains('<'));
+
+    assert_eq!(description_text("a <b>b</b> c"), "a &lt;b&gt;b&lt;/b&gt; c");
+    assert_eq!(description_text("  a \t\n b  "), "a b");
+    assert_eq!(description_text("a\u{0000}b\u{0007}c"), "abc");
+    assert_eq!(description_text("a\u{202e}b\u{202d}c\u{2066}d"), "abcd");
+    assert_eq!(
+        description_text("say \"hi\" & 'go'"),
+        "say &quot;hi&quot; &amp; &#39;go&#39;"
+    );
+    assert_eq!(description_text("<script>"), "&lt;script&gt;");
+    assert_eq!(
+        description_text("<javascript:alert(1)>"),
+        "&lt;javascript:alert(1)&gt;"
+    );
+    assert_eq!(
+        description_text("[x]: javascript:alert(1)"),
+        "[x]: javascript:alert(1)"
+    );
+
+    let exact = "c".repeat(DESCRIPTION_TEXT_LIMIT);
+    assert_eq!(description_text(&exact), exact);
+    let over = format!("{exact}Z");
+    let truncated = description_text(&over);
+    assert_eq!(truncated.chars().count(), DESCRIPTION_TEXT_LIMIT);
+    assert!(truncated.ends_with('\u{2026}'));
+    assert!(!truncated.contains('Z'));
+}
+
+#[test]
+fn description_text_escapes_recheck_inputs_without_a_link() {
+    for sample in recheck_descriptions() {
+        let escaped = description_text(&sample);
+        let decoded = decode_amp_and_quotes(&escaped);
+        assert!(!escaped.contains('<'), "{sample} -> {escaped}");
+        assert!(!escaped.contains('>'), "{sample} -> {escaped}");
+        assert!(
+            !decoded.contains('<') && !decoded.contains('>'),
+            "{sample} -> {escaped} -> {decoded}"
+        );
+        assert!(
+            !is_javascript_link(&escaped),
+            "{sample} -> {escaped} -> {decoded}"
+        );
+    }
+    let run = description_text(&"a".repeat(8192));
+    assert_eq!(run.chars().count(), DESCRIPTION_TEXT_LIMIT);
+    assert!(run.ends_with('\u{2026}'));
+    let wide = description_text(&"é".repeat(8192));
+    assert_eq!(wide.chars().count(), DESCRIPTION_TEXT_LIMIT);
+    assert!(wide.ends_with('\u{2026}'));
+    assert!(!wide.contains('<'));
+}
+
+/// Section A of the consent recheck, plus the earlier scheme spellings.
+fn recheck_descriptions() -> Vec<String> {
     let nested = format!(
         "[x]({}javascript:{}alert(1))",
         "java".repeat(8),
         "script:".repeat(8)
     );
-    for sample in [
+    let mut samples: Vec<String> = [
+        "[x](javascript\\:alert(1))",
+        "[x](JaVaScRiPt\\:alert(1))",
+        "[x](javascript&#92;:alert(1))",
+        "[x](javascript&#x5c;&#x3a;alert(1))",
+        "![x](data\\:image/svg+xml,hi)",
+        "[x](vbscript\\:msgbox)",
+        "pay [here](javascript\\:fetch(...document.cookie))",
+        "[x](&#1data:06;avascript:alert(1))",
+        "[x](java&#11data:5;cript:alert(1))",
+        "[x](\\é)",
+        "[x](a\\éb)",
+        "[x](&#92;&#233;)",
+        "<script>",
+        "<script>alert(1)</script>",
+        "<javascript:alert(1)>",
+        "<https://example.test>",
+        "[x]: javascript:alert(1)",
+        "[click][id]\n[id]: javascript:alert(1)",
+        "]( [b](file:///etc/passwd)",
+        "[a](https://ok \"t\\\"\") [b](file:///etc/passwd)",
+        "[x](ms\\-msdt:/id)",
         "JavaScript:alert(1)",
         "javajavascript:script:alert(1)",
         "java&#115;cript:alert(1)",
@@ -203,106 +288,57 @@ fn consent_keeps_the_amount_out_of_the_sanitized_description() {
         "JaVaScRiPt&#58;alert(1)",
         "data:text/html,hi",
         "vbscript:msg",
-        "[x](&#1data:06;avascript:alert(1))",
-        "[x](java&#11data:5;cript:alert(1))",
-        nested.as_str(),
-        "[x]: javascript:alert(1)",
-    ] {
-        let stripped = sanitize_markdown(sample);
-        let decoded = commonmark_decode(&stripped);
-        assert!(
-            !decoded.to_ascii_lowercase().contains("javascript:"),
-            "{sample} -> {stripped} -> {decoded}"
-        );
-        assert!(
-            !decoded.to_ascii_lowercase().contains("data:"),
-            "{sample} -> {stripped} -> {decoded}"
-        );
-        assert!(
-            !decoded.to_ascii_lowercase().contains("vbscript:"),
-            "{sample} -> {stripped} -> {decoded}"
-        );
-        for destination in link_destinations(&decoded) {
-            let destination = destination.to_ascii_lowercase();
-            assert!(
-                !destination.contains("javascript:")
-                    && !destination.contains("data:")
-                    && !destination.contains("vbscript:"),
-                "{sample} -> {decoded} dest {destination}"
-            );
-        }
-    }
+        "&#xD800;",
+        "&#xDFFF;",
+        "&#55296;",
+        "<a href=\"javascript:alert(1)\">",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    samples.push(nested);
+    samples.push("a".repeat(8192));
+    samples.push("é".repeat(8192));
+    samples.push("<".repeat(8192));
+    samples.push("&#xD800;".repeat(1024));
+    samples
 }
 
-/// One CommonMark pass, repeated until a second pass changes nothing.
-fn commonmark_decode(input: &str) -> String {
-    let mut current = input.to_owned();
-    loop {
-        let next = commonmark_decode_once(&current);
-        if next == current {
-            return current;
-        }
-        current = next;
-    }
-}
-
-fn commonmark_decode_once(input: &str) -> String {
+/// One decode of the escapes that are not brackets.
+///
+/// `&lt;` and `&gt;` stay in place, so this pass still contains no raw `<`.
+/// A full HTML decode would restore the resource's brackets as text. That
+/// text is what a person reads when the escaped string is inserted into HTML.
+fn decode_amp_and_quotes(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let Some(end) = rest.find(';') else {
+    while !rest.is_empty() {
+        if let Some(stripped) = rest.strip_prefix("&amp;") {
             out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        if end > 16 {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        }
-        if let Some(character) = commonmark_entity(&rest[1..end]) {
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("&quot;") {
+            out.push('"');
+            rest = stripped;
+        } else if let Some(stripped) = rest.strip_prefix("&#39;") {
+            out.push('\'');
+            rest = stripped;
+        } else {
+            let Some(character) = rest.chars().next() else {
+                break;
+            };
             out.push(character);
-            rest = &rest[end + 1..];
-            continue;
+            rest = &rest[character.len_utf8()..];
         }
-        out.push('&');
-        rest = &rest[1..];
     }
-    out.push_str(rest);
     out
 }
 
-fn commonmark_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "colon" => Some(':'),
-        "nbsp" => Some(' '),
-        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)
-        }
-        _ if let Some(digits) = entity.strip_prefix('#') => {
-            char::from_u32(digits.parse::<u32>().ok()?)
-        }
-        _ => None,
-    }
-}
-
-fn link_destinations(markdown: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    let mut rest = markdown;
-    while let Some(position) = rest.find("](") {
-        rest = &rest[position + 2..];
-        let end = rest.find(')').unwrap_or(rest.len());
-        found.push(rest[..end].to_owned());
-        rest = rest.get(end + 1..).unwrap_or("");
-    }
-    found
+fn is_javascript_link(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("<a")
+        || lower.contains("href=\"javascript:")
+        || lower.contains("href='javascript:")
+        || lower.contains("href=javascript:")
 }
 
 #[test]

@@ -57,8 +57,14 @@ the draft required each spelling.
   reports the untouched remainder.
 - `"$5.00"` does not specify rounding or a currency symbol. USD amounts render
   with a leading `$` and two digits, half-up from the signed scale. The amount
-  string and the sanitized description stay separate values. There is no wire
-  field for "visually distinct."
+  string and the description stay separate values. There is no wire field for
+  "visually distinct." The draft says the unit description is Markdown and
+  that an implementation must sanitize it before rendering. This profile does
+  not render Markdown. `description_text` produces plain text: it HTML-escapes
+  `&`, `<`, `>`, `"`, and `'`, removes control characters and bidi formatting
+  characters, collapses whitespace, and caps the normalized text at
+  `DESCRIPTION_TEXT_LIMIT` (1024) scalar values, ending a longer description
+  with `…`. It does not decode character references or rewrite links.
 - A usage response that mixes units reports the first declared unit. It does
   not convert. A counter that would exceed 15 digits is omitted. When
   `all_time` would exceed that limit, or is zero, the `usage` object is
