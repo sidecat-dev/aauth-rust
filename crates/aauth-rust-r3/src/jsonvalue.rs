@@ -1,6 +1,7 @@
 //! Strict JSON for documents and parameters.
 //!
 //! Numbers stay the sender's spelling. Object members reject duplicates.
+//! Nesting is bounded by `MAX_DEPTH`.
 //! Callers that need wire bytes keep the exact value slice.
 
 use std::cmp::Ordering;
@@ -12,6 +13,14 @@ use serde::Serializer;
 use serde_json::value::RawValue;
 
 use crate::error::Error;
+
+/// Implementation limit on open arrays and objects, counted from the outermost
+/// value of the bytes being parsed.
+///
+/// This is a stack-safety resource policy, not an R3 protocol rule. It matches
+/// serde_json's default recursion limit: 127 nested levels parse, and the
+/// 128th opening bracket is refused before its contents are read.
+const MAX_DEPTH: usize = 128;
 
 /// One JSON value. Numbers are the original literal, not floating point.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,7 +52,7 @@ pub(crate) fn parse_raw_object(data: &[u8]) -> Result<Vec<RawMember>, Error> {
     if parser.peek() != Some(b'{') {
         return Err(Error::new("expected JSON object"));
     }
-    parser.bump();
+    parser.enter()?;
     let mut members = Vec::new();
     let mut seen = BTreeSet::new();
     parser.skip_ws();
@@ -88,7 +97,7 @@ pub(crate) fn raw_array_elements(data: &[u8]) -> Result<Vec<Vec<u8>>, Error> {
     if parser.peek() != Some(b'[') {
         return Err(Error::new("expected JSON array"));
     }
-    parser.bump();
+    parser.enter()?;
     let mut elements = Vec::new();
     parser.skip_ws();
     if parser.peek() == Some(b']') {
@@ -478,6 +487,7 @@ fn sub_abs(left: &str, right: &str) -> String {
 struct Parser<'a> {
     data: &'a [u8],
     index: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -485,7 +495,11 @@ impl<'a> Parser<'a> {
         if std::str::from_utf8(data).is_err() {
             return Err(Error::new("JSON must be valid UTF-8"));
         }
-        Ok(Self { data, index: 0 })
+        Ok(Self {
+            data,
+            index: 0,
+            depth: 0,
+        })
     }
 
     fn peek(&self) -> Option<u8> {
@@ -500,6 +514,20 @@ impl<'a> Parser<'a> {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.bump();
         }
+    }
+
+    /// Consume an opening bracket, refusing it when it would reach `MAX_DEPTH`.
+    fn enter(&mut self) -> Result<(), Error> {
+        self.depth += 1;
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::new("JSON nesting exceeds the depth limit"));
+        }
+        self.bump();
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     fn finish(&mut self) -> Result<(), Error> {
@@ -676,11 +704,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_object(&mut self) -> Result<Json, Error> {
-        self.bump();
+        self.enter()?;
         let mut members = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.bump();
+            self.leave();
             return Ok(Json::Object(members));
         }
         loop {
@@ -702,6 +731,7 @@ impl<'a> Parser<'a> {
                 Some(b',') => self.bump(),
                 Some(b'}') => {
                     self.bump();
+                    self.leave();
                     return Ok(Json::Object(members));
                 }
                 _ => return Err(Error::new("invalid JSON object")),
@@ -710,11 +740,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array(&mut self) -> Result<Json, Error> {
-        self.bump();
+        self.enter()?;
         let mut items = Vec::new();
         self.skip_ws();
         if self.peek() == Some(b']') {
             self.bump();
+            self.leave();
             return Ok(Json::Array(items));
         }
         loop {
@@ -725,6 +756,7 @@ impl<'a> Parser<'a> {
                 Some(b',') => self.bump(),
                 Some(b']') => {
                     self.bump();
+                    self.leave();
                     return Ok(Json::Array(items));
                 }
                 _ => return Err(Error::new("invalid JSON array")),

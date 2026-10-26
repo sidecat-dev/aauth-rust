@@ -862,3 +862,97 @@ fn proposal_account_parity_and_referenced_digest() -> Result<(), Error> {
     assert!(must_err(invalid).to_string().contains("reference"));
     Ok(())
 }
+
+/// `levels` objects and arrays, alternating from the outside in, around `leaf`.
+fn nested_json(levels: usize, leaf: &str) -> String {
+    let mut text = String::new();
+    for level in 0..levels {
+        text.push_str(if level % 2 == 0 { r#"{"a":"# } else { "[" });
+    }
+    text.push_str(leaf);
+    for level in (0..levels).rev() {
+        text.push(if level % 2 == 0 { '}' } else { ']' });
+    }
+    text
+}
+
+fn document_with_operation(operation: &str) -> String {
+    format!(r#"{{"vocabulary":"{NAMED}","operations":[{operation}]}}"#)
+}
+
+fn proposal_with_parameter(value: &str) -> String {
+    format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{"p":{value}}}}}"#
+    )
+}
+
+fn refused_for_depth<T>(result: Result<T, Error>) -> bool {
+    result.is_err_and(|err| err.to_string().contains("JSON nesting exceeds the depth limit"))
+}
+
+#[test]
+fn json_nesting_limit_matches_serde_json_default() -> Result<(), Error> {
+    for levels in [127, 128] {
+        let arrays = format!("{}{}", "[".repeat(levels), "]".repeat(levels));
+        for text in [nested_json(levels, "1"), arrays] {
+            let baseline = serde_json::from_str::<serde_json::Value>(&text).is_ok();
+            assert_eq!(baseline, levels == 127, "serde_json at {levels} levels");
+            if baseline {
+                parse_json(text.as_bytes())?;
+            } else {
+                assert!(refused_for_depth(parse_json(text.as_bytes())), "{levels}");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn inline_parameters_compare_at_the_depth_limit_and_refuse_past_it() -> Result<(), Error> {
+    let limit = nested_json(127, "1");
+    let inline = Parameter::inline(limit.as_bytes())?;
+    assert_eq!(inline.inline_json(), Some(limit.into_bytes()));
+    let one = Parameters::new([("value".to_owned(), inline)])?;
+    let same = PresentedParameter::inline(nested_json(127, "1.0").as_bytes())?;
+    assert!(one.matches(&BTreeMap::from([("value".to_owned(), same)]))?);
+    let changed = PresentedParameter::inline(nested_json(127, "2").as_bytes())?;
+    assert!(!one.matches(&BTreeMap::from([("value".to_owned(), changed)]))?);
+
+    let past = nested_json(128, "1");
+    assert!(refused_for_depth(Parameter::inline(past.as_bytes())));
+    assert!(refused_for_depth(PresentedParameter::inline(past.as_bytes())));
+    Ok(())
+}
+
+#[test]
+fn documents_and_proposals_count_depth_from_the_outermost_object() -> Result<(), Error> {
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    let below = nested_json(125, "1");
+    let at = nested_json(126, "1");
+
+    let document = registry.parse_document(document_with_operation(&below).as_bytes());
+    assert!(document.is_err() && !refused_for_depth(document));
+    let document = registry.parse_document(document_with_operation(&at).as_bytes());
+    assert!(refused_for_depth(document));
+
+    let proposal = registry.parse_proposal(proposal_with_parameter(&below).as_bytes())?;
+    let parameter = proposal.parameters().get("p").expect("parameter");
+    assert_eq!(parameter.inline_json(), Some(below.into_bytes()));
+    let proposal = registry.parse_proposal(proposal_with_parameter(&at).as_bytes());
+    assert!(refused_for_depth(proposal));
+    Ok(())
+}
+
+#[test]
+fn very_deep_json_is_refused_through_public_entry_points() {
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    let deep = nested_json(1_000_000, "1");
+    let document = document_with_operation(&deep);
+    let proposal = proposal_with_parameter(&deep);
+    assert!(refused_for_depth(registry.parse_document(document.as_bytes())));
+    assert!(refused_for_depth(registry.parse_proposal(proposal.as_bytes())));
+    assert!(refused_for_depth(Parameter::inline(deep.as_bytes())));
+    assert!(refused_for_depth(PresentedParameter::inline(deep.as_bytes())));
+}
