@@ -13,9 +13,8 @@ use crate::uri::VocabularyUri;
 use crate::vocabulary::Codec;
 use crate::{
     AccessMode, AuthoritativeSnapshot, DefinedOperation, DefinitionCheckError, DefinitionCodec,
-    DefinitionError, DefinitionErrorKind, DefinitionMaterial, DefinitionParser,
-    DefinitionRegistry, Operation, OperationHints, OperationSet, SourceEncoding, Vocabulary,
-    digest,
+    DefinitionError, DefinitionErrorKind, DefinitionMaterial, DefinitionParser, DefinitionRegistry,
+    Operation, OperationHints, OperationSet, SourceEncoding, Vocabulary, digest,
 };
 
 const WIDGETS: &str = "https://example.test/r3/widgets";
@@ -156,7 +155,10 @@ fn person_token() -> OperationHints {
     OperationHints::new(Some(AccessMode::PersonToken), None).expect("hints")
 }
 
-fn defined(name: &str, hints: Option<&OperationHints>) -> Result<DefinedOperation, DefinitionError> {
+fn defined(
+    name: &str,
+    hints: Option<&OperationHints>,
+) -> Result<DefinedOperation, DefinitionError> {
     DefinedOperation::new(&name_json(name), hints).map_err(DefinitionError::from)
 }
 
@@ -254,7 +256,10 @@ fn definition_parser_atomically_owns_source_operations_and_hints() {
         snapshot.hints_for(&operations[0]).expect("read hints"),
         Some(person_token())
     );
-    assert_eq!(snapshot.hints_for(&operations[1]).expect("write hints"), None);
+    assert_eq!(
+        snapshot.hints_for(&operations[1]).expect("write hints"),
+        None
+    );
     snapshot
         .validate_defined(&snapshot.operations())
         .expect("derived operations are defined");
@@ -274,7 +279,10 @@ fn definition_snapshot_refuses_unknown_and_foreign_operations() {
     let unknown = operation(&local, "unknown");
     let unknown_set = OperationSet::new(std::slice::from_ref(&unknown)).expect("unknown set");
     let err = snapshot.validate_defined(&unknown_set);
-    assert_eq!(check_kind(err), Some(DefinitionErrorKind::OperationNotDefined));
+    assert_eq!(
+        check_kind(err),
+        Some(DefinitionErrorKind::OperationNotDefined)
+    );
     match snapshot.hints_for(&unknown) {
         Err(DefinitionCheckError::Refused(err)) => {
             assert_eq!(err.kind(), DefinitionErrorKind::OperationNotDefined);
@@ -347,7 +355,10 @@ fn definition_hints_follow_semantically_equal_operation_encoding() {
         Some(person_token())
     );
     let unknown = operation(&vocabulary, "write");
-    let refused = snapshot.hints_for(&unknown).err().and_then(|err| err.definition_kind());
+    let refused = snapshot
+        .hints_for(&unknown)
+        .err()
+        .and_then(|err| err.definition_kind());
     assert_eq!(refused, Some(DefinitionErrorKind::OperationNotDefined));
 }
 
@@ -479,12 +490,27 @@ fn definition_error_kinds_use_the_go_wire_spellings() {
     let kinds = [
         (DefinitionErrorKind::InvalidSource, "invalid_source"),
         (DefinitionErrorKind::IncompleteSource, "incomplete_source"),
-        (DefinitionErrorKind::UnresolvedDependency, "unresolved_dependency"),
-        (DefinitionErrorKind::SourceKindUnsupported, "source_kind_unsupported"),
-        (DefinitionErrorKind::IdentityUnavailable, "operation_identity_unavailable"),
-        (DefinitionErrorKind::IdentityAmbiguous, "operation_identity_ambiguous"),
+        (
+            DefinitionErrorKind::UnresolvedDependency,
+            "unresolved_dependency",
+        ),
+        (
+            DefinitionErrorKind::SourceKindUnsupported,
+            "source_kind_unsupported",
+        ),
+        (
+            DefinitionErrorKind::IdentityUnavailable,
+            "operation_identity_unavailable",
+        ),
+        (
+            DefinitionErrorKind::IdentityAmbiguous,
+            "operation_identity_ambiguous",
+        ),
         (DefinitionErrorKind::InvalidAnnotation, "invalid_annotation"),
-        (DefinitionErrorKind::OperationNotDefined, "operation_not_defined"),
+        (
+            DefinitionErrorKind::OperationNotDefined,
+            "operation_not_defined",
+        ),
     ];
     for (kind, wire) in kinds {
         assert_eq!(kind.as_str(), wire);

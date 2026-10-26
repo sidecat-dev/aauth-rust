@@ -131,16 +131,26 @@ fn run_contract<S: Sync>(contract: &Contract<S>) {
     let registry =
         DefinitionRegistry::new(std::slice::from_ref(&contract.registration)).expect("registry");
     let snapshot = (contract.parse)(contract.endpoint, &contract.source).expect("valid source");
-    registry.validate(&snapshot).expect("definition registration");
+    registry
+        .validate(&snapshot)
+        .expect("definition registration");
     let receipt = snapshot.receipt();
     assert!(!receipt.encoding().as_str().is_empty());
     assert_eq!(receipt.discovery_endpoint(), contract.endpoint);
     assert!(!receipt.digest().is_empty());
     assert!(receipt.byte_length() > 0);
-    assert!(!snapshot.operations().operations().expect("operations").is_empty());
+    assert!(
+        !snapshot
+            .operations()
+            .operations()
+            .expect("operations")
+            .is_empty()
+    );
 
     let known = set_of(&contract.known);
-    snapshot.validate_defined(&known).expect("known operation is defined");
+    snapshot
+        .validate_defined(&known)
+        .expect("known operation is defined");
     let unknown = set_of(&contract.unknown);
     assert_eq!(
         check_kind(snapshot.validate_defined(&unknown)),
@@ -152,7 +162,12 @@ fn run_contract<S: Sync>(contract: &Contract<S>) {
     }
 
     let replayed = (contract.parse)(contract.endpoint, &contract.source).expect("replay");
-    assert!(snapshot.operations().equal(&replayed.operations()).expect("compare"));
+    assert!(
+        snapshot
+            .operations()
+            .equal(&replayed.operations())
+            .expect("compare")
+    );
     assert_eq!(snapshot.receipt(), replayed.receipt());
     if let Some(expected) = &contract.hints {
         check_hints(&replayed, expected);
@@ -167,7 +182,12 @@ fn run_contract<S: Sync>(contract: &Contract<S>) {
                 .join()
                 .expect("reader thread")
                 .expect("concurrent replay");
-            assert!(snapshot.operations().equal(&concurrent.operations()).expect("compare"));
+            assert!(
+                snapshot
+                    .operations()
+                    .equal(&concurrent.operations())
+                    .expect("compare")
+            );
             assert_eq!(snapshot.receipt(), concurrent.receipt());
             if let Some(expected) = &contract.hints {
                 check_hints(&concurrent, expected);
@@ -177,8 +197,15 @@ fn run_contract<S: Sync>(contract: &Contract<S>) {
 
     let changed = (contract.parse)(contract.endpoint, &contract.changed).expect("changed source");
     assert_ne!(changed.receipt().digest(), snapshot.receipt().digest());
-    assert!(!snapshot.operations().equal(&changed.operations()).expect("compare"));
-    changed.validate_defined(&known).expect("changed source keeps the known operation");
+    assert!(
+        !snapshot
+            .operations()
+            .equal(&changed.operations())
+            .expect("compare")
+    );
+    changed
+        .validate_defined(&known)
+        .expect("changed source keeps the known operation");
     let changed_only = set_of(&contract.changed_only);
     assert_eq!(
         check_kind(snapshot.validate_defined(&changed_only)),
@@ -302,7 +329,8 @@ fn definition_contract_exercises_asyncapi_document() {
 
 #[test]
 fn definition_refusal_contract_exercises_graphql_identity_gap() {
-    let source = GraphQlIntrospectionSource::new(br#"{"data":{"__schema":{"queryType":{"name":"Query"}}}}"#);
+    let source =
+        GraphQlIntrospectionSource::new(br#"{"data":{"__schema":{"queryType":{"name":"Query"}}}}"#);
     assert_refusal(
         GraphQlCodec::parse_definition(GRAPHQL_ENDPOINT, &source),
         IdentityUnavailable,
@@ -323,8 +351,16 @@ fn definition_registrations_are_explicit_and_stable() {
     ])
     .expect("registry");
     assert_eq!(registry.len(), 4);
-    for uri in [McpCodec::URI, OpenApiCodec::URI, GraphQlCodec::URI, AsyncApiCodec::URI] {
-        assert!(registry.contains(&VocabularyUri::parse(uri).expect("uri")), "{uri}");
+    for uri in [
+        McpCodec::URI,
+        OpenApiCodec::URI,
+        GraphQlCodec::URI,
+        AsyncApiCodec::URI,
+    ] {
+        assert!(
+            registry.contains(&VocabularyUri::parse(uri).expect("uri")),
+            "{uri}"
+        );
     }
     assert!(
         DefinitionRegistry::new(&[
@@ -334,9 +370,14 @@ fn definition_registrations_are_explicit_and_stable() {
         .is_err()
     );
 
-    let source = mcp_snapshot(&[(None, r#"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#)]);
+    let source = mcp_snapshot(&[(
+        None,
+        r#"{"tools":[{"name":"read","inputSchema":{"type":"object"}}]}"#,
+    )]);
     let snapshot = McpCodec::parse_definition(MCP_ENDPOINT, &source).expect("mcp snapshot");
-    registry.validate(&snapshot).expect("standard MCP registration");
+    registry
+        .validate(&snapshot)
+        .expect("standard MCP registration");
     let graphql_only =
         DefinitionRegistry::new(&[GraphQlCodec::definition_registration().expect("graphql")])
             .expect("registry");
@@ -459,8 +500,7 @@ fn mcp_definition_rejects_duplicate_tools_across_pages() {
 #[test]
 fn mcp_definition_rejects_incomplete_pagination() {
     let read = r#"{"tools":[{"name":"calendar.read","inputSchema":{"type":"object"}}]}"#;
-    let read_more =
-        r#"{"tools":[{"name":"calendar.read","inputSchema":{"type":"object"}}],"nextCursor":"page-2"}"#;
+    let read_more = r#"{"tools":[{"name":"calendar.read","inputSchema":{"type":"object"}}],"nextCursor":"page-2"}"#;
     let write = r#"{"tools":[{"name":"calendar.write","inputSchema":{"type":"object"}}]}"#;
     let empty_more = r#"{"tools":[],"nextCursor":"page-2"}"#;
     let cases: [(&str, Vec<(Option<&str>, &str)>); 9] = [
@@ -470,7 +510,10 @@ fn mcp_definition_rejects_incomplete_pagination() {
             vec![(None, read), (Some("page-2"), write)],
         ),
         ("final page has next cursor", vec![(None, read_more)]),
-        ("first page has a requested cursor", vec![(Some("page-1"), read)]),
+        (
+            "first page has a requested cursor",
+            vec![(Some("page-1"), read)],
+        ),
         (
             "continuation omits requested cursor",
             vec![(None, empty_more), (None, read)],
@@ -486,7 +529,10 @@ fn mcp_definition_rejects_incomplete_pagination() {
         // Go decodes a null cursor as an empty one.
         (
             "final page has a null cursor",
-            vec![(None, r#"{"tools":[{"name":"a","inputSchema":{"type":"object"}}],"nextCursor":null}"#)],
+            vec![(
+                None,
+                r#"{"tools":[{"name":"a","inputSchema":{"type":"object"}}],"nextCursor":null}"#,
+            )],
         ),
         (
             "nextCursor repeats",
@@ -498,7 +544,10 @@ fn mcp_definition_rejects_incomplete_pagination() {
         ),
     ];
     for (name, pages) in cases {
-        let err = refused(McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&pages)));
+        let err = refused(McpCodec::parse_definition(
+            MCP_ENDPOINT,
+            &mcp_snapshot(&pages),
+        ));
         assert_eq!(err.kind(), IncompleteSource, "{name}: {err}");
     }
     let no_tools = mcp_snapshot(&[(None, r#"{"tools":[]}"#)]);
@@ -537,8 +586,14 @@ fn mcp_definition_rejects_invalid_annotations() {
 fn mcp_definition_rejects_invalid_tool_input_schema() {
     for (name, tool) in [
         ("missing", r#"{"name":"calendar.read"}"#),
-        ("not an object", r#"{"name":"calendar.read","inputSchema":true}"#),
-        ("not object rooted", r#"{"name":"calendar.read","inputSchema":{"type":"string"}}"#),
+        (
+            "not an object",
+            r#"{"name":"calendar.read","inputSchema":true}"#,
+        ),
+        (
+            "not object rooted",
+            r#"{"name":"calendar.read","inputSchema":{"type":"string"}}"#,
+        ),
         (
             "invalid properties shape",
             r#"{"name":"calendar.read","inputSchema":{"type":"object","properties":[]}}"#,
@@ -596,8 +651,14 @@ fn mcp_definition_rejects_invalid_tool_input_schema() {
             "unknown anchor reference",
             r##"{"name":"a","inputSchema":{"type":"object","properties":{"x":{"$ref":"#nowhere"}}}}"##,
         ),
-        ("empty tool name", r#"{"name":"","inputSchema":{"type":"object"}}"#),
-        ("padded tool name", r#"{"name":" a","inputSchema":{"type":"object"}}"#),
+        (
+            "empty tool name",
+            r#"{"name":"","inputSchema":{"type":"object"}}"#,
+        ),
+        (
+            "padded tool name",
+            r#"{"name":" a","inputSchema":{"type":"object"}}"#,
+        ),
         ("null tool", "null"),
     ] {
         let body = format!(r#"{{"tools":[{tool}]}}"#);
@@ -639,7 +700,9 @@ fn mcp_definition_accepts_self_contained_schemas_of_each_draft() {
         ),
     ] {
         let body = format!(r#"{{"tools":[{{"name":"a","inputSchema":{schema}}}]}}"#);
-        if let Err(err) = McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, body.as_str())])) {
+        if let Err(err) =
+            McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, body.as_str())]))
+        {
             panic!("{name}: {err}");
         }
     }
@@ -689,7 +752,11 @@ fn mcp_definition_retains_no_hints_when_meta_has_no_r3_annotations() {
     )]);
     let snapshot = McpCodec::parse_definition(MCP_ENDPOINT, &source).expect("snapshot");
     for tool in ["calendar.read", "calendar.write"] {
-        assert_eq!(snapshot.hints_for(&mcp_tool(tool)).expect(tool), None, "{tool}");
+        assert_eq!(
+            snapshot.hints_for(&mcp_tool(tool)).expect(tool),
+            None,
+            "{tool}"
+        );
     }
 }
 
@@ -767,7 +834,10 @@ fn openapi_ids(snapshot: &AuthoritativeSnapshot) -> Vec<String> {
 }
 
 fn openapi(document: &str) -> Result<AuthoritativeSnapshot, DefinitionError> {
-    OpenApiCodec::parse_definition(OPENAPI_ENDPOINT, &OpenApiDocumentSource::new(document.as_bytes()))
+    OpenApiCodec::parse_definition(
+        OPENAPI_ENDPOINT,
+        &OpenApiDocumentSource::new(document.as_bytes()),
+    )
 }
 
 fn openapi_kind(document: &str) -> DefinitionErrorKind {
@@ -782,7 +852,11 @@ fn openapi_paths(paths: &str) -> String {
 /// joins; its JSON form derives the same operations and hints.
 #[test]
 fn openapi_definition_owns_exact_source_and_derives_caller_operations() {
-    assert_refusal(openapi(PET_API_YAML), SourceKindUnsupported, OpenApiCodec::URI);
+    assert_refusal(
+        openapi(PET_API_YAML),
+        SourceKindUnsupported,
+        OpenApiCodec::URI,
+    );
 
     let mut original = PET_API_JSON.as_bytes().to_vec();
     let source = OpenApiDocumentSource::new(&original);
@@ -892,9 +966,17 @@ fn openapi_definition_refuses_invalid_versions_documents_and_external_references
         ),
         // Rust: further version, framing, and reference cases.
         ("empty document", " \n", IncompleteSource),
-        ("numeric version", r#"{"openapi":3.1,"paths":{}}"#, SourceKindUnsupported),
+        (
+            "numeric version",
+            r#"{"openapi":3.1,"paths":{}}"#,
+            SourceKindUnsupported,
+        ),
         ("array root", "[]", InvalidSource),
-        ("duplicate member", r#"{"openapi":"3.1.0","openapi":"3.0.0"}"#, InvalidSource),
+        (
+            "duplicate member",
+            r#"{"openapi":"3.1.0","openapi":"3.0.0"}"#,
+            InvalidSource,
+        ),
         (
             "missing internal reference",
             r##"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{"/x":{"get":{"operationId":"x","responses":{"200":{"$ref":"#/components/responses/Missing"}}}}}}"##,
@@ -915,7 +997,11 @@ fn openapi_definition_refuses_invalid_versions_documents_and_external_references
             r#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{"/x":{"$ref":"paths.json"}}}"#,
             UnresolvedDependency,
         ),
-        ("paths is an array", r#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":[]}"#, InvalidSource),
+        (
+            "paths is an array",
+            r#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":[]}"#,
+            InvalidSource,
+        ),
     ] {
         assert_eq!(openapi_kind(document), kind, "{name}");
     }
@@ -946,7 +1032,9 @@ fn openapi_definition_preserves_sparse_hints_and_reports_invalid_ones() {
     assert!(planned.publisher_conflict());
     assert_eq!(planned.access_mode(), AccessMode::AuthToken);
     assert_eq!(
-        snapshot.hints_for(&openapi_operation("none")).expect("none"),
+        snapshot
+            .hints_for(&openapi_operation("none"))
+            .expect("none"),
         None
     );
 
@@ -1011,7 +1099,10 @@ fn openapi_definition_resolves_path_item_references() {
 fn openapi_definition_validates_the_operation_graph_after_identity() {
     for (name, paths) in [
         ("missing responses", r#"{"/a":{"get":{"operationId":"a"}}}"#),
-        ("empty responses", r#"{"/a":{"get":{"operationId":"a","responses":{}}}}"#),
+        (
+            "empty responses",
+            r#"{"/a":{"get":{"operationId":"a","responses":{}}}}"#,
+        ),
         (
             "response without description",
             r#"{"/a":{"get":{"operationId":"a","responses":{"200":{}}}}}"#,
@@ -1061,7 +1152,9 @@ fn openapi_definition_validates_the_operation_graph_after_identity() {
     .expect("declared path parameter");
     assert_eq!(openapi_ids(&snapshot), ["a"]);
     assert_eq!(
-        openapi_kind(r#"{"openapi":"3.1.0","paths":{"/a":{"get":{"operationId":"a","responses":{"204":{"description":"ok"}}}}}}"#),
+        openapi_kind(
+            r#"{"openapi":"3.1.0","paths":{"/a":{"get":{"operationId":"a","responses":{"204":{"description":"ok"}}}}}}"#
+        ),
         InvalidSource,
         "missing info"
     );
@@ -1132,8 +1225,9 @@ fn asyncapi_definition_derives_operations_and_sparse_hints() {
 
 #[test]
 fn asyncapi_definition_preserves_operation_map_keys_without_private_grammar() {
-    let document = asyncapi_document(r##"{"action":"send","channel":{"$ref":"#/channels/events"}}"##)
-        .replacen(r#""event":"#, r#""calendar.events/read":"#, 1);
+    let document =
+        asyncapi_document(r##"{"action":"send","channel":{"$ref":"#/channels/events"}}"##)
+            .replacen(r#""event":"#, r#""calendar.events/read":"#, 1);
     let snapshot = asyncapi(&document).expect("snapshot");
     assert_eq!(
         operation_json(&snapshot),
@@ -1148,7 +1242,14 @@ fn asyncapi_definition_resolves_one_escaped_or_encoded_channel_token() {
         r##"{"asyncapi":"3.0.0","info":{"title":"events","version":"1"},"channels":{"events archive":{"address":"events"}},"operations":{"read":{"action":"receive","channel":{"$ref":"#/channels/events%20archive"}}}}"##,
     ] {
         let snapshot = asyncapi(document).expect("snapshot");
-        assert_eq!(snapshot.operations().operations().expect("operations").len(), 1);
+        assert_eq!(
+            snapshot
+                .operations()
+                .operations()
+                .expect("operations")
+                .len(),
+            1
+        );
     }
 }
 
@@ -1192,7 +1293,9 @@ fn asyncapi_definition_refuses_invalid_sources() {
         ),
         (
             "missing info",
-            format!(r#"{{"asyncapi":"3.0.0","channels":{{"events":{{}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#),
+            format!(
+                r#"{{"asyncapi":"3.0.0","channels":{{"events":{{}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#
+            ),
             IncompleteSource,
         ),
         (
@@ -1222,22 +1325,30 @@ fn asyncapi_definition_refuses_invalid_sources() {
         ),
         (
             "external channel",
-            asyncapi_document(r#"{"action":"send","channel":{"$ref":"https://example.test/channel"}}"#),
+            asyncapi_document(
+                r#"{"action":"send","channel":{"$ref":"https://example.test/channel"}}"#,
+            ),
             UnresolvedDependency,
         ),
         (
             "nested channel pointer",
-            format!(r##"{header}"channels":{{"events/child":{{"address":"events"}}}},"operations":{{"event":{{"action":"send","channel":{{"$ref":"#/channels/events/child"}}}}}}}}"##),
+            format!(
+                r##"{header}"channels":{{"events/child":{{"address":"events"}}}},"operations":{{"event":{{"action":"send","channel":{{"$ref":"#/channels/events/child"}}}}}}}}"##
+            ),
             UnresolvedDependency,
         ),
         (
             "invalid channel pointer escape",
-            format!(r##"{header}"channels":{{"events~2":{{"address":"events"}}}},"operations":{{"event":{{"action":"send","channel":{{"$ref":"#/channels/events~2"}}}}}}}}"##),
+            format!(
+                r##"{header}"channels":{{"events~2":{{"address":"events"}}}},"operations":{{"event":{{"action":"send","channel":{{"$ref":"#/channels/events~2"}}}}}}}}"##
+            ),
             UnresolvedDependency,
         ),
         (
             "nested external reference",
-            format!(r#"{header}"channels":{{"events":{{"address":"events","messages":{{"event":{{"$ref":"https://example.test/message"}}}}}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#),
+            format!(
+                r#"{header}"channels":{{"events":{{"address":"events","messages":{{"event":{{"$ref":"https://example.test/message"}}}}}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#
+            ),
             UnresolvedDependency,
         ),
         (
@@ -1247,17 +1358,23 @@ fn asyncapi_definition_refuses_invalid_sources() {
         ),
         (
             "invalid access hint",
-            asyncapi_document(&format!(r#"{{"action":"send",{channel},"x-aauth-access-mode":"session-token"}}"#)),
+            asyncapi_document(&format!(
+                r#"{{"action":"send",{channel},"x-aauth-access-mode":"session-token"}}"#
+            )),
             InvalidAnnotation,
         ),
         (
             "invalid budget hint",
-            asyncapi_document(&format!(r#"{{"action":"send",{channel},"x-aauth-budget":"yes"}}"#)),
+            asyncapi_document(&format!(
+                r#"{{"action":"send",{channel},"x-aauth-budget":"yes"}}"#
+            )),
             InvalidAnnotation,
         ),
         (
             "null budget hint",
-            asyncapi_document(&format!(r#"{{"action":"send",{channel},"x-aauth-budget":null}}"#)),
+            asyncapi_document(&format!(
+                r#"{{"action":"send",{channel},"x-aauth-budget":null}}"#
+            )),
             InvalidAnnotation,
         ),
         // Rust: Go decodes the root before it reads the version, and decodes
@@ -1269,17 +1386,23 @@ fn asyncapi_definition_refuses_invalid_sources() {
         ),
         (
             "info without a title",
-            format!(r#"{{"asyncapi":"3.0.0","info":{{"version":"1"}},"channels":{{"events":{{}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#),
+            format!(
+                r#"{{"asyncapi":"3.0.0","info":{{"version":"1"}},"channels":{{"events":{{}}}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#
+            ),
             IncompleteSource,
         ),
         (
             "case variant of operations",
-            format!(r#"{header}"channels":{{"events":{{}}}},"Operations":{{}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#),
+            format!(
+                r#"{header}"channels":{{"events":{{}}}},"Operations":{{}},"operations":{{"event":{{"action":"send",{channel}}}}}}}"#
+            ),
             InvalidSource,
         ),
         (
             "case variant of the channel reference",
-            asyncapi_document(r##"{"action":"send","channel":{"$ref":"#/channels/events","$REF":"#/channels/other"}}"##),
+            asyncapi_document(
+                r##"{"action":"send","channel":{"$ref":"#/channels/events","$REF":"#/channels/other"}}"##,
+            ),
             InvalidSource,
         ),
         (
@@ -1329,11 +1452,23 @@ fn graphql_introspection_separates_invalid_and_incomplete_sources() {
         // Rust: Go's struct decode reads these the same way.
         ("null root", "null", IncompleteSource),
         ("null data", r#"{"data":null}"#, IncompleteSource),
-        ("null schema", r#"{"data":{"__schema":null}}"#, IncompleteSource),
+        (
+            "null schema",
+            r#"{"data":{"__schema":null}}"#,
+            IncompleteSource,
+        ),
         ("data is not an object", r#"{"data":5}"#, InvalidSource),
-        ("schema is not an object", r#"{"data":{"__schema":[]}}"#, InvalidSource),
+        (
+            "schema is not an object",
+            r#"{"data":{"__schema":[]}}"#,
+            InvalidSource,
+        ),
         ("array root", "[]", InvalidSource),
-        ("case variant of data", r#"{"Data":{"__schema":{}}}"#, InvalidSource),
+        (
+            "case variant of data",
+            r#"{"Data":{"__schema":{}}}"#,
+            InvalidSource,
+        ),
         (
             "well-formed",
             r#"{"data":{"__schema":{"queryType":{"name":"Query"}}}}"#,

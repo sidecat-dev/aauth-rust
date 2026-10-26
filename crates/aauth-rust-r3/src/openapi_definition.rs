@@ -31,8 +31,8 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use crate::definition::{
-    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError,
-    DefinitionMaterial, DefinitionParser, DefinitionRegistration, SourceEncoding,
+    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError, DefinitionMaterial,
+    DefinitionParser, DefinitionRegistration, SourceEncoding,
 };
 use crate::definition_support::{
     ambiguous, cached_parser, go_json_name_matches, incomplete, invalid, json_pointer, member,
@@ -91,8 +91,7 @@ impl OpenApiCodec {
     /// # Errors
     /// Returns [`Error`] when the OpenAPI vocabulary is unavailable.
     pub fn definition_parser() -> Result<DefinitionParser<OpenApiDocumentSource>, Error> {
-        static PARSER: OnceLock<Option<DefinitionParser<OpenApiDocumentSource>>> =
-            OnceLock::new();
+        static PARSER: OnceLock<Option<DefinitionParser<OpenApiDocumentSource>>> = OnceLock::new();
         cached_parser(
             &PARSER,
             || DefinitionParser::new(OpenApiDefinitionCodec),
@@ -230,7 +229,13 @@ const HEADER_FIELDS: &[&str] = &[
 ];
 const REQUEST_BODY_FIELDS: &[&str] = &["description", "content", "required"];
 const MEDIA_TYPE_FIELDS: &[&str] = &["schema", "example", "examples", "encoding"];
-const ENCODING_FIELDS: &[&str] = &["contentType", "headers", "style", "explode", "allowReserved"];
+const ENCODING_FIELDS: &[&str] = &[
+    "contentType",
+    "headers",
+    "style",
+    "explode",
+    "allowReserved",
+];
 const RESPONSE_FIELDS: &[&str] = &["description", "headers", "content", "links"];
 
 fn parse_document(source: &OpenApiDocumentSource) -> Result<DefinitionMaterial, DefinitionError> {
@@ -544,7 +549,13 @@ impl<'a> Walk<'a> {
             INFO_FIELDS_30
         };
         self.fields(members, allowed, "Info")?;
-        for name in ["title", "version", "summary", "description", "termsOfService"] {
+        for name in [
+            "title",
+            "version",
+            "summary",
+            "description",
+            "termsOfService",
+        ] {
             text(members, name, "Info")?;
         }
         for name in ["contact", "license"] {
@@ -581,7 +592,10 @@ impl<'a> Walk<'a> {
             // The specification leaves a field present both here and in the
             // referenced Path Item undefined; kin-openapi keeps only the
             // referenced one. An operation named on both sides is ambiguous.
-            if METHODS.iter().any(|method| member(members, method).is_some()) {
+            if METHODS
+                .iter()
+                .any(|method| member(members, method).is_some())
+            {
                 return Err(ambiguous(
                     "an OpenAPI Path Item combines $ref with operations",
                 ));
@@ -626,7 +640,9 @@ impl<'a> Walk<'a> {
         if let Some(tags) = member(members, "tags")
             && !matches!(tags, Json::Array(items) if items.iter().all(|tag| matches!(tag, Json::String(_))))
         {
-            return Err(invalid("OpenAPI Operation tags must be an array of strings"));
+            return Err(invalid(
+                "OpenAPI Operation tags must be an array of strings",
+            ));
         }
         if let Some(deprecated) = member(members, "deprecated")
             && !matches!(deprecated, Json::Bool(_))

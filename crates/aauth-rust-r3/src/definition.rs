@@ -246,10 +246,7 @@ impl DefinedOperation {
                 hints: hints.cloned(),
             }),
             Ok(_) => Err(Error::new("r3: defined operation must be a JSON object")),
-            Err(err) => Err(Error::wrap(
-                "r3: defined operation must be valid JSON",
-                err,
-            )),
+            Err(err) => Err(Error::wrap("r3: defined operation must be valid JSON", err)),
         }
     }
 
@@ -286,9 +283,7 @@ impl DefinitionMaterial {
         operations: Vec<DefinedOperation>,
     ) -> Result<Self, Error> {
         if digest_input.is_empty() {
-            return Err(Error::new(
-                "r3: definition receipt input must not be empty",
-            ));
+            return Err(Error::new("r3: definition receipt input must not be empty"));
         }
         if operations.is_empty() {
             return Err(Error::new(

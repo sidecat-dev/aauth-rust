@@ -10,8 +10,8 @@
 use std::sync::OnceLock;
 
 use crate::definition::{
-    AuthoritativeSnapshot, DefinitionCodec, DefinitionError, DefinitionMaterial,
-    DefinitionParser, DefinitionRegistration,
+    AuthoritativeSnapshot, DefinitionCodec, DefinitionError, DefinitionMaterial, DefinitionParser,
+    DefinitionRegistration,
 };
 use crate::definition_support::{
     cached_parser, incomplete, invalid, member, parse_standard, refuse_field_variants, unavailable,
@@ -117,7 +117,11 @@ fn refuse_introspection(
     let members: &[(String, Json)] = match &document {
         Json::Object(members) => members,
         Json::Null => &[],
-        _ => return Err(invalid("GraphQL introspection response must be a JSON object")),
+        _ => {
+            return Err(invalid(
+                "GraphQL introspection response must be a JSON object",
+            ));
+        }
     };
     refuse_field_variants(members, &["data"], "GraphQL response")?;
     let data = match member(members, "data") {

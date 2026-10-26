@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use crate::definition::{
-    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError,
-    DefinitionMaterial, DefinitionParser, DefinitionRegistration, SourceEncoding,
+    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError, DefinitionMaterial,
+    DefinitionParser, DefinitionRegistration, SourceEncoding,
 };
 use crate::definition_support::{
     ambiguous, cached_parser, incomplete, invalid, invalid_annotation, member, parse_standard,

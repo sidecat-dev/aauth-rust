@@ -58,10 +58,14 @@ enum Shape {
     /// A non-negative integer.
     Count,
     /// A unique string array.
-    Names { non_empty: bool },
+    Names {
+        non_empty: bool,
+    },
     /// A simple type, or a non-empty unique array of simple types.
     Types,
-    Values { non_empty_unique: bool },
+    Values {
+        non_empty_unique: bool,
+    },
     List,
     Anchor(AnchorGrammar),
     /// An object of booleans.
@@ -248,7 +252,11 @@ impl<'a> Walker<'a> {
     fn resolve_references(&self) -> Result<(), SchemaRefusal> {
         for reference in &self.references {
             let (resource, _) = split_fragment(reference);
-            if !self.resources.iter().any(|(uri, _)| uri.as_str() == resource) {
+            if !self
+                .resources
+                .iter()
+                .any(|(uri, _)| uri.as_str() == resource)
+            {
                 return Err(SchemaRefusal::External(reference.clone()));
             }
         }
@@ -310,8 +318,9 @@ fn keyword_shape(draft: Draft, keyword: &str) -> Option<Shape> {
         "maximum" | "minimum" => Shape::Number,
         "exclusiveMaximum" | "exclusiveMinimum" if boolean_schemas => Shape::Number,
         "exclusiveMaximum" | "exclusiveMinimum" => Shape::Flag,
-        "maxLength" | "minLength" | "maxItems" | "minItems" | "maxProperties"
-        | "minProperties" => Shape::Count,
+        "maxLength" | "minLength" | "maxItems" | "minItems" | "maxProperties" | "minProperties" => {
+            Shape::Count
+        }
         "uniqueItems" => Shape::Flag,
         "properties" | "patternProperties" | "definitions" => Shape::SchemaMap,
         "dependencies" => Shape::Dependencies,
@@ -430,10 +439,11 @@ fn is_name_list(value: &Json, non_empty: bool) -> bool {
 }
 
 fn all_unique(items: &[Json]) -> bool {
-    items
-        .iter()
-        .enumerate()
-        .all(|(index, item)| !items[..index].iter().any(|earlier| json_equal(earlier, item)))
+    items.iter().enumerate().all(|(index, item)| {
+        !items[..index]
+            .iter()
+            .any(|earlier| json_equal(earlier, item))
+    })
 }
 
 /// `$anchor` grammar: 2019-09 `[A-Za-z][-A-Za-z0-9.:_]*`, 2020-12 `[A-Za-z_][-A-Za-z0-9._]*`.
@@ -653,10 +663,26 @@ mod tests {
 
     #[test]
     fn json_schema_counts_are_integers_without_floating_point() {
-        for literal in ["0", "-0", "1", "1.0", "1e2", "2.50e1", "10E-1", "1e999999999999999999999"] {
+        for literal in [
+            "0",
+            "-0",
+            "1",
+            "1.0",
+            "1e2",
+            "2.50e1",
+            "10E-1",
+            "1e999999999999999999999",
+        ] {
             assert!(is_non_negative_integer(literal), "{literal}");
         }
-        for literal in ["-1", "1.5", "1e-1", "-2e3", "15e-1", "1e-999999999999999999999"] {
+        for literal in [
+            "-1",
+            "1.5",
+            "1e-1",
+            "-2e3",
+            "15e-1",
+            "1e-999999999999999999999",
+        ] {
             assert!(!is_non_negative_integer(literal), "{literal}");
         }
     }

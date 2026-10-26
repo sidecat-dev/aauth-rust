@@ -11,8 +11,8 @@
 use std::sync::OnceLock;
 
 use crate::definition::{
-    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError,
-    DefinitionMaterial, DefinitionParser, DefinitionRegistration, SourceEncoding,
+    AuthoritativeSnapshot, DefinedOperation, DefinitionCodec, DefinitionError, DefinitionMaterial,
+    DefinitionParser, DefinitionRegistration, SourceEncoding,
 };
 use crate::definition_support::{
     cached_parser, incomplete, invalid, member, parse_standard, percent_decode, published_hints,
@@ -69,8 +69,7 @@ impl AsyncApiCodec {
     /// # Errors
     /// Returns [`Error`] when the AsyncAPI vocabulary is unavailable.
     pub fn definition_parser() -> Result<DefinitionParser<AsyncApiDocumentSource>, Error> {
-        static PARSER: OnceLock<Option<DefinitionParser<AsyncApiDocumentSource>>> =
-            OnceLock::new();
+        static PARSER: OnceLock<Option<DefinitionParser<AsyncApiDocumentSource>>> = OnceLock::new();
         cached_parser(
             &PARSER,
             || DefinitionParser::new(AsyncApiDefinitionCodec),
@@ -150,7 +149,12 @@ fn parse_document(source: &AsyncApiDocumentSource) -> Result<DefinitionMaterial,
     ordered.sort_by(|left, right| left.0.cmp(&right.0));
     let mut defined = Vec::with_capacity(ordered.len());
     for (identifier, operation) in ordered {
-        defined.push(parse_operation(identifier, operation, channels, &vocabulary)?);
+        defined.push(parse_operation(
+            identifier,
+            operation,
+            channels,
+            &vocabulary,
+        )?);
     }
     let encoding = match SourceEncoding::new(AsyncApiDocumentSource::SOURCE_ENCODING) {
         Ok(encoding) => encoding,
@@ -180,9 +184,7 @@ fn validate_info(value: Option<&Json>) -> Result<(), DefinitionError> {
         return Err(missing());
     };
     refuse_field_variants(members, &["title", "version"], "AsyncAPI info")?;
-    let filled = |name: &str| {
-        matches!(member(members, name), Some(Json::String(value)) if !value.is_empty())
-    };
+    let filled = |name: &str| matches!(member(members, name), Some(Json::String(value)) if !value.is_empty());
     if filled("title") && filled("version") {
         Ok(())
     } else {
@@ -268,7 +270,9 @@ fn validate_channel(
         )));
     };
     let Json::Object(channel_fields) = channel else {
-        return Err(invalid(format!("AsyncAPI channel \"{name}\" is not an object")));
+        return Err(invalid(format!(
+            "AsyncAPI channel \"{name}\" is not an object"
+        )));
     };
     if member(channel_fields, "$ref").is_some() {
         return Err(unresolved(format!(
