@@ -4,13 +4,15 @@
 //! per-call proposals, operation access hints, authoritative definitions, and
 //! the R3 claims of Resource and Auth tokens. A host registers one codec per
 //! vocabulary; codecs for the seven standard vocabularies are included.
-//! Definition parsers are included for the MCP, OpenAPI, AsyncAPI, and
-//! GraphQL JSON sources; WSDL, OData, and gRPC definitions are not parsed yet.
-//! This crate does not fetch a definition or artifact, decide policy, execute
-//! a call, or bind a token to a request.
+//! Definition parsers derive MCP, OpenAPI and AsyncAPI operations. GraphQL
+//! introspection is refused because a schema alone supplies no operation
+//! identity; WSDL, OData and gRPC definitions are not parsed yet. A signed
+//! artifact fetcher uses a trusted host HTTPS adapter. This crate does not
+//! fetch a definition, decide policy, execute a call, or bind a token to a request.
 #![deny(missing_docs)]
 
 mod annotation;
+mod artifact;
 mod asyncapi_definition;
 mod budget_token;
 mod definition;
@@ -19,6 +21,7 @@ mod digest;
 mod document;
 mod envelope;
 mod error;
+mod fetch;
 mod grant;
 mod graphql_definition;
 mod hints;
@@ -35,6 +38,7 @@ mod uri;
 mod vocabulary;
 
 pub use annotation::AnnotationEncoding;
+pub use artifact::{ArtifactKind, ReferencedArtifact};
 pub use asyncapi_definition::AsyncApiDocumentSource;
 pub use budget_token::{
     mint_budget_auth_token, mint_budget_resource_token, verify_budget_auth_token,
@@ -48,6 +52,11 @@ pub use definition::{
 pub use digest::digest;
 pub use document::{Display, Document, DocumentOptions, validate_document_account};
 pub use error::Error;
+pub use fetch::{
+    DEFAULT_ARTIFACT_FETCH_TIMEOUT, DEFAULT_MAXIMUM_DOCUMENT_BYTES, FetchBody, FetchClient,
+    FetchConfig, FetchEgress, FetchError, FetchIdentity, FetchLimits, FetchResponse,
+    FetchTransport,
+};
 pub use grant::{Authorization, Grant};
 pub use graphql_definition::GraphQlIntrospectionSource;
 pub use hints::{AccessMode, ExpectedAccess, OperationHints};
@@ -78,6 +87,8 @@ mod artifact_tests;
 mod definition_adapter_tests;
 #[cfg(test)]
 mod definition_tests;
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(test)]
 mod hints_tests;
 #[cfg(test)]
