@@ -7,13 +7,13 @@ use std::thread;
 use aauth_rust_budgets::{
     AllocationBook, Budget, BudgetHeader, Caller, ChargeError, ConsumptionRecord, Error,
     IssuerPolicy, KeyRole, Ledger, MAX_AMOUNT, Refusal, RevocationSettlement, TokenAccount,
-    UnitDeclaration, act_on_header, answer_usage, assume_lost_cost, balance_after, check_declared,
-    consent_figure, header_is_fresh, human_amount, issue_auth_budget, metered_access_mode,
-    narrow_to, offer_budget, parse_budget, parse_declarations, parse_header, parse_max_cost,
-    parse_resource_claims, parse_usage_query, plan_from_grant, read_granted, recover_omitted_cost,
-    response_complete_without_trailer, sanitize_markdown, sender_field, sign_usage_response,
-    spend_plan, trailer_field, usage_signature_covers, validate_endpoint_url, validate_narrowing,
-    verify_delivered, verify_usage_signature, withhold_budget_header,
+    UnitDeclaration, UsageQuery, act_on_header, answer_usage, assume_lost_cost, balance_after,
+    check_declared, consent_figure, header_is_fresh, human_amount, issue_auth_budget,
+    metered_access_mode, narrow_to, offer_budget, parse_budget, parse_declarations, parse_header,
+    parse_max_cost, parse_resource_claims, parse_usage_query, plan_from_grant, read_granted,
+    recover_omitted_cost, response_complete_without_trailer, sanitize_markdown, sender_field,
+    sign_usage_response, spend_plan, trailer_field, usage_signature_covers, validate_endpoint_url,
+    validate_narrowing, verify_delivered, verify_usage_signature, withhold_budget_header,
 };
 use aauth_rust_jose::SigningKey;
 use serde_json::json;
@@ -184,6 +184,17 @@ fn consent_keeps_the_amount_out_of_the_sanitized_description() {
     assert_eq!(cleaned, "a b c");
     let kept = sanitize_markdown("see [docs](https://example.test/a)");
     assert!(kept.contains("https://example.test/a"), "{kept}");
+    let mail = sanitize_markdown("write [me](mailto:person@example.test)");
+    assert!(mail.contains("mailto:person@example.test"), "{mail}");
+    let http = sanitize_markdown("see [x](http://example.test/a)");
+    assert!(http.contains("http://example.test/a"), "{http}");
+    let ftp = sanitize_markdown("see [x](ftp://files.example/a)");
+    assert!(!ftp.to_ascii_lowercase().contains("ftp:"), "{ftp}");
+    let nested = format!(
+        "[x]({}javascript:{}alert(1))",
+        "java".repeat(8),
+        "script:".repeat(8)
+    );
     for sample in [
         "JavaScript:alert(1)",
         "javajavascript:script:alert(1)",
@@ -192,12 +203,106 @@ fn consent_keeps_the_amount_out_of_the_sanitized_description() {
         "JaVaScRiPt&#58;alert(1)",
         "data:text/html,hi",
         "vbscript:msg",
+        "[x](&#1data:06;avascript:alert(1))",
+        "[x](java&#11data:5;cript:alert(1))",
+        nested.as_str(),
+        "[x]: javascript:alert(1)",
     ] {
-        let stripped = sanitize_markdown(sample).to_ascii_lowercase();
-        assert!(!stripped.contains("javascript:"), "{sample} -> {stripped}");
-        assert!(!stripped.contains("data:"), "{sample} -> {stripped}");
-        assert!(!stripped.contains("vbscript:"), "{sample} -> {stripped}");
+        let stripped = sanitize_markdown(sample);
+        let decoded = commonmark_decode(&stripped);
+        assert!(
+            !decoded.to_ascii_lowercase().contains("javascript:"),
+            "{sample} -> {stripped} -> {decoded}"
+        );
+        assert!(
+            !decoded.to_ascii_lowercase().contains("data:"),
+            "{sample} -> {stripped} -> {decoded}"
+        );
+        assert!(
+            !decoded.to_ascii_lowercase().contains("vbscript:"),
+            "{sample} -> {stripped} -> {decoded}"
+        );
+        for destination in link_destinations(&decoded) {
+            let destination = destination.to_ascii_lowercase();
+            assert!(
+                !destination.contains("javascript:")
+                    && !destination.contains("data:")
+                    && !destination.contains("vbscript:"),
+                "{sample} -> {decoded} dest {destination}"
+            );
+        }
     }
+}
+
+/// One CommonMark pass, repeated until a second pass changes nothing.
+fn commonmark_decode(input: &str) -> String {
+    let mut current = input.to_owned();
+    loop {
+        let next = commonmark_decode_once(&current);
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+}
+
+fn commonmark_decode_once(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(end) = rest.find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        if end > 16 {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        }
+        if let Some(character) = commonmark_entity(&rest[1..end]) {
+            out.push(character);
+            rest = &rest[end + 1..];
+            continue;
+        }
+        out.push('&');
+        rest = &rest[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn commonmark_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "colon" => Some(':'),
+        "nbsp" => Some(' '),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)
+        }
+        _ if let Some(digits) = entity.strip_prefix('#') => {
+            char::from_u32(digits.parse::<u32>().ok()?)
+        }
+        _ => None,
+    }
+}
+
+fn link_destinations(markdown: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = markdown;
+    while let Some(position) = rest.find("](") {
+        rest = &rest[position + 2..];
+        let end = rest.find(')').unwrap_or(rest.len());
+        found.push(rest[..end].to_owned());
+        rest = rest.get(end + 1..).unwrap_or("");
+    }
+    found
 }
 
 #[test]
@@ -612,6 +717,16 @@ fn the_same_jti_from_two_issuers_keeps_separate_grants() {
     assert_eq!(ledger.committed(other, "same"), Some(70));
     assert_eq!(ledger.outstanding(ISS, "same"), Some((40, 0)));
     assert_eq!(ledger.outstanding(other, "same"), Some((70, 0)));
+    // Same person server, subject, and audience: the two issuers add.
+    assert_eq!(
+        ledger.person_total(
+            "https://ps.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        110
+    );
     assert!(matches!(
         ledger.open(account("same", 50, "ada")),
         Err(Error::Malformed)
@@ -665,4 +780,191 @@ fn concurrent_commits_add_once_per_winner_and_a_different_audience_stays_at_zero
         state.person_total("https://ps.example", "ada", "https://other.example", "USD"),
         0
     );
+}
+
+#[test]
+fn person_totals_follow_ps_when_one_access_server_serves_two_person_servers() {
+    let mut ledger = Ledger::new();
+    let mut first = account("ps-a", 100, "ada");
+    first.ps = "https://ps-a.example".into();
+    let mut second = account("ps-b", 80, "ada");
+    second.ps = "https://ps-b.example".into();
+    ledger.open(first).unwrap();
+    ledger.open(second).unwrap();
+    let hold = ledger.reserve(ISS, "ps-a", 40).unwrap();
+    ledger.commit(&hold, 40, 1).unwrap();
+    let hold = ledger.reserve(ISS, "ps-b", 25).unwrap();
+    ledger.commit(&hold, 25, 1).unwrap();
+    assert_eq!(
+        ledger.person_total(
+            "https://ps-a.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        40
+    );
+    assert_eq!(
+        ledger.person_total(
+            "https://ps-b.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        25
+    );
+    assert_ne!(
+        ledger.person_total(
+            "https://ps-a.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        65
+    );
+}
+
+#[test]
+fn a_caller_does_not_receive_another_callers_tenant_mission_or_key() {
+    let mut ledger = Ledger::new();
+    let mut first = account("scope-a", 100, "ada");
+    first.ps = "https://ps-a.example".into();
+    first.tenant = Some("tenant-a".into());
+    first.mission = Some("mission-a".into());
+    first.jkt = "jkt-a".into();
+    let mut second = account("scope-b", 100, "ada");
+    second.ps = "https://ps-b.example".into();
+    second.tenant = Some("tenant-b".into());
+    second.mission = Some("mission-b".into());
+    second.jkt = "jkt-b".into();
+    ledger.open(first).unwrap();
+    ledger.open(second).unwrap();
+    let hold = ledger.reserve(ISS, "scope-a", 40).unwrap();
+    ledger.commit(&hold, 40, 2).unwrap();
+    let hold = ledger.reserve(ISS, "scope-b", 25).unwrap();
+    ledger.commit(&hold, 25, 2).unwrap();
+    let report = usd(0);
+    let ps_a = Caller {
+        id: "https://ps-a.example".into(),
+        role: KeyRole::PersonServer,
+        ps: None,
+    };
+    let own = answer_usage(
+        &ledger,
+        &ps_a,
+        &UsageQuery {
+            sub: None,
+            tenant: Some("tenant-a".into()),
+            mission: None,
+            ps: None,
+            jkts: Some(vec!["jkt-a".into(), "jkt-b".into()]),
+        },
+        10,
+        &report,
+    );
+    assert_eq!(own.usage.as_ref().map(|usage| usage.all_time), Some(40));
+    assert_eq!(own.jkts.as_ref().unwrap().get("jkt-a"), Some(&40));
+    assert!(!own.jkts.as_ref().unwrap().contains_key("jkt-b"));
+    let own_mission = answer_usage(
+        &ledger,
+        &ps_a,
+        &UsageQuery {
+            sub: None,
+            tenant: None,
+            mission: Some("mission-a".into()),
+            ps: None,
+            jkts: None,
+        },
+        10,
+        &report,
+    );
+    assert_eq!(
+        own_mission.usage.as_ref().map(|usage| usage.all_time),
+        Some(40)
+    );
+    for (tenant, mission) in [(Some("tenant-b"), None), (None, Some("mission-b"))] {
+        let hidden = answer_usage(
+            &ledger,
+            &ps_a,
+            &UsageQuery {
+                sub: None,
+                tenant: tenant.map(str::to_owned),
+                mission: mission.map(str::to_owned),
+                ps: None,
+                jkts: None,
+            },
+            10,
+            &report,
+        );
+        assert!(hidden.usage.is_none(), "{tenant:?} {mission:?} {hidden:?}");
+    }
+    let stranger = Caller {
+        id: "https://ps-c.example".into(),
+        role: KeyRole::PersonServer,
+        ps: None,
+    };
+    let unseen = answer_usage(
+        &ledger,
+        &stranger,
+        &UsageQuery {
+            sub: None,
+            tenant: Some("tenant-a".into()),
+            mission: None,
+            ps: None,
+            jkts: Some(vec!["jkt-a".into()]),
+        },
+        10,
+        &report,
+    );
+    assert!(unseen.usage.is_none());
+    assert!(unseen.jkts.as_ref().unwrap().is_empty());
+    let access = Caller {
+        id: ISS.into(),
+        role: KeyRole::AccessServer,
+        ps: Some("https://ps-a.example".into()),
+    };
+    let narrowed = answer_usage(
+        &ledger,
+        &access,
+        &UsageQuery {
+            sub: None,
+            tenant: Some("tenant-b".into()),
+            mission: None,
+            ps: Some("https://ps-a.example".into()),
+            jkts: Some(vec!["jkt-b".into()]),
+        },
+        10,
+        &report,
+    );
+    assert!(narrowed.usage.is_none(), "{narrowed:?}");
+    assert!(narrowed.jkts.as_ref().unwrap().is_empty());
+    let hidden_mission = answer_usage(
+        &ledger,
+        &access,
+        &UsageQuery {
+            sub: None,
+            tenant: None,
+            mission: Some("mission-b".into()),
+            ps: Some("https://ps-a.example".into()),
+            jkts: None,
+        },
+        10,
+        &report,
+    );
+    assert!(hidden_mission.usage.is_none(), "{hidden_mission:?}");
+    let visible = answer_usage(
+        &ledger,
+        &access,
+        &UsageQuery {
+            sub: None,
+            tenant: Some("tenant-a".into()),
+            mission: None,
+            ps: Some("https://ps-a.example".into()),
+            jkts: Some(vec!["jkt-a".into()]),
+        },
+        10,
+        &report,
+    );
+    assert_eq!(visible.usage.as_ref().map(|usage| usage.all_time), Some(40));
+    assert_eq!(visible.jkts.as_ref().unwrap().get("jkt-a"), Some(&40));
 }

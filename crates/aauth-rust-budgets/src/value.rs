@@ -568,20 +568,34 @@ fn split_digits(amount: i64, decimals: i64) -> (String, String) {
 
 /// Remove raw HTML and link targets whose scheme is not `http`, `https`, or `mailto`.
 ///
-/// Entity decoding runs until stable, then tags are removed, then disallowed
-/// schemes are stripped case-insensitively until none remain. A nested
-/// `javajavascript:script:` therefore does not leave `javascript:`.
+/// Character references are decoded until none remain, then tags and control
+/// characters are removed. An inline destination or a reference definition is
+/// kept only when it has no scheme or the scheme is `http`, `https`, or
+/// `mailto` (ASCII case-insensitive). Any other scheme is dropped. `javascript:`,
+/// `data:`, and `vbscript:` are replaced with `#` so removing one occurrence
+/// cannot assemble another, including through a character reference a renderer
+/// would decode. `&` in the result is written as `&amp;`.
 pub fn sanitize_markdown(input: &str) -> String {
+    let decoded = decode_until_stable(input);
+    let stripped = strip_tags_and_controls(&decoded);
+    let neutralized = neutralize_disallowed_schemes(&stripped);
+    allow_list_links(&neutralized).replace('&', "&amp;")
+}
+
+fn decode_until_stable(input: &str) -> String {
     let mut decoded = input.to_owned();
-    for _ in 0..5 {
+    loop {
         let next = decode_entities(&decoded);
         if next == decoded {
-            break;
+            return decoded;
         }
         decoded = next;
     }
-    let mut stripped = String::with_capacity(decoded.len());
-    let mut chars = decoded.chars().peekable();
+}
+
+fn strip_tags_and_controls(input: &str) -> String {
+    let mut stripped = String::with_capacity(input.len());
+    let mut chars = input.chars();
     while let Some(character) = chars.next() {
         if character == '<' {
             for next in chars.by_ref() {
@@ -591,20 +605,16 @@ pub fn sanitize_markdown(input: &str) -> String {
             }
             continue;
         }
-        if character.is_control() || character == '\u{feff}' || character == '\u{200b}' {
+        if character == '>'
+            || character.is_control()
+            || character == '\u{feff}'
+            || character == '\u{200b}'
+        {
             continue;
         }
         stripped.push(character);
     }
-    let mut current = stripped;
-    for _ in 0..8 {
-        let next = strip_disallowed_schemes(&current);
-        if next == current {
-            break;
-        }
-        current = next;
-    }
-    current.replace(['<', '>'], "")
+    stripped
 }
 
 fn decode_entities(input: &str) -> String {
@@ -654,24 +664,26 @@ fn decode_entity(entity: &str) -> Option<char> {
     }
 }
 
-fn strip_disallowed_schemes(input: &str) -> String {
+fn neutralize_disallowed_schemes(input: &str) -> String {
     const SCHEMES: [&str; 3] = ["javascript:", "data:", "vbscript:"];
     let mut out = String::with_capacity(input.len());
     let mut index = 0;
     let bytes = input.as_bytes();
     while index < bytes.len() {
-        let mut removed = false;
+        let mut replaced = false;
         for scheme in SCHEMES {
             let scheme_bytes = scheme.as_bytes();
             if index + scheme_bytes.len() <= bytes.len()
                 && bytes[index..index + scheme_bytes.len()].eq_ignore_ascii_case(scheme_bytes)
             {
+                // A non-letter stops `java` + `script:` from becoming a new scheme.
+                out.push('#');
                 index += scheme_bytes.len();
-                removed = true;
+                replaced = true;
                 break;
             }
         }
-        if removed {
+        if replaced {
             continue;
         }
         let character = input[index..]
@@ -682,6 +694,179 @@ fn strip_disallowed_schemes(input: &str) -> String {
         index += character.len_utf8();
     }
     out
+}
+
+fn scheme_allowed(destination: &str) -> bool {
+    let destination = destination.trim();
+    let bytes = destination.as_bytes();
+    if bytes.first().is_none_or(|byte| !byte.is_ascii_alphabetic()) {
+        return true;
+    }
+    let mut end = 1;
+    while end < bytes.len()
+        && (bytes[end].is_ascii_alphanumeric() || matches!(bytes[end], b'+' | b'-' | b'.'))
+    {
+        end += 1;
+    }
+    if end >= bytes.len() || bytes[end] != b':' {
+        return true;
+    }
+    let scheme = &destination[..end];
+    scheme.eq_ignore_ascii_case("http")
+        || scheme.eq_ignore_ascii_case("https")
+        || scheme.eq_ignore_ascii_case("mailto")
+}
+
+fn allow_list_links(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(position) = rest.find("](") {
+        out.push_str(&rest[..position + 2]);
+        rest = &rest[position + 2..];
+        let Some((end, destination)) = consume_inline_link(rest) else {
+            out.push_str(rest);
+            return rewrite_reference_definitions(&out);
+        };
+        if scheme_allowed(&destination) {
+            out.push_str(&rest[..end]);
+        } else {
+            out.push(')');
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    rewrite_reference_definitions(&out)
+}
+
+fn consume_inline_link(input: &str) -> Option<(usize, String)> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b'<' {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes[index] != b'>' && bytes[index] != b'\n' {
+            let character = input[index..].chars().next()?;
+            index += character.len_utf8();
+        }
+        let destination = input[start..index].to_owned();
+        if index < bytes.len() && bytes[index] == b'>' {
+            index += 1;
+        }
+        return Some((skip_title_and_close(input, index)?, destination));
+    }
+    let start = index;
+    let mut depth = 0_i32;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if index + 1 < bytes.len() => index += 2,
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' if depth == 0 => break,
+            b')' => {
+                depth -= 1;
+                index += 1;
+            }
+            b' ' | b'\t' | b'\n' | b'\r' if depth == 0 => break,
+            _ => {
+                let character = input[index..].chars().next()?;
+                index += character.len_utf8();
+            }
+        }
+    }
+    let destination = input[start..index].to_owned();
+    Some((skip_title_and_close(input, index)?, destination))
+}
+
+fn skip_title_and_close(input: &str, mut index: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index < bytes.len() && matches!(bytes[index], b'"' | b'\'' | b'(') {
+        let quote = if bytes[index] == b'(' {
+            b')'
+        } else {
+            bytes[index]
+        };
+        index += 1;
+        while index < bytes.len() && bytes[index] != quote {
+            let character = input[index..].chars().next()?;
+            index += character.len_utf8();
+        }
+        if index < bytes.len() && bytes[index] == quote {
+            index += 1;
+        }
+    }
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    (index < bytes.len() && bytes[index] == b')').then_some(index + 1)
+}
+
+fn rewrite_reference_definitions(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for line in input.split_inclusive('\n') {
+        let newline = line.ends_with('\n');
+        let body = line.trim_end_matches('\n');
+        match reference_destination(body) {
+            None => out.push_str(line),
+            Some(destination) if scheme_allowed(&destination) => out.push_str(line),
+            Some(_) => {
+                if let Some(label) = body.find("]:") {
+                    out.push_str(&body[..=label + 1]);
+                } else {
+                    out.push_str(body);
+                }
+                if newline {
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+fn reference_destination(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && index < 3 && bytes[index] == b' ' {
+        index += 1;
+    }
+    if index >= bytes.len() || bytes[index] != b'[' {
+        return None;
+    }
+    index += 1;
+    while index < bytes.len() && bytes[index] != b']' && bytes[index] != b'\n' {
+        index += 1;
+    }
+    if index + 1 >= bytes.len() || bytes[index] != b']' || bytes[index + 1] != b':' {
+        return None;
+    }
+    index += 2;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return Some(String::new());
+    }
+    if bytes[index] == b'<' {
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes[index] != b'>' && bytes[index] != b'\n' {
+            index += 1;
+        }
+        return Some(line[start..index].to_owned());
+    }
+    let start = index;
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    Some(line[start..index].to_owned())
 }
 
 /// Amount and description a person server shows at consent.
