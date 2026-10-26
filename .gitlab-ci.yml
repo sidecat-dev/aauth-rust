@@ -1,0 +1,48 @@
+stages: [verify]
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "2"
+
+# This pinned Linux job produces a standalone demo artifact, not a release.
+linux:
+  stage: verify
+  image: rust:1.99.1@sha256:e259494b14672950a909b4c54527e19d29cae6ebf980672114c8bb85e5594e4a
+  tags: [sprint-gen6]
+  variables:
+    TARGET: x86_64-unknown-linux-gnu
+  before_script:
+    - rustup component add rustfmt clippy
+    - rustup target add aarch64-unknown-linux-gnu x86_64-pc-windows-msvc
+  script:
+    - cargo build --locked
+    # Fresh separate consumer: compile README recipe using the primed registry cache.
+    - sh ci/check-consumer-bootstrap.sh "${CI_PROJECT_DIR}/target/consumer-bootstrap"
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+    # Stage unpublished sibling dependencies and verify every archive; never upload.
+    - cargo publish --workspace --dry-run --locked
+    - cargo test --locked
+    - cargo run --locked -p aauth-rust-resource --example library
+    - cargo run --locked -p aauth-rust-resource --example axum
+    - cargo run --locked -p aauth-rust-resource --example three-party
+    - cargo run --locked -p aauth-rust-resource --example four-party
+    - cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
+    - cargo test --locked -p aauth-rust-resource --example subagent
+    - cargo run --locked -p aauth-rust-resource --example subagent
+    - cargo run --locked -p aauth-rust-person-server --example mixed-grants
+    - cargo run --locked -p aauth-rust-person-server-redb --example contracts
+    # Compile-only coverage: no foreign executable, target linker or TLS C build.
+    - cargo check --workspace --lib --locked --target aarch64-unknown-linux-gnu
+    - cargo check --workspace --lib --locked --target x86_64-pc-windows-msvc
+    - cargo check -p aauth-rust-person-server-redb --tests --locked --target x86_64-pc-windows-msvc
+    - cargo build --locked --release -p aauth-rust-resource --example direct-identity
+    - target/release/examples/direct-identity
+    - cp target/release/examples/direct-identity "direct-identity-${TARGET}"
+  artifacts:
+    name: "aauth-demo-${TARGET}-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - direct-identity-*
+      - target/package/tmp-crate/*.crate
+    expire_in: 14 days

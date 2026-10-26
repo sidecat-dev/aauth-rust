@@ -1,0 +1,33 @@
+[package]
+name = "aauth-rust-signature-key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "Buffered HTTP Message Signatures with inline, JWT, jkt-jwt, self-jwt, direct JWKS, X.509, cached, and explicit JWKS-URI key conveyance"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+http.workspace = true
+sfv.workspace = true
+base64.workspace = true
+chacha20poly1305.workspace = true
+thiserror.workspace = true
+p256.workspace = true
+p384.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+rustls-pki-types.workspace = true
+rand_core.workspace = true
+rustls-webpki.workspace = true
+
+[dev-dependencies]
+ring.workspace = true
+serde_json.workspace = true
+rcgen = "0.13"

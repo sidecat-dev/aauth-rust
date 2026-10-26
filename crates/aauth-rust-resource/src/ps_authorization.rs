@@ -1,0 +1,944 @@
+//! Immediate Person-Server authorization with route challenges.
+//! Mission context is opt-in through `with_mission_context`.
+use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
+use aauth_rust_core::{
+    AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceClaims, TokenError,
+    VerifiedAuthToken, mint_resource_token, validate_server_identifier,
+};
+use aauth_rust_jose::{Jws, SigningKey};
+use aauth_rust_signature_key::{
+    Error, KeyMaterial, PreparedRequest, canonical_authority, required_components,
+};
+use http::{Request, Response, StatusCode};
+use serde_json::json;
+
+#[path = "resource_revocation.rs"]
+mod revocation;
+
+/// Named captured-state policy for a PS-authorized Resource in application state.
+pub type BoxedAuthPolicy = Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
+
+/// Named PS Auth policy returning application context to the admitted handler.
+pub type BoxedAuthAdmissionPolicy<T> =
+    Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> Result<T, Deny> + Send + Sync>;
+
+/// Host configuration for one origin and one fixed route scope profile.
+/// The host router owns which paths use this profile.
+pub struct PsAuthorizationConfig {
+    /// Canonical published Resource identity, without port or path.
+    pub issuer: String,
+    /// Actual HTTPS request origin; a configured nondefault port is allowed.
+    pub signed_origin: String,
+    /// Nonempty JWKS identifier of the Resource signing key.
+    pub kid: String,
+    /// Caller-owned Resource signing key; secret bytes are never serialized.
+    pub signing_key: SigningKey,
+    /// Nonempty unique scope values required by every route using this value.
+    pub scopes: Vec<String>,
+}
+
+/// Local configuration failure, separate from request authentication failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PsConfigurationError {
+    /// Published identity is not a canonical HTTPS DNS origin.
+    InvalidIssuer,
+    /// Signed origin has an invalid authority, path, query or fragment.
+    InvalidOrigin,
+    /// The signing key identifier is empty.
+    InvalidKeyId,
+    /// Scope profile is empty, duplicated or contains malformed values.
+    InvalidScopes,
+    /// Expected Access Server identifier is malformed.
+    InvalidAccessServer,
+}
+impl std::fmt::Display for PsConfigurationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidAccessServer => {
+                "Access Server must be a canonical HTTPS server identifier"
+            }
+            Self::InvalidIssuer => {
+                "Resource issuer must be a canonical HTTPS DNS origin without port or path"
+            }
+            Self::InvalidOrigin => {
+                "signed_origin must be an absolute HTTPS origin without path, query or fragment"
+            }
+            Self::InvalidKeyId => "Resource kid must name its published signing key",
+            Self::InvalidScopes => "Resource scopes must be nonempty unique RFC 6749 scope values",
+        })
+    }
+}
+impl std::error::Error for PsConfigurationError {}
+
+/// Verified PS-issued Auth token and application context returned by host policy.
+#[derive(Debug)]
+pub struct AuthAuthorized<T = ()> {
+    token: VerifiedAuthToken,
+    admitted: T,
+}
+impl<T> AuthAuthorized<T> {
+    /// Authenticated authorization token whose HTTP holder proof also succeeded.
+    pub fn token(&self) -> &VerifiedAuthToken {
+        &self.token
+    }
+    /// Application context produced by the admission policy.
+    pub fn admitted(&self) -> &T {
+        &self.admitted
+    }
+    /// Move authenticated token and policy context to the application handler.
+    pub fn into_parts(self) -> (VerifiedAuthToken, T) {
+        (self.token, self.admitted)
+    }
+}
+
+/// Result of immediate Person-Server Resource authorization.
+pub enum AuthDecision<T = ()> {
+    /// No Person/Auth credential was verified; obtain a Person token first.
+    PersonTokenRequired,
+    /// A verified person or auth token is revoked. No resource token is issued.
+    Revoked {
+        /// The refused credential was an auth token, so the requirement is a person token.
+        auth_token: bool,
+    },
+    /// Verified Person identity requires PS authorization before application use.
+    AuthTokenRequired {
+        /// Resource-signed challenge to exchange with the actual presented token.
+        resource_token: String,
+    },
+    /// JWT or HTTP proof verification failed before host policy.
+    SignatureFailure(SignatureFailure),
+    /// Verified authorization is insufficient or host policy refused admission.
+    Forbidden,
+    /// Host-supplied challenge identifier/time could not produce a valid token.
+    InternalError,
+    /// Verified Auth token, holder proof, route scopes and host policy admitted it.
+    Granted(Box<AuthAuthorized<T>>),
+}
+impl<T> std::fmt::Debug for AuthDecision<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PersonTokenRequired => f.write_str("PersonTokenRequired"),
+            Self::Revoked { auth_token } => f
+                .debug_struct("Revoked")
+                .field("auth_token", auth_token)
+                .finish(),
+            Self::AuthTokenRequired { .. } => {
+                f.debug_struct("AuthTokenRequired").finish_non_exhaustive()
+            }
+            Self::SignatureFailure(error) => {
+                f.debug_tuple("SignatureFailure").field(error).finish()
+            }
+            Self::Forbidden => f.write_str("Forbidden"),
+            Self::InternalError => f.write_str("InternalError"),
+            Self::Granted(value) => f
+                .debug_struct("Granted")
+                .field("token", &value.token)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+impl<T> AuthDecision<T> {
+    /// Move authenticated Auth claims and policy context to application handling.
+    ///
+    /// # Errors
+    /// Returns the mapped HTTP challenge, authentication failure or refusal.
+    pub fn into_result(self) -> Result<(VerifiedAuthToken, T), Box<Response<Vec<u8>>>> {
+        match self {
+            Self::Granted(value) => Ok((*value).into_parts()),
+            other => Err(Box::new(other.into_response())),
+        }
+    }
+    /// Map challenges/refusals to HTTP. Granted writes the authenticated subject.
+    /// Applications normally use into_result and implement their own response.
+    pub fn into_response(self) -> Response<Vec<u8>> {
+        match self {
+            Self::SignatureFailure(failure) => {
+                let mut response = Decision::<()>::SignatureFailure(failure).into_response();
+                // The shared Agent diagnostics must not advertise Agent-only access.
+                response.headers_mut().remove("aauth-requirement");
+                response
+            }
+            Self::Granted(value) => Response::new(value.token.claims().sub.as_bytes().to_vec()),
+            Self::PersonTokenRequired => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "person_token_required");
+                response.headers_mut().insert(
+                    "aauth-requirement",
+                    "requirement=person-token".parse().unwrap(),
+                );
+                response
+            }
+            Self::Revoked { auth_token } => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "revoked_jwt");
+                response.headers_mut().insert(
+                    "signature-error",
+                    "error=revoked_jwt".parse().expect("static signature error"),
+                );
+                if auth_token {
+                    response.headers_mut().insert(
+                        "aauth-requirement",
+                        "requirement=person-token"
+                            .parse()
+                            .expect("static requirement"),
+                    );
+                }
+                response
+            }
+            Self::AuthTokenRequired { resource_token } => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "auth_token_required");
+                let requirement =
+                    format!("requirement=auth-token;resource-token=\"{resource_token}\"");
+                let Ok(value) = requirement.parse() else {
+                    return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+                };
+                response.headers_mut().insert("aauth-requirement", value);
+                response
+            }
+            Self::Forbidden => refusal(StatusCode::FORBIDDEN, "access_denied"),
+            Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+        }
+    }
+}
+/// Result of a proactive authorization-endpoint request.
+pub enum ProactiveDecision {
+    /// The request did not present a verified person token.
+    PersonTokenRequired,
+    /// The presented person token is revoked. No resource token is issued.
+    Revoked,
+    /// The person token or HTTP proof failed verification.
+    SignatureFailure(SignatureFailure),
+    /// `scope` is missing, empty, or not a string.
+    InvalidRequest,
+    /// `scope` names a value this resource does not publish.
+    InvalidScope,
+    /// The person token and scope were verified. The resource token carries that scope.
+    ResourceToken {
+        /// Resource-signed token for the Person Server or Access Server.
+        resource_token: String,
+    },
+    /// The host challenge identifier could not be minted.
+    InternalError,
+}
+impl ProactiveDecision {
+    /// Map the decision to the authorization-endpoint HTTP response.
+    pub fn into_response(self) -> Response<Vec<u8>> {
+        match self {
+            Self::PersonTokenRequired => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "person_token_required");
+                response.headers_mut().insert(
+                    "aauth-requirement",
+                    "requirement=person-token".parse().unwrap(),
+                );
+                response
+            }
+            Self::Revoked => {
+                let mut response = refusal(StatusCode::UNAUTHORIZED, "revoked_jwt");
+                response.headers_mut().insert(
+                    "signature-error",
+                    "error=revoked_jwt".parse().expect("static signature error"),
+                );
+                response
+            }
+            Self::SignatureFailure(failure) => {
+                let mut response = Decision::<()>::SignatureFailure(failure).into_response();
+                response.headers_mut().remove("aauth-requirement");
+                response
+            }
+            Self::InvalidRequest => refusal(StatusCode::BAD_REQUEST, "invalid_request"),
+            Self::InvalidScope => refusal(StatusCode::BAD_REQUEST, "invalid_scope"),
+            Self::ResourceToken { resource_token } => {
+                let mut response = Response::new(
+                    json!({ "resource_token": resource_token })
+                        .to_string()
+                        .into_bytes(),
+                );
+                *response.status_mut() = StatusCode::OK;
+                response.headers_mut().insert(
+                    "content-type",
+                    "application/json".parse().expect("static content type"),
+                );
+                response
+            }
+            Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+        }
+    }
+}
+fn requested_scope(
+    request: &Request<Vec<u8>>,
+    allowed: &[String],
+) -> Result<String, ProactiveDecision> {
+    let Ok(value) = aauth_rust_jose::strict_json(request.body()) else {
+        return Err(ProactiveDecision::InvalidRequest);
+    };
+    let Some(scope) = value.get("scope").and_then(|scope| scope.as_str()) else {
+        return Err(ProactiveDecision::InvalidRequest);
+    };
+    let tokens: Vec<&str> = scope.split(' ').filter(|token| !token.is_empty()).collect();
+    if scope.is_empty() || tokens.is_empty() || tokens.len() != scope.split(' ').count() {
+        return Err(ProactiveDecision::InvalidRequest);
+    }
+    if tokens.iter().any(|token| !scope_value(token)) {
+        return Err(ProactiveDecision::InvalidRequest);
+    }
+    if tokens
+        .iter()
+        .any(|token| !allowed.iter().any(|configured| configured == token))
+    {
+        return Err(ProactiveDecision::InvalidScope);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if tokens.iter().any(|token| !seen.insert(*token)) {
+        return Err(ProactiveDecision::InvalidRequest);
+    }
+    Ok(scope.to_owned())
+}
+fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
+    let mut response = Response::new(json!({"type":"about:blank", "title":status.canonical_reason().unwrap_or("Request refused"), "status":status.as_u16(), "error":code}).to_string().into_bytes());
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert("content-type", "application/problem+json".parse().unwrap());
+    response
+}
+
+/// Claims a Resource asked a Person Server to authorize.
+///
+/// `ps` is that Person Server. A Person token must carry it as `iss` and an
+/// Auth token must carry it as `ps`. `sub` and `tenant` are compared only in
+/// that namespace, so the same subject string from another server does not
+/// match. `sub` is a required field; an empty subject is a host error and
+/// authorizes no one. `login_hint` is copied into the resource-token challenge
+/// and is not an Auth subject. `account` and `tenant` are exact expectations,
+/// including when they are absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorizationAsk {
+    /// Person Server namespace for `sub` and `tenant`.
+    pub ps: String,
+    /// Hint forwarded unchanged. An empty string is a host error.
+    pub login_hint: Option<String>,
+    /// Directed subject required on the Person token and the Auth token.
+    /// An empty string is a host error, not a wildcard.
+    pub sub: String,
+    /// Account placed in the challenge and required again on the Auth token.
+    pub account: Option<String>,
+    /// Tenant required on the Person token and the Auth token, under `ps`.
+    pub tenant: Option<String>,
+}
+impl AuthorizationAsk {
+    fn host_error(&self) -> bool {
+        validate_server_identifier(&self.ps).is_err()
+            || self.sub.is_empty()
+            || self.login_hint.as_ref().is_some_and(|hint| hint.is_empty())
+            || self
+                .account
+                .as_ref()
+                .is_some_and(|account| account.is_empty())
+            || self.tenant.as_ref().is_some_and(|tenant| tenant.is_empty())
+    }
+    fn person_differs(&self, iss: &str, sub: &str, tenant: Option<&str>) -> bool {
+        self.ps != iss || self.sub != sub || self.tenant.as_deref() != tenant
+    }
+    fn auth_differs(
+        &self,
+        ps: &str,
+        sub: &str,
+        account: Option<&str>,
+        tenant: Option<&str>,
+    ) -> bool {
+        self.ps != ps
+            || self.sub != sub
+            || self.account.as_deref() != account
+            || self.tenant.as_deref() != tenant
+    }
+}
+
+/// PS authorization: credential/holder verification precedes policy.
+/// This Resource issues route challenges. [`Self::with_authorization_endpoint`]
+/// also publishes a proactive authorization endpoint.
+/// The default profile is missionless. [`Self::with_mission_context`] copies a
+/// verified Person mission digest into the challenge and admits a PS Auth token
+/// that carries one; host policy still decides whether that digest is the mission
+/// it asked for. [`PsAuthorizationResource::authorize`] does not ask for a login
+/// hint. [`PsAuthorizationResource::authorize_for`] does, and checks the Auth
+/// token against that ask. Host keys implement the accepted issuer trust set;
+/// host policy owns person-record admission. A Person token is never admitted
+/// as authorization.
+pub struct PsAuthorizationResource<K, P> {
+    config: PsAuthorizationConfig,
+    authority: String,
+    keys: K,
+    policy: P,
+    access_server: Option<String>,
+    scope_descriptions: Option<std::collections::BTreeMap<String, String>>,
+    mission_context: bool,
+    authorization_endpoint: bool,
+    revocation: Option<revocation::Gate>,
+}
+impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
+where
+    P: Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> O,
+    O: PolicyOutcome,
+{
+    /// Bind a published identity, separately configured signed origin, keys and policy.
+    ///
+    /// # Errors
+    /// Rejects invalid identifiers/origins, empty kid and invalid scope profiles.
+    pub fn new(
+        config: PsAuthorizationConfig,
+        keys: K,
+        policy: P,
+    ) -> Result<Self, PsConfigurationError> {
+        validate_server_identifier(&config.issuer)
+            .map_err(|_| PsConfigurationError::InvalidIssuer)?;
+        let uri: http::Uri = config
+            .signed_origin
+            .parse()
+            .map_err(|_| PsConfigurationError::InvalidOrigin)?;
+        if uri.query().is_some()
+            || config.signed_origin.contains('#')
+            || (!uri.path().is_empty() && uri.path() != "/")
+        {
+            return Err(PsConfigurationError::InvalidOrigin);
+        }
+        let authority =
+            canonical_authority(&uri).map_err(|_| PsConfigurationError::InvalidOrigin)?;
+        if config.kid.is_empty() {
+            return Err(PsConfigurationError::InvalidKeyId);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        if config.scopes.is_empty()
+            || config
+                .scopes
+                .iter()
+                .any(|scope| !scope_value(scope) || !seen.insert(scope))
+        {
+            return Err(PsConfigurationError::InvalidScopes);
+        }
+        Ok(Self {
+            config,
+            authority,
+            keys,
+            policy,
+            access_server: None,
+            scope_descriptions: None,
+            mission_context: false,
+            authorization_endpoint: false,
+            revocation: None,
+        })
+    }
+    /// Construct a Resource that trusts the named AS's policy verdict. Challenges
+    /// target this AS; only its aauth-access.json Auth tokens may grant access,
+    /// including when PS and AS share one identifier. Existing new remains PS-only.
+    ///
+    /// # Errors
+    /// As for new, also rejects an invalid Access Server identifier.
+    pub fn new_federated(
+        config: PsAuthorizationConfig,
+        access_server: &str,
+        keys: K,
+        policy: P,
+    ) -> Result<Self, PsConfigurationError> {
+        validate_server_identifier(access_server)
+            .map_err(|_| PsConfigurationError::InvalidAccessServer)?;
+        let mut resource = Self::new(config, keys, policy)?;
+        resource.access_server = Some(access_server.into());
+        Ok(resource)
+    }
+    /// Publish host-authored Markdown descriptions for this exact scope profile.
+    /// This adds no authorization endpoint or scope. [`Self::with_authorization_endpoint`]
+    /// publishes that endpoint separately. Host routing and actual
+    /// revision/payload policy must implement the advertised meaning.
+    ///
+    /// # Errors
+    /// Rejects missing/extra scope names and empty descriptions.
+    pub fn with_scope_descriptions(
+        mut self,
+        descriptions: std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, PsConfigurationError> {
+        if descriptions.len() != self.config.scopes.len()
+            || self
+                .config
+                .scopes
+                .iter()
+                .any(|s| descriptions.get(s).is_none_or(|d| d.is_empty()))
+        {
+            return Err(PsConfigurationError::InvalidScopes);
+        }
+        self.scope_descriptions = Some(descriptions);
+        Ok(self)
+    }
+    /// Accept signed mission context on the direct PS path.
+    ///
+    /// A Person token's `mission_s256` is copied into the Resource challenge.
+    /// A PS Auth token carrying one reaches host policy instead of being refused
+    /// as an unknown profile. Federated AS Auth remains missionless. The digest
+    /// is not a grant: policy must still compare it with the mission it asked for.
+    pub fn with_mission_context(mut self) -> Self {
+        self.mission_context = true;
+        self
+    }
+    /// Publish `{issuer}/authorize` for a proactive scope request.
+    ///
+    /// The route still requires a verified person token. Metadata omits
+    /// `authorization_endpoint` until this is called.
+    pub fn with_authorization_endpoint(mut self) -> Self {
+        self.authorization_endpoint = true;
+        self
+    }
+    /// Accurate public metadata; serve at the published Resource well-known path.
+    /// `revocation_endpoint` is present only after [`Self::with_revocation`].
+    /// `authorization_endpoint` is present only after [`Self::with_authorization_endpoint`].
+    /// AS selection is carried by its signed challenge audience.
+    ///
+    /// # Errors
+    /// Returns a serialization error as InvalidJwt.
+    pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
+        let mut metadata = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"access_mode":"auth-token","signature_window":60});
+        if self.revocation.is_some() {
+            metadata["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
+        if self.authorization_endpoint {
+            metadata["authorization_endpoint"] = json!(format!("{}/authorize", self.config.issuer));
+        }
+        if let Some(descriptions) = &self.scope_descriptions {
+            metadata["scope_descriptions"] = json!(descriptions);
+        }
+        serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
+    }
+    /// Public Resource signing key with its configured kid, without secret bytes.
+    ///
+    /// # Errors
+    /// Returns a serialization error as InvalidJwt.
+    pub fn jwks(&self) -> Result<Vec<u8>, TokenError> {
+        let mut jwk = serde_json::to_value(self.config.signing_key.public_jwk())
+            .map_err(|_| TokenError::InvalidJwt)?;
+        jwk["kid"] = json!(self.config.kid);
+        serde_json::to_vec(&json!({"keys":[jwk]})).map_err(|_| TokenError::InvalidJwt)
+    }
+    /// Verify one actual buffered request, then challenge or invoke Auth policy.
+    /// Host supplies trusted Unix seconds and a fresh challenge identifier. Proof
+    /// coverage/body bounds follow Signature-Key's 1 MiB buffered profile and
+    /// 60-second window. Direct mode accepts PS Auth; new_federated accepts only
+    /// its configured AS issuer and discovery role. Missions are refused unless
+    /// `with_mission_context` is set, and AS missions stay refused either way.
+    /// Known companion authority claims are refused by this immediate Core-scope profile.
+    pub fn authorize(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+    ) -> AuthDecision<O::Context> {
+        let authority = match canonical_authority(request.uri()) {
+            Ok(value) => value,
+            Err(error) => return AuthDecision::SignatureFailure(SignatureFailure::Proof(error)),
+        };
+        if authority != self.authority {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
+        }
+        if !(0..=(1_i64 << 33) - 1).contains(&now) {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::InvalidClock));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|name| !request.headers().contains_key(*name))
+        {
+            return AuthDecision::PersonTokenRequired;
+        }
+        match self.authorize_proved(request, now, challenge_jti, None) {
+            Ok(decision) => decision,
+            Err(error) => AuthDecision::SignatureFailure(error),
+        }
+    }
+    /// Verify one request, and compare its Auth token with `asked`.
+    ///
+    /// A Person challenge copies `login_hint` and `account` and still copies
+    /// `sub` and `tenant` from the presented Person token. The Person token's
+    /// `iss` and the Auth token's `ps` must be the asked Person Server, and
+    /// `sub`, `account` and `tenant` must match inside that namespace. A
+    /// verified token that differs is `403` `access_denied` with no
+    /// `Signature-Error` header and does not reach policy. The hint is not
+    /// compared to `sub` and is not shown to policy as an identity. A missing
+    /// or empty subject, an empty hint, account or tenant, or a `ps` that is
+    /// not a server identifier, is a host error.
+    pub fn authorize_for(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        asked: &AuthorizationAsk,
+    ) -> AuthDecision<O::Context> {
+        if asked.host_error() {
+            return AuthDecision::InternalError;
+        }
+        let authority = match canonical_authority(request.uri()) {
+            Ok(value) => value,
+            Err(error) => return AuthDecision::SignatureFailure(SignatureFailure::Proof(error)),
+        };
+        if authority != self.authority {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
+        }
+        if !(0..=(1_i64 << 33) - 1).contains(&now) {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::InvalidClock));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|name| !request.headers().contains_key(*name))
+        {
+            return AuthDecision::PersonTokenRequired;
+        }
+        match self.authorize_proved(request, now, challenge_jti, Some(asked)) {
+            Ok(decision) => decision,
+            Err(error) => AuthDecision::SignatureFailure(error),
+        }
+    }
+    fn authorize_proved(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        asked: Option<&AuthorizationAsk>,
+    ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
+            .map_err(|error| match error {
+                Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+                Error::InvalidInput => SignatureFailure::Input(required_components(request)),
+                other => SignatureFailure::Proof(other),
+            })?;
+        let KeyMaterial::Jwt(compact) = proof.key() else {
+            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+        };
+        let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;
+        match parsed.header().get("typ").and_then(|value| value.as_str()) {
+            Some("aa-agent+jwt") => {
+                let token = AgentToken::parse(compact)
+                    .and_then(|token| token.verify(&self.keys, now))
+                    .map_err(SignatureFailure::Token)?;
+                proof
+                    .verify(&token.claims().cnf.jwk)
+                    .map_err(SignatureFailure::Proof)?;
+                check_iat(token.claims().iat, now)?;
+                Ok(AuthDecision::PersonTokenRequired)
+            }
+            Some("aa-person+jwt") => {
+                let parsed = PersonToken::parse(compact).map_err(SignatureFailure::Token)?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.keys, now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.presented_revoked(&issuer, &jti, now) => {
+                        proof
+                            .verify(&parsed.unverified_claims().cnf.jwk)
+                            .map_err(SignatureFailure::Proof)?;
+                        check_iat(parsed.unverified_claims().iat, now)?;
+                        if parsed.unverified_claims().aud != self.config.issuer {
+                            return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                        }
+                        return Ok(AuthDecision::Revoked { auth_token: false });
+                    }
+                    Err(error) => return Err(SignatureFailure::Token(error)),
+                };
+                let claims = token.claims();
+                proof
+                    .verify(&claims.cnf.jwk)
+                    .map_err(SignatureFailure::Proof)?;
+                check_iat(claims.iat, now)?;
+                if claims.aud != self.config.issuer {
+                    return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if self.presented_revoked(&issuer, &jti, now) {
+                    return Ok(AuthDecision::Revoked { auth_token: false });
+                }
+                if self.mission_refused(claims.mission_s256.is_some())
+                    || unsupported_companion(&claims.extra)
+                {
+                    return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                }
+                let (login_hint, account) = if let Some(asked) = asked {
+                    if asked.person_differs(&claims.iss, &claims.sub, claims.tenant.as_deref()) {
+                        return Ok(AuthDecision::Forbidden);
+                    }
+                    (asked.login_hint.clone(), asked.account.clone())
+                } else {
+                    (None, None)
+                };
+                let challenge = ResourceClaims {
+                    iss: self.config.issuer.clone(),
+                    dwk: "aauth-resource.json".into(),
+                    aud: self
+                        .access_server
+                        .clone()
+                        .unwrap_or_else(|| claims.iss.clone()),
+                    ps: claims.iss.clone(),
+                    sub: claims.sub.clone(),
+                    jti: challenge_jti.into(),
+                    presented_jti: claims.jti.clone(),
+                    agent_jkt: claims
+                        .cnf
+                        .jwk
+                        .thumbprint()
+                        .map_err(|error| SignatureFailure::Token(error.into()))?,
+                    iat: now,
+                    exp: now.saturating_add(300),
+                    scope: Some(self.config.scopes.join(" ")),
+                    account,
+                    login_hint,
+                    nbf: None,
+                    tenant: claims.tenant.clone(),
+                    mission_s256: if self.mission_context {
+                        claims.mission_s256.clone()
+                    } else {
+                        None
+                    },
+                    extra: Default::default(),
+                };
+                match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
+                    Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired { resource_token }),
+                    Err(_) => Ok(AuthDecision::InternalError),
+                }
+            }
+            Some("aa-auth+jwt") => {
+                let parsed = AuthToken::parse(compact).map_err(SignatureFailure::Token)?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.keys, now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.presented_revoked(&issuer, &jti, now) => {
+                        proof
+                            .verify(&parsed.unverified_claims().cnf.jwk)
+                            .map_err(SignatureFailure::Proof)?;
+                        check_iat(parsed.unverified_claims().iat, now)?;
+                        if parsed.unverified_claims().aud != self.config.issuer {
+                            return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                        }
+                        return Ok(AuthDecision::Revoked { auth_token: true });
+                    }
+                    Err(error) => return Err(SignatureFailure::Token(error)),
+                };
+                let claims = token.claims();
+                proof
+                    .verify(&claims.cnf.jwk)
+                    .map_err(SignatureFailure::Proof)?;
+                check_iat(claims.iat, now)?;
+                if claims.aud != self.config.issuer {
+                    return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if self.presented_revoked(&issuer, &jti, now) {
+                    return Ok(AuthDecision::Revoked { auth_token: true });
+                }
+                let valid_role = match &self.access_server {
+                    Some(issuer) => claims.dwk == "aauth-access.json" && &claims.iss == issuer,
+                    None => claims.dwk == "aauth-person.json" && claims.iss == claims.ps,
+                };
+                if !valid_role
+                    || self.mission_refused(claims.mission_s256.is_some())
+                    || unsupported_companion(&claims.extra)
+                {
+                    return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                }
+                if let Some(asked) = asked {
+                    // The hint is not a subject. The asked Person Server and
+                    // claims authorize; a bare subject from another server does not.
+                    if asked.auth_differs(
+                        &claims.ps,
+                        &claims.sub,
+                        claims.account.as_deref(),
+                        claims.tenant.as_deref(),
+                    ) {
+                        return Ok(AuthDecision::Forbidden);
+                    }
+                }
+                let granted: Vec<&str> = claims.scope.as_deref().unwrap_or("").split(' ').collect();
+                if self
+                    .config
+                    .scopes
+                    .iter()
+                    .any(|scope| !granted.contains(&scope.as_str()))
+                {
+                    return Ok(AuthDecision::Forbidden);
+                }
+                match (self.policy)(&token, request).into_admission() {
+                    Ok(admitted) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+                        token,
+                        admitted,
+                    }))),
+                    Err(Deny) => Ok(AuthDecision::Forbidden),
+                }
+            }
+            _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
+        }
+    }
+    /// Accept `POST /authorize` when [`Self::with_authorization_endpoint`] is set.
+    ///
+    /// A missing proof, and a verified agent token, are `requirement=person-token`.
+    /// The person token is verified before `scope` is read. A missing or empty
+    /// `scope` is `invalid_request`. A scope this resource does not publish is
+    /// `invalid_scope`. A recognized scope returns that resource token.
+    pub fn authorize_endpoint(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+    ) -> ProactiveDecision {
+        if !self.authorization_endpoint {
+            return ProactiveDecision::InvalidRequest;
+        }
+        let authority = match canonical_authority(request.uri()) {
+            Ok(value) => value,
+            Err(error) => {
+                return ProactiveDecision::SignatureFailure(SignatureFailure::Proof(error));
+            }
+        };
+        if authority != self.authority || request.uri().path() != "/authorize" {
+            return ProactiveDecision::SignatureFailure(SignatureFailure::Proof(
+                Error::TargetMismatch,
+            ));
+        }
+        if request.method() != http::Method::POST {
+            return ProactiveDecision::InvalidRequest;
+        }
+        if !(0..=(1_i64 << 33) - 1).contains(&now) {
+            return ProactiveDecision::SignatureFailure(SignatureFailure::Proof(
+                Error::InvalidClock,
+            ));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|name| !request.headers().contains_key(*name))
+        {
+            return ProactiveDecision::PersonTokenRequired;
+        }
+        match self.proactive_person(request, now, challenge_jti) {
+            Ok(decision) => decision,
+            Err(error) => ProactiveDecision::SignatureFailure(error),
+        }
+    }
+    fn proactive_person(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+    ) -> Result<ProactiveDecision, SignatureFailure> {
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
+            .map_err(|error| match error {
+                Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+                Error::InvalidInput => SignatureFailure::Input(required_components(request)),
+                other => SignatureFailure::Proof(other),
+            })?;
+        let KeyMaterial::Jwt(compact) = proof.key() else {
+            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+        };
+        let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;
+        match parsed.header().get("typ").and_then(|value| value.as_str()) {
+            Some("aa-agent+jwt") => {
+                let token = AgentToken::parse(compact)
+                    .and_then(|token| token.verify(&self.keys, now))
+                    .map_err(SignatureFailure::Token)?;
+                proof
+                    .verify(&token.claims().cnf.jwk)
+                    .map_err(SignatureFailure::Proof)?;
+                check_iat(token.claims().iat, now)?;
+                Ok(ProactiveDecision::PersonTokenRequired)
+            }
+            Some("aa-person+jwt") => {
+                let parsed = PersonToken::parse(compact).map_err(SignatureFailure::Token)?;
+                let issuer = parsed.unverified_claims().iss.clone();
+                let jti = parsed.unverified_claims().jti.clone();
+                let token = match parsed.verify(&self.keys, now) {
+                    Ok(token) => token,
+                    Err(TokenError::ExpiredJwt) if self.presented_revoked(&issuer, &jti, now) => {
+                        proof
+                            .verify(&parsed.unverified_claims().cnf.jwk)
+                            .map_err(SignatureFailure::Proof)?;
+                        check_iat(parsed.unverified_claims().iat, now)?;
+                        if parsed.unverified_claims().aud != self.config.issuer {
+                            return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                        }
+                        return Ok(ProactiveDecision::Revoked);
+                    }
+                    Err(error) => return Err(SignatureFailure::Token(error)),
+                };
+                let claims = token.claims();
+                proof
+                    .verify(&claims.cnf.jwk)
+                    .map_err(SignatureFailure::Proof)?;
+                check_iat(claims.iat, now)?;
+                if claims.aud != self.config.issuer {
+                    return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
+                }
+                if self.presented_revoked(&issuer, &jti, now) {
+                    return Ok(ProactiveDecision::Revoked);
+                }
+                if self.mission_refused(claims.mission_s256.is_some())
+                    || unsupported_companion(&claims.extra)
+                {
+                    return Err(SignatureFailure::Token(TokenError::InvalidJwt));
+                }
+                let scope = match requested_scope(request, &self.config.scopes) {
+                    Ok(scope) => scope,
+                    Err(decision) => return Ok(decision),
+                };
+                let challenge = ResourceClaims {
+                    iss: self.config.issuer.clone(),
+                    dwk: "aauth-resource.json".into(),
+                    aud: self
+                        .access_server
+                        .clone()
+                        .unwrap_or_else(|| claims.iss.clone()),
+                    ps: claims.iss.clone(),
+                    sub: claims.sub.clone(),
+                    jti: challenge_jti.into(),
+                    presented_jti: claims.jti.clone(),
+                    agent_jkt: claims
+                        .cnf
+                        .jwk
+                        .thumbprint()
+                        .map_err(|error| SignatureFailure::Token(error.into()))?,
+                    iat: now,
+                    exp: now.saturating_add(300),
+                    scope: Some(scope),
+                    account: None,
+                    login_hint: None,
+                    nbf: None,
+                    tenant: claims.tenant.clone(),
+                    mission_s256: if self.mission_context {
+                        claims.mission_s256.clone()
+                    } else {
+                        None
+                    },
+                    extra: Default::default(),
+                };
+                match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
+                    Ok(resource_token) => Ok(ProactiveDecision::ResourceToken { resource_token }),
+                    Err(_) => Ok(ProactiveDecision::InternalError),
+                }
+            }
+            _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
+        }
+    }
+    fn mission_refused(&self, present: bool) -> bool {
+        present && (!self.mission_context || self.access_server.is_some())
+    }
+}
+fn check_iat(iat: i64, now: i64) -> Result<(), SignatureFailure> {
+    if iat > now.saturating_add(60) {
+        return Err(SignatureFailure::ClockSkew { server_time: now });
+    }
+    Ok(())
+}
+fn scope_value(scope: &str) -> bool {
+    !scope.is_empty()
+        && scope
+            .bytes()
+            .all(|b| b == 0x21 || (0x23..=0x5b).contains(&b) || (0x5d..=0x7e).contains(&b))
+}
+fn unsupported_companion(claims: &std::collections::BTreeMap<String, serde_json::Value>) -> bool {
+    [
+        "r3_uri",
+        "r3_s256",
+        "r3_granted",
+        "r3_per_call",
+        "budget",
+        "budget_consumed",
+    ]
+    .iter()
+    .any(|name| claims.contains_key(*name))
+}
