@@ -10,10 +10,10 @@ use aauth_rust_budgets::{
     UnitDeclaration, act_on_header, answer_usage, assume_lost_cost, balance_after, check_declared,
     consent_figure, header_is_fresh, human_amount, issue_auth_budget, metered_access_mode,
     narrow_to, offer_budget, parse_budget, parse_declarations, parse_header, parse_max_cost,
-    parse_resource_claims, parse_usage_query, read_granted, recover_omitted_cost,
-    sanitize_markdown, sender_field, sign_usage_response, spend_plan, trailer_field,
-    usage_signature_covers, validate_endpoint_url, validate_narrowing, verify_delivered,
-    verify_usage_signature, withhold_budget_header,
+    parse_resource_claims, parse_usage_query, plan_from_grant, read_granted, recover_omitted_cost,
+    response_complete_without_trailer, sanitize_markdown, sender_field, sign_usage_response,
+    spend_plan, trailer_field, usage_signature_covers, validate_endpoint_url, validate_narrowing,
+    verify_delivered, verify_usage_signature, withhold_budget_header,
 };
 use aauth_rust_jose::SigningKey;
 use serde_json::json;
@@ -25,6 +25,8 @@ fn usd(amount: i64) -> Budget {
 fn units() -> Vec<UnitDeclaration> {
     vec![UnitDeclaration::with_max("USD", 6, 10_000_000, "dollars <b>bold</b>").unwrap()]
 }
+
+const ISS: &str = "https://as.example";
 
 fn account(jti: &str, amount: i64, sub: &str) -> TokenAccount {
     TokenAccount {
@@ -60,6 +62,15 @@ fn budget_object_requires_three_integer_members_inside_fifteen_digits() {
         parse_budget(&json!({"amount": 1, "decimals": 6})),
         Err(Error::Malformed)
     ));
+    assert!(matches!(
+        parse_budget(&json!({"unit": "USD", "decimals": 6})),
+        Err(Error::Malformed)
+    ));
+    assert!(matches!(
+        parse_budget(&json!({"amount": 1, "unit": "USD"})),
+        Err(Error::Malformed)
+    ));
+    assert!(parse_budget(&json!({"amount": 1, "unit": "USD", "decimals": -1})).is_err());
     assert_eq!(usd(1).amount(), 1);
     assert!(Budget::new(MAX_AMOUNT, "USD", 0).is_ok());
     assert!(Budget::new(MAX_AMOUNT + 1, "USD", 0).is_err());
@@ -144,6 +155,10 @@ fn consumption_requires_budget_and_the_presented_jti() {
         json!({"jti": "other", "consumed": 4}),
     );
     assert!(parse_resource_claims(&extra, "auth-1").is_err());
+    extra.insert("budget_consumed".into(), json!({"consumed": 4}));
+    assert!(parse_resource_claims(&extra, "auth-1").is_err());
+    extra.insert("budget_consumed".into(), json!({"jti": "auth-1"}));
+    assert!(parse_resource_claims(&extra, "auth-1").is_err());
     let mut missing = BTreeMap::new();
     missing.insert("budget".into(), json!({"unit": "USD"}));
     assert!(parse_resource_claims(&missing, "auth-1").is_err());
@@ -167,6 +182,22 @@ fn consent_keeps_the_amount_out_of_the_sanitized_description() {
     );
     let cleaned = sanitize_markdown("a <b>b</b> c");
     assert_eq!(cleaned, "a b c");
+    let kept = sanitize_markdown("see [docs](https://example.test/a)");
+    assert!(kept.contains("https://example.test/a"), "{kept}");
+    for sample in [
+        "JavaScript:alert(1)",
+        "javajavascript:script:alert(1)",
+        "java&#115;cript:alert(1)",
+        "&#106;avascript:alert(1)",
+        "JaVaScRiPt&#58;alert(1)",
+        "data:text/html,hi",
+        "vbscript:msg",
+    ] {
+        let stripped = sanitize_markdown(sample).to_ascii_lowercase();
+        assert!(!stripped.contains("javascript:"), "{sample} -> {stripped}");
+        assert!(!stripped.contains("data:"), "{sample} -> {stripped}");
+        assert!(!stripped.contains("vbscript:"), "{sample} -> {stripped}");
+    }
 }
 
 #[test]
@@ -222,7 +253,12 @@ fn trailer_carries_only_cost_and_a_served_request_names_cost_or_reserved() {
     let mut extra = BTreeMap::new();
     extra.insert("budget".into(), usd(9).to_value());
     let granted = read_granted(&extra).unwrap().unwrap();
-    assert_eq!(spend_plan(&granted), 9);
+    assert_eq!(spend_plan(&granted, Some(&usd(100))), 9);
+    assert_ne!(spend_plan(&granted, Some(&usd(100))), 100);
+    assert_eq!(plan_from_grant(&extra, Some(&usd(100))).unwrap(), Some(9));
+    assert_eq!(trailer.listed, "AAuth-Budget");
+    assert!(response_complete_without_trailer(None));
+    assert!(response_complete_without_trailer(Some("cost=3")));
 }
 
 #[test]
@@ -296,20 +332,20 @@ fn unreported_allocation_counts_as_fully_consumed_until_a_figure_replaces_it() {
 fn cap_is_per_token_and_a_refusal_does_not_draw_down() {
     let mut ledger = Ledger::new();
     ledger.open(account("t", 100, "ada")).unwrap();
-    let hold = ledger.reserve("t", 40).unwrap();
+    let hold = ledger.reserve(ISS, "t", 40).unwrap();
     assert!(matches!(
-        ledger.reserve("t", 70),
+        ledger.reserve(ISS, "t", 70),
         Err(ChargeError::Refused(Refusal::Insufficient {
             remaining: 60,
             ..
         }))
     ));
-    assert_eq!(ledger.committed("t"), Some(0));
-    assert_eq!(ledger.outstanding("t"), Some((0, 40)));
+    assert_eq!(ledger.committed(ISS, "t"), Some(0));
+    assert_eq!(ledger.outstanding(ISS, "t"), Some((0, 40)));
     let header = ledger.commit(&hold, 15, 1_000).unwrap();
     assert!(header.contains("cost=15"));
     assert!(header.contains("remaining=85"));
-    assert_eq!(ledger.committed("t"), Some(15));
+    assert_eq!(ledger.committed(ISS, "t"), Some(15));
     assert_eq!(
         ledger.person_total(
             "https://ps.example",
@@ -320,16 +356,16 @@ fn cap_is_per_token_and_a_refusal_does_not_draw_down() {
         15
     );
     ledger.open(account("other", 1_000, "ada")).unwrap();
-    assert!(ledger.reserve("other", 1_000).is_ok());
+    assert!(ledger.reserve(ISS, "other", 1_000).is_ok());
     ledger.open(account("full", 10, "ada")).unwrap();
     assert!(matches!(
-        ledger.reserve("full", 11),
+        ledger.reserve(ISS, "full", 11),
         Err(ChargeError::Refused(Refusal::Insufficient { .. }))
     ));
-    let hold = ledger.reserve("full", 10).unwrap();
+    let hold = ledger.reserve(ISS, "full", 10).unwrap();
     ledger.commit(&hold, 10, 2).unwrap();
     assert!(matches!(
-        ledger.reserve("full", 1),
+        ledger.reserve(ISS, "full", 1),
         Err(ChargeError::Refused(Refusal::Exhausted {
             remaining: 0,
             ..
@@ -341,9 +377,9 @@ fn cap_is_per_token_and_a_refusal_does_not_draw_down() {
 fn failed_call_records_what_it_metered_and_a_replay_does_not_meter_again() {
     let mut ledger = Ledger::new();
     ledger.open(account("t", 100, "ada")).unwrap();
-    let hold = ledger.reserve("t", 50).unwrap();
+    let hold = ledger.reserve(ISS, "t", 50).unwrap();
     ledger.commit(&hold, 0, 10).unwrap();
-    assert_eq!(ledger.committed("t"), Some(0));
+    assert_eq!(ledger.committed(ISS, "t"), Some(0));
     assert_eq!(
         ledger.person_total(
             "https://ps.example",
@@ -353,25 +389,42 @@ fn failed_call_records_what_it_metered_and_a_replay_does_not_meter_again() {
         ),
         0
     );
-    let hold = ledger.reserve("t", 50).unwrap();
+    let hold = ledger.reserve(ISS, "t", 50).unwrap();
     ledger.commit(&hold, 12, 11).unwrap();
-    assert_eq!(ledger.committed("t"), Some(12));
-    let stream = ledger.reserve("t", 20).unwrap();
+    assert_eq!(ledger.committed(ISS, "t"), Some(12));
+    assert_eq!(
+        ledger.person_total(
+            "https://ps.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        12
+    );
+    let stream = ledger.reserve(ISS, "t", 20).unwrap();
     let preview = ledger.stream_header(&stream).unwrap();
     assert!(preview.contains("reserved=20"));
     assert!(!preview.contains("cost="));
     ledger.commit(&stream, 5, 12).unwrap();
-    let before = ledger.held_refusal("t", None).unwrap();
-    assert_eq!(ledger.committed("t"), Some(17));
+    let before = ledger.held_refusal(ISS, "t", None).unwrap();
+    assert_eq!(ledger.committed(ISS, "t"), Some(17));
     assert!(before.contains("remaining="));
-    let first = ledger.complete_held("pending", "t", 10, 4, 13).unwrap();
+    let first = ledger
+        .complete_held("pending", ISS, "t", 10, 4, 13)
+        .unwrap();
     assert!(first.contains("cost=4"));
-    let committed = ledger.committed("t").unwrap();
-    let again = ledger.complete_held("pending", "t", 10, 4, 14).unwrap();
+    let committed = ledger.committed(ISS, "t").unwrap();
+    let again = ledger
+        .complete_held("pending", ISS, "t", 10, 4, 14)
+        .unwrap();
     assert!(again.contains("cost=4"));
-    assert_eq!(ledger.committed("t"), Some(committed));
-    assert!(ledger.complete_held("other", "t", 1_000, 1, 15).is_err());
-    assert_eq!(ledger.committed("t"), Some(committed));
+    assert_eq!(ledger.committed(ISS, "t"), Some(committed));
+    assert!(
+        ledger
+            .complete_held("other", ISS, "t", 1_000, 1, 15)
+            .is_err()
+    );
+    assert_eq!(ledger.committed(ISS, "t"), Some(committed));
 }
 
 #[test]
@@ -387,7 +440,7 @@ fn concurrent_reserves_cannot_both_spend_the_last_unit() {
         let ledger = Arc::clone(&ledger);
         handles.push(thread::spawn(move || {
             let mut guard = ledger.lock().unwrap();
-            guard.reserve("t", 4).is_ok()
+            guard.reserve(ISS, "t", 4).is_ok()
         }));
     }
     let mut wins = 0;
@@ -398,7 +451,7 @@ fn concurrent_reserves_cannot_both_spend_the_last_unit() {
     }
     assert_eq!(wins, 2);
     let state = ledger.lock().unwrap();
-    let (committed, reserved) = state.outstanding("t").unwrap();
+    let (committed, reserved) = state.outstanding(ISS, "t").unwrap();
     assert_eq!(committed + reserved, 8);
     assert!(committed + reserved <= 10);
 }
@@ -409,22 +462,22 @@ fn usage_counters_follow_utc_calendars_and_omit_unknown_keys() {
     let mut ada = account("day", 100, "ada");
     ada.jkt = "known".into();
     ledger.open(ada).unwrap();
-    let hold = ledger.reserve("day", 1).unwrap();
+    let hold = ledger.reserve(ISS, "day", 1).unwrap();
     ledger.commit(&hold, 1, 1_792_886_400 + 3_600).unwrap();
     let mut week = account("week", 100, "ada");
     week.jkt = "known".into();
     ledger.open(week).unwrap();
-    let hold = ledger.reserve("week", 2).unwrap();
+    let hold = ledger.reserve(ISS, "week", 2).unwrap();
     ledger.commit(&hold, 2, 1_792_368_000).unwrap();
     let mut month = account("month", 100, "ada");
     month.jkt = "old".into();
     ledger.open(month).unwrap();
-    let hold = ledger.reserve("month", 4).unwrap();
+    let hold = ledger.reserve(ISS, "month", 4).unwrap();
     ledger.commit(&hold, 4, 1_792_281_600).unwrap();
     let mut year = account("year", 100, "bea");
     year.jkt = "old".into();
     ledger.open(year).unwrap();
-    let hold = ledger.reserve("year", 8).unwrap();
+    let hold = ledger.reserve(ISS, "year", 8).unwrap();
     ledger.commit(&hold, 8, 1_754_611_200).unwrap();
     let mut quiet_key = account("quiet", 10, "ada");
     quiet_key.jkt = "zero".into();
@@ -459,7 +512,7 @@ fn usage_counters_follow_utc_calendars_and_omit_unknown_keys() {
         .unwrap();
     assert!(kept.contains_key("old"));
     assert_eq!(ledger.as_of(1_792_886_400 + 9_000), 1_792_886_400 + 9_000);
-    let _parked = ledger.reserve("day", 1).unwrap();
+    let _parked = ledger.reserve(ISS, "day", 1).unwrap();
     assert_eq!(ledger.as_of(1_792_886_400 + 9_000), 1_792_886_400 + 3_600);
     let quiet = parse_usage_query(
         &json!({"sub": "nobody", "ps": "https://ps.example"}),
@@ -541,4 +594,75 @@ impl PairProbe for BudgetHeader {
             )
             && BudgetHeader::final_cost(1, 1, "", 6).is_err()
     }
+}
+
+#[test]
+fn the_same_jti_from_two_issuers_keeps_separate_grants() {
+    let mut ledger = Ledger::new();
+    let other = "https://other.example";
+    let mut foreign = account("same", 80, "ada");
+    foreign.iss = other.into();
+    ledger.open(account("same", 100, "ada")).unwrap();
+    ledger.open(foreign).unwrap();
+    let hold = ledger.reserve(ISS, "same", 40).unwrap();
+    ledger.commit(&hold, 40, 1).unwrap();
+    let hold = ledger.reserve(other, "same", 70).unwrap();
+    ledger.commit(&hold, 70, 1).unwrap();
+    assert_eq!(ledger.committed(ISS, "same"), Some(40));
+    assert_eq!(ledger.committed(other, "same"), Some(70));
+    assert_eq!(ledger.outstanding(ISS, "same"), Some((40, 0)));
+    assert_eq!(ledger.outstanding(other, "same"), Some((70, 0)));
+    assert!(matches!(
+        ledger.open(account("same", 50, "ada")),
+        Err(Error::Malformed)
+    ));
+    assert!(matches!(
+        ledger.open(account("same", 100, "bob")),
+        Err(Error::Malformed)
+    ));
+}
+
+#[test]
+fn concurrent_commits_add_once_per_winner_and_a_different_audience_stays_at_zero() {
+    let ledger = Arc::new(Mutex::new(Ledger::new()));
+    ledger
+        .lock()
+        .unwrap()
+        .open(account("race", 10, "ada"))
+        .unwrap();
+    let mut other = account("elsewhere", 10, "ada");
+    other.aud = "https://other.example".into();
+    ledger.lock().unwrap().open(other).unwrap();
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let ledger = Arc::clone(&ledger);
+        handles.push(thread::spawn(move || {
+            let mut guard = ledger.lock().unwrap();
+            let Ok(hold) = guard.reserve(ISS, "race", 1) else {
+                return false;
+            };
+            guard.commit(&hold, 1, 1).is_ok()
+        }));
+    }
+    let mut wins = 0;
+    for handle in handles {
+        if handle.join().unwrap() {
+            wins += 1;
+        }
+    }
+    assert_eq!(wins, 8);
+    let state = ledger.lock().unwrap();
+    assert_eq!(
+        state.person_total(
+            "https://ps.example",
+            "ada",
+            "https://resource.example",
+            "USD"
+        ),
+        wins
+    );
+    assert_eq!(
+        state.person_total("https://ps.example", "ada", "https://other.example", "USD"),
+        0
+    );
 }

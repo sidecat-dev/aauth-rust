@@ -140,6 +140,7 @@ pub fn trailer_field(header: &BudgetHeader, cost: i64) -> Result<Trailer, Error>
         serializer.finish().ok_or(Error::Malformed)?
     };
     Ok(Trailer {
+        listed: "AAuth-Budget",
         name: "aauth-budget",
         field,
     })
@@ -148,7 +149,9 @@ pub fn trailer_field(header: &BudgetHeader, cost: i64) -> Result<Trailer, Error>
 /// `Trailer` header value and the trailer field value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trailer {
-    /// Value of the `Trailer` header.
+    /// Value of the HTTP `Trailer` header. The response lists `AAuth-Budget`.
+    pub listed: &'static str,
+    /// Trailer field name.
     pub name: &'static str,
     /// `AAuth-Budget` trailer field value.
     pub field: String,

@@ -566,10 +566,22 @@ fn split_digits(amount: i64, decimals: i64) -> (String, String) {
     }
 }
 
-/// Remove raw HTML tags and `javascript:` / `data:` link targets.
+/// Remove raw HTML and link targets whose scheme is not `http`, `https`, or `mailto`.
+///
+/// Entity decoding runs until stable, then tags are removed, then disallowed
+/// schemes are stripped case-insensitively until none remain. A nested
+/// `javajavascript:script:` therefore does not leave `javascript:`.
 pub fn sanitize_markdown(input: &str) -> String {
-    let mut stripped = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let mut decoded = input.to_owned();
+    for _ in 0..5 {
+        let next = decode_entities(&decoded);
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    let mut stripped = String::with_capacity(decoded.len());
+    let mut chars = decoded.chars().peekable();
     while let Some(character) = chars.next() {
         if character == '<' {
             for next in chars.by_ref() {
@@ -579,12 +591,97 @@ pub fn sanitize_markdown(input: &str) -> String {
             }
             continue;
         }
+        if character.is_control() || character == '\u{feff}' || character == '\u{200b}' {
+            continue;
+        }
         stripped.push(character);
     }
-    stripped
-        .replace("javascript:", "")
-        .replace("data:", "")
-        .replace(['<', '>'], "")
+    let mut current = stripped;
+    for _ in 0..8 {
+        let next = strip_disallowed_schemes(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current.replace(['<', '>'], "")
+}
+
+fn decode_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(end) = rest.find(';') else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        if end > 16 {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        }
+        if let Some(character) = decode_entity(&rest[1..end]) {
+            out.push(character);
+            rest = &rest[end + 1..];
+            continue;
+        }
+        out.push('&');
+        rest = &rest[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "colon" => Some(':'),
+        "nbsp" => Some(' '),
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)
+        }
+        _ if let Some(digits) = entity.strip_prefix('#') => {
+            char::from_u32(digits.parse::<u32>().ok()?)
+        }
+        _ => None,
+    }
+}
+
+fn strip_disallowed_schemes(input: &str) -> String {
+    const SCHEMES: [&str; 3] = ["javascript:", "data:", "vbscript:"];
+    let mut out = String::with_capacity(input.len());
+    let mut index = 0;
+    let bytes = input.as_bytes();
+    while index < bytes.len() {
+        let mut removed = false;
+        for scheme in SCHEMES {
+            let scheme_bytes = scheme.as_bytes();
+            if index + scheme_bytes.len() <= bytes.len()
+                && bytes[index..index + scheme_bytes.len()].eq_ignore_ascii_case(scheme_bytes)
+            {
+                index += scheme_bytes.len();
+                removed = true;
+                break;
+            }
+        }
+        if removed {
+            continue;
+        }
+        let character = input[index..]
+            .chars()
+            .next()
+            .expect("index on a char boundary");
+        out.push(character);
+        index += character.len_utf8();
+    }
+    out
 }
 
 /// Amount and description a person server shows at consent.

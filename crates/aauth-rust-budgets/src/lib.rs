@@ -14,8 +14,8 @@ mod usage;
 mod value;
 
 pub use agent::{
-    assume_lost_cost, balance_after, header_is_fresh, read_granted, recover_omitted_cost,
-    spend_plan, withhold_budget_header,
+    assume_lost_cost, balance_after, header_is_fresh, plan_from_grant, read_granted,
+    recover_omitted_cost, response_complete_without_trailer, spend_plan, withhold_budget_header,
 };
 pub use header::{
     BudgetHeader, ParsedHeader, Trailer, act_on_header, parse_header, parse_max_cost, sender_field,

@@ -413,7 +413,7 @@ pub fn verify_usage_signature(
     let base = format!(
         "\"@status\": 200\n\"content-type\": application/json\n\"content-digest\": {digest}\n\"@authority\";req: {authority}\n\"@path\";req: {path}\n\"@signature-params\": {params}"
     );
-    if !params.contains(&format!("created={created}")) {
+    if !created_parameter(params, created) {
         return Err(Error::Malformed);
     }
     let raw = signed
@@ -424,4 +424,25 @@ pub fn verify_usage_signature(
     let bytes = STANDARD.decode(raw).map_err(|_| Error::Malformed)?;
     key.verify(base.as_bytes(), &bytes)
         .map_err(|_| Error::Malformed)
+}
+
+/// `created=N` matches only the whole parameter, so `created=1` does not match `created=1000`.
+pub(crate) fn created_parameter(params: &str, created: i64) -> bool {
+    let expected = format!("created={created}");
+    params
+        .split(';')
+        .any(|part| part.trim().trim_matches(',').trim() == expected)
+}
+
+#[cfg(test)]
+mod created_parameter_tests {
+    use super::created_parameter;
+
+    #[test]
+    fn created_matches_the_whole_parameter() {
+        assert!(created_parameter("created=1;keyid=\"a\"", 1));
+        assert!(!created_parameter("created=1000;keyid=\"a\"", 1));
+        assert!(!created_parameter("created=1;keyid=\"a\"", 1000));
+        assert!(created_parameter("keyid=\"a\";created=1000", 1000));
+    }
 }

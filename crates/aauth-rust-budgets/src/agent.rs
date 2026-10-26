@@ -17,8 +17,25 @@ pub fn read_granted(extra: &BTreeMap<String, Value>) -> Result<Option<Budget>, E
 }
 
 /// What the agent may plan to spend: the granted amount, never the request.
-pub fn spend_plan(granted: &Budget) -> i64 {
+///
+/// `requested` is accepted so a caller can pass the figure it asked for, and is
+/// ignored. The plan is the `budget` claim the agent actually received.
+pub fn spend_plan(granted: &Budget, requested: Option<&Budget>) -> i64 {
+    let _ = requested;
     granted.amount()
+}
+
+/// Plan from the auth token's `budget` claim. The request is not an input to the figure.
+///
+/// # Errors
+/// Returns [`Error::Malformed`] when the claim is present and not a budget object.
+pub fn plan_from_grant(
+    extra: &BTreeMap<String, Value>,
+    requested: Option<&Budget>,
+) -> Result<Option<i64>, Error> {
+    Ok(read_granted(extra)?
+        .as_ref()
+        .map(|grant| spend_plan(grant, requested)))
 }
 
 /// Cost to assume for a response that never arrived.
@@ -47,4 +64,13 @@ pub fn header_is_fresh(current_age: Option<u64>) -> bool {
 /// The resource does not withhold `AAuth-Budget` when the agent omitted the capability.
 pub fn withhold_budget_header(_declared_budget_capability: bool) -> bool {
     false
+}
+
+/// A recipient must not treat the trailer as necessary.
+///
+/// A response that never delivers a trailer is complete. `true` means the
+/// recipient accepts the response.
+pub fn response_complete_without_trailer(trailer: Option<&str>) -> bool {
+    let _ = trailer;
+    true
 }

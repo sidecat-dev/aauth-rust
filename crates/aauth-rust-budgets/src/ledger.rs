@@ -31,6 +31,7 @@ pub struct TokenAccount {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reservation {
     id: u64,
+    iss: String,
     jti: String,
     amount: i64,
 }
@@ -39,6 +40,11 @@ impl Reservation {
     /// Hold identifier.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Issuer of the auth token this hold is against.
+    pub fn iss(&self) -> &str {
+        &self.iss
     }
 
     /// Auth token this hold is against.
@@ -132,21 +138,28 @@ struct KeyFigure {
 
 #[derive(Clone, Debug)]
 struct Hold {
+    iss: String,
     jti: String,
     amount: i64,
 }
 
 /// Process-memory meter. Callers that share it across threads wrap it in a mutex.
 /// Each mutating method updates the token and the person ledger before it returns.
+/// Token state is keyed by `(iss, jti)`, so two issuers that mint the same `jti`
+/// do not share a grant or a person's counters.
 #[derive(Clone, Debug, Default)]
 pub struct Ledger {
-    tokens: BTreeMap<String, State>,
+    tokens: BTreeMap<(String, String), State>,
     holds: BTreeMap<u64, Hold>,
     next_hold: u64,
     charges: Vec<Charge>,
     keys: BTreeMap<String, Vec<KeyFigure>>,
     last_commit: Option<i64>,
-    replays: BTreeMap<(String, String), i64>,
+    replays: BTreeMap<(String, String, String), i64>,
+}
+
+fn token_key(iss: &str, jti: &str) -> (String, String) {
+    (iss.to_owned(), jti.to_owned())
 }
 
 impl Ledger {
@@ -155,13 +168,18 @@ impl Ledger {
         Self::default()
     }
 
-    /// Register a grant. A second registration of the same `jti` must carry the same grant.
+    /// Register a grant. A second registration of the same `(iss, jti)` must carry the same grant.
     ///
     /// # Errors
-    /// Returns [`Error::Malformed`] when the same `jti` is registered with a different grant.
+    /// Returns [`Error::Malformed`] when the same issuer and `jti` are registered with a different grant.
     pub fn open(&mut self, account: TokenAccount) -> Result<(), Error> {
-        if let Some(existing) = self.tokens.get(&account.jti) {
-            if existing.account.grant != account.grant {
+        let key = token_key(&account.iss, &account.jti);
+        if let Some(existing) = self.tokens.get(&key) {
+            if existing.account.grant != account.grant
+                || existing.account.ps != account.ps
+                || existing.account.sub != account.sub
+                || existing.account.aud != account.aud
+            {
                 return Err(Error::Malformed);
             }
             return Ok(());
@@ -182,7 +200,7 @@ impl Ledger {
             });
         }
         self.tokens.insert(
-            account.jti.clone(),
+            key,
             State {
                 account,
                 committed: 0,
@@ -193,19 +211,26 @@ impl Ledger {
         Ok(())
     }
 
-    /// Atomically reserve `maximum` against the token. A refusal changes nothing.
+    /// Atomically reserve `maximum` against the token identified by `(iss, jti)`.
+    /// A refusal changes nothing. A zero maximum does not admit a spent grant.
     ///
     /// # Errors
     /// Returns [`ChargeError::Refused`] when the maximum does not fit, or
     /// [`ChargeError::Protocol`] when the token was not opened.
-    pub fn reserve(&mut self, jti: &str, maximum: i64) -> Result<Reservation, ChargeError> {
+    pub fn reserve(
+        &mut self,
+        iss: &str,
+        jti: &str,
+        maximum: i64,
+    ) -> Result<Reservation, ChargeError> {
         check_amount(maximum).map_err(ChargeError::Protocol)?;
+        let key = token_key(iss, jti);
         let state = self
             .tokens
-            .get(jti)
+            .get(&key)
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
-        if maximum > remaining {
+        if remaining == 0 || maximum > remaining {
             let header = refusal_header(&state.account.grant, remaining, maximum)?;
             return Err(ChargeError::Refused(if remaining == 0 {
                 Refusal::Exhausted { remaining, header }
@@ -217,13 +242,14 @@ impl Ledger {
                 }
             }));
         }
-        let state = self.tokens.get_mut(jti).expect("token present");
+        let state = self.tokens.get_mut(&key).expect("token present");
         state.reserved += maximum;
         self.next_hold += 1;
         let id = self.next_hold;
         self.holds.insert(
             id,
             Hold {
+                iss: iss.to_owned(),
                 jti: jti.to_owned(),
                 amount: maximum,
             },
@@ -231,6 +257,7 @@ impl Ledger {
         self.assert_caps();
         Ok(Reservation {
             id,
+            iss: iss.to_owned(),
             jti: jti.to_owned(),
             amount: maximum,
         })
@@ -260,7 +287,7 @@ impl Ledger {
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let state = self
             .tokens
-            .get(&hold.jti)
+            .get(&token_key(&hold.iss, &hold.jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
         let header = BudgetHeader::reserved_hold(
@@ -284,7 +311,7 @@ impl Ledger {
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let state = self
             .tokens
-            .get_mut(&hold.jti)
+            .get_mut(&token_key(&hold.iss, &hold.jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         state.reserved -= hold.amount;
         self.assert_caps();
@@ -295,10 +322,15 @@ impl Ledger {
     ///
     /// # Errors
     /// Returns [`ChargeError::Protocol`] when the token was not opened.
-    pub fn held_refusal(&self, jti: &str, required: Option<i64>) -> Result<String, ChargeError> {
-        let before = self.snapshot(jti);
-        let header = self.refusal_view(jti, required)?;
-        if self.snapshot(jti) != before {
+    pub fn held_refusal(
+        &self,
+        iss: &str,
+        jti: &str,
+        required: Option<i64>,
+    ) -> Result<String, ChargeError> {
+        let before = self.snapshot(iss, jti);
+        let header = self.refusal_view(iss, jti, required)?;
+        if self.snapshot(iss, jti) != before {
             return Err(ChargeError::Protocol(Error::Malformed));
         }
         Ok(header)
@@ -316,16 +348,17 @@ impl Ledger {
     pub fn complete_held(
         &mut self,
         pending: &str,
+        iss: &str,
         jti: &str,
         maximum: i64,
         actual: i64,
         at: i64,
     ) -> Result<String, ChargeError> {
-        let key = (pending.to_owned(), jti.to_owned());
+        let key = (pending.to_owned(), iss.to_owned(), jti.to_owned());
         if let Some(cost) = self.replays.get(&key).copied() {
-            return self.replay_header(jti, cost);
+            return self.replay_header(iss, jti, cost);
         }
-        let reservation = self.reserve(jti, maximum)?;
+        let reservation = self.reserve(iss, jti, maximum)?;
         match self.commit(&reservation, actual, at) {
             Ok(header) => {
                 self.replays.insert(key, actual);
@@ -339,15 +372,28 @@ impl Ledger {
     }
 
     /// Committed amount for one token.
-    pub fn committed(&self, jti: &str) -> Option<i64> {
-        self.tokens.get(jti).map(|state| state.committed)
+    pub fn committed(&self, iss: &str, jti: &str) -> Option<i64> {
+        self.tokens
+            .get(&token_key(iss, jti))
+            .map(|state| state.committed)
     }
 
     /// Committed and outstanding reservation for one opened token.
-    pub fn outstanding(&self, jti: &str) -> Option<(i64, i64)> {
+    pub fn outstanding(&self, iss: &str, jti: &str) -> Option<(i64, i64)> {
         self.tokens
-            .get(jti)
+            .get(&token_key(iss, jti))
             .map(|state| (state.committed, state.reserved))
+    }
+
+    /// Whether any accepted token names this caller as `iss` or `ps`.
+    pub fn caller_seen(&self, caller: &Caller) -> bool {
+        self.tokens
+            .values()
+            .any(|state| visible_token(state, caller))
+            || self
+                .charges
+                .iter()
+                .any(|charge| visible_charge(charge, caller))
     }
 
     /// Person total for `(ps, sub, aud)` in `unit`. This is not a second ceiling.
@@ -431,11 +477,12 @@ impl Ledger {
         if actual > hold.amount {
             return Err(ChargeError::Protocol(Error::Exceeds));
         }
+        let iss = hold.iss.clone();
         let jti = hold.jti.clone();
         let amount = hold.amount;
         let state = self
             .tokens
-            .get_mut(&jti)
+            .get_mut(&token_key(&iss, &jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         state.reserved -= amount;
         state.committed += actual;
@@ -469,7 +516,10 @@ impl Ledger {
         }
         self.last_commit = Some(self.last_commit.map(|prev| prev.max(at)).unwrap_or(at));
         self.assert_caps();
-        let state = self.tokens.get(&jti).expect("token present");
+        let state = self
+            .tokens
+            .get(&token_key(&iss, &jti))
+            .expect("token present");
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
         let header = BudgetHeader::final_cost(
             remaining,
@@ -481,19 +531,24 @@ impl Ledger {
         sender_field(&header, true).map_err(ChargeError::Protocol)
     }
 
-    fn refusal_view(&self, jti: &str, required: Option<i64>) -> Result<String, ChargeError> {
+    fn refusal_view(
+        &self,
+        iss: &str,
+        jti: &str,
+        required: Option<i64>,
+    ) -> Result<String, ChargeError> {
         let state = self
             .tokens
-            .get(jti)
+            .get(&token_key(iss, jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
         refusal_header_with(&state.account.grant, remaining, required)
     }
 
-    fn replay_header(&self, jti: &str, cost: i64) -> Result<String, ChargeError> {
+    fn replay_header(&self, iss: &str, jti: &str, cost: i64) -> Result<String, ChargeError> {
         let state = self
             .tokens
-            .get(jti)
+            .get(&token_key(iss, jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
         let header = BudgetHeader::final_cost(
@@ -506,9 +561,9 @@ impl Ledger {
         sender_field(&header, true).map_err(ChargeError::Protocol)
     }
 
-    fn snapshot(&self, jti: &str) -> Option<(i64, i64)> {
+    fn snapshot(&self, iss: &str, jti: &str) -> Option<(i64, i64)> {
         self.tokens
-            .get(jti)
+            .get(&token_key(iss, jti))
             .map(|state| (state.committed, state.reserved))
     }
 
