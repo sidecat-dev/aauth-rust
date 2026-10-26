@@ -216,9 +216,11 @@ impl Subagent {
         Ok(token)
     }
     /// Build and parent-sign a missionless Person request containing the exact
-    /// child Agent token. The host must admit `endpoint` from trusted PS metadata
-    /// before calling; endpoint syntax checks do not establish endpoint authority.
-    /// Send the returned bytes unchanged. No transport or retry is performed.
+    /// child Agent token. The body `capabilities` member and the
+    /// `AAuth-Capabilities` header both declare `budget`. The host must admit
+    /// `endpoint` from trusted PS metadata before calling; endpoint syntax checks
+    /// do not establish endpoint authority. Send the returned bytes unchanged.
+    /// No transport or retry is performed.
     ///
     /// # Errors
     /// Rejects stale identities, a different parent, invalid Resource/endpoint,
@@ -236,17 +238,22 @@ impl Subagent {
         self.request(
             parent,
             endpoint,
-            json!({"resource":resource,"subagent_token":self.child.compact()}),
+            json!({"resource":resource,"subagent_token":self.child.compact(),"capabilities":["budget"]}),
             now,
         )
     }
     /// Build and parent-sign an Auth request with exact child, Resource and
     /// presented token bytes, forwarding a Resource `login_hint` unchanged.
+    /// The body `capabilities` member and the `AAuth-Capabilities` header both
+    /// declare `budget`.
     /// `resource` must come from challenge verification against the host's
     /// intended identities. The host must admit `endpoint` from trusted PS
     /// metadata, then send these bytes unchanged. No transport or retry occurs.
     /// `attempts` is the set of resource tokens already refused as
     /// `revoked_resource_token`. The host records that error before calling again.
+    /// This build omits `justification`. Use
+    /// [`Self::auth_request_with_justification`] when the host is explaining a
+    /// larger budget.
     ///
     /// # Errors
     /// Rejects a remembered revoked resource token, stale identities/challenge,
@@ -262,6 +269,37 @@ impl Subagent {
         keys: &dyn AgentKeyResolver,
         now: i64,
         attempts: &ResourceTokenAttempts,
+    ) -> Result<Request<Vec<u8>>, TokenError> {
+        self.auth_request_with_justification(
+            parent,
+            endpoint,
+            resource,
+            presented_compact,
+            keys,
+            now,
+            attempts,
+            None,
+        )
+    }
+    /// Same request as [`Self::auth_request`], plus a host-supplied `justification`.
+    ///
+    /// `None` omits the member. The library copies `Some` text unchanged and does
+    /// not invent an explanation.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::auth_request`]. An empty explanation,
+    /// or one longer than 65536 bytes, is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn auth_request_with_justification(
+        &self,
+        parent: &Agent,
+        endpoint: &str,
+        resource: &VerifiedResourceToken,
+        presented_compact: &str,
+        keys: &dyn AgentKeyResolver,
+        now: i64,
+        attempts: &ResourceTokenAttempts,
+        justification: Option<&str>,
     ) -> Result<Request<Vec<u8>>, TokenError> {
         if !attempts.may_submit(resource.compact()) {
             return Err(TokenError::InvalidJwt);
@@ -294,9 +332,15 @@ impl Subagent {
                     now,
                 )
             })?;
-        let mut body = json!({"resource_token":resource.compact(),"presented_token":presented_compact,"subagent_token":self.child.compact()});
+        let mut body = json!({"resource_token":resource.compact(),"presented_token":presented_compact,"subagent_token":self.child.compact(),"capabilities":["budget"]});
         if let Some(hint) = &c.login_hint {
             body["login_hint"] = json!(hint);
+        }
+        if let Some(text) = justification {
+            if text.is_empty() || text.len() > 65536 {
+                return Err(TokenError::InvalidJwt);
+            }
+            body["justification"] = json!(text);
         }
         self.request(parent, endpoint, body, now)
     }
@@ -324,6 +368,7 @@ impl Subagent {
         }
         let mut request = Request::post(uri)
             .header("content-type", "application/json")
+            .header("aauth-capabilities", "budget")
             .body(serde_json::to_vec(&body).map_err(|_| TokenError::InvalidJwt)?)
             .map_err(|_| TokenError::InvalidJwt)?;
         parent

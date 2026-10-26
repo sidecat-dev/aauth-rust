@@ -66,6 +66,30 @@ fn auth_challenge_needs_a_nonempty_string_parameter_on_the_member() {
 }
 
 #[test]
+fn budget_reason_is_an_ignored_parameter_and_unknown_requirements_stay_unsatisfiable() {
+    assert_eq!(
+        parse(
+            "requirement=auth-token;resource-token=\"header.payload.signature\";reason=budget-exhausted"
+        ),
+        Ok(Requirement::AuthToken {
+            resource_token: "header.payload.signature".into()
+        })
+    );
+    assert_eq!(
+        parse(
+            "requirement=auth-token;resource-token=\"header.payload.signature\";reason=insufficient-budget"
+        ),
+        Ok(Requirement::AuthToken {
+            resource_token: "header.payload.signature".into()
+        })
+    );
+    assert!(matches!(
+        parse("requirement=budget-exhausted"),
+        Err(RequirementError::Unsupported(_))
+    ));
+}
+
+#[test]
 fn unsupported_requirements_are_explicit_errors_never_success() {
     for value in [
         "interaction",
