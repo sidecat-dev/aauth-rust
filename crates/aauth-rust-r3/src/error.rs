@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// An R3 grammar or set-algebra failure.
+/// An R3 validation failure.
 #[derive(Debug)]
 pub struct Error {
     message: String,

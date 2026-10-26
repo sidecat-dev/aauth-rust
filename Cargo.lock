@@ -125,8 +125,10 @@ dependencies = [
 name = "aauth-rust-r3"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

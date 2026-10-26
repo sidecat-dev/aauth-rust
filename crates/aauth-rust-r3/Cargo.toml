@@ -10,8 +10,10 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "AAuth Rich Resource Requests: operation vocabularies and set algebra"
+description = "AAuth Rich Resource Requests: vocabularies, documents, grants, and proposals"
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true

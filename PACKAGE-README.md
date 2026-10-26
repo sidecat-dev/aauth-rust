@@ -19,7 +19,7 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-person-server` | Person bindings, consent, credential issuance and federation custody. |
 | `aauth-rust-person-server-redb` | Transactional file-backed Person Server storage on supported Unix filesystems. |
 | `aauth-rust-budgets` | Budget objects, narrowing, metering, and usage counters. |
-| `aauth-rust-r3` | Operation vocabulary grammar and whole-set algebra. |
+| `aauth-rust-r3` | Vocabularies, documents, grants, and proposals. |
 | `aauth-rust-resource` | Resource request verification and application admission policy. |
 
 Each archive contains that crate's sources, tests and examples where present,

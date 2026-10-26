@@ -308,6 +308,10 @@ pub(crate) struct OperationValue {
 }
 
 impl OperationValue {
+    pub(crate) fn canonical_raw(&self) -> &[Vec<u8>] {
+        &self.raw
+    }
+
     fn validate(&self) -> Result<(), Error> {
         let ops = self.vocabulary.ops()?;
         let _canonical = ops.normalize(&self.raw, self.use_)?;
@@ -330,6 +334,20 @@ pub(crate) fn new_operation_value(
         use_,
         raw: canonical,
     })
+}
+
+pub(crate) fn compatible_grant_and_set(
+    granted: &GrantedOperations,
+    operation_set: &OperationSet,
+) -> Result<(), Error> {
+    compatible_operations(&granted.value, &operation_set.value)
+}
+
+pub(crate) fn compatible_grants(
+    left: &GrantedOperations,
+    right: &GrantedOperations,
+) -> Result<(), Error> {
+    compatible_operations(&left.value, &right.value)
 }
 
 fn compatible_operations(left: &OperationValue, right: &OperationValue) -> Result<(), Error> {
@@ -477,6 +495,11 @@ impl OperationSet {
         self.value.vocabulary.uri()
     }
 
+    pub(crate) fn json_operations(&self) -> Result<&[Vec<u8>], Error> {
+        self.value.validate()?;
+        Ok(&self.value.raw)
+    }
+
     /// Operations in retained wire order.
     ///
     /// # Errors
@@ -545,7 +568,7 @@ impl OperationSet {
     }
 }
 
-fn new_parsed(
+pub(crate) fn new_parsed(
     vocabulary: Vocabulary,
     raw: Vec<Vec<u8>>,
     use_: SetUse,
