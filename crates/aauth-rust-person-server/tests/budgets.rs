@@ -231,12 +231,21 @@ fn issue(
     person_token: &str,
     challenge: &str,
 ) -> aauth_rust_core::VerifiedAuthToken {
+    issue_offer(server, person_token, challenge, 5_000_000)
+}
+
+fn issue_offer(
+    server: &Server,
+    person_token: &str,
+    challenge: &str,
+    amount: i64,
+) -> aauth_rust_core::VerifiedAuthToken {
     let parsed = aauth_rust_jose::Jws::parse(person_token).unwrap();
     let claims: Value = serde_json::from_slice(parsed.payload()).unwrap();
     let mut extra = std::collections::BTreeMap::new();
     extra.insert(
         "budget".into(),
-        json!({"amount": 5_000_000, "unit": "USD", "decimals": 6}),
+        json!({"amount": amount, "unit": "USD", "decimals": 6}),
     );
     let resource = ResourceClaims {
         iss: RESOURCE.into(),
@@ -297,6 +306,17 @@ fn a_second_grant_for_the_same_person_stays_inside_the_ceiling() {
     let second = issued_amount(&server, &person_token(&server), "challenge-b");
     assert_eq!(first, 2_000_000);
     assert_eq!(second, 0);
+    assert_eq!(server.budget_accounted(), Some(2_000_000));
+}
+
+#[test]
+fn an_offer_above_the_host_limit_is_omitted_and_one_at_the_limit_is_narrowed() {
+    let server = server_with(IssuerPolicy::capped(2_000_000, dollars()).omit_above(5_000_000));
+    let person = person_token(&server);
+    let fitted = issue_offer(&server, &person, "challenge-fit", 5_000_000);
+    assert_eq!(fitted.claims().extra["budget"]["amount"], 2_000_000);
+    let wide = issue_offer(&server, &person, "challenge-wide", 9_000_000);
+    assert!(!wide.claims().extra.contains_key("budget"));
     assert_eq!(server.budget_accounted(), Some(2_000_000));
 }
 

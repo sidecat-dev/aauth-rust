@@ -221,14 +221,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
     /// Account for budgets. `policy.cap` is this server's per-token maximum and
     /// the standing sum of outstanding grants for one subject at one resource.
-    /// An empty `policy.units` cache accepts the scale signed on the resource token.
+    /// `policy.omit_above` sends no parameter when the resource offer amount is
+    /// above that limit. An empty `policy.units` cache accepts the scale signed on the resource token.
     ///
     /// # Errors
-    /// Returns [`ConfigurationError`] when `cap` is outside the carrier.
+    /// Returns [`ConfigurationError`] when `cap` or `omit_above` is outside the carrier.
     pub fn with_budgets(mut self, policy: IssuerPolicy) -> Result<Self, ConfigurationError> {
         if policy
             .cap
             .is_some_and(|cap| !(0..=MAX_AMOUNT).contains(&cap))
+            || policy
+                .omit_above
+                .is_some_and(|limit| !(0..=MAX_AMOUNT).contains(&limit))
         {
             return Err(ConfigurationError);
         }
@@ -960,6 +964,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Some(offer) = offer else {
             return Ok(None);
         };
+        if state
+            .policy
+            .omit_above
+            .is_some_and(|limit| offer.amount() > limit)
+        {
+            return Ok(None);
+        }
         let cap = match state.policy.cap {
             Some(ceiling) => {
                 let room = state

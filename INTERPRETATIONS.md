@@ -81,8 +81,14 @@ the draft required each spelling.
   as an unsupported companion claim. Opt-in is per server.
 - The usage response is signed in this crate. Signature-Key's `sign_request`
   covers a request. The response coverage is `@status`, `content-type`,
-  `content-digest`, `@authority;req`, and `@path;req`. A parser still accepts
-  an unsigned usage body. The resource's `usage` method always signs.
+  `content-digest`, `@authority;req`, and `@path;req`. The response also
+  sends `Cache-Control: no-store`. That field is outside the signature base.
+  A parser still accepts an unsigned usage body. The resource's `usage`
+  method always signs.
+- `IssuerPolicy::omit_above` sends no budget parameter when the resource
+  offer amount is above that limit. An offer equal to the limit is still
+  narrowed to the cap. The standing ceiling is separate: a later grant is
+  narrowed by outstanding allocations for that subject at that resource.
 - This library is not an intermediary, so it does not implement a rule about
   rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
   with normative keywords sit in non-normative prior art and are not executed.

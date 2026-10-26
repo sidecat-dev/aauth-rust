@@ -1579,6 +1579,9 @@ where
         if let Ok(value) = signed.signature_key.parse() {
             headers.insert("signature-key", value);
         }
+        if let Ok(value) = "no-store".parse() {
+            headers.insert("cache-control", value);
+        }
         response
     }
     /// Reserve `maximum` against a verified auth token without serving the request.

@@ -774,6 +774,7 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
     assert_eq!(body["unit"], "USD");
     assert_eq!(body["decimals"], 6);
     assert_eq!(body["usage"]["all_time"], 1_000);
+    assert_eq!(usage.headers()["cache-control"], "no-store");
     assert!(body["as_of"].as_i64().unwrap() >= NOW);
 
     let mut unknown = Request::builder()

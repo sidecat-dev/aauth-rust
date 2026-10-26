@@ -223,7 +223,9 @@ and decimals, and does not exceed the parameter or its own cap. A parameter
 below the cap is issued at that amount. A decimals mismatch, an amount above
 the resource offer, a malformed object, or a parameter when the resource token
 had no budget is `400` `invalid_budget`. Omitting the parameter issues no
-budget claim. A person server whose cached unit disagrees with the resource
+budget claim. `IssuerPolicy::omit_above` sends no parameter when the resource
+offer amount is above that limit. An offer equal to the limit is still narrowed
+to the cap. A person server whose cached unit disagrees with the resource
 token's decimals returns `400` `invalid_budget` and does not rescale. The
 resource meters an already issued token on the signed unit and decimals,
 including after `replace_budget_units`. The host's `default_bound` is the
@@ -266,8 +268,8 @@ does not cover is `401`. While a reservation is open, `as_of` stays at the
 newest commit time and does not move backward when a later commit carries an
 earlier timestamp. With no reservation open, `as_of` is the request time.
 The response signature covers `@status`, `content-type`, `content-digest`,
-`@authority;req`, and `@path;req`. An unrecognized scope or a zero total omits
-`usage`. An unknown key thumbprint is omitted. Intermediary rewriting,
+`@authority;req`, and `@path;req`. The response carries `Cache-Control: no-store`.
+An unrecognized scope or a zero total omits `usage`. An unknown key thumbprint is omitted. Intermediary rewriting,
 RateLimit prior art, and the TPX client are outside this library.
 See [CONFORMANCE.md](CONFORMANCE.md) and [INTERPRETATIONS.md](INTERPRETATIONS.md).
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies

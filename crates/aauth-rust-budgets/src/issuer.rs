@@ -13,6 +13,11 @@ pub struct IssuerPolicy {
     /// Latest Unix second an issued auth token may expire. A calendar-period
     /// ceiling passes the period boundary. `None` leaves the other lifetimes alone.
     pub period_end: Option<i64>,
+    /// Offer amount above which the person server sends no budget parameter.
+    ///
+    /// This is not a narrowing cap. An offer equal to the limit is still narrowed
+    /// to [`Self::cap`]. `None` narrows every offer the cache accepts.
+    pub omit_above: Option<i64>,
 }
 
 impl IssuerPolicy {
@@ -27,7 +32,16 @@ impl IssuerPolicy {
             cap: Some(cap),
             units,
             period_end: None,
+            omit_above: None,
         }
+    }
+
+    /// Send no budget parameter when the resource offer amount is above `limit`.
+    ///
+    /// An offer equal to `limit` is still narrowed to the cap.
+    pub fn omit_above(mut self, limit: i64) -> Self {
+        self.omit_above = Some(limit);
+        self
     }
 
     /// Do not issue an auth token past `period_end`.
