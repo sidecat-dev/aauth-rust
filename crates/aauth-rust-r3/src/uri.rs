@@ -24,6 +24,11 @@ impl VocabularyUri {
     pub(crate) fn uninitialized() -> Self {
         Self(String::new())
     }
+
+    /// A built-in URI. [`crate::Vocabulary::new`] still validates it.
+    pub(crate) fn from_static(text: &'static str) -> Self {
+        Self(text.to_owned())
+    }
 }
 
 impl fmt::Display for VocabularyUri {

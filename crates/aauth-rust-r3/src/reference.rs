@@ -41,7 +41,7 @@ impl Reference {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        validate_https_uri(&self.uri)?;
+        validate_https_uri(&self.uri, "reference URI")?;
         validate_digest(&self.digest)
     }
 }
@@ -63,52 +63,43 @@ impl<'de> Deserialize<'de> for Reference {
     }
 }
 
-fn validate_https_uri(uri: &str) -> Result<(), Error> {
+/// Absolute HTTPS URI with a host, no userinfo, and no fragment. `what` names
+/// the value in error text.
+pub(crate) fn validate_https_uri(uri: &str, what: &str) -> Result<(), Error> {
+    let not_https = || Error::new(format!("r3: {what} must be an absolute HTTPS URI"));
     if uri.is_empty()
         || uri
             .bytes()
             .any(|byte| byte.is_ascii_whitespace() || byte < 0x20)
     {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     }
     let Some(scheme_end) = uri.find(':') else {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     };
     let scheme = &uri[..scheme_end];
     if !is_scheme(scheme) || !scheme.eq_ignore_ascii_case("https") {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     }
     let rest = &uri[scheme_end + 1..];
     if !rest.starts_with("//") {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     }
     let after = &rest[2..];
     let authority_end = after.find(['/', '?']).unwrap_or(after.len());
     let authority = &after[..authority_end];
     if authority.is_empty() {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     }
     if authority.contains('@') {
-        return Err(Error::new("r3: reference URI must not contain userinfo"));
+        return Err(Error::new(format!("r3: {what} must not contain userinfo")));
     }
-    let hostname = hostname_of(authority)?;
+    let hostname = hostname_of(authority, what)?;
     if hostname.is_empty() {
-        return Err(Error::new(
-            "r3: reference URI must be an absolute HTTPS URI",
-        ));
+        return Err(not_https());
     }
     if uri.contains('#') {
-        return Err(Error::new("r3: reference URI must not contain a fragment"));
+        return Err(Error::new(format!("r3: {what} must not contain a fragment")));
     }
     Ok(())
 }
@@ -123,10 +114,10 @@ fn is_scheme(scheme: &str) -> bool {
     }
 }
 
-fn hostname_of(authority: &str) -> Result<&str, Error> {
+fn hostname_of<'a>(authority: &'a str, what: &str) -> Result<&'a str, Error> {
     if let Some(host) = authority.strip_prefix('[') {
         let Some(end) = host.find(']') else {
-            return Err(Error::new("r3: invalid reference URI: missing ']'"));
+            return Err(Error::new(format!("r3: invalid {what}: missing ']'")));
         };
         let hostname = &host[..end];
         let after = &host[end + 1..];
@@ -134,10 +125,10 @@ fn hostname_of(authority: &str) -> Result<&str, Error> {
             return Ok(hostname);
         }
         let Some(port) = after.strip_prefix(':') else {
-            return Err(Error::new("r3: invalid reference URI: invalid host"));
+            return Err(Error::new(format!("r3: invalid {what}: invalid host")));
         };
         if !port.is_empty() && !port.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(Error::new("r3: invalid reference URI: invalid port"));
+            return Err(Error::new(format!("r3: invalid {what}: invalid port")));
         }
         return Ok(hostname);
     }
@@ -145,7 +136,7 @@ fn hostname_of(authority: &str) -> Result<&str, Error> {
         if port.bytes().all(|byte| byte.is_ascii_digit()) {
             return Ok(host);
         }
-        return Err(Error::new("r3: invalid reference URI: invalid port"));
+        return Err(Error::new(format!("r3: invalid {what}: invalid port")));
     }
     Ok(authority)
 }
