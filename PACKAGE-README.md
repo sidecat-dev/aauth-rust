@@ -19,11 +19,12 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-person-server` | Person bindings, consent, credential issuance and federation custody. |
 | `aauth-rust-person-server-redb` | Transactional file-backed Person Server storage on supported Unix filesystems. |
 | `aauth-rust-budgets` | Budget objects, narrowing, metering, and usage counters. |
+| `aauth-rust-r3` | Operation vocabulary grammar and whole-set algebra. |
 | `aauth-rust-resource` | Resource request verification and application admission policy. |
 
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
-other nine crates or the workspace's complete service guides. The root
+other ten crates or the workspace's complete service guides. The root
 `README.md`, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and `SPECIFICATIONS.md`
 in the full development checkout describe executable examples, host integration,
 the implemented subset and pinned protocol sources. This is a partial protocol

@@ -1,0 +1,17 @@
+[package]
+name = "aauth-rust-r3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "AAuth Rich Resource Requests: operation vocabularies and set algebra"
+
+[dependencies]
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }

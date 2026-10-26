@@ -122,6 +122,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aauth-rust-r3"
+version = "0.1.0-alpha.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aauth-rust-resource"
 version = "0.1.0-alpha.2"
 dependencies = [
