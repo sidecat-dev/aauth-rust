@@ -310,6 +310,24 @@ fn a_second_grant_for_the_same_person_stays_inside_the_ceiling() {
 }
 
 #[test]
+fn clearing_outstanding_budgets_opens_the_cap_for_the_next_exchange() {
+    let server = server();
+    assert_eq!(
+        issued_amount(&server, &person_token(&server), "challenge-a"),
+        2_000_000
+    );
+    server.clear_outstanding_budgets();
+    assert_eq!(
+        issued_amount(&server, &person_token(&server), "challenge-b"),
+        2_000_000
+    );
+    assert_eq!(
+        issued_amount(&server, &person_token(&server), "challenge-c"),
+        0
+    );
+}
+
+#[test]
 fn an_offer_above_the_host_limit_is_omitted_and_one_at_the_limit_is_narrowed() {
     let server = server_with(IssuerPolicy::capped(2_000_000, dollars()).omit_above(5_000_000));
     let person = person_token(&server);

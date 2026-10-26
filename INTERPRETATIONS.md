@@ -89,6 +89,9 @@ the draft required each spelling.
   offer amount is above that limit. An offer equal to the limit is still
   narrowed to the cap. The standing ceiling is separate: a later grant is
   narrowed by outstanding allocations for that subject at that resource.
+  `clear_outstanding_budgets` drops that book. Grants after the clear see
+  the full cap again. The conformance adapter clears it when a scenario
+  starts, so one process does not carry the ceiling across scenarios.
 - This library is not an intermediary, so it does not implement a rule about
   rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
   with normative keywords sit in non-normative prior art and are not executed.

@@ -253,6 +253,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .accounted()
         })
     }
+    /// Forget outstanding allocations so the next grant sees the full cap.
+    ///
+    /// One conformance process serves many independent exchanges. The ceiling
+    /// still applies to grants that share the book.
+    pub fn clear_outstanding_budgets(&self) {
+        if let Some(state) = &self.budgets {
+            *state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) = AllocationBook::new();
+        }
+    }
     /// Human amount and sanitized description, kept as separate strings.
     /// `None` when budgets are off.
     pub fn budget_consent(&self, budget: &Budget, description: &str) -> Option<ConsentFigure> {
