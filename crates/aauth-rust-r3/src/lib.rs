@@ -31,7 +31,7 @@ pub use proposal::{
 pub use reference::Reference;
 pub use standard::{
     AsyncApiCodec, GraphQlCodec, GrpcCodec, McpCodec, ODataCodec, OpenApiCodec, WsdlCodec,
-    standard_vocabularies,
+    standard_registry, standard_vocabularies,
 };
 pub use uri::VocabularyUri;
 pub use vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Registry, Vocabulary};

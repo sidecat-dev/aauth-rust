@@ -4,7 +4,7 @@ use crate::vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Regis
 use crate::{
     AnnotationEncoding, AsyncApiCodec, Authorization, Document, DocumentOptions, GraphQlCodec,
     GrpcCodec, McpCodec, ODataCodec, OpenApiCodec, Reference, WsdlCodec, digest,
-    standard_vocabularies,
+    standard_registry, standard_vocabularies,
 };
 
 const MCP: &str = "urn:aauth:vocabulary:mcp";
@@ -16,7 +16,7 @@ const WSDL: &str = "urn:aauth:vocabulary:wsdl";
 const ODATA: &str = "urn:aauth:vocabulary:odata";
 
 fn registry() -> Registry {
-    Registry::new(&standard_vocabularies().expect("standard vocabularies")).expect("registry")
+    standard_registry().expect("standard registry")
 }
 
 fn vocabulary(registry: &Registry, uri: &str) -> Vocabulary {
@@ -44,10 +44,6 @@ fn granted(registry: &Registry, uri: &str, operations: &[&str]) -> GrantedOperat
         .unwrap_or_else(|err| panic!("{uri} {operations:?}: {err}"))
 }
 
-fn document(registry: &Registry, uri: &str, operations: &[&str]) -> Document {
-    Document::new(&set(registry, uri, operations), DocumentOptions::default()).expect("document")
-}
-
 fn json_text(value: &impl serde::Serialize) -> String {
     String::from_utf8(serde_json::to_vec(value).expect("json")).expect("utf-8")
 }
@@ -59,8 +55,156 @@ fn refused<T>(result: Result<T, Error>) -> String {
     }
 }
 
+/// The samples of Go `vocabtest/standard_contract_test.go` at 0225f3f.
+struct GoSample {
+    uri: &'static str,
+    a: &'static str,
+    b: &'static str,
+    unknown_member: &'static str,
+    duplicate_member: &'static str,
+    private: fn() -> Result<Vocabulary, Error>,
+}
+
+fn go_samples() -> [GoSample; 7] {
+    [
+        GoSample {
+            uri: MCP,
+            a: r#"{"tool":"records.read"}"#,
+            b: r#"{"tool":"records.write"}"#,
+            unknown_member: r#"{"tool":"records.read","unknown":true}"#,
+            duplicate_member: r#"{"tool":"records.read","tool":"records.write"}"#,
+            private: || Vocabulary::new(McpCodec),
+        },
+        GoSample {
+            uri: OPENAPI,
+            a: r#"{"operationId":"readRecord"}"#,
+            b: r#"{"operationId":"writeRecord"}"#,
+            unknown_member: r#"{"operationId":"readRecord","unknown":true}"#,
+            duplicate_member: r#"{"operationId":"readRecord","operationId":"writeRecord"}"#,
+            private: || Vocabulary::new(OpenApiCodec),
+        },
+        GoSample {
+            uri: GRPC,
+            a: r#"{"method":"records.RecordService/Read"}"#,
+            b: r#"{"method":"records.RecordService/Write"}"#,
+            unknown_member: r#"{"method":"records.RecordService/Read","unknown":true}"#,
+            duplicate_member: r#"{"method":"records.RecordService/Read","method":"records.RecordService/Write"}"#,
+            private: || Vocabulary::new(GrpcCodec),
+        },
+        GoSample {
+            uri: GRAPHQL,
+            a: r#"{"operation":"ReadRecord","type":"query"}"#,
+            b: r#"{"operation":"WriteRecord","type":"mutation"}"#,
+            unknown_member: r#"{"operation":"ReadRecord","type":"query","unknown":true}"#,
+            duplicate_member: r#"{"operation":"ReadRecord","operation":"Other","type":"query"}"#,
+            private: || Vocabulary::new(GraphQlCodec),
+        },
+        GoSample {
+            uri: ASYNCAPI,
+            a: r#"{"operationId":"recordRead","action":"receive"}"#,
+            b: r#"{"operationId":"recordWrite","action":"send"}"#,
+            unknown_member: r#"{"operationId":"recordRead","action":"receive","unknown":true}"#,
+            duplicate_member: r#"{"operationId":"recordRead","operationId":"other","action":"receive"}"#,
+            private: || Vocabulary::new(AsyncApiCodec),
+        },
+        GoSample {
+            uri: WSDL,
+            a: r#"{"operation":"ReadRecord","service":"RecordService"}"#,
+            b: r#"{"operation":"WriteRecord","service":"RecordService"}"#,
+            unknown_member: r#"{"operation":"ReadRecord","service":"RecordService","unknown":true}"#,
+            duplicate_member: r#"{"operation":"ReadRecord","operation":"Other","service":"RecordService"}"#,
+            private: || Vocabulary::new(WsdlCodec),
+        },
+        GoSample {
+            uri: ODATA,
+            a: r#"{"operation":"Records","methods":["GET"]}"#,
+            b: r#"{"operation":"OtherRecords","methods":["POST"]}"#,
+            unknown_member: r#"{"operation":"Records","methods":["GET"],"unknown":true}"#,
+            duplicate_member: r#"{"operation":"Records","operation":"Other","methods":["GET"]}"#,
+            private: || Vocabulary::new(ODataCodec),
+        },
+    ]
+}
+
 #[test]
-fn standard_vocabularies_register_draft_uris_and_annotation_encodings() -> Result<(), Error> {
+fn standard_codecs_satisfy_the_go_vocabulary_contract() -> Result<(), Error> {
+    let registry = registry();
+    for sample in go_samples() {
+        let uri = sample.uri;
+        let a = set(&registry, uri, &[sample.a]);
+        let b = set(&registry, uri, &[sample.b]);
+        let both = set(&registry, uri, &[sample.a, sample.b]);
+
+        assert_eq!(json_text(&a), envelope(uri, &[sample.a]), "{uri}");
+        assert_eq!(a.operations()?[0].json()?, sample.a.as_bytes(), "{uri}");
+        let reparsed = registry.parse_operation_set(json_text(&both).as_bytes())?;
+        assert_eq!(json_text(&reparsed), json_text(&both), "{uri}");
+        assert!(reparsed.equal(&both)?, "{uri}");
+
+        assert!(a.equal(&a)?, "{uri}");
+        assert!(!a.equal(&b)? && !b.equal(&a)?, "{uri}");
+        assert!(a.is_subset_of(&a)?, "{uri}");
+        assert!(a.is_subset_of(&both)? && b.is_subset_of(&both)?, "{uri}");
+        assert!(!both.is_subset_of(&a)?, "{uri}");
+        assert!(a.is_disjoint(&b)? && b.is_disjoint(&a)?, "{uri}");
+        for (left, right) in [(&a, &a), (&b, &b), (&both, &both), (&a, &both)] {
+            assert!(!left.is_disjoint(right)?, "{uri}");
+        }
+
+        let a_before = json_text(&a);
+        let b_before = json_text(&b);
+        let ab = a.union_with(std::slice::from_ref(&b))?;
+        let ba = b.union_with(std::slice::from_ref(&a))?;
+        assert!(ab.equal(&both)? && ab.equal(&ba)?, "{uri}");
+        assert!(a.union_with(std::slice::from_ref(&a))?.equal(&a)?, "{uri}");
+        let left_associated = ab.union_with(std::slice::from_ref(&a))?;
+        let right_associated = a.union_with(std::slice::from_ref(&ba))?;
+        assert!(left_associated.equal(&right_associated)?, "{uri}");
+        assert!(a.is_subset_of(&ab)? && b.is_subset_of(&ab)?, "{uri}");
+        assert_eq!(json_text(&a), a_before, "{uri}");
+        assert_eq!(json_text(&b), b_before, "{uri}");
+
+        for operations in [
+            [sample.unknown_member].as_slice(),
+            [sample.duplicate_member].as_slice(),
+            [sample.a, sample.a].as_slice(),
+        ] {
+            assert!(
+                registry
+                    .parse_operation_set(envelope(uri, operations).as_bytes())
+                    .is_err(),
+                "{uri} accepted {operations:?}"
+            );
+        }
+        let extra = format!(
+            r#"{{"vocabulary":"{uri}","operations":[{}],"extra":true}}"#,
+            sample.a
+        );
+        assert!(registry.parse_operation_set(extra.as_bytes()).is_err(), "{uri}");
+        let doubled = format!(
+            r#"{{"vocabulary":"{uri}","vocabulary":"{uri}","operations":[{}]}}"#,
+            sample.a
+        );
+        assert!(registry.parse_operation_set(doubled.as_bytes()).is_err(), "{uri}");
+
+        let private = (sample.private)()?;
+        let private_set = Registry::new(std::slice::from_ref(&private))?
+            .parse_operation_set(envelope(uri, &[sample.a]).as_bytes())?;
+        assert!(private_set.equal(&a).is_err(), "{uri}");
+        assert!(private_set.is_subset_of(&a).is_err(), "{uri}");
+        assert!(private_set.is_disjoint(&a).is_err(), "{uri}");
+        assert!(private_set.union_with(std::slice::from_ref(&a)).is_err(), "{uri}");
+        assert!(registry.validate_operation_set(&private_set).is_err(), "{uri}");
+        assert!(
+            Registry::new(&[vocabulary(&registry, uri), private]).is_err(),
+            "{uri}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn standard_vocabularies_are_stable_registrations_with_draft_annotations() -> Result<(), Error> {
     let vocabularies = standard_vocabularies()?;
     let want = [
         (MCP, AnnotationEncoding::MCP_META),
@@ -88,42 +232,60 @@ fn standard_vocabularies_register_draft_uris_and_annotation_encodings() -> Resul
     assert_eq!(constants, [MCP, OPENAPI, GRPC, GRAPHQL, ASYNCAPI, WSDL, ODATA]);
     assert_eq!(ODataCodec.uri().as_str(), ODATA);
 
-    let registry = Registry::new(&vocabularies)?;
+    let registry = standard_registry()?;
     assert_eq!(registry.len(), 7);
-    assert!(Registry::new(&[Vocabulary::new(McpCodec)?, Vocabulary::new(McpCodec)?]).is_err());
+    let tool = br#"{"tool":"create_calendar_event"}"#;
+    let first = Operation::new(&vocabularies[0], tool)?;
+    let again = Operation::new(&standard_vocabularies()?[0], tool)?;
+    let via_codec = Operation::new(&McpCodec::vocabulary()?, tool)?;
+    assert!(first.equal(&again)?);
+    assert!(first.equal(&via_codec)?);
+    registry.validate_operation_set(&OperationSet::new(&[again])?)?;
 
-    let again = standard_vocabularies()?;
-    let first = Operation::new(&vocabularies[0], br#"{"tool":"create_calendar_event"}"#)?;
-    let second = Operation::new(&again[0], br#"{"tool":"create_calendar_event"}"#)?;
-    assert!(first.equal(&second).is_err());
-    registry.validate_operation_set(&OperationSet::new(&[first])?)?;
+    let private = Operation::new(&Vocabulary::new(McpCodec)?, tool)?;
+    assert!(first.equal(&private).is_err());
     assert!(
         registry
-            .validate_operation_set(&OperationSet::new(&[second])?)
+            .validate_operation_set(&OperationSet::new(&[private])?)
             .is_err()
     );
+    assert!(Registry::new(&[McpCodec::vocabulary()?, Vocabulary::new(McpCodec)?]).is_err());
     Ok(())
 }
 
 #[test]
-fn standard_discovery_endpoints_are_absolute_https_uris() -> Result<(), Error> {
+fn standard_discovery_endpoints_follow_the_go_https_profile() -> Result<(), Error> {
     let accepted = [
-        "https://calendar.example.com/mcp",
-        "https://calendar.example.com/openapi.json",
+        "https://resource.example/definition?version=current",
+        "HTTPS://RESOURCE.EXAMPLE/definition",
+        "https://grpc.example/reflection?service=records.v1.Records",
+        "https://grpc.example/records.proto",
         "https://calendar.example.com:8443/odata/",
         "https://[2001:db8::1]/calendar.wsdl?version=2",
+        "https://b\u{fc}cher.example/definition",
+        "https://resource.example/%E2%82%AC/definition",
+        "https://resource.example/definition?filter=%zz",
     ];
     let rejected = [
         "",
-        " https://calendar.example.com/graphql",
-        "http://calendar.example.com/mcp",
-        "/openapi.json",
-        "calendar.example.com:443",
-        "dns:///calendar.example.com:443",
-        "grpcs://calendar.example.com",
-        "https:///graphql",
-        "https://user@calendar.example.com/mcp",
-        "https://calendar.example.com/asyncapi.json#/operations",
+        " https://resource.example/definition",
+        "https://resource.example/definition ",
+        "https://resource.example/definition\u{a0}",
+        "/relative/definition",
+        "http://resource.example/definition",
+        "https:opaque-definition",
+        "https:///definition-without-host",
+        "https://user@resource.example/definition",
+        "https://resource.example/definition#section",
+        "dns:///grpc.example",
+        "grpc://grpc.example",
+        "https://resource.example/defi\u{7f}nition",
+        "https://resource.example/%zz",
+        "https://resource.example/%4",
+        "https://exa{mple.com/definition",
+        "https://exa%41mple.com/definition",
+        // Go net/url accepts a raw space in a path. The shared HTTPS check does not.
+        "https://resource.example/open api.json",
     ];
     for vocabulary in standard_vocabularies()? {
         for endpoint in accepted {
@@ -271,28 +433,28 @@ fn standard_codecs_emit_one_canonical_spelling() -> Result<(), Error> {
             br#"{"operationId":"updateEvent"}"#.to_vec(),
         ]
     );
-    let at_limit = format!(r#"{{"operation":"{}"}}"#, "E".repeat(128));
-    Operation::new(&vocabulary(&registry, ODATA), at_limit.as_bytes())?;
     Ok(())
 }
 
 #[test]
 fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
     let registry = registry();
-    let past_limit = format!(r#"{{"operation":"{}"}}"#, "E".repeat(129));
     let not_object = "operation must be a JSON object";
+    let untrimmed = "must not have surrounding whitespace";
+    let not_string = "must be a string";
     let grpc_form = "package.ServiceName/MethodName";
+    let graphql_name = "is not a GraphQL name";
     let graphql_type = "is not query, mutation, or subscription";
     let asyncapi_action = "is not send or receive";
-    let ncname = "is not an XML NCName";
-    let odata_form = "is not EntitySet or EntitySet/Operation";
-    let odata_method = "is not GET, POST, PUT, PATCH, or DELETE";
+    let odata_token = "is not an HTTP method token";
     let rejected = [
         (MCP, "{}", r#"missing member "tool""#),
         (MCP, r#"{"tool":""}"#, r#"member "tool" must not be empty"#),
-        (MCP, r#"{"tool":null}"#, r#"member "tool" must be a string"#),
-        (MCP, r#"{"tool":7}"#, r#"member "tool" must be a string"#),
-        (MCP, r#"{"tool":["create_calendar_event"]}"#, "must be a string"),
+        (MCP, r#"{"tool":" calendar.create"}"#, untrimmed),
+        (MCP, r#"{"tool":"calendar.create "}"#, untrimmed),
+        (MCP, r#"{"tool":null}"#, not_string),
+        (MCP, r#"{"tool":7}"#, not_string),
+        (MCP, r#"{"tool":["create_calendar_event"]}"#, not_string),
         (MCP, r#"{"tool":"a","tool":"b"}"#, r#"duplicate member "tool""#),
         (MCP, r#"{"tool":"a","tool":"a"}"#, r#"duplicate member "tool""#),
         (MCP, r#"{"Tool":"a"}"#, r#"unknown member "Tool""#),
@@ -308,7 +470,10 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
         (MCP, "null", not_object),
         (OPENAPI, "{}", r#"missing member "operationId""#),
         (OPENAPI, r#"{"operationId":""}"#, "must not be empty"),
-        (OPENAPI, r#"{"operationid":"createEvent"}"#, r#"unknown member "operationid""#),
+        (OPENAPI, r#"{"operationId":" createEvent"}"#, untrimmed),
+        (OPENAPI, r#"{"operationId":null}"#, not_string),
+        (OPENAPI, r#"{"operationID":"createEvent"}"#, r#"unknown member "operationID""#),
+        (OPENAPI, r#"{"OperationId":"createEvent"}"#, r#"unknown member "OperationId""#),
         (
             OPENAPI,
             r#"{"operationId":"createEvent","method":"post"}"#,
@@ -319,13 +484,18 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
             r#"{"operationId":"purchaseDataset","x-aauth-access-mode":"per-call"}"#,
             r#"unknown member "x-aauth-access-mode""#,
         ),
-        (OPENAPI, r#"{"operationId":{"name":"createEvent"}}"#, "must be a string"),
+        (OPENAPI, r#"{"operationId":{"name":"createEvent"}}"#, not_string),
+        (GRPC, r#"{"method":null}"#, not_string),
+        (GRPC, r#"{"method":" calendar.CalendarService/CreateEvent"}"#, untrimmed),
         (GRPC, r#"{"method":"CalendarService/CreateEvent"}"#, grpc_form),
         (GRPC, r#"{"method":"/calendar.CalendarService/CreateEvent"}"#, grpc_form),
         (GRPC, r#"{"method":".calendar.CalendarService/CreateEvent"}"#, grpc_form),
-        (GRPC, r#"{"method":"calendar.CalendarService.CreateEvent"}"#, grpc_form),
+        (GRPC, r#"{"method":"calendar.CalendarServiceCreateEvent"}"#, grpc_form),
         (GRPC, r#"{"method":"calendar.CalendarService/"}"#, grpc_form),
         (GRPC, r#"{"method":"calendar..CalendarService/CreateEvent"}"#, grpc_form),
+        (GRPC, r#"{"method":"calendar.2CalendarService/CreateEvent"}"#, grpc_form),
+        (GRPC, r#"{"method":"calendar.CalendarService/2CreateEvent"}"#, grpc_form),
+        (GRPC, r#"{"method":"calendar.CalendarService/Create.Event"}"#, grpc_form),
         (GRPC, r#"{"method":"calendar.CalendarService/Create/Event"}"#, grpc_form),
         (GRPC, r#"{"method":"calendar.Calendar-Service/CreateEvent"}"#, grpc_form),
         (
@@ -333,88 +503,73 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
             r#"{"method":"calendar.CalendarService/CreateEvent","service":"CalendarService"}"#,
             r#"unknown member "service""#,
         ),
-        (GRAPHQL, r#"{"operation":"GetCalendarEvents"}"#, r#"missing member "type""#),
+        (GRAPHQL, r#"{"operation":"CalendarEvent"}"#, r#"missing member "type""#),
         (GRAPHQL, r#"{"type":"query"}"#, r#"missing member "operation""#),
-        (GRAPHQL, r#"{"operation":"GetCalendarEvents","type":"Query"}"#, graphql_type),
-        (GRAPHQL, r#"{"operation":"GetCalendarEvents","type":"fragment"}"#, graphql_type),
-        (
-            GRAPHQL,
-            r#"{"operation":"GetCalendarEvents","type":null}"#,
-            r#"member "type" must be a string"#,
-        ),
         (
             GRAPHQL,
             r#"{"operation":"","type":"query"}"#,
             r#"member "operation" must not be empty"#,
         ),
-        (GRAPHQL, r#"{"operation":"1Events","type":"query"}"#, "is not a GraphQL name"),
-        (GRAPHQL, r#"{"operation":"Get-Events","type":"query"}"#, "is not a GraphQL name"),
+        (GRAPHQL, r#"{"operation":null,"type":"query"}"#, not_string),
+        (GRAPHQL, r#"{"operation":" CreateCalendarEvent","type":"query"}"#, untrimmed),
+        (GRAPHQL, r#"{"operation":"CalendarEvent","type":"mutation "}"#, untrimmed),
+        (GRAPHQL, r#"{"operation":"CalendarEvent","type":"QUERY"}"#, graphql_type),
+        (GRAPHQL, r#"{"operation":"CalendarEvent","type":"fragment"}"#, graphql_type),
         (
             GRAPHQL,
-            r#"{"operation":"GetCalendarEvents","type":"query","variables":{}}"#,
-            r#"unknown member "variables""#,
+            r#"{"operation":"CalendarEvent","type":null}"#,
+            r#"member "type" must be a string"#,
+        ),
+        (GRAPHQL, r#"{"operation":"2CreateCalendarEvent","type":"query"}"#, graphql_name),
+        (GRAPHQL, r#"{"operation":"Create-Calendar-Event","type":"query"}"#, graphql_name),
+        (GRAPHQL, r#"{"operation":"Create.Calendar.Event","type":"query"}"#, graphql_name),
+        (
+            GRAPHQL,
+            r#"{"Operation":"CalendarEvent","type":"query"}"#,
+            r#"unknown member "Operation""#,
+        ),
+        (
+            GRAPHQL,
+            r#"{"operation":"CalendarEvent","type":"query","type":"mutation"}"#,
+            r#"duplicate member "type""#,
         ),
         (ASYNCAPI, r#"{"action":"send"}"#, r#"missing member "operationId""#),
+        (ASYNCAPI, r#"{"operationId":""}"#, "must not be empty"),
+        (ASYNCAPI, r#"{"operationId":" x "}"#, untrimmed),
+        (ASYNCAPI, r#"{"operationId":"x","action":"publish"}"#, asyncapi_action),
+        (ASYNCAPI, r#"{"operationId":"x","action":"subscribe"}"#, asyncapi_action),
+        (ASYNCAPI, r#"{"operationId":"x","action":"Receive"}"#, asyncapi_action),
         (
             ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","action":"subscribe"}"#,
-            asyncapi_action,
-        ),
-        (
-            ASYNCAPI,
-            r#"{"operationId":"publishCalendarUpdate","action":"publish"}"#,
-            asyncapi_action,
-        ),
-        (
-            ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","action":"Receive"}"#,
-            asyncapi_action,
-        ),
-        (
-            ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","action":null}"#,
+            r#"{"operationId":"x","action":null}"#,
             r#"member "action" must be a string"#,
         ),
         (
             ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","action":""}"#,
+            r#"{"operationId":"x","action":""}"#,
             r#"member "action" must not be empty"#,
         ),
-        (
-            ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","action":["receive"]}"#,
-            "must be a string",
-        ),
-        (
-            ASYNCAPI,
-            r#"{"operationId":"receiveCalendarEvent","channel":"calendar"}"#,
-            r#"unknown member "channel""#,
-        ),
+        (ASYNCAPI, r#"{"operationId":"x","action":["receive"]}"#, not_string),
+        (ASYNCAPI, r#"{"operationId":"x","extra":true}"#, r#"unknown member "extra""#),
         (WSDL, r#"{"service":"CalendarService"}"#, r#"missing member "operation""#),
+        (WSDL, r#"{"operation":""}"#, "must not be empty"),
+        (WSDL, r#"{"operation":" x "}"#, untrimmed),
         (
             WSDL,
-            r#"{"operation":"CreateCalendarEvent","service":null}"#,
+            r#"{"operation":"x","service":null}"#,
             r#"member "service" must be a string"#,
         ),
         (
             WSDL,
-            r#"{"operation":"CreateCalendarEvent","service":""}"#,
+            r#"{"operation":"x","service":""}"#,
             r#"member "service" must not be empty"#,
         ),
-        (WSDL, r#"{"operation":"tns:CreateCalendarEvent"}"#, ncname),
-        (WSDL, r#"{"operation":"Create CalendarEvent"}"#, ncname),
-        (WSDL, r#"{"operation":"1CreateCalendarEvent"}"#, ncname),
-        (
-            WSDL,
-            r#"{"operation":"CreateCalendarEvent","service":"tns:CalendarService"}"#,
-            r#"service "tns:CalendarService" is not an XML NCName"#,
-        ),
-        (
-            WSDL,
-            r#"{"operation":"CreateCalendarEvent","port":"CalendarPort"}"#,
-            r#"unknown member "port""#,
-        ),
+        (WSDL, r#"{"operation":"x","service":"CalendarService "}"#, untrimmed),
+        (WSDL, r#"{"operation":"x","port":"CalendarPort"}"#, r#"unknown member "port""#),
+        (WSDL, r#"{"operation":"x","operation":"y"}"#, r#"duplicate member "operation""#),
         (ODATA, r#"{"methods":["GET"]}"#, r#"missing member "operation""#),
+        (ODATA, r#"{"operation":""}"#, "must not be empty"),
+        (ODATA, r#"{"operation":" x "}"#, untrimmed),
         (
             ODATA,
             r#"{"operation":"Events","methods":[]}"#,
@@ -430,13 +585,14 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
             r#"{"operation":"Events","methods":"GET"}"#,
             r#"member "methods" must be an array"#,
         ),
-        (ODATA, r#"{"operation":"Events","methods":["get"]}"#, odata_method),
-        (ODATA, r#"{"operation":"Events","methods":["HEAD"]}"#, odata_method),
         (
             ODATA,
             r#"{"operation":"Events","methods":["GET","GET"]}"#,
             r#"method "GET" is repeated"#,
         ),
+        (ODATA, r#"{"operation":"Events","methods":["BAD METHOD"]}"#, odata_token),
+        (ODATA, r#"{"operation":"Events","methods":[""]}"#, odata_token),
+        (ODATA, r#"{"operation":"Events","methods":["GÉT"]}"#, odata_token),
         (
             ODATA,
             r#"{"operation":"Events","methods":[1]}"#,
@@ -444,20 +600,15 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
         ),
         (
             ODATA,
-            r#"{"operation":"Events/SendCancellation","methods":["POST"]}"#,
-            "not allowed on a bound function or action",
+            r#"{"operation":"Events","methods":[null]}"#,
+            "must contain only strings",
         ),
-        (ODATA, r#"{"operation":"Events/"}"#, odata_form),
-        (ODATA, r#"{"operation":"/SendCancellation"}"#, odata_form),
-        (ODATA, r#"{"operation":"Events/Calendar.SendCancellation"}"#, odata_form),
-        (ODATA, r#"{"operation":"Events/SendCancellation/Again"}"#, odata_form),
-        (ODATA, r#"{"operation":"Events(1)"}"#, odata_form),
-        (ODATA, past_limit.as_str(), odata_form),
         (
             ODATA,
             r#"{"operation":"Events","methods":["GET"],"filter":"Start gt 2026"}"#,
             r#"unknown member "filter""#,
         ),
+        (ODATA, r#"{"operation":"x","operation":"y"}"#, r#"duplicate member "operation""#),
     ];
     for &(uri, operation, reason) in &rejected {
         let vocabulary = vocabulary(&registry, uri);
@@ -476,7 +627,48 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
 }
 
 #[test]
-fn standard_codecs_reject_a_repeated_operation_in_one_set() {
+fn standard_codecs_accept_what_the_go_codecs_accept() -> Result<(), Error> {
+    let registry = registry();
+    let long_name = format!(r#"{{"operation":"{}"}}"#, "E".repeat(129));
+    let accepted = [
+        (MCP, r#"{"tool":"calendar create"}"#),
+        (MCP, r#"{"tool":"日本"}"#),
+        (OPENAPI, r#"{"operationId":"list events/v2"}"#),
+        (GRPC, r#"{"method":"_package._Service/_Method"}"#),
+        (
+            GRPC,
+            r#"{"method":"com.example.calendar.Calendar_Service/Create_Event2"}"#,
+        ),
+        (GRAPHQL, r#"{"operation":"_CalendarEvent2","type":"subscription"}"#),
+        (ASYNCAPI, r#"{"operationId":"calendar.event-received"}"#),
+        (WSDL, r#"{"operation":"tns:CreateCalendarEvent"}"#),
+        (
+            WSDL,
+            r#"{"operation":"1CreateCalendarEvent","service":"Calendar Service"}"#,
+        ),
+        (ODATA, r#"{"operation":"Events/Calendar.SendCancellation"}"#),
+        (ODATA, r#"{"operation":"Events(1)"}"#),
+        (ODATA, r#"{"operation":"Événements","methods":["GET"]}"#),
+        (
+            ODATA,
+            r#"{"operation":"Events/SendCancellation","methods":["POST"]}"#,
+        ),
+        (
+            ODATA,
+            r#"{"operation":"Events","methods":["get","MERGE","X-Custom"]}"#,
+        ),
+        (ODATA, long_name.as_str()),
+    ];
+    for (uri, operation) in accepted {
+        Operation::new(&vocabulary(&registry, uri), operation.as_bytes())
+            .map_err(|err| Error::wrap(format!("{uri} {operation}"), err))?;
+        registry.parse_operation_set(envelope(uri, &[operation]).as_bytes())?;
+    }
+    Ok(())
+}
+
+#[test]
+fn standard_codecs_reject_a_repeated_or_overlapping_operation_in_one_set() {
     let registry = registry();
     let repeated = [
         (
@@ -485,14 +677,16 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"tool":"create_calendar_event"}"#,
                 r#"{"tool":"create_calendar_event"}"#,
             ],
+            "repeats",
         ),
-        (MCP, [r#"{"tool":"a"}"#, r#"{"tool":"a"}"#]),
+        (MCP, [r#"{"tool":"a"}"#, r#"{"tool":"a"}"#], "repeats"),
         (
             OPENAPI,
             [
                 r#"{"operationId":"createEvent"}"#,
                 r#"{"operationId":"createEvent"}"#,
             ],
+            "repeats",
         ),
         (
             GRPC,
@@ -500,13 +694,15 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"method":"calendar.CalendarService/CreateEvent"}"#,
                 r#"{"method":"calendar.CalendarService/CreateEvent"}"#,
             ],
+            "repeats",
         ),
         (
             GRAPHQL,
             [
                 r#"{"operation":"CalendarEvents","type":"query"}"#,
-                r#"{"operation":"CalendarEvents","type":"subscription"}"#,
+                r#"{"type":"query","operation":"CalendarEvents"}"#,
             ],
+            "repeats",
         ),
         (
             ASYNCAPI,
@@ -514,6 +710,7 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"operationId":"receiveCalendarEvent"}"#,
                 r#"{"operationId":"receiveCalendarEvent","action":"receive"}"#,
             ],
+            "overlaps",
         ),
         (
             ASYNCAPI,
@@ -521,6 +718,7 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"operationId":"receiveCalendarEvent","action":"send"}"#,
                 r#"{"operationId":"receiveCalendarEvent","action":"receive"}"#,
             ],
+            "overlaps",
         ),
         (
             WSDL,
@@ -528,6 +726,15 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"operation":"CreateCalendarEvent","service":"CalendarService"}"#,
                 r#"{"service":"CalendarService","operation":"CreateCalendarEvent"}"#,
             ],
+            "repeats",
+        ),
+        (
+            WSDL,
+            [
+                r#"{"operation":"CreateCalendarEvent"}"#,
+                r#"{"operation":"CreateCalendarEvent","service":"CalendarService"}"#,
+            ],
+            "overlaps",
         ),
         (
             ODATA,
@@ -535,6 +742,7 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"operation":"Events","methods":["GET"]}"#,
                 r#"{"operation":"Events","methods":["POST"]}"#,
             ],
+            "overlaps",
         ),
         (
             ODATA,
@@ -542,12 +750,13 @@ fn standard_codecs_reject_a_repeated_operation_in_one_set() {
                 r#"{"operation":"Events"}"#,
                 r#"{"operation":"Events","methods":["GET"]}"#,
             ],
+            "overlaps",
         ),
     ];
-    for (uri, operations) in repeated {
+    for (uri, operations, reason) in repeated {
         let source = envelope(uri, &operations);
         let message = refused(registry.parse_operation_set(source.as_bytes()));
-        assert!(message.contains("repeats"), "{uri}: {message}");
+        assert!(message.contains(reason), "{uri}: {message}");
         assert!(registry.parse_granted_operations(source.as_bytes()).is_err());
         assert!(registry.parse_document(source.as_bytes()).is_err());
     }
@@ -565,7 +774,7 @@ fn standard_registry_refuses_unregistered_and_mismatched_vocabularies() -> Resul
         assert!(registry.parse_operation_set(source.as_bytes()).is_err(), "{uri}");
         assert!(registry.parse_granted_operations(source.as_bytes()).is_err(), "{uri}");
     }
-    let only_mcp = Registry::new(&[Vocabulary::new(McpCodec)?])?;
+    let only_mcp = Registry::new(&[McpCodec::vocabulary()?])?;
     let openapi_source = envelope(OPENAPI, &[r#"{"operationId":"createEvent"}"#]);
     assert!(only_mcp.parse_operation_set(openapi_source.as_bytes()).is_err());
     let borrowed_shape = envelope(GRAPHQL, &[r#"{"operationId":"createEvent"}"#]);
@@ -675,28 +884,32 @@ fn standard_registry_algebra_holds_for_each_vocabulary() -> Result<(), Error> {
 }
 
 #[test]
-fn standard_graphql_name_identifies_and_type_must_agree() -> Result<(), Error> {
+fn standard_graphql_identity_is_the_name_and_type_pair() -> Result<(), Error> {
     let registry = registry();
-    let query = set(
-        &registry,
-        GRAPHQL,
-        &[r#"{"operation":"CalendarEvents","type":"query"}"#],
-    );
-    let subscription = set(
-        &registry,
-        GRAPHQL,
-        &[r#"{"operation":"CalendarEvents","type":"subscription"}"#],
-    );
-    assert!(!query.equal(&subscription)?);
-    assert!(!query.is_subset_of(&subscription)?);
-    assert!(!query.is_disjoint(&subscription)?);
-    let message = refused(query.union_with(std::slice::from_ref(&subscription)));
-    assert!(message.contains("conflicting entries"), "{message}");
+    let query = r#"{"operation":"CalendarEvents","type":"query"}"#;
+    let subscription = r#"{"operation":"CalendarEvents","type":"subscription"}"#;
+    let query_set = set(&registry, GRAPHQL, &[query]);
+    let subscription_set = set(&registry, GRAPHQL, &[subscription]);
+    let both = set(&registry, GRAPHQL, &[query, subscription]);
+    assert!(!query_set.equal(&subscription_set)?);
+    assert!(!query_set.is_subset_of(&subscription_set)?);
+    assert!(query_set.is_disjoint(&subscription_set)?);
+    let union = query_set.union_with(std::slice::from_ref(&subscription_set))?;
+    assert!(union.equal(&both)?);
+    let document = Document::new(&both, DocumentOptions::default())?;
+    Authorization::new(
+        &granted(&registry, GRAPHQL, &[query]),
+        &granted(&registry, GRAPHQL, &[subscription]),
+        &document,
+    )?;
     Ok(())
 }
 
+/// Go reports `{op}`, `{op,send}`, and `{op,receive}` pairwise disjoint. They name
+/// one operationId, so this port keeps them overlapping. A document holds only one
+/// spelling, so `Authorization` refuses the pairing in both ports by containment.
 #[test]
-fn standard_asyncapi_absent_action_is_not_a_present_action() -> Result<(), Error> {
+fn standard_asyncapi_one_operation_id_is_never_disjoint_from_itself() -> Result<(), Error> {
     let registry = registry();
     let bare = r#"{"operationId":"receiveCalendarEvent"}"#;
     let receive = r#"{"operationId":"receiveCalendarEvent","action":"receive"}"#;
@@ -705,6 +918,7 @@ fn standard_asyncapi_absent_action_is_not_a_present_action() -> Result<(), Error
     let receive_set = set(&registry, ASYNCAPI, &[receive]);
     let send_set = set(&registry, ASYNCAPI, &[send]);
     assert_eq!(json_text(&bare_set), envelope(ASYNCAPI, &[bare]));
+    assert!(!bare_set.equal(&send_set)?);
     assert!(!bare_set.is_subset_of(&receive_set)?);
     assert!(!receive_set.is_subset_of(&bare_set)?);
     assert!(!receive_set.is_subset_of(&send_set)?);
@@ -721,15 +935,25 @@ fn standard_asyncapi_absent_action_is_not_a_present_action() -> Result<(), Error
             .is_err()
     );
     assert!(
-        receive_set
-            .union_with(std::slice::from_ref(&receive_set))?
-            .equal(&receive_set)?
+        send_set
+            .union_with(std::slice::from_ref(&send_set))?
+            .equal(&send_set)?
+    );
+
+    let document = Document::new(&receive_set, DocumentOptions::default())?;
+    assert!(
+        Authorization::new(
+            &granted(&registry, ASYNCAPI, &[bare]),
+            &granted(&registry, ASYNCAPI, &[receive]),
+            &document,
+        )
+        .is_err()
     );
     Ok(())
 }
 
 #[test]
-fn standard_wsdl_service_qualifies_identity_and_absence_overlaps() -> Result<(), Error> {
+fn standard_wsdl_unqualified_operation_overlaps_every_service() -> Result<(), Error> {
     let registry = registry();
     let unqualified = r#"{"operation":"CreateCalendarEvent"}"#;
     let calendar = r#"{"operation":"CreateCalendarEvent","service":"CalendarService"}"#;
@@ -738,22 +962,21 @@ fn standard_wsdl_service_qualifies_identity_and_absence_overlaps() -> Result<(),
     let calendar_set = set(&registry, WSDL, &[calendar]);
     let archive_set = set(&registry, WSDL, &[archive]);
     assert_eq!(json_text(&unqualified_set), envelope(WSDL, &[unqualified]));
+
+    let message = refused(
+        registry.parse_operation_set(envelope(WSDL, &[unqualified, calendar]).as_bytes()),
+    );
+    assert!(message.contains("overlaps"), "{message}");
+    let message = refused(unqualified_set.union_with(std::slice::from_ref(&calendar_set)));
+    assert!(message.contains("conflicting entries"), "{message}");
     assert!(!unqualified_set.is_subset_of(&calendar_set)?);
     assert!(!calendar_set.is_subset_of(&unqualified_set)?);
     assert!(!unqualified_set.is_disjoint(&calendar_set)?);
     assert!(calendar_set.is_disjoint(&archive_set)?);
-    let both = unqualified_set.union_with(std::slice::from_ref(&calendar_set))?;
-    assert_eq!(json_text(&both), envelope(WSDL, &[unqualified, calendar]));
 
-    let document = document(&registry, WSDL, &[unqualified, calendar, archive]);
-    assert!(
-        Authorization::new(
-            &granted(&registry, WSDL, &[unqualified]),
-            &granted(&registry, WSDL, &[calendar]),
-            &document,
-        )
-        .is_err()
-    );
+    let qualified = calendar_set.union_with(std::slice::from_ref(&archive_set))?;
+    assert_eq!(json_text(&qualified), envelope(WSDL, &[calendar, archive]));
+    let document = Document::new(&qualified, DocumentOptions::default())?;
     Authorization::new(
         &granted(&registry, WSDL, &[calendar]),
         &granted(&registry, WSDL, &[archive]),
@@ -778,6 +1001,9 @@ fn standard_odata_methods_compare_as_a_set_and_absence_stays_distinct() -> Resul
     assert!(get_set.is_subset_of(&get_post_set)?);
     assert!(!get_post_set.is_subset_of(&get_set)?);
     assert!(get_post_set.equal(&set(&registry, ODATA, &[post_get]))?);
+    // Go's Equal is `len && subset`, so it reports GET equal to GET+POST.
+    assert!(!get_set.equal(&get_post_set)?);
+    assert!(!get_post_set.equal(&get_set)?);
     assert!(get_set.is_disjoint(&post_set)?);
     assert!(!get_set.is_disjoint(&get_post_set)?);
     let merged = get_set.union_with(std::slice::from_ref(&post_set))?;
@@ -790,14 +1016,17 @@ fn standard_odata_methods_compare_as_a_set_and_absence_stays_distinct() -> Resul
     let message = refused(events_set.union_with(std::slice::from_ref(&get_set)));
     assert!(message.contains("conflicting entries"), "{message}");
 
-    let document = document(
-        &registry,
-        ODATA,
-        &[
-            r#"{"operation":"Events","methods":["GET","POST","PATCH"]}"#,
-            r#"{"operation":"Events/SendCancellation"}"#,
-        ],
-    );
+    let document = Document::new(
+        &set(
+            &registry,
+            ODATA,
+            &[
+                r#"{"operation":"Events","methods":["GET","POST","PATCH"]}"#,
+                r#"{"operation":"Events/SendCancellation"}"#,
+            ],
+        ),
+        DocumentOptions::default(),
+    )?;
     let authorization = Authorization::new(
         &granted(&registry, ODATA, &[get]),
         &granted(
@@ -922,6 +1151,7 @@ fn standard_mcp_document_subset_grant_and_one_tool_proposal() -> Result<(), Erro
         "[]",
         r#"[{"tool":"create_calendar_event","arguments":{"title":"Planning"}}]"#,
         r#"[{"tool":""}]"#,
+        r#"[{"tool":"create_calendar_event "}]"#,
     ] {
         let source = proposal_source.replace(one_tool, replacement);
         assert_ne!(source, proposal_source);

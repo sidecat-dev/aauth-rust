@@ -1,34 +1,46 @@
 //! The seven standard vocabularies, `urn:aauth:vocabulary:*`.
 //!
-//! Each codec parses the operation grammar the draft gives it and nothing more.
-//! It does not fetch or read a definition and does not read annotations. An
-//! operation object carries only the members its vocabulary defines. An optional
-//! member is either absent or a valid value: `null` and `""` are refused, and
-//! absence never equals a present value.
+//! Ported from the Go `r3/vocab/*` codecs. Each codec parses its operation
+//! grammar and nothing more: it does not fetch or read a definition and does
+//! not read annotations. An operation object carries only the members its
+//! vocabulary defines. Every string member is non-empty and has no surrounding
+//! whitespace. An optional member is either absent or valid (`null` is refused),
+//! and absence never equals a present value.
+
+use std::sync::OnceLock;
 
 use crate::annotation::AnnotationEncoding;
 use crate::error::Error;
 use crate::jsonvalue::{Json, parse_json, push_key, push_string};
 use crate::reference::validate_https_uri;
 use crate::uri::VocabularyUri;
-use crate::vocabulary::{Codec, Vocabulary};
+use crate::vocabulary::{Codec, Registry, Vocabulary};
 
-/// One fresh registration for each standard vocabulary, in draft order.
+/// The process-wide registration of each standard vocabulary, in draft order.
 ///
-/// Registrations from two calls are not interchangeable.
+/// Every call returns the same registrations, so sets parsed through any of them
+/// compare. A registration made with [`Vocabulary::new`] is a different one.
 ///
 /// # Errors
 /// Returns [`Error`] when a built-in URI or annotation encoding is refused.
 pub fn standard_vocabularies() -> Result<Vec<Vocabulary>, Error> {
     Ok(vec![
-        Vocabulary::new(McpCodec)?,
-        Vocabulary::new(OpenApiCodec)?,
-        Vocabulary::new(GrpcCodec)?,
-        Vocabulary::new(GraphQlCodec)?,
-        Vocabulary::new(AsyncApiCodec)?,
-        Vocabulary::new(WsdlCodec)?,
-        Vocabulary::new(ODataCodec)?,
+        McpCodec::vocabulary()?,
+        OpenApiCodec::vocabulary()?,
+        GrpcCodec::vocabulary()?,
+        GraphQlCodec::vocabulary()?,
+        AsyncApiCodec::vocabulary()?,
+        WsdlCodec::vocabulary()?,
+        ODataCodec::vocabulary()?,
     ])
+}
+
+/// A new allowlist holding all seven [`standard_vocabularies`].
+///
+/// # Errors
+/// Returns [`Error`] when a standard vocabulary cannot be registered.
+pub fn standard_registry() -> Result<Registry, Error> {
+    Registry::new(&standard_vocabularies()?)
 }
 
 /// Operations parsed by one standard codec, in first-seen order.
@@ -39,9 +51,9 @@ pub struct StandardSet<E>(Vec<E>);
 
 /// One operation object of a standard vocabulary.
 ///
-/// `same_slot` is the identity a set holds at most once. `covered_by` and
-/// `may_overlap` default to that identity. An entry with a qualifier or a method
-/// list overrides them, and `may_overlap` errs toward overlap.
+/// `same_slot` is what a set may hold at most once. `covered_by` and
+/// `may_overlap` default to that. An entry with an optional qualifier or a
+/// method list overrides them, and `may_overlap` errs toward overlap.
 trait Entry: Clone + PartialEq {
     /// Members an operation object may carry.
     const MEMBERS: &'static [&'static str];
@@ -90,6 +102,24 @@ macro_rules! standard_codec {
         impl $codec {
             /// Registered vocabulary URI.
             pub const URI: &'static str = $uri;
+
+            /// The process-wide registration of this codec. Every call returns
+            /// the same registration.
+            ///
+            /// # Errors
+            /// Returns [`Error`] when the built-in URI or annotation encoding is refused.
+            pub fn vocabulary() -> Result<Vocabulary, Error> {
+                static REGISTRATION: OnceLock<Option<Vocabulary>> = OnceLock::new();
+                REGISTRATION
+                    .get_or_init(|| Vocabulary::new($codec).ok())
+                    .clone()
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "r3: standard vocabulary \"{}\" did not register",
+                            Self::URI
+                        ))
+                    })
+            }
         }
 
         impl Codec for $codec {
@@ -104,7 +134,7 @@ macro_rules! standard_codec {
             }
 
             fn validate_discovery_endpoint(&self, endpoint: &str) -> Result<(), Error> {
-                validate_https_uri(endpoint, "discovery endpoint")
+                validate_standard_endpoint(endpoint)
             }
 
             fn parse_set(&self, raw: &[Vec<u8>]) -> Result<Self::Set, Error> {
@@ -176,9 +206,9 @@ standard_codec!(
 standard_codec!(
     /// `urn:aauth:vocabulary:graphql`: `{"operation", "type"}`.
     ///
-    /// A GraphQL name and one of `query`, `mutation`, or `subscription`. The name
-    /// is the identifier: one name with two types is a conflict, never two
-    /// operations. The draft defines no annotation encoding.
+    /// A GraphQL name and one of `query`, `mutation`, or `subscription`. The pair
+    /// is the identity: one name with two types is two operations. The draft
+    /// defines no annotation encoding.
     GraphQlCodec,
     GraphQlOperation,
     "urn:aauth:vocabulary:graphql",
@@ -188,11 +218,11 @@ standard_codec!(
 standard_codec!(
     /// `urn:aauth:vocabulary:asyncapi`: `{"operationId", "action"?}`.
     ///
-    /// `operationId` is the identifier. `action`, when present, is `send` or
+    /// `operationId` names the operation. `action`, when present, is `send` or
     /// `receive`. An entry without `action` and one with it name the same
-    /// operation, so a set refuses both, a union of them conflicts, and neither
-    /// covers the other. Annotations are published as specification extensions
-    /// on the Operation Object.
+    /// operation: a set refuses both, a union of them conflicts, neither covers
+    /// the other, and they are not disjoint. Annotations are published as
+    /// specification extensions on the Operation Object.
     AsyncApiCodec,
     AsyncApiOperation,
     "urn:aauth:vocabulary:asyncapi",
@@ -202,10 +232,11 @@ standard_codec!(
 standard_codec!(
     /// `urn:aauth:vocabulary:wsdl`: `{"operation", "service"?}`.
     ///
-    /// XML NCNames. `service` disambiguates, so it is part of the identity: an
-    /// entry without `service` covers only an entry without `service`. Because
-    /// either may name the same call, they are never disjoint. The draft defines
-    /// no annotation encoding.
+    /// `service` disambiguates. An entry covers only an entry with the same
+    /// operation and the same service or the same absence of one. An entry
+    /// without `service` overlaps every entry for its operation, so a set or a
+    /// union refuses it beside a service-qualified entry of the same name. The
+    /// draft defines no annotation encoding.
     WsdlCodec,
     WsdlOperation,
     "urn:aauth:vocabulary:wsdl",
@@ -215,13 +246,12 @@ standard_codec!(
 standard_codec!(
     /// `urn:aauth:vocabulary:odata`: `{"operation", "methods"?}`.
     ///
-    /// `EntitySet`, or `EntitySet/Operation` for a bound function or action.
-    /// `methods` is a non-empty list of distinct `GET`, `POST`, `PUT`, `PATCH`,
-    /// and `DELETE`, allowed only on an entity set. Methods compare as a set: a
-    /// union merges them, and two entries for one entity set are disjoint when
+    /// `operation` names an entity set or a bound operation. `methods` is a
+    /// non-empty list of distinct HTTP method tokens and compares as a set: a
+    /// union merges them, and two entries for one operation are disjoint when
     /// they share no method. An entry without `methods` covers only an entry
-    /// without `methods` and overlaps every entry for its entity set.
-    /// Annotations are published in `$metadata`.
+    /// without `methods`, overlaps every entry for its operation, and conflicts
+    /// with one that has `methods`. Annotations are published in `$metadata`.
     ODataCodec,
     ODataOperation,
     "urn:aauth:vocabulary:odata",
@@ -359,11 +389,7 @@ impl Entry for GraphQlOperation {
     }
 
     fn label(&self) -> String {
-        format!("operation \"{}\"", self.operation)
-    }
-
-    fn same_slot(&self, other: &Self) -> bool {
-        self.operation == other.operation
+        format!("{} \"{}\"", self.kind.as_str(), self.operation)
     }
 }
 
@@ -440,19 +466,10 @@ impl Entry for WsdlOperation {
     const MEMBERS: &'static [&'static str] = &["operation", "service"];
 
     fn parse(members: &[(String, Json)]) -> Result<Self, Error> {
-        let operation = required_string(members, "operation")?;
-        if !is_ncname(&operation) {
-            return Err(Error::new(format!(
-                "operation \"{operation}\" is not an XML NCName"
-            )));
-        }
-        let service = optional_string(members, "service")?;
-        if let Some(invalid) = service.as_deref().filter(|service| !is_ncname(service)) {
-            return Err(Error::new(format!(
-                "service \"{invalid}\" is not an XML NCName"
-            )));
-        }
-        Ok(Self { operation, service })
+        Ok(Self {
+            operation: required_string(members, "operation")?,
+            service: optional_string(members, "service")?,
+        })
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -475,7 +492,7 @@ impl Entry for WsdlOperation {
         }
     }
 
-    fn may_overlap(&self, other: &Self) -> bool {
+    fn same_slot(&self, other: &Self) -> bool {
         self.operation == other.operation
             && match (&self.service, &other.service) {
                 (Some(left), Some(right)) => left == right,
@@ -484,43 +501,11 @@ impl Entry for WsdlOperation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ODataMethod {
-    Get,
-    Post,
-    Put,
-    Patch,
-    Delete,
-}
-
-impl ODataMethod {
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "GET" => Some(Self::Get),
-            "POST" => Some(Self::Post),
-            "PUT" => Some(Self::Put),
-            "PATCH" => Some(Self::Patch),
-            "DELETE" => Some(Self::Delete),
-            _ => None,
-        }
-    }
-
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Post => "POST",
-            Self::Put => "PUT",
-            Self::Patch => "PATCH",
-            Self::Delete => "DELETE",
-        }
-    }
-}
-
 /// OData operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ODataOperation {
     operation: String,
-    methods: Option<Vec<ODataMethod>>,
+    methods: Option<Vec<String>>,
 }
 
 impl Entry for ODataOperation {
@@ -528,26 +513,8 @@ impl Entry for ODataOperation {
 
     fn parse(members: &[(String, Json)]) -> Result<Self, Error> {
         let operation = required_string(members, "operation")?;
-        let bound = match operation.split_once('/') {
-            None if is_odata_identifier(&operation) => false,
-            Some((entity_set, name))
-                if is_odata_identifier(entity_set) && is_odata_identifier(name) =>
-            {
-                true
-            }
-            _ => {
-                return Err(Error::new(format!(
-                    "operation \"{operation}\" is not EntitySet or EntitySet/Operation"
-                )));
-            }
-        };
         let methods = match member(members, "methods") {
             None => None,
-            Some(_) if bound => {
-                return Err(Error::new(
-                    "member \"methods\" is not allowed on a bound function or action",
-                ));
-            }
             Some(Json::Array(items)) => Some(parse_methods(items)?),
             Some(_) => return Err(Error::new("member \"methods\" must be an array")),
         };
@@ -565,7 +532,7 @@ impl Entry for ODataOperation {
                 if index > 0 {
                     out.push(b',');
                 }
-                push_string(out, method.as_str());
+                push_string(out, method);
             }
             out.push(b']');
         }
@@ -603,7 +570,7 @@ impl Entry for ODataOperation {
                 let mut merged = mine.clone();
                 for method in theirs {
                     if !merged.contains(method) {
-                        merged.push(*method);
+                        merged.push(method.clone());
                     }
                 }
                 Some(merged)
@@ -622,24 +589,24 @@ impl Entry for ODataOperation {
     }
 }
 
-fn parse_methods(items: &[Json]) -> Result<Vec<ODataMethod>, Error> {
+fn parse_methods(items: &[Json]) -> Result<Vec<String>, Error> {
     if items.is_empty() {
         return Err(Error::new("member \"methods\" must not be empty"));
     }
-    let mut methods = Vec::with_capacity(items.len());
+    let mut methods: Vec<String> = Vec::with_capacity(items.len());
     for item in items {
-        let Json::String(text) = item else {
+        let Json::String(method) = item else {
             return Err(Error::new("member \"methods\" must contain only strings"));
         };
-        let Some(method) = ODataMethod::parse(text) else {
+        if !is_http_token(method) {
             return Err(Error::new(format!(
-                "method \"{text}\" is not GET, POST, PUT, PATCH, or DELETE"
+                "method \"{method}\" is not an HTTP method token"
             )));
-        };
-        if methods.contains(&method) {
-            return Err(Error::new(format!("method \"{text}\" is repeated")));
         }
-        methods.push(method);
+        if methods.contains(method) {
+            return Err(Error::new(format!("method \"{method}\" is repeated")));
+        }
+        methods.push(method.clone());
     }
     Ok(methods)
 }
@@ -649,10 +616,15 @@ fn parse_entries<E: Entry>(raw: &[Vec<u8>]) -> Result<StandardSet<E>, Error> {
     for (index, value) in raw.iter().enumerate() {
         let entry = parse_entry::<E>(value)
             .map_err(|err| Error::wrap(format!("r3: operation {index}"), err))?;
-        if entries.iter().any(|existing| existing.same_slot(&entry)) {
+        if let Some(existing) = entries.iter().find(|existing| existing.same_slot(&entry)) {
+            let relation = if *existing == entry {
+                "repeats"
+            } else {
+                "overlaps"
+            };
             return Err(Error::new(format!(
-                "r3: operation {index} repeats {}",
-                entry.label()
+                "r3: operation {index} {relation} {}",
+                existing.label()
             )));
         }
         entries.push(entry);
@@ -734,6 +706,9 @@ fn string_value(name: &str, value: &Json) -> Result<String, Error> {
         Json::String(text) if text.is_empty() => Err(Error::new(format!(
             "member \"{name}\" must not be empty"
         ))),
+        Json::String(text) if text.trim() != text => Err(Error::new(format!(
+            "member \"{name}\" must not have surrounding whitespace"
+        ))),
         Json::String(text) => Ok(text.clone()),
         _ => Err(Error::new(format!("member \"{name}\" must be a string"))),
     }
@@ -766,38 +741,77 @@ fn is_ascii_identifier(text: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-/// OData `SimpleIdentifier`, limited to its ASCII subset.
-fn is_odata_identifier(text: &str) -> bool {
-    text.len() <= 128 && is_ascii_identifier(text)
+/// RFC 9110 `token`: one or more `tchar`.
+fn is_http_token(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
-/// XML Namespaces `NCName`: an XML 1.0 `Name` without `:`.
-fn is_ncname(text: &str) -> bool {
-    let mut chars = text.chars();
-    chars.next().is_some_and(is_name_start_char) && chars.all(is_name_char)
+/// Absolute HTTPS URI, plus the refusals Go `net/url` makes that the shared
+/// check does not: surrounding Unicode whitespace, DEL, a host byte that must be
+/// escaped, and an invalid percent escape in the path.
+fn validate_standard_endpoint(endpoint: &str) -> Result<(), Error> {
+    if endpoint.trim() != endpoint || endpoint.contains('\u{7f}') {
+        return Err(Error::new(
+            "r3: discovery endpoint must be trimmed and free of control characters",
+        ));
+    }
+    validate_https_uri(endpoint, "discovery endpoint")?;
+    let rest = endpoint.split_once("//").map_or("", |(_, rest)| rest);
+    let before_query = rest.split_once('?').map_or(rest, |(head, _)| head);
+    let (authority, path) = before_query.split_once('/').unwrap_or((before_query, ""));
+    if !is_url_host(authority) {
+        return Err(Error::new(
+            "r3: discovery endpoint host contains a byte that must be escaped",
+        ));
+    }
+    if !has_valid_escapes(path) {
+        return Err(Error::new(
+            "r3: discovery endpoint path contains an invalid percent escape",
+        ));
+    }
+    Ok(())
 }
 
-fn is_name_start_char(c: char) -> bool {
-    matches!(c,
-        'A'..='Z'
-        | '_'
-        | 'a'..='z'
-        | '\u{C0}'..='\u{D6}'
-        | '\u{D8}'..='\u{F6}'
-        | '\u{F8}'..='\u{2FF}'
-        | '\u{370}'..='\u{37D}'
-        | '\u{37F}'..='\u{1FFF}'
-        | '\u{200C}'..='\u{200D}'
-        | '\u{2070}'..='\u{218F}'
-        | '\u{2C00}'..='\u{2FEF}'
-        | '\u{3001}'..='\u{D7FF}'
-        | '\u{F900}'..='\u{FDCF}'
-        | '\u{FDF0}'..='\u{FFFD}'
-        | '\u{10000}'..='\u{EFFFF}')
+/// Bytes Go `net/url` accepts in a host and port: unreserved, sub-delims,
+/// `:[]<>"`, non-ASCII, and a percent escape of a non-ASCII byte or `%25`.
+fn is_url_host(authority: &str) -> bool {
+    let bytes = authority.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            let Some(&[high, low]) = bytes.get(index + 1..index + 3) else {
+                return false;
+            };
+            if !high.is_ascii_hexdigit() || !low.is_ascii_hexdigit() {
+                return false;
+            }
+            if matches!(high, b'0'..=b'7') && (high, low) != (b'2', b'5') {
+                return false;
+            }
+            index += 3;
+            continue;
+        }
+        if byte.is_ascii()
+            && !byte.is_ascii_alphanumeric()
+            && !b"-._~!$&'()*+,;=:[]<>\"".contains(&byte)
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
-fn is_name_char(c: char) -> bool {
-    is_name_start_char(c)
-        || matches!(c,
-            '-' | '.' | '0'..='9' | '\u{B7}' | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+fn has_valid_escapes(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().all(|(index, byte)| {
+        *byte != b'%'
+            || bytes
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+    })
 }
