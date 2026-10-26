@@ -2,7 +2,8 @@
 //! Mission context is opt-in through `with_mission_context`.
 //! Budgets are opt-in through `with_budgets`.
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::budget_gate::{BudgetGate, metadata_units, problem};
 use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
@@ -131,13 +132,32 @@ impl<T> AuthAuthorized<T> {
 /// The reservation is not committed. The host bounds served work to
 /// [`Self::admitted_maximum`], then [`PsAuthorizationResource::budget_commit`] or
 /// [`PsAuthorizationResource::budget_release`]. Calling [`PsAuthorizationResource::authorize`]
-/// on the same request would meter it again.
-#[derive(Debug)]
+/// on the same request would meter it again. Dropping the hold, including by
+/// [`AuthDecision::into_response`] or [`AuthDecision::into_result`], releases the
+/// reservation. The grant and `as_of` return to where they were. A commit that
+/// already removed the hold is left alone.
 pub struct HeldAdmission<T = ()> {
     token: VerifiedAuthToken,
     admitted: T,
     reservation: Reservation,
     admitted_maximum: i64,
+    gate: Arc<BudgetGate>,
+}
+impl<T: std::fmt::Debug> std::fmt::Debug for HeldAdmission<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeldAdmission")
+            .field("token", &self.token)
+            .field("admitted", &self.admitted)
+            .field("reservation", &self.reservation)
+            .field("admitted_maximum", &self.admitted_maximum)
+            .finish()
+    }
+}
+impl<T> Drop for HeldAdmission<T> {
+    fn drop(&mut self) {
+        self.gate.release(&self.reservation);
+    }
 }
 impl<T> HeldAdmission<T> {
     /// Authenticated authorization token whose HTTP holder proof also succeeded.
@@ -325,7 +345,7 @@ impl<T> AuthDecision<T> {
                 response
             }
             // A hold or an unmetered admission is not an HTTP grant. Mapping it
-            // here does not commit the reservation.
+            // here does not commit the reservation. Dropping the hold releases it.
             Self::Held(_) | Self::Observed(_) => {
                 refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error")
             }
@@ -510,7 +530,7 @@ pub struct PsAuthorizationResource<K, P> {
     mission_context: bool,
     authorization_endpoint: bool,
     revocation: Option<revocation::Gate>,
-    budgets: Option<BudgetGate>,
+    budgets: Option<Arc<BudgetGate>>,
     omit_required: bool,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
@@ -657,14 +677,14 @@ where
         }
         aauth_rust_budgets::offer_budget(&units, None, default_offer)
             .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
-        self.budgets = Some(BudgetGate {
+        self.budgets = Some(Arc::new(BudgetGate {
             units: Mutex::new(units),
             usage_endpoint,
             default_bound,
             default_offer,
-            omit_required: self.omit_required,
+            omit_required: AtomicBool::new(self.omit_required),
             ledger: Mutex::new(aauth_rust_budgets::Ledger::new()),
-        });
+        }));
         Ok(self)
     }
     /// Omit `required` on an `insufficient-budget` refusal.
@@ -673,8 +693,8 @@ where
     /// a cost bound. Exhaustion already omits `required` because nothing remains.
     pub fn without_stated_required(mut self) -> Self {
         self.omit_required = true;
-        if let Some(gate) = &mut self.budgets {
-            gate.omit_required = true;
+        if let Some(gate) = &self.budgets {
+            gate.omit_required.store(true, Ordering::Relaxed);
         }
         self
     }
@@ -1288,7 +1308,7 @@ where
                     },
                 }
             } else {
-                let header = if gate.omit_required {
+                let header = if gate.omit_required.load(Ordering::Relaxed) {
                     match unstated_required(&grant, remaining) {
                         Ok(header) => header,
                         Err(()) => return Ok(AuthDecision::InternalError),
@@ -1333,6 +1353,7 @@ where
                         admitted,
                         reservation,
                         admitted_maximum: maximum,
+                        gate: Arc::clone(gate),
                     }))),
                     Err(Deny) => {
                         gate.release(&reservation);
@@ -1383,7 +1404,7 @@ where
             aauth_rust_budgets::Refusal::Insufficient {
                 remaining, header, ..
             } => {
-                let header = if gate.omit_required {
+                let header = if gate.omit_required.load(Ordering::Relaxed) {
                     match unstated_required(grant, remaining) {
                         Ok(header) => header,
                         Err(()) => return Ok(AuthDecision::InternalError),
@@ -1482,8 +1503,10 @@ where
     /// Answer `POST` on the configured usage endpoint.
     ///
     /// The caller proves a person-server or access-server key with `jwks_uri`
-    /// and covers `content-type` and `content-digest`. An unrecognized scope and
-    /// a scope that consumed nothing both omit `usage`. The response is signed.
+    /// and covers `content-type` and `content-digest`. Figures are limited to
+    /// tokens whose `iss` or `ps` names the caller. An unrecognized scope key,
+    /// including a caller who has not appeared, is `200` with `usage` omitted.
+    /// An unrecognized thumbprint is omitted from `jkts`. The response is signed.
     pub fn usage(&self, request: &Request<Vec<u8>>, now: i64) -> Response<Vec<u8>> {
         let Some(gate) = &self.budgets else {
             return problem(StatusCode::NOT_FOUND, "not_found");
@@ -1539,9 +1562,6 @@ where
             role,
             ps: query.ps.clone(),
         };
-        if !gate.lock().caller_seen(&caller) {
-            return problem(StatusCode::FORBIDDEN, "access_denied");
-        }
         let value = {
             let ledger = gate.lock();
             answer_usage(&ledger, &caller, &query, now, &report)

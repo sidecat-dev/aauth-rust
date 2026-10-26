@@ -2,6 +2,7 @@
 //! concurrent requests on one process cannot both spend the last unit.
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 use aauth_rust_budgets::{
     Budget, BudgetHeader, ChargeError, ConsumptionRecord, Error, Ledger, Reservation, TokenAccount,
@@ -16,7 +17,7 @@ pub(super) struct BudgetGate {
     pub(super) usage_endpoint: String,
     pub(super) default_bound: i64,
     pub(super) default_offer: i64,
-    pub(super) omit_required: bool,
+    pub(super) omit_required: AtomicBool,
     pub(super) ledger: Mutex<Ledger>,
 }
 

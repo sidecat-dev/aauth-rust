@@ -857,11 +857,12 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
     )
     .unwrap();
     let foreign_response = resource.usage(&foreign, NOW);
-    assert_eq!(foreign_response.status(), 403);
+    assert_eq!(foreign_response.status(), 200);
+    let foreign_body: Value = serde_json::from_slice(foreign_response.body()).unwrap();
+    assert!(foreign_body.get("usage").is_none(), "{foreign_body}");
     assert!(
-        !String::from_utf8_lossy(foreign_response.body()).contains("1000"),
-        "{}",
-        String::from_utf8_lossy(foreign_response.body())
+        !foreign_body.to_string().contains("all_time"),
+        "{foreign_body}"
     );
     let mut foreign_keys = Request::builder()
         .method("POST")
@@ -880,7 +881,19 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
         NOW,
     )
     .unwrap();
-    assert_eq!(resource.usage(&foreign_keys, NOW).status(), 403);
+    let foreign_keys_response = resource.usage(&foreign_keys, NOW);
+    assert_eq!(foreign_keys_response.status(), 200);
+    let foreign_keys_body: Value = serde_json::from_slice(foreign_keys_response.body()).unwrap();
+    assert!(
+        foreign_keys_body
+            .get("jkts")
+            .is_none_or(|keys| keys.as_object().is_some_and(|keys| keys.is_empty())),
+        "{foreign_keys_body}"
+    );
+    assert!(
+        !foreign_keys_body.to_string().contains("all_time"),
+        "{foreign_keys_body}"
+    );
 }
 
 #[test]
@@ -1134,12 +1147,46 @@ fn a_reserved_stream_commits_once_and_dropping_the_decision_does_not() {
     assert!(resource.budget_commit(held.reservation(), 1, NOW).is_err());
 
     let abandoned = resource.authorize_reserved(
-        &present(&auth("drop", Some(2_000), "read"), None),
+        &present(&auth("drop", Some(1_500), "read"), None),
         NOW,
         "drop",
     );
     let response = abandoned.into_response();
     assert_eq!(response.status(), 500);
+    let released = resource
+        .authorize(
+            &present(&auth("drop", Some(1_500), "read"), None),
+            NOW,
+            "drop-again",
+        )
+        .into_response();
+    assert_eq!(released.status(), 200);
+    let released_header = released.headers()["aauth-budget"].to_str().unwrap();
+    assert!(released_header.contains("cost=1000"), "{released_header}");
+    assert!(
+        released_header.contains("remaining=500"),
+        "{released_header}"
+    );
+
+    let by_result = resource.authorize_reserved(
+        &present(&auth("result", Some(1_500), "read"), None),
+        NOW,
+        "result",
+    );
+    let error = by_result
+        .into_result()
+        .expect_err("a hold is not an HTTP grant");
+    assert_eq!(error.status(), 500);
+    let result_released = resource
+        .authorize(
+            &present(&auth("result", Some(1_500), "read"), None),
+            NOW,
+            "result-again",
+        )
+        .into_response();
+    assert_eq!(result_released.status(), 200);
+
+    let later = NOW + 40;
     let mut request = Request::builder()
         .method("POST")
         .uri(format!("{RESOURCE}/usage"))
@@ -1154,11 +1201,12 @@ fn a_reserved_stream_commits_once_and_dropping_the_decision_does_not() {
             dwk: "aauth-person.json".into(),
             kid: "ps".into(),
         },
-        NOW,
+        later,
     )
     .unwrap();
-    let usage = resource.usage(&request, NOW);
+    let usage = resource.usage(&request, later);
     assert_eq!(usage.status(), 200);
     let body: Value = serde_json::from_slice(usage.body()).unwrap();
-    assert_eq!(body["usage"]["all_time"], 30);
+    assert_eq!(body["usage"]["all_time"], 30 + 1_000 + 1_000);
+    assert_eq!(body["as_of"], later);
 }
