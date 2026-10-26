@@ -29,9 +29,6 @@ mod vocabulary;
 
 pub use annotation::AnnotationEncoding;
 pub use artifact::{ArtifactKind, ReferencedArtifact};
-pub use fetch::{FetchBody, FetchClient, FetchConfig, FetchEgress, FetchError, FetchIdentity,
-    FetchLimits, FetchResponse, FetchTransport, DEFAULT_ARTIFACT_FETCH_TIMEOUT,
-    DEFAULT_MAXIMUM_DOCUMENT_BYTES};
 pub use budget_token::{
     mint_budget_auth_token, mint_budget_resource_token, verify_budget_auth_token,
     verify_budget_resource_token,
@@ -39,6 +36,11 @@ pub use budget_token::{
 pub use digest::digest;
 pub use document::{Display, Document, DocumentOptions, validate_document_account};
 pub use error::Error;
+pub use fetch::{
+    DEFAULT_ARTIFACT_FETCH_TIMEOUT, DEFAULT_MAXIMUM_DOCUMENT_BYTES, FetchBody, FetchClient,
+    FetchConfig, FetchEgress, FetchError, FetchIdentity, FetchLimits, FetchResponse,
+    FetchTransport,
+};
 pub use grant::{Authorization, Grant};
 pub use hints::{AccessMode, ExpectedAccess, OperationHints};
 pub use issuance::{IssuanceError, IssuanceRecord, IssuanceStore};

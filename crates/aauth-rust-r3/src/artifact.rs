@@ -1,6 +1,6 @@
 //! Exact-byte artifact classification, independent of the reference URI's path.
-use crate::{Document, Error, Proposal, Reference, Registry, digest};
 use crate::jsonvalue::parse_raw_object;
+use crate::{Document, Error, Proposal, Reference, Registry, digest};
 
 /// Closed R3 artifact shape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,7 +12,10 @@ pub enum ArtifactKind {
 }
 
 #[derive(Clone)]
-enum Content { Document(Document), Proposal(Proposal) }
+enum Content {
+    Document(Document),
+    Proposal(Proposal),
+}
 
 /// A validated artifact and the exact bytes bound by its reference.
 #[derive(Clone)]
@@ -24,16 +27,33 @@ pub struct ReferencedArtifact {
 impl ReferencedArtifact {
     /// Classification obtained from the bytes, never from the URI.
     pub fn kind(&self) -> ArtifactKind {
-        match &self.content {Content::Document(_)=>ArtifactKind::Document,Content::Proposal(_)=>ArtifactKind::Proposal}
+        match &self.content {
+            Content::Document(_) => ArtifactKind::Document,
+            Content::Proposal(_) => ArtifactKind::Proposal,
+        }
     }
     /// Reference whose digest was verified.
-    pub fn reference(&self)->&Reference {&self.reference}
+    pub fn reference(&self) -> &Reference {
+        &self.reference
+    }
     /// Exact bytes used for hashing and parsing; forward or retain without reserialization.
-    pub fn exact_bytes(&self)->&[u8] {&self.exact}
+    pub fn exact_bytes(&self) -> &[u8] {
+        &self.exact
+    }
     /// Class document, when the artifact has that shape.
-    pub fn document(&self)->Option<&Document> {match &self.content {Content::Document(value)=>Some(value),Content::Proposal(_)=>None}}
+    pub fn document(&self) -> Option<&Document> {
+        match &self.content {
+            Content::Document(value) => Some(value),
+            Content::Proposal(_) => None,
+        }
+    }
     /// Per-call proposal, when the artifact has that shape.
-    pub fn proposal(&self)->Option<&Proposal> {match &self.content {Content::Proposal(value)=>Some(value),Content::Document(_)=>None}}
+    pub fn proposal(&self) -> Option<&Proposal> {
+        match &self.content {
+            Content::Proposal(value) => Some(value),
+            Content::Document(_) => None,
+        }
+    }
 }
 impl Registry {
     /// Verify the exact digest before selecting a parser or vocabulary.
@@ -42,13 +62,25 @@ impl Registry {
     ///
     /// # Errors
     /// Rejects an invalid reference, changed bytes, ambiguous JSON, or an invalid artifact.
-    pub fn parse_referenced_artifact(&self,reference:&Reference,exact:&[u8])->Result<ReferencedArtifact,Error>{
+    pub fn parse_referenced_artifact(
+        &self,
+        reference: &Reference,
+        exact: &[u8],
+    ) -> Result<ReferencedArtifact, Error> {
         reference.validate()?;
-        if digest(exact)!=reference.digest(){return Err(Error::new("r3: referenced artifact digest mismatch"))}
-        let members=parse_raw_object(exact)?;
-        let content=if members.iter().any(|member|member.name=="parameters"){
+        if digest(exact) != reference.digest() {
+            return Err(Error::new("r3: referenced artifact digest mismatch"));
+        }
+        let members = parse_raw_object(exact)?;
+        let content = if members.iter().any(|member| member.name == "parameters") {
             Content::Proposal(self.parse_proposal(exact)?)
-        }else{Content::Document(self.parse_document(exact)?)};
-        Ok(ReferencedArtifact{reference:reference.clone(),exact:exact.to_vec(),content})
+        } else {
+            Content::Document(self.parse_document(exact)?)
+        };
+        Ok(ReferencedArtifact {
+            reference: reference.clone(),
+            exact: exact.to_vec(),
+            content,
+        })
     }
 }
