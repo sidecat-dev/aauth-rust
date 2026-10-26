@@ -555,7 +555,8 @@ fn mcp_definition_rejects_incomplete_pagination() {
     let read_more = r#"{"tools":[{"name":"calendar.read","inputSchema":{"type":"object"}}],"nextCursor":"page-2"}"#;
     let write = r#"{"tools":[{"name":"calendar.write","inputSchema":{"type":"object"}}]}"#;
     let empty_more = r#"{"tools":[],"nextCursor":"page-2"}"#;
-    let cases: [(&str, Vec<(Option<&str>, &str)>); 9] = [
+    type PaginationCase<'a> = (&'a str, Vec<(Option<&'a str>, &'a str)>);
+    let cases: [PaginationCase<'_>; 9] = [
         ("no pages", vec![]),
         (
             "nonfinal page has no next cursor",

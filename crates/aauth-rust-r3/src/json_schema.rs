@@ -10,6 +10,8 @@
 //! `patternProperties` names, which Go compiles with RE2. A pattern Go refuses
 //! is accepted here. Format assertion stays off, as in Go.
 
+use std::collections::BTreeMap;
+
 use crate::definition_support::{json_pointer, member, percent_decode};
 use crate::jsonvalue::{Json, json_equal};
 
@@ -90,9 +92,10 @@ pub(crate) fn check_schema_resource(root: &Json, location: &str) -> Result<(), S
         _ => Draft::V2020,
     };
     let mut walker = Walker {
-        resources: vec![(location.to_owned(), root)],
+        resources: vec![(location.to_owned(), root, draft)],
         anchors: Vec::new(),
         references: Vec::new(),
+        contexts: BTreeMap::new(),
     };
     walker.visit(root, location, draft)?;
     walker.resolve_references()
@@ -122,15 +125,21 @@ fn meta_schema_draft(value: &Json) -> Result<Draft, SchemaRefusal> {
 
 struct Walker<'a> {
     /// Schema resources by absolute URI without a fragment.
-    resources: Vec<(String, &'a Json)>,
+    resources: Vec<(String, &'a Json, Draft)>,
     /// Plain-name fragments by resource URI.
-    anchors: Vec<(String, String)>,
+    anchors: Vec<(String, String, &'a Json)>,
     /// Every reference, resolved to an absolute URI.
     references: Vec<String>,
+    /// Already checked schema nodes and their effective resource/draft context.
+    /// References may revisit nodes; the JSON value itself remains acyclic.
+    contexts: BTreeMap<usize, (String, Draft)>,
 }
 
 impl<'a> Walker<'a> {
     fn visit(&mut self, node: &'a Json, base: &str, mut draft: Draft) -> Result<(), SchemaRefusal> {
+        if self.contexts.contains_key(&std::ptr::from_ref(node).addr()) {
+            return Ok(());
+        }
         let members = match node {
             Json::Object(members) => members,
             Json::Bool(_) if draft != Draft::V4 => return Ok(()),
@@ -147,15 +156,19 @@ impl<'a> Walker<'a> {
             if draft >= Draft::V2019 && !fragment.is_empty() {
                 return Err(invalid("\"$id\" must not contain a non-empty fragment"));
             }
-            if resource != base.as_str() {
-                if let Some(schema) = member(members, "$schema") {
-                    draft = meta_schema_draft(schema)?;
-                }
-                self.resources.push((resource.to_owned(), node));
-                base = resource.to_owned();
+            if resource != base.as_str()
+                && let Some(schema) = member(members, "$schema")
+            {
+                draft = meta_schema_draft(schema)?;
             }
+            // A fragment-only legacy id names an anchor, not a second resource.
+            // A nonempty resource id must never identify two distinct nodes.
+            if resource != base.as_str() || (!id.is_empty() && fragment.is_empty()) {
+                self.add_resource(resource, node, draft)?;
+            }
+            base = resource.to_owned();
             if !fragment.is_empty() {
-                self.anchors.push((base.clone(), fragment.to_owned()));
+                self.add_anchor(&base, fragment, node)?;
             }
         }
         if draft >= Draft::V2019
@@ -167,14 +180,15 @@ impl<'a> Walker<'a> {
                 AnchorGrammar::V2020
             };
             let name = anchor_name(value, "$anchor", grammar)?;
-            self.anchors.push((base.clone(), name));
+            self.add_anchor(&base, &name, node)?;
         }
         if draft == Draft::V2020
             && let Some(value) = member(members, "$dynamicAnchor")
         {
             let name = anchor_name(value, "$dynamicAnchor", AnchorGrammar::V2020)?;
-            self.anchors.push((base.clone(), name));
+            self.add_anchor(&base, &name, node)?;
         }
+        self.contexts.insert(std::ptr::from_ref(node).addr(), (base.clone(), draft));
         let reference_keywords: &[&str] = match draft {
             Draft::V4 | Draft::V6 | Draft::V7 => &["$ref"],
             Draft::V2019 => &["$ref", "$recursiveRef"],
@@ -208,6 +222,28 @@ impl<'a> Walker<'a> {
                     return Err(invalid(format!("\"{dependent}\" requires \"{required}\"")));
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn add_resource(&mut self, uri: &str, node: &'a Json, draft: Draft) -> Result<(), SchemaRefusal> {
+        if let Some((_, existing, _)) = self.resources.iter().find(|(name, _, _)| name == uri) {
+            if !std::ptr::eq(*existing, node) {
+                return Err(invalid(format!("duplicate schema resource id \"{uri}\"")));
+            }
+        } else {
+            self.resources.push((uri.to_owned(), node, draft));
+        }
+        Ok(())
+    }
+
+    fn add_anchor(&mut self, uri: &str, name: &str, node: &'a Json) -> Result<(), SchemaRefusal> {
+        if let Some((_, _, existing)) = self.anchors.iter().find(|(resource, anchor, _)| resource == uri && anchor == name) {
+            if !std::ptr::eq(*existing, node) {
+                return Err(invalid(format!("duplicate schema anchor \"{uri}#{name}\"")));
+            }
+        } else {
+            self.anchors.push((uri.to_owned(), name.to_owned(), node));
         }
         Ok(())
     }
@@ -246,26 +282,29 @@ impl<'a> Walker<'a> {
         }
     }
 
-    /// Go classifies a compile that tried to load anything as an unresolved
-    /// dependency, so every external reference is reported before an
-    /// unresolvable internal one.
-    fn resolve_references(&self) -> Result<(), SchemaRefusal> {
+    /// Close over referenced targets, including targets beneath otherwise
+    /// ignored annotations. The work list grows only when a previously unseen
+    /// schema is visited, so recursive references do not recurse on the stack.
+    fn resolve_references(&mut self) -> Result<(), SchemaRefusal> {
         for reference in &self.references {
             let (resource, _) = split_fragment(reference);
             if !self
                 .resources
                 .iter()
-                .any(|(uri, _)| uri.as_str() == resource)
+                .any(|(uri, _, _)| uri.as_str() == resource)
             {
                 return Err(SchemaRefusal::External(reference.clone()));
             }
         }
-        for reference in &self.references {
-            let (resource, fragment) = split_fragment(reference);
-            let Some((_, root)) = self
+        let mut index = 0;
+        while index < self.references.len() {
+            let reference = self.references[index].clone();
+            index += 1;
+            let (resource, fragment) = split_fragment(&reference);
+            let Some((_, root, draft)) = self
                 .resources
                 .iter()
-                .find(|(uri, _)| uri.as_str() == resource)
+                .find(|(uri, _, _)| uri.as_str() == resource)
             else {
                 return Err(SchemaRefusal::External(reference.clone()));
             };
@@ -274,21 +313,40 @@ impl<'a> Walker<'a> {
                     "reference \"{reference}\" has an invalid percent escape"
                 )));
             };
+            let mut target = *root;
+            let (mut base, mut draft) = self.contexts.get(&std::ptr::from_ref(target).addr()).cloned().unwrap_or((resource.to_owned(), *draft));
             let resolved = if fragment.is_empty() {
                 true
-            } else if fragment.starts_with('/') {
-                json_pointer(root, &fragment)
-                    .is_some_and(|target| matches!(target, Json::Object(_) | Json::Bool(_)))
-            } else {
-                self.anchors
+            } else if let Some(pointer) = fragment.strip_prefix('/') {
+                // Preserve the closest enclosing resource's context while
+                // walking into an annotation that has not been checked before.
+                let mut found = true;
+                for token in pointer.split('/') {
+                    let Some(child) = json_pointer(target, &format!("/{token}")) else {
+                        found = false;
+                        break;
+                    };
+                    target = child;
+                    if let Some(context) = self.contexts.get(&std::ptr::from_ref(target).addr()) {
+                        (base, draft) = context.clone();
+                    }
+                }
+                found
+            } else if let Some((_, _, anchored)) = self.anchors
                     .iter()
-                    .any(|(uri, name)| uri.as_str() == resource && *name == fragment)
+                    .find(|(uri, name, _)| *uri == base && *name == fragment)
+            {
+                target = *anchored;
+                true
+            } else {
+                false
             };
             if !resolved {
                 return Err(invalid(format!(
                     "reference \"{reference}\" does not identify a schema in the value"
                 )));
             }
+            self.visit(target, &base, draft)?;
         }
         Ok(())
     }

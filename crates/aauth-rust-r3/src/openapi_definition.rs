@@ -572,6 +572,7 @@ impl<'a> Walk<'a> {
     }
 
     fn paths(&mut self, value: &'a Json) -> Result<(), DefinitionError> {
+        let mut normalized = BTreeSet::new();
         for (path, item) in object(value, "Paths")? {
             if path.starts_with("x-") {
                 continue;
@@ -580,6 +581,11 @@ impl<'a> Walk<'a> {
                 self.record(format!(
                     "OpenAPI path \"{path}\" must begin with a forward slash"
                 ));
+            }
+            if let Some(route) = normalized_template(path)
+                && !normalized.insert(route)
+            {
+                self.record(format!("OpenAPI path \"{path}\" conflicts with another path template"));
             }
             self.pending.push((item, Node::PathItem(Origin::Paths)));
         }
@@ -1108,4 +1114,25 @@ fn template_names(path: &str) -> Option<BTreeSet<String>> {
         return None;
     }
     Some(names)
+}
+
+/// Match kin-openapi's route identity: template names are erased, while its
+/// optional trailing `*` distinction and all literal path bytes are retained.
+fn normalized_template(path: &str) -> Option<String> {
+    template_names(path)?;
+    let mut normalized = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        normalized.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let close = after.find('}')?;
+        normalized.push('{');
+        if after[..close].ends_with('*') {
+            normalized.push('*');
+        }
+        normalized.push('}');
+        rest = &after[close + 1..];
+    }
+    normalized.push_str(rest);
+    Some(normalized)
 }
