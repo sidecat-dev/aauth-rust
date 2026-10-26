@@ -188,7 +188,8 @@ impl<'a> Walker<'a> {
             let name = anchor_name(value, "$dynamicAnchor", AnchorGrammar::V2020)?;
             self.add_anchor(&base, &name, node)?;
         }
-        self.contexts.insert(std::ptr::from_ref(node).addr(), (base.clone(), draft));
+        self.contexts
+            .insert(std::ptr::from_ref(node).addr(), (base.clone(), draft));
         let reference_keywords: &[&str] = match draft {
             Draft::V4 | Draft::V6 | Draft::V7 => &["$ref"],
             Draft::V2019 => &["$ref", "$recursiveRef"],
@@ -226,7 +227,12 @@ impl<'a> Walker<'a> {
         Ok(())
     }
 
-    fn add_resource(&mut self, uri: &str, node: &'a Json, draft: Draft) -> Result<(), SchemaRefusal> {
+    fn add_resource(
+        &mut self,
+        uri: &str,
+        node: &'a Json,
+        draft: Draft,
+    ) -> Result<(), SchemaRefusal> {
         if let Some((_, existing, _)) = self.resources.iter().find(|(name, _, _)| name == uri) {
             if !std::ptr::eq(*existing, node) {
                 return Err(invalid(format!("duplicate schema resource id \"{uri}\"")));
@@ -238,7 +244,11 @@ impl<'a> Walker<'a> {
     }
 
     fn add_anchor(&mut self, uri: &str, name: &str, node: &'a Json) -> Result<(), SchemaRefusal> {
-        if let Some((_, _, existing)) = self.anchors.iter().find(|(resource, anchor, _)| resource == uri && anchor == name) {
+        if let Some((_, _, existing)) = self
+            .anchors
+            .iter()
+            .find(|(resource, anchor, _)| resource == uri && anchor == name)
+        {
             if !std::ptr::eq(*existing, node) {
                 return Err(invalid(format!("duplicate schema anchor \"{uri}#{name}\"")));
             }
@@ -314,7 +324,11 @@ impl<'a> Walker<'a> {
                 )));
             };
             let mut target = *root;
-            let (mut base, mut draft) = self.contexts.get(&std::ptr::from_ref(target).addr()).cloned().unwrap_or((resource.to_owned(), *draft));
+            let (mut base, mut draft) = self
+                .contexts
+                .get(&std::ptr::from_ref(target).addr())
+                .cloned()
+                .unwrap_or((resource.to_owned(), *draft));
             let resolved = if fragment.is_empty() {
                 true
             } else if let Some(pointer) = fragment.strip_prefix('/') {
@@ -332,9 +346,10 @@ impl<'a> Walker<'a> {
                     }
                 }
                 found
-            } else if let Some((_, _, anchored)) = self.anchors
-                    .iter()
-                    .find(|(uri, name, _)| *uri == base && *name == fragment)
+            } else if let Some((_, _, anchored)) = self
+                .anchors
+                .iter()
+                .find(|(uri, name, _)| *uri == base && *name == fragment)
             {
                 target = *anchored;
                 true

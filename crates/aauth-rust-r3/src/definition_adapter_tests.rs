@@ -24,13 +24,29 @@ const GRAPHQL_ENDPOINT: &str = "https://resource.example/graphql";
 #[test]
 fn mcp_definition_closes_referenced_annotation_targets() {
     for (schema, kind) in [
-        (r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"https://outside.example/schema"}}"##, UnresolvedDependency),
-        (r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"#/second"},"second":{"$ref":"https://outside.example/schema"}}"##, UnresolvedDependency),
-        (r##"{"type":"object","$ref":"#/hidden","hidden":{"type":17}}"##, InvalidSource),
-        (r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"#/missing"}}"##, InvalidSource),
+        (
+            r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"https://outside.example/schema"}}"##,
+            UnresolvedDependency,
+        ),
+        (
+            r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"#/second"},"second":{"$ref":"https://outside.example/schema"}}"##,
+            UnresolvedDependency,
+        ),
+        (
+            r##"{"type":"object","$ref":"#/hidden","hidden":{"type":17}}"##,
+            InvalidSource,
+        ),
+        (
+            r##"{"type":"object","$ref":"#/hidden","hidden":{"$ref":"#/missing"}}"##,
+            InvalidSource,
+        ),
     ] {
         let body = format!(r#"{{"tools":[{{"name":"read","inputSchema":{schema}}}]}}"#);
-        assert_refusal(McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)])), kind, McpCodec::URI);
+        assert_refusal(
+            McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)])),
+            kind,
+            McpCodec::URI,
+        );
     }
 }
 
@@ -43,7 +59,11 @@ fn mcp_definition_refuses_ambiguous_schema_bindings() {
         r##"{"type":"object","$defs":{"a":{"$id":"urn:aauth:mcp:tool-input-schema","type":"string"}}}"##,
     ] {
         let body = format!(r#"{{"tools":[{{"name":"read","inputSchema":{schema}}}]}}"#);
-        assert_refusal(McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)])), InvalidSource, McpCodec::URI);
+        assert_refusal(
+            McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)])),
+            InvalidSource,
+            McpCodec::URI,
+        );
     }
 }
 
@@ -57,17 +77,25 @@ fn mcp_definition_preserves_recursive_and_unreferenced_sources() {
         r##"{"type":"object","$defs":{"nested":{"$id":"https://schemas.example/nested","$defs":{"leaf":{"$id":"leaf","type":"string"}},"hidden":{"$ref":"leaf"}}},"properties":{"child":{"$ref":"#/$defs/nested/hidden"}}}"##,
     ] {
         let body = format!(r#"{{"tools":[{{"name":"read","inputSchema":{schema}}}]}}"#);
-        let snapshot = McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)])).expect("self-contained schema");
-        snapshot.validate_defined(&set_of(&mcp_tool("read"))).expect("defined read operation");
+        let snapshot = McpCodec::parse_definition(MCP_ENDPOINT, &mcp_snapshot(&[(None, &body)]))
+            .expect("self-contained schema");
+        snapshot
+            .validate_defined(&set_of(&mcp_tool("read")))
+            .expect("defined read operation");
     }
 }
 
 #[test]
 fn openapi_definition_refuses_conflicting_route_templates() {
     let source = br#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{"/pets/{id}":{"get":{"operationId":"readPet","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"ok"}}}},"/pets/{name}":{"get":{"operationId":"archivePet","parameters":[{"name":"name","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"ok"}}}}}}"#;
-    assert_refusal(OpenApiCodec::parse_definition(OPENAPI_ENDPOINT, &OpenApiDocumentSource::new(source)), InvalidSource, OpenApiCodec::URI);
+    assert_refusal(
+        OpenApiCodec::parse_definition(OPENAPI_ENDPOINT, &OpenApiDocumentSource::new(source)),
+        InvalidSource,
+        OpenApiCodec::URI,
+    );
     let distinct = br#"{"openapi":"3.1.0","info":{"title":"x","version":"1"},"paths":{"/pets/me":{"get":{"operationId":"self","responses":{"200":{"description":"ok"}}}},"/pets/{id}":{"get":{"operationId":"readPet","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"ok"}}}}}}"#;
-    OpenApiCodec::parse_definition(OPENAPI_ENDPOINT, &OpenApiDocumentSource::new(distinct)).expect("concrete and templated routes remain distinct");
+    OpenApiCodec::parse_definition(OPENAPI_ENDPOINT, &OpenApiDocumentSource::new(distinct))
+        .expect("concrete and templated routes remain distinct");
 }
 
 use DefinitionErrorKind::{

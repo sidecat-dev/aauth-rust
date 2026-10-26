@@ -585,7 +585,9 @@ impl<'a> Walk<'a> {
             if let Some(route) = normalized_template(path)
                 && !normalized.insert(route)
             {
-                self.record(format!("OpenAPI path \"{path}\" conflicts with another path template"));
+                self.record(format!(
+                    "OpenAPI path \"{path}\" conflicts with another path template"
+                ));
             }
             self.pending.push((item, Node::PathItem(Origin::Paths)));
         }
