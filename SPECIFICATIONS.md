@@ -208,43 +208,63 @@ resource token names a unit from that list. On the authorization endpoint an
 amount above `max` is narrowed; an unknown unit, a decimals mismatch, or a
 malformed object is `400` `invalid_budget`. Omitting `budget` uses the profile
 default offer, capped by the first unit's `max`. The person server copies that
-unit and decimals and narrows the amount to its cap. That cap is also the
-standing ceiling for one subject at one resource: a later grant is narrowed to
-what outstanding allocations still leave. `IssuerPolicy::until` stops the
-issued auth token at that Unix second, which is the period boundary for a
-calendar ceiling. It records the issued
-amount as fully consumed until a consumption record replaces that figure. In a
-four-party exchange it sends the narrowed object as the `budget` parameter.
-The access server issues a budget only when that parameter is present, copies
-unit and decimals, and does not exceed the parameter or its own cap. A
-decimals mismatch, an amount above the resource offer, a malformed object, or
-a parameter when the resource token had no budget is `400` `invalid_budget`.
-Omitting the parameter issues no budget claim. The person server checks the
-delivered claim against what it sent; a mismatch is a delivery failure
-(`as_unreachable`). The resource meters the auth token's signed unit and
-decimals, including after `replace_budget_units`. A buffered call charges
-`AAuth-Max-Cost` when that header is one bare integer, otherwise the profile
-default bound, and sets the cost to that maximum. A bound the grant cannot
-cover is `401` with `reason=insufficient-budget` or `reason=budget-exhausted`,
-an `AAuth-Budget` header, and no draw-down. The default insufficient refusal
-includes `required`. `without_stated_required` omits that member and still
-sends `remaining`. A successful metered response
+unit and decimals and narrows the amount to its cap. That cap bounds the sum
+of outstanding allocations for one subject at one resource. An allocation
+counts its full issued amount until `exp`, or until a consumption record
+replaces that figure. `IssuerPolicy::until` stops the issued auth token at
+that Unix second. Grants sized before either is recorded can each see the
+full remaining room, so the cap is a concurrency cap. In a four-party exchange
+the person server sends the narrowed object as the `budget` parameter and
+stores that object with the pending exchange. Immediate and deferred delivery,
+including a later poll, check the delivered claim against the stored parameter.
+A mismatch is a delivery failure (`as_unreachable`) and is not recorded. The
+access server issues a budget only when that parameter is present, copies unit
+and decimals, and does not exceed the parameter or its own cap. A parameter
+below the cap is issued at that amount. A decimals mismatch, an amount above
+the resource offer, a malformed object, or a parameter when the resource token
+had no budget is `400` `invalid_budget`. Omitting the parameter issues no
+budget claim. A person server whose cached unit disagrees with the resource
+token's decimals returns `400` `invalid_budget` and does not rescale. The
+resource meters an already issued token on the signed unit and decimals,
+including after `replace_budget_units`. The host's `default_bound` is the
+maximum cost. A client `AAuth-Max-Cost` of one bare integer may only lower
+that maximum. The admitted maximum is returned on the decision. A client
+figure of zero is not a free admission: a spent grant is `budget-exhausted`,
+and a grant that still has room is `insufficient-budget` with `required`
+equal to the host bound. Neither case draws the grant down. A bound the grant
+cannot cover is `401` with `reason=insufficient-budget` or
+`reason=budget-exhausted`, an `AAuth-Budget` header, and no draw-down. The
+default insufficient refusal includes `required`. `without_stated_required`
+omits that member and still sends `remaining`. A successful metered response
 carries `AAuth-Budget` with `cost`. A scope or policy denial of a verified
 budgeted token still carries the header and does not draw down. A person-token
 challenge does not carry it. A metering-layer failure is `500` and omits the
 header. A subagent person or auth request declares `budget` in `capabilities`
 and sends `AAuth-Capabilities: budget`. `auth_request_with_justification`
 copies a host-supplied explanation of at most 65536 bytes and does not invent one.
-A challenge issued for an auth token carries that token's consumption record. Streaming is `budget_reserve`, `budget_stream_header` (`reserved`, no
-`cost`), `budget_commit`, and `budget_trailer` (`cost` only, with trailer name
-`aauth-budget`). Held completion stores one cost for a pending id and a replay
-does not add consumption. The cap is per auth-token `jti`. A high per-person
-total does not refuse a request that fits its token. `POST` on the usage
-endpoint answers a caller who appears as `iss` or `ps` on a metered token. The
-caller signs with `jwks_uri`, covering `content-type` and `content-digest`.
-While a reservation is open, `as_of` stays at the newest commit time and does not
-move backward when a later commit carries an earlier timestamp. With no
-reservation open, `as_of` is the request time.
+A challenge offers the scale declared now. It carries `budget_consumed` only
+when the locked grant uses that unit and those decimals. `authorize` reserves
+and commits the admitted maximum. `authorize_reserved` returns a hold and does
+not commit. `authorize_observed` verifies proof, audience, revocation, and
+scope, and does not meter. The host finishes with `budget_commit`,
+`budget_release`, or one `budget_complete_held`. `into_response` on a hold or
+an observed admission is `500` `server_error` and does not commit. Streaming
+uses `budget_stream_header` (`reserved`, no `cost`) and `budget_trailer`. That
+call returns the `Trailer` header value `AAuth-Budget`, the field name
+`aauth-budget`, and a field that carries `cost` only. A response that never
+delivers the trailer is complete. Held completion stores one cost for
+`(pending, iss, jti)` and a replay does not add consumption. The ledger key is
+`(iss, jti)`. The same issuer and `jti` with a different grant, or a different
+`ps`, `sub`, or `aud`, is `500` and omits `AAuth-Budget`. The same `jti` from
+two issuers keeps two grants. Consumption for one person is aggregated on
+`(ps, sub, aud)`. A high per-person total does not refuse a request that fits
+its token. `POST` on the usage endpoint answers a caller who has appeared as
+`iss` or `ps` on an accepted token. A caller who has not is `403`
+`access_denied`. The caller signs with `jwks_uri`, covering `content-type` and
+`content-digest`. An unsigned request, a `jwt` scheme, or a body the digest
+does not cover is `401`. While a reservation is open, `as_of` stays at the
+newest commit time and does not move backward when a later commit carries an
+earlier timestamp. With no reservation open, `as_of` is the request time.
 The response signature covers `@status`, `content-type`, `content-digest`,
 `@authority;req`, and `@path;req`. An unrecognized scope or a zero total omits
 `usage`. An unknown key thumbprint is omitted. Intermediary rewriting,

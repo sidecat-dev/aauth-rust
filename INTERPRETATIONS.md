@@ -49,8 +49,10 @@ the draft required each spelling.
 
 - The draft does not name a request header for the caller's maximum cost.
   Buffered admission reads one bare Structured Field integer from
-  `AAuth-Max-Cost`. When the header is absent, the host's `default_bound` is
-  that maximum, and the metered cost equals it. A malformed header is a
+  `AAuth-Max-Cost`. The host's `default_bound` is the maximum. The client
+  header may only lower it. A higher client figure does not raise the bound.
+  A client figure of zero does not admit the host's work. When the header is
+  absent, the metered cost is `default_bound`. A malformed header is a
   refusal of the call: the grant is not drawn down, and `AAuth-Budget` still
   reports the untouched remainder.
 - `"$5.00"` does not specify rounding or a currency symbol. USD amounts render
@@ -65,9 +67,10 @@ the draft required each spelling.
 - A JSON number that is not an integer in the i64 range, including `1.0`, is
   malformed. It is not rounded.
 - Duplicate `budget_units` names are rejected at configuration. An empty unit
-  cache accepts the scale signed on the token. A later cache whose decimals
-  differ does not relabel an already issued grant, a consumption record, or
-  the step-up offer that carries that record.
+  cache accepts the scale signed on the token. A step-up offer uses the scale
+  declared now. `budget_consumed` is included only when the locked grant uses
+  that unit and those decimals. Metering of an already issued token stays on
+  the signed scale.
 - Authorization-endpoint decimals mismatch is not in the error table. This
   profile returns `400` `invalid_budget` and does not rescale. The same code
   is used for an unknown unit, a malformed budget object, and an access-server
