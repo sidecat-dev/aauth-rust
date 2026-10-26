@@ -99,7 +99,9 @@ pub(crate) fn validate_https_uri(uri: &str, what: &str) -> Result<(), Error> {
         return Err(not_https());
     }
     if uri.contains('#') {
-        return Err(Error::new(format!("r3: {what} must not contain a fragment")));
+        return Err(Error::new(format!(
+            "r3: {what} must not contain a fragment"
+        )));
     }
     Ok(())
 }

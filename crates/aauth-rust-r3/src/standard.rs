@@ -484,10 +484,7 @@ impl Entry for WsdlOperation {
 
     fn label(&self) -> String {
         match &self.service {
-            Some(service) => format!(
-                "operation \"{}\" of service \"{service}\"",
-                self.operation
-            ),
+            Some(service) => format!("operation \"{}\" of service \"{service}\"", self.operation),
             None => format!("operation \"{}\" with no service", self.operation),
         }
     }
@@ -703,9 +700,9 @@ fn optional_string(members: &[(String, Json)], name: &str) -> Result<Option<Stri
 
 fn string_value(name: &str, value: &Json) -> Result<String, Error> {
     match value {
-        Json::String(text) if text.is_empty() => Err(Error::new(format!(
-            "member \"{name}\" must not be empty"
-        ))),
+        Json::String(text) if text.is_empty() => {
+            Err(Error::new(format!("member \"{name}\" must not be empty")))
+        }
         Json::String(text) if text.trim() != text => Err(Error::new(format!(
             "member \"{name}\" must not have surrounding whitespace"
         ))),
