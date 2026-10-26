@@ -17,7 +17,7 @@ use crate::{
 };
 use aauth_rust_budgets::{
     AllocationBook, Budget, ConsentFigure, IssuerPolicy, MAX_AMOUNT, check_declared, narrow_to,
-    parse_resource_claims, read_granted, verify_delivered,
+    parse_budget, parse_resource_claims, read_granted, verify_delivered,
 };
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonClaims, PersonToken,

@@ -73,7 +73,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
-        self.accept_federation(response, agent, prepared, &endpoint)
+        self.accept_federation(response, agent, prepared, &endpoint, sent)
     }
     pub(super) fn accept_federation(
         &self,
@@ -81,6 +81,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
         endpoint: &str,
+        sent: Option<Budget>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -93,7 +94,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if self.deferred.is_some()
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
-            return self.defer_federation(&response, agent, resource, presented, context, endpoint);
+            return self.defer_federation(
+                &response,
+                agent,
+                resource,
+                presented,
+                context,
+                endpoint,
+                sent.clone(),
+            );
         }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
@@ -224,7 +233,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(failed(Reason::InvalidGrant));
         }
-        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss)?;
         let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
         if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {
             return Err(failed(Reason::InvalidGrant));

@@ -2,18 +2,21 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_budgets::{Budget, IssuerPolicy, UnitDeclaration};
+use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, AuthToken, Confirmation, ResourceClaims, TokenError,
     mint_auth_token, mint_resource_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
-    AuthorizationRequest, Config, Federation, FederationError, FederationFailure, Grant,
-    MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError,
+    AuthorizationRequest, Config, DeferredConfig, Federation, FederationError, FederationFailure,
+    FederationInput, Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError,
+    Store,
 };
-use http::{Request, Response};
+use http::{Method, Request, Response};
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const PS: &str = "https://ps.example";
 const AS: &str = "https://as.example";
@@ -456,4 +459,431 @@ fn a_delivered_budget_above_the_parameter_is_a_delivery_failure() {
         response.extensions().get::<FederationFailure>()
     );
     assert_eq!(server.budget_accounted(), Some(0));
+}
+
+fn post_json<S, P, C, I>(
+    server: &PersonServer<Keys, S, P, C, I>,
+    path: &str,
+    body: Value,
+    now: i64,
+) -> Response<Vec<u8>>
+where
+    S: Store,
+    P: Policy,
+    C: Fn() -> i64,
+    I: Fn() -> String,
+{
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("{PS}{path}"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    agent().sign(&mut request, now).unwrap();
+    server.handle(&request)
+}
+
+fn issued_person<S, P, C, I>(server: &PersonServer<Keys, S, P, C, I>, now: i64) -> String
+where
+    S: Store,
+    P: Policy,
+    C: Fn() -> i64,
+    I: Fn() -> String,
+{
+    let person = post_json(
+        server,
+        "/person",
+        json!({"resource": RESOURCE, "capabilities": ["budget"]}),
+        now,
+    );
+    assert_eq!(
+        person.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(person.body())
+    );
+    serde_json::from_slice::<Value>(person.body()).unwrap()["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn resource_offer(person_token: &str, challenge: &str, amount: i64) -> String {
+    let claims: Value =
+        serde_json::from_slice(aauth_rust_jose::Jws::parse(person_token).unwrap().payload())
+            .unwrap();
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert(
+        "budget".into(),
+        json!({"amount": amount, "unit": "USD", "decimals": 6}),
+    );
+    mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &ResourceClaims {
+            iss: RESOURCE.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: AS.into(),
+            ps: PS.into(),
+            sub: "directed".into(),
+            jti: challenge.into(),
+            presented_jti: claims["jti"].as_str().unwrap().into(),
+            agent_jkt: agent().public_jwk().thumbprint().unwrap(),
+            iat: 1000,
+            exp: 1300,
+            scope: Some("read".into()),
+            account: None,
+            login_hint: None,
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            extra,
+        },
+    )
+    .unwrap()
+}
+
+fn auth_body(amount: i64, iat: i64, exp: i64) -> Response<Vec<u8>> {
+    static JTI: AtomicUsize = AtomicUsize::new(0);
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert(
+        "budget".into(),
+        json!({"amount": amount, "unit": "USD", "decimals": 6}),
+    );
+    let compact = mint_auth_token(
+        &SigningKey::from_seed([4; 32]),
+        "as",
+        &AuthClaims {
+            iss: AS.into(),
+            dwk: "aauth-access.json".into(),
+            aud: RESOURCE.into(),
+            sub: "directed".into(),
+            jti: format!("as-{}", JTI.fetch_add(1, Ordering::SeqCst)),
+            iat,
+            exp,
+            ps: PS.into(),
+            cnf: Confirmation {
+                jwk: SigningKey::from_seed([2; 32]).public_jwk(),
+            },
+            scope: Some("read".into()),
+            account: None,
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            extra,
+        },
+    )
+    .unwrap();
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"auth_token": compact})).unwrap())
+        .unwrap()
+}
+
+fn accepted() -> Response<Vec<u8>> {
+    Response::builder()
+        .status(202)
+        .header("location", format!("{AS}/token/pending/as-wait"))
+        .header("retry-after", "0")
+        .header("cache-control", "no-store")
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"status": "pending"})).unwrap())
+        .unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum Script {
+    Shrink,
+    Grow,
+}
+
+struct Scripted {
+    script: Script,
+    posts: AtomicUsize,
+    sent: Mutex<Vec<i64>>,
+}
+
+impl Federation for Scripted {
+    fn endpoint(&self, access_server: &str) -> Result<String, FederationError> {
+        if access_server == AS {
+            Ok(format!("{AS}/token"))
+        } else {
+            Err(FederationError)
+        }
+    }
+    fn send(&self, request: &Request<Vec<u8>>) -> Result<Response<Vec<u8>>, FederationError> {
+        if *request.method() == Method::GET {
+            return Ok(match self.script {
+                Script::Shrink => auth_body(2_000_000, 1000, 1200),
+                Script::Grow => auth_body(4_000_000, 1101, 1200),
+            });
+        }
+        let body: Value = serde_json::from_slice(request.body()).expect("ps request is json");
+        let sent = body["budget"]["amount"].as_i64().expect("sent amount");
+        self.sent.lock().unwrap().push(sent);
+        let turn = self.posts.fetch_add(1, Ordering::SeqCst);
+        Ok(match (self.script, turn) {
+            (Script::Shrink, 0) => {
+                assert_eq!(sent, 2_000_000);
+                accepted()
+            }
+            (Script::Shrink, 1) => {
+                assert_eq!(sent, 2_000_000);
+                auth_body(sent, 1000, 1200)
+            }
+            (Script::Grow, 0) => {
+                assert_eq!(sent, 3_000_000);
+                auth_body(sent, 1000, 1100)
+            }
+            (Script::Grow, 1) => {
+                assert_eq!(sent, 2_000_000);
+                accepted()
+            }
+            _ => panic!("unexpected federation post {turn}"),
+        })
+    }
+}
+
+fn deferred_config(lifetime: i64) -> DeferredConfig {
+    let mut config = DeferredConfig::new(MemoryContinuations::new(16));
+    config.lifetime = lifetime;
+    config.retry_after = 0;
+    config
+}
+
+static DEFERRED_IDS: AtomicUsize = AtomicUsize::new(0);
+fn deferred_ids() -> String {
+    format!("d{}", DEFERRED_IDS.fetch_add(1, Ordering::SeqCst))
+}
+
+#[test]
+fn a_decimals_mismatch_on_the_resource_token_is_rejected() {
+    let server = server();
+    let person = person_token(&server);
+    let claims: Value =
+        serde_json::from_slice(aauth_rust_jose::Jws::parse(&person).unwrap().payload()).unwrap();
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert(
+        "budget".into(),
+        json!({"amount": 5_000_000, "unit": "USD", "decimals": 2}),
+    );
+    let resource = mint_resource_token(
+        &SigningKey::from_seed([5; 32]),
+        "resource",
+        &ResourceClaims {
+            iss: RESOURCE.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: PS.into(),
+            ps: PS.into(),
+            sub: "directed".into(),
+            jti: "decimals-off".into(),
+            presented_jti: claims["jti"].as_str().unwrap().into(),
+            agent_jkt: agent().public_jwk().thumbprint().unwrap(),
+            iat: 1000,
+            exp: 1300,
+            scope: Some("read".into()),
+            account: None,
+            login_hint: None,
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            extra,
+        },
+    )
+    .unwrap();
+    let response = call(
+        &server,
+        "/token",
+        json!({"resource_token": resource, "presented_token": person}),
+    );
+    assert_eq!(
+        response.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(body["error"], "invalid_budget");
+    assert_eq!(server.budget_accounted(), Some(0));
+    assert_eq!(
+        issued_amount(&server, &person_token(&server), "decimals-ok"),
+        2_000_000
+    );
+}
+
+#[test]
+fn a_deferred_delivery_is_checked_against_the_budget_that_was_sent() {
+    let server = PersonServer::new(
+        Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        Host,
+        clock as fn() -> i64,
+        deferred_ids,
+    )
+    .unwrap()
+    .with_federation(Scripted {
+        script: Script::Shrink,
+        posts: AtomicUsize::new(0),
+        sent: Mutex::new(Vec::new()),
+    })
+    .with_budgets(IssuerPolicy::capped(3_000_000, dollars()))
+    .unwrap()
+    .with_deferred(deferred_config(60))
+    .unwrap();
+    let first_person = issued_person(&server, 1000);
+    let first = post_json(
+        &server,
+        "/token",
+        json!({
+            "resource_token": resource_offer(&first_person, "shrink-a", 2_000_000),
+            "presented_token": first_person,
+            "capabilities": ["budget"]
+        }),
+        1000,
+    );
+    assert_eq!(
+        first.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(first.body())
+    );
+    let pending = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+    let second_person = issued_person(&server, 1000);
+    let second = post_json(
+        &server,
+        "/token",
+        json!({
+            "resource_token": resource_offer(&second_person, "shrink-b", 2_000_000),
+            "presented_token": second_person,
+            "capabilities": ["budget"]
+        }),
+        1000,
+    );
+    assert_eq!(
+        second.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(second.body())
+    );
+    let second_body: Value = serde_json::from_slice(second.body()).unwrap();
+    let second_token = AuthToken::parse(second_body["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(second_token.claims().extra["budget"]["amount"], 2_000_000);
+    assert_eq!(server.budget_accounted(), Some(2_000_000));
+    let advanced = server
+        .advance_federation(&pending.location, FederationInput::Poll)
+        .unwrap();
+    assert_eq!(
+        advanced.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(advanced.body())
+    );
+    let advanced_body: Value = serde_json::from_slice(advanced.body()).unwrap();
+    let completed = AuthToken::parse(advanced_body["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(completed.claims().extra["budget"]["amount"], 2_000_000);
+    assert_eq!(server.budget_accounted(), Some(4_000_000));
+}
+
+struct FlexLifetime(AtomicI64);
+impl Policy for FlexLifetime {
+    fn bind_person(&self, _: &PersonRequest) -> Result<Person, PolicyError> {
+        Ok(Person {
+            id: "person-1".into(),
+            subject: "directed".into(),
+            tenant: None,
+        })
+    }
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+        let lifetime = self.0.swap(600, Ordering::SeqCst);
+        Ok(Grant {
+            scopes: request.scopes.clone(),
+            lifetime,
+        })
+    }
+    fn consent(&self, _: &AuthorizationRequest) -> Result<(), PolicyError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_deferred_delivery_above_the_sent_budget_is_refused_after_the_room_grows() {
+    let now = Arc::new(AtomicI64::new(1000));
+    let clock_now = Arc::clone(&now);
+    let ids = Arc::new(AtomicUsize::new(0));
+    let clock_ids = Arc::clone(&ids);
+    let server = PersonServer::new(
+        Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        FlexLifetime(AtomicI64::new(100)),
+        move || clock_now.load(Ordering::SeqCst),
+        move || format!("g{}", clock_ids.fetch_add(1, Ordering::SeqCst)),
+    )
+    .unwrap()
+    .with_federation(Scripted {
+        script: Script::Grow,
+        posts: AtomicUsize::new(0),
+        sent: Mutex::new(Vec::new()),
+    })
+    .with_budgets(IssuerPolicy::capped(5_000_000, dollars()))
+    .unwrap()
+    .with_deferred(deferred_config(3600))
+    .unwrap();
+    let filler_person = issued_person(&server, 1000);
+    let filler = post_json(
+        &server,
+        "/token",
+        json!({
+            "resource_token": resource_offer(&filler_person, "grow-fill", 3_000_000),
+            "presented_token": filler_person,
+            "capabilities": ["budget"]
+        }),
+        1000,
+    );
+    assert_eq!(
+        filler.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(filler.body())
+    );
+    assert_eq!(server.budget_accounted(), Some(3_000_000));
+    let deferred_person = issued_person(&server, 1000);
+    let deferred = post_json(
+        &server,
+        "/token",
+        json!({
+            "resource_token": resource_offer(&deferred_person, "grow-wait", 4_000_000),
+            "presented_token": deferred_person,
+            "capabilities": ["budget"]
+        }),
+        1000,
+    );
+    assert_eq!(
+        deferred.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(deferred.body())
+    );
+    let pending = PendingResponse::parse(&format!("{PS}/token"), &deferred).unwrap();
+    now.store(1101, Ordering::SeqCst);
+    let advanced = server
+        .advance_federation(&pending.location, FederationInput::Poll)
+        .unwrap();
+    assert_eq!(
+        advanced.status(),
+        502,
+        "{}",
+        String::from_utf8_lossy(advanced.body())
+    );
+    let body: Value = serde_json::from_slice(advanced.body()).unwrap();
+    assert_eq!(body["error"], "as_unreachable");
+    assert_eq!(server.budget_accounted(), Some(3_000_000));
 }
