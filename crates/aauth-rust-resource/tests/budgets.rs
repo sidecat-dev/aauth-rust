@@ -16,7 +16,7 @@ use aauth_rust_person_server::{
     AuthorizationRequest as PsAuthorization, Config as PsConfig, Federation, FederationError,
     Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError as PsPolicyError,
 };
-use aauth_rust_resource::{Deny, PsAuthorizationConfig, PsAuthorizationResource};
+use aauth_rust_resource::{AuthDecision, Deny, PsAuthorizationConfig, PsAuthorizationResource};
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
 use serde_json::{Value, json};
@@ -224,7 +224,7 @@ fn buffered_requests_meter_the_token_cap_and_keep_its_signed_scale() {
     );
     let refusal = tight.headers()["aauth-budget"].to_str().unwrap();
     assert!(refusal.contains("remaining=500"), "{refusal}");
-    assert!(refusal.contains("required=1500"), "{refusal}");
+    assert!(refusal.contains("required=1000"), "{refusal}");
     assert!(!refusal.contains("cost="), "{refusal}");
     let challenge = requirement
         .split("resource-token=\"")
@@ -234,9 +234,9 @@ fn buffered_requests_meter_the_token_cap_and_keep_its_signed_scale() {
         .next()
         .unwrap();
     let challenge_claims = payload(challenge);
-    assert_eq!(challenge_claims["budget_consumed"]["jti"], "meter");
-    assert_eq!(challenge_claims["budget_consumed"]["consumed"], 1_500);
-    assert_eq!(challenge_claims["budget"]["decimals"], 6);
+    assert!(challenge_claims.get("budget_consumed").is_none());
+    assert_eq!(challenge_claims["budget"]["unit"], "USD");
+    assert_eq!(challenge_claims["budget"]["decimals"], 2);
     assert_eq!(challenge_claims["budget"]["amount"], 5_000_000);
     assert_ne!(challenge_claims["budget"]["amount"], 1_500);
 
@@ -327,7 +327,7 @@ fn an_insufficient_refusal_can_omit_required() {
     let resource = resource().without_stated_required();
     let refused = resource
         .authorize(
-            &present(&auth("quiet", Some(2_000), "read"), Some(2_500)),
+            &present(&auth("quiet", Some(400), "read"), Some(2_500)),
             NOW,
             "quiet-1",
         )
@@ -339,12 +339,12 @@ fn an_insufficient_refusal_can_omit_required() {
         "{requirement}"
     );
     let header = refused.headers()["aauth-budget"].to_str().unwrap();
-    assert!(header.contains("remaining=2000"), "{header}");
+    assert!(header.contains("remaining=400"), "{header}");
     assert!(!header.contains("required="), "{header}");
     assert!(!header.contains("cost="), "{header}");
     let again = resource
         .authorize(
-            &present(&auth("quiet", Some(2_000), "read"), Some(1_000)),
+            &present(&auth("quiet-ok", Some(2_000), "read"), Some(1_000)),
             NOW,
             "quiet-2",
         )
@@ -373,7 +373,8 @@ fn streaming_hold_and_replay_do_not_pass_the_grant() {
     assert!(!preview.contains("cost="), "{preview}");
     let done = resource.budget_commit(&reservation, 100, NOW).unwrap();
     assert!(done.contains("cost=100"), "{done}");
-    let (name, field) = resource.budget_trailer(&preview, 100).unwrap();
+    let (listed, name, field) = resource.budget_trailer(&preview, 100).unwrap();
+    assert_eq!(listed, "AAuth-Budget");
     assert_eq!(name, "aauth-budget");
     assert_eq!(field, "cost=100");
     let first = resource
@@ -434,7 +435,7 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
     )
     .unwrap()
     .with_authorization_endpoint()
-    .with_budgets(units(6), "https://orders.example/usage", 1_000, 5_000_000)
+    .with_budgets(units(6), "https://orders.example/usage", 1_500, 5_000_000)
     .unwrap();
 
     let access = AccessServer::new(
@@ -641,7 +642,7 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
         metered.headers()["aauth-budget"]
             .to_str()
             .unwrap()
-            .contains("cost=1000")
+            .contains("cost=1500")
     );
     let step = resource
         .authorize(&present(&auth, Some(1_500)), NOW, "step")
@@ -661,7 +662,9 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
         .unwrap()
         .to_owned();
     let step_claims = payload(&step_token);
-    assert_eq!(step_claims["budget_consumed"]["consumed"], 1_000);
+    assert_eq!(step_claims["budget_consumed"]["consumed"], 1_500);
+    assert_eq!(step_claims["budget"]["decimals"], 6);
+    assert_eq!(step_claims["budget"]["unit"], "USD");
     let verified = ResourceToken::parse(&step_token)
         .unwrap()
         .verify(&Keys, NOW)
@@ -685,7 +688,7 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
         "{}",
         String::from_utf8_lossy(report_response.body())
     );
-    assert_eq!(person.budget_accounted(), Some(3_000));
+    assert_eq!(person.budget_accounted(), Some(3_500));
 }
 
 struct Host;
@@ -772,4 +775,389 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
     assert_eq!(body["decimals"], 6);
     assert_eq!(body["usage"]["all_time"], 1_000);
     assert!(body["as_of"].as_i64().unwrap() >= NOW);
+
+    let mut unknown = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"sub": "nobody"})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut unknown,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let unknown_response = resource.usage(&unknown, NOW);
+    assert_eq!(unknown_response.status(), 200);
+    let unknown_body: Value = serde_json::from_slice(unknown_response.body()).unwrap();
+    assert!(unknown_body.get("usage").is_none(), "{unknown_body}");
+
+    let unsigned = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"sub": "directed"})).unwrap())
+        .unwrap();
+    assert_eq!(resource.usage(&unsigned, NOW).status(), 401);
+
+    let mut wrong_scheme = unsigned.clone();
+    sign_request(
+        &mut wrong_scheme,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::Jwt(auth("usage", Some(2_000), "read")),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(resource.usage(&wrong_scheme, NOW).status(), 401);
+
+    let mut missing_digest = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut missing_digest,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    *missing_digest.body_mut() = serde_json::to_vec(&json!({"sub": "directed"})).unwrap();
+    missing_digest
+        .headers_mut()
+        .insert("content-type", "application/json".parse().unwrap());
+    assert_eq!(resource.usage(&missing_digest, NOW).status(), 401);
+
+    let mut foreign = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"sub": "directed", "ps": PS})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut foreign,
+        &SigningKey::from_seed([4; 32]),
+        KeyMaterial::JwksUri {
+            id: AS.into(),
+            dwk: "aauth-access.json".into(),
+            kid: "as".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let foreign_response = resource.usage(&foreign, NOW);
+    assert_eq!(foreign_response.status(), 403);
+    assert!(
+        !String::from_utf8_lossy(foreign_response.body()).contains("1000"),
+        "{}",
+        String::from_utf8_lossy(foreign_response.body())
+    );
+    let mut foreign_keys = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"jkts": ["missing-thumbprint"]})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut foreign_keys,
+        &SigningKey::from_seed([4; 32]),
+        KeyMaterial::JwksUri {
+            id: AS.into(),
+            dwk: "aauth-access.json".into(),
+            kid: "as".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(resource.usage(&foreign_keys, NOW).status(), 403);
+}
+
+#[test]
+fn a_client_cost_cannot_raise_the_host_bound_or_buy_a_free_admission() {
+    let resource = resource();
+    let zero = resource
+        .authorize(
+            &present(&auth("priced", Some(2_000), "read"), Some(0)),
+            NOW,
+            "zero",
+        )
+        .into_response();
+    assert_eq!(zero.status(), 401);
+    let requirement = zero.headers()["aauth-requirement"].to_str().unwrap();
+    assert!(
+        requirement.contains("reason=insufficient-budget"),
+        "{requirement}"
+    );
+    let header = zero.headers()["aauth-budget"].to_str().unwrap();
+    assert!(header.contains("remaining=2000"), "{header}");
+    assert!(header.contains("required=1000"), "{header}");
+    assert!(!header.contains("cost="), "{header}");
+
+    let charged = resource
+        .authorize(
+            &present(&auth("priced", Some(2_000), "read"), None),
+            NOW,
+            "pay",
+        )
+        .into_response();
+    assert_eq!(charged.status(), 200);
+    let charged_header = charged.headers()["aauth-budget"].to_str().unwrap();
+    assert!(charged_header.contains("cost=1000"), "{charged_header}");
+    assert!(
+        charged_header.contains("remaining=1000"),
+        "{charged_header}"
+    );
+
+    let raised = resource
+        .authorize(
+            &present(&auth("priced", Some(2_000), "read"), Some(4_000)),
+            NOW,
+            "raise",
+        )
+        .into_response();
+    assert_eq!(raised.status(), 200);
+    let raised_header = raised.headers()["aauth-budget"].to_str().unwrap();
+    assert!(raised_header.contains("cost=1000"), "{raised_header}");
+    assert!(raised_header.contains("remaining=0"), "{raised_header}");
+
+    let spent = resource
+        .authorize(
+            &present(&auth("priced", Some(2_000), "read"), Some(0)),
+            NOW,
+            "spent-zero",
+        )
+        .into_response();
+    assert_eq!(spent.status(), 401);
+    assert!(
+        spent.headers()["aauth-requirement"]
+            .to_str()
+            .unwrap()
+            .contains("reason=budget-exhausted")
+    );
+
+    let lowered = resource
+        .authorize(
+            &present(&auth("lower", Some(2_000), "read"), Some(250)),
+            NOW,
+            "lower",
+        )
+        .into_response();
+    assert_eq!(lowered.status(), 200);
+    assert!(
+        lowered.headers()["aauth-budget"]
+            .to_str()
+            .unwrap()
+            .contains("cost=250")
+    );
+    let AuthDecision::Granted(admitted) = resource.authorize(
+        &present(&auth("cap", Some(2_000), "read"), Some(250)),
+        NOW,
+        "cap",
+    ) else {
+        panic!("expected a granted admission");
+    };
+    assert_eq!(admitted.admitted_maximum(), Some(250));
+}
+
+#[test]
+fn step_up_offers_the_declared_scale_and_omits_a_stale_consumption_record() {
+    let resource = resource();
+    let first = resource
+        .authorize(
+            &present(&auth("scale", Some(1_500), "read"), None),
+            NOW,
+            "scale-1",
+        )
+        .into_response();
+    assert_eq!(first.status(), 200);
+    let step = resource
+        .authorize(
+            &present(&auth("scale", Some(1_500), "read"), None),
+            NOW,
+            "scale-2",
+        )
+        .into_response();
+    assert_eq!(step.status(), 401);
+    let requirement = step.headers()["aauth-requirement"].to_str().unwrap();
+    let challenge = requirement
+        .split("resource-token=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let claims = payload(challenge);
+    assert_eq!(claims["budget_consumed"]["consumed"], 1_000);
+    assert_eq!(claims["budget"]["unit"], "USD");
+    assert_eq!(claims["budget"]["decimals"], 6);
+    resource
+        .replace_budget_units(vec![
+            UnitDeclaration::with_max("EUR", 2, 10_000_000, "euros").unwrap(),
+        ])
+        .unwrap();
+    let relabeled = resource
+        .authorize(
+            &present(&auth("scale", Some(1_500), "read"), None),
+            NOW,
+            "scale-3",
+        )
+        .into_response();
+    assert_eq!(relabeled.status(), 401);
+    let relabeled_requirement = relabeled.headers()["aauth-requirement"].to_str().unwrap();
+    let relabeled_challenge = relabeled_requirement
+        .split("resource-token=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let relabeled_claims = payload(relabeled_challenge);
+    assert!(relabeled_claims.get("budget_consumed").is_none());
+    assert_eq!(relabeled_claims["budget"]["unit"], "EUR");
+    assert_eq!(relabeled_claims["budget"]["decimals"], 2);
+    let metered = relabeled.headers()["aauth-budget"].to_str().unwrap();
+    assert!(metered.contains("decimals=6"), "{metered}");
+}
+
+#[test]
+fn observed_admission_meters_once_and_a_buffered_call_does_not() {
+    let resource = resource();
+    let bare = Request::builder()
+        .uri(format!("{RESOURCE}/records"))
+        .body(Vec::new())
+        .unwrap();
+    assert!(matches!(
+        resource.authorize_observed(&bare, NOW, "unsigned"),
+        AuthDecision::PersonTokenRequired
+    ));
+
+    let watched = resource.authorize_observed(
+        &present(&auth("watch", Some(5_000), "read"), None),
+        NOW,
+        "watch",
+    );
+    let AuthDecision::Observed(observed) = watched else {
+        panic!("expected an unmetered admission, got {watched:?}");
+    };
+    assert_eq!(observed.admitted_maximum(), Some(1_000));
+    let followed = resource
+        .authorize(
+            &present(&auth("watch", Some(5_000), "read"), None),
+            NOW,
+            "watch-meter",
+        )
+        .into_response();
+    assert_eq!(followed.status(), 200);
+    assert!(
+        followed.headers()["aauth-budget"]
+            .to_str()
+            .unwrap()
+            .contains("remaining=4000")
+    );
+
+    let once = resource.authorize_observed(
+        &present(&auth("once", Some(5_000), "read"), None),
+        NOW,
+        "once",
+    );
+    let AuthDecision::Observed(once) = once else {
+        panic!("expected an unmetered admission, got {once:?}");
+    };
+    resource
+        .budget_complete_held("held-1", once.token(), 100, 35, NOW)
+        .unwrap();
+    let again = resource
+        .budget_complete_held("held-1", once.token(), 100, 35, NOW)
+        .unwrap();
+    assert!(again.contains("cost=35"), "{again}");
+    assert!(resource.budget_reserve(once.token(), 4_965).is_ok());
+
+    let doubled = resource
+        .authorize(
+            &present(&auth("double", Some(2_000), "read"), None),
+            NOW,
+            "double",
+        )
+        .into_response();
+    assert_eq!(doubled.status(), 200);
+    let token = AuthToken::parse(&auth("double", Some(2_000), "read"))
+        .unwrap()
+        .verify(&Keys, NOW)
+        .unwrap();
+    resource
+        .budget_complete_held("other-held", &token, 1_000, 1_000, NOW)
+        .unwrap();
+    let exhausted = resource
+        .authorize(
+            &present(&auth("double", Some(2_000), "read"), None),
+            NOW,
+            "double-again",
+        )
+        .into_response();
+    assert_eq!(exhausted.status(), 401);
+    assert!(
+        exhausted.headers()["aauth-requirement"]
+            .to_str()
+            .unwrap()
+            .contains("reason=budget-exhausted")
+    );
+}
+
+#[test]
+fn a_reserved_stream_commits_once_and_dropping_the_decision_does_not() {
+    let resource = resource();
+    let held = resource.authorize_reserved(
+        &present(&auth("stream", Some(2_000), "read"), Some(400)),
+        NOW,
+        "stream",
+    );
+    let AuthDecision::Held(held) = held else {
+        panic!("expected a reservation, got {held:?}");
+    };
+    assert_eq!(held.admitted_maximum(), 400);
+    let preview = resource.budget_stream_header(held.reservation()).unwrap();
+    assert!(preview.contains("reserved=400"), "{preview}");
+    assert!(!preview.contains("cost="), "{preview}");
+    let posted = resource.budget_commit(held.reservation(), 30, NOW).unwrap();
+    assert!(posted.contains("cost=30"), "{posted}");
+    assert!(resource.budget_commit(held.reservation(), 1, NOW).is_err());
+
+    let abandoned = resource.authorize_reserved(
+        &present(&auth("drop", Some(2_000), "read"), None),
+        NOW,
+        "drop",
+    );
+    let response = abandoned.into_response();
+    assert_eq!(response.status(), 500);
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/usage"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"sub": "directed"})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut request,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    let usage = resource.usage(&request, NOW);
+    assert_eq!(usage.status(), 200);
+    let body: Value = serde_json::from_slice(usage.body()).unwrap();
+    assert_eq!(body["usage"]["all_time"], 30);
 }

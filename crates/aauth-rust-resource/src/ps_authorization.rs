@@ -22,6 +22,13 @@ use aauth_rust_signature_key::{
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy)]
+enum Meter {
+    Buffered,
+    Reserve,
+    Observe,
+}
+
 #[path = "resource_revocation.rs"]
 mod revocation;
 
@@ -91,6 +98,7 @@ pub struct AuthAuthorized<T = ()> {
     token: VerifiedAuthToken,
     admitted: T,
     budget_header: Option<String>,
+    admitted_maximum: Option<i64>,
 }
 impl<T> AuthAuthorized<T> {
     /// Authenticated authorization token whose HTTP holder proof also succeeded.
@@ -105,9 +113,74 @@ impl<T> AuthAuthorized<T> {
     pub fn budget_header(&self) -> Option<&str> {
         self.budget_header.as_deref()
     }
+    /// Maximum the host may serve for this admission.
+    ///
+    /// The host supplies the cost bound. A client `AAuth-Max-Cost` can only lower
+    /// it. The host must not perform work beyond this figure.
+    pub fn admitted_maximum(&self) -> Option<i64> {
+        self.admitted_maximum
+    }
     /// Move authenticated token and policy context to the application handler.
     pub fn into_parts(self) -> (VerifiedAuthToken, T) {
         (self.token, self.admitted)
+    }
+}
+
+/// Proof, audience, revocation, and scope succeeded, and the admitted maximum is reserved.
+///
+/// The reservation is not committed. The host bounds served work to
+/// [`Self::admitted_maximum`], then [`PsAuthorizationResource::budget_commit`] or
+/// [`PsAuthorizationResource::budget_release`]. Calling [`PsAuthorizationResource::authorize`]
+/// on the same request would meter it again.
+#[derive(Debug)]
+pub struct HeldAdmission<T = ()> {
+    token: VerifiedAuthToken,
+    admitted: T,
+    reservation: Reservation,
+    admitted_maximum: i64,
+}
+impl<T> HeldAdmission<T> {
+    /// Authenticated authorization token whose HTTP holder proof also succeeded.
+    pub fn token(&self) -> &VerifiedAuthToken {
+        &self.token
+    }
+    /// Application context produced by the admission policy.
+    pub fn admitted(&self) -> &T {
+        &self.admitted
+    }
+    /// Outstanding reservation. It has not been committed.
+    pub fn reservation(&self) -> &Reservation {
+        &self.reservation
+    }
+    /// Maximum the host may serve. The reservation covers this figure.
+    pub fn admitted_maximum(&self) -> i64 {
+        self.admitted_maximum
+    }
+}
+
+/// Proof, audience, revocation, and scope succeeded, and nothing was metered.
+///
+/// The host meters once with [`PsAuthorizationResource::budget_reserve`] or
+/// [`PsAuthorizationResource::budget_complete_held`]. The host must not serve more
+/// than [`Self::admitted_maximum`] when that figure is present.
+#[derive(Debug)]
+pub struct ObservedAdmission<T = ()> {
+    token: VerifiedAuthToken,
+    admitted: T,
+    admitted_maximum: Option<i64>,
+}
+impl<T> ObservedAdmission<T> {
+    /// Authenticated authorization token whose HTTP holder proof also succeeded.
+    pub fn token(&self) -> &VerifiedAuthToken {
+        &self.token
+    }
+    /// Application context produced by the admission policy.
+    pub fn admitted(&self) -> &T {
+        &self.admitted
+    }
+    /// Maximum the host may serve, when the token carries a budget.
+    pub fn admitted_maximum(&self) -> Option<i64> {
+        self.admitted_maximum
     }
 }
 
@@ -140,6 +213,10 @@ pub enum AuthDecision<T = ()> {
     InternalError,
     /// Verified Auth token, holder proof, route scopes and host policy admitted it.
     Granted(Box<AuthAuthorized<T>>),
+    /// Verified and reserved, not committed. The host finishes metering.
+    Held(Box<HeldAdmission<T>>),
+    /// Verified without reserving or committing. The host meters once.
+    Observed(Box<ObservedAdmission<T>>),
 }
 impl<T> std::fmt::Debug for AuthDecision<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -160,6 +237,16 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
             Self::Granted(value) => f
                 .debug_struct("Granted")
                 .field("token", &value.token)
+                .finish_non_exhaustive(),
+            Self::Held(value) => f
+                .debug_struct("Held")
+                .field("token", &value.token)
+                .field("admitted_maximum", &value.admitted_maximum)
+                .finish_non_exhaustive(),
+            Self::Observed(value) => f
+                .debug_struct("Observed")
+                .field("token", &value.token)
+                .field("admitted_maximum", &value.admitted_maximum)
                 .finish_non_exhaustive(),
         }
     }
@@ -236,6 +323,11 @@ impl<T> AuthDecision<T> {
                 let mut response = refusal(StatusCode::FORBIDDEN, "access_denied");
                 insert_budget(&mut response, budget_header);
                 response
+            }
+            // A hold or an unmetered admission is not an HTTP grant. Mapping it
+            // here does not commit the reservation.
+            Self::Held(_) | Self::Observed(_) => {
+                refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error")
             }
             Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         }
@@ -528,8 +620,9 @@ where
     }
     /// Meter auth-token requests against a declared budget profile.
     ///
-    /// `default_bound` is the maximum cost of a buffered request that omits
-    /// `AAuth-Max-Cost`. `default_offer` is the amount placed on a challenge
+    /// `default_bound` is the host's maximum cost of a buffered request. A client
+    /// `AAuth-Max-Cost` may only lower that figure, and the admitted maximum is
+    /// what the host may serve. `default_offer` is the amount placed on a challenge
     /// when the client does not name one. The first unit is the usage report's
     /// unit. An empty declaration list is rejected: a resource that meters has
     /// published `budget_units`.
@@ -681,7 +774,64 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti, None) {
+        match self.authorize_proved(request, now, challenge_jti, None, Meter::Buffered) {
+            Ok(decision) => decision,
+            Err(error) => AuthDecision::SignatureFailure(error),
+        }
+    }
+    /// Verify the request, then reserve the admitted maximum without committing it.
+    ///
+    /// Proof, audience, revocation, and scope are the same checks as
+    /// [`Self::authorize`]. A budgeted token that fits returns [`AuthDecision::Held`].
+    /// The host bounds served work to the admitted maximum, then commits or releases.
+    /// [`Self::authorize`] on the same request would reserve and commit a second time.
+    pub fn authorize_reserved(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+    ) -> AuthDecision<O::Context> {
+        self.authorize_with(request, now, challenge_jti, Meter::Reserve)
+    }
+    /// Verify the request and do not meter it.
+    ///
+    /// Proof, audience, revocation, and scope are the same checks as
+    /// [`Self::authorize`]. Nothing is reserved or committed. The host meters once
+    /// with [`Self::budget_reserve`] or [`Self::budget_complete_held`], and must
+    /// not serve more than the admitted maximum. A later call to [`Self::authorize`]
+    /// meters the request as a new buffered admission.
+    pub fn authorize_observed(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+    ) -> AuthDecision<O::Context> {
+        self.authorize_with(request, now, challenge_jti, Meter::Observe)
+    }
+    fn authorize_with(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        meter: Meter,
+    ) -> AuthDecision<O::Context> {
+        let authority = match canonical_authority(request.uri()) {
+            Ok(value) => value,
+            Err(error) => return AuthDecision::SignatureFailure(SignatureFailure::Proof(error)),
+        };
+        if authority != self.authority {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
+        }
+        if !(0..=(1_i64 << 33) - 1).contains(&now) {
+            return AuthDecision::SignatureFailure(SignatureFailure::Proof(Error::InvalidClock));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|name| !request.headers().contains_key(*name))
+        {
+            return AuthDecision::PersonTokenRequired;
+        }
+        match self.authorize_proved(request, now, challenge_jti, None, meter) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -723,7 +873,7 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti, Some(asked)) {
+        match self.authorize_proved(request, now, challenge_jti, Some(asked), Meter::Buffered) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -734,6 +884,7 @@ where
         now: i64,
         challenge_jti: &str,
         asked: Option<&AuthorizationAsk>,
+        meter: Meter,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
             .map_err(|error| match error {
@@ -905,7 +1056,7 @@ where
                 {
                     return Ok(self.forbidden_budget(&token, grant.as_ref()));
                 }
-                self.admit_auth(token, request, now, challenge_jti, grant)
+                self.admit_auth(token, request, now, challenge_jti, grant, meter)
             }
             _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
         }
@@ -1109,73 +1260,159 @@ where
         now: i64,
         challenge_jti: &str,
         grant: Option<Budget>,
+        meter: Meter,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
         let Some(gate) = &self.budgets else {
-            return self.finish_admission(token, request, None);
+            return self.finish_admission(token, request, None, meter);
         };
         let Some(grant) = grant else {
-            return self.finish_admission(token, request, None);
+            return self.finish_admission(token, request, None, meter);
         };
-        let maximum = match gate.bound(request) {
+        let maximum = match gate.admitted_cost(request) {
             Ok(maximum) => maximum,
             Err(()) => return Ok(self.forbidden_budget(&token, Some(&grant))),
         };
-        match gate.reserve(&token, &grant, maximum) {
-            Ok(reservation) => match (self.policy)(&token, request).into_admission() {
-                Ok(admitted) => match gate.commit(&reservation, maximum, now) {
-                    Ok(header) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+        // A client figure of zero is not a free admission of the host's work,
+        // and it does not fit a spent grant.
+        if maximum == 0 && gate.default_bound > 0 {
+            let remaining = match gate.remaining(&token, &grant) {
+                Ok(remaining) => remaining,
+                Err(_) => return Ok(AuthDecision::InternalError),
+            };
+            let refusal = if remaining == 0 {
+                aauth_rust_budgets::Refusal::Exhausted {
+                    remaining,
+                    header: match unstated_required(&grant, 0) {
+                        Ok(header) => header,
+                        Err(()) => return Ok(AuthDecision::InternalError),
+                    },
+                }
+            } else {
+                let header = if gate.omit_required {
+                    match unstated_required(&grant, remaining) {
+                        Ok(header) => header,
+                        Err(()) => return Ok(AuthDecision::InternalError),
+                    }
+                } else {
+                    match BudgetHeader::refusal(
+                        remaining,
+                        Some(gate.default_bound),
+                        grant.unit(),
+                        grant.decimals(),
+                    )
+                    .and_then(|header| sender_field(&header, false))
+                    {
+                        Ok(header) => header,
+                        Err(_) => return Ok(AuthDecision::InternalError),
+                    }
+                };
+                aauth_rust_budgets::Refusal::Insufficient {
+                    remaining,
+                    required: gate.default_bound,
+                    header,
+                }
+            };
+            return self.budget_refusal(&token, &grant, now, challenge_jti, refusal);
+        }
+        match meter {
+            Meter::Observe => match gate.open_grant(&token) {
+                Ok(_) => match (self.policy)(&token, request).into_admission() {
+                    Ok(admitted) => Ok(AuthDecision::Observed(Box::new(ObservedAdmission {
                         token,
                         admitted,
-                        budget_header: Some(header),
+                        admitted_maximum: Some(maximum),
                     }))),
-                    Err(()) => Ok(AuthDecision::InternalError),
+                    Err(Deny) => Ok(self.forbidden_budget(&token, Some(&grant))),
                 },
-                Err(Deny) => {
-                    gate.release(&reservation);
-                    Ok(self.forbidden_budget(&token, Some(&grant)))
-                }
+                Err(_) => Ok(AuthDecision::InternalError),
             },
-            Err(ChargeError::Refused(refusal)) => {
-                let (reason, header) = match refusal {
-                    aauth_rust_budgets::Refusal::Exhausted { header, .. } => {
-                        ("budget-exhausted", header)
+            Meter::Reserve => match gate.reserve(&token, &grant, maximum) {
+                Ok(reservation) => match (self.policy)(&token, request).into_admission() {
+                    Ok(admitted) => Ok(AuthDecision::Held(Box::new(HeldAdmission {
+                        token,
+                        admitted,
+                        reservation,
+                        admitted_maximum: maximum,
+                    }))),
+                    Err(Deny) => {
+                        gate.release(&reservation);
+                        Ok(self.forbidden_budget(&token, Some(&grant)))
                     }
-                    aauth_rust_budgets::Refusal::Insufficient {
-                        remaining, header, ..
-                    } => {
-                        let header = if gate.omit_required {
-                            match unstated_required(&grant, remaining) {
-                                Ok(header) => header,
-                                Err(()) => return Ok(AuthDecision::InternalError),
-                            }
-                        } else {
-                            header
-                        };
-                        ("insufficient-budget", header)
-                    }
-                };
-                let consumed = gate
-                    .lock()
-                    .committed(token.claims().jti.as_str())
-                    .unwrap_or(0);
-                let record = match ConsumptionRecord::new(token.claims().jti.clone(), consumed) {
-                    Ok(record) => record,
-                    Err(_) => return Ok(AuthDecision::InternalError),
-                };
-                let extra = match gate.challenge_extra(None, Some(&record), Some(&grant)) {
-                    Ok(extra) => extra,
-                    Err(_) => return Ok(AuthDecision::InternalError),
-                };
-                match self.mint_step_up(&token, now, challenge_jti, extra) {
-                    Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired {
-                        resource_token,
-                        budget_reason: Some(reason.to_owned()),
-                        budget_header: Some(header),
-                    }),
-                    Err(()) => Ok(AuthDecision::InternalError),
+                },
+                Err(ChargeError::Refused(refusal)) => {
+                    self.budget_refusal(&token, &grant, now, challenge_jti, refusal)
                 }
+                Err(ChargeError::Protocol(_)) => Ok(AuthDecision::InternalError),
+            },
+            Meter::Buffered => match gate.reserve(&token, &grant, maximum) {
+                Ok(reservation) => match (self.policy)(&token, request).into_admission() {
+                    Ok(admitted) => match gate.commit(&reservation, maximum, now) {
+                        Ok(header) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+                            token,
+                            admitted,
+                            budget_header: Some(header),
+                            admitted_maximum: Some(maximum),
+                        }))),
+                        Err(()) => Ok(AuthDecision::InternalError),
+                    },
+                    Err(Deny) => {
+                        gate.release(&reservation);
+                        Ok(self.forbidden_budget(&token, Some(&grant)))
+                    }
+                },
+                Err(ChargeError::Refused(refusal)) => {
+                    self.budget_refusal(&token, &grant, now, challenge_jti, refusal)
+                }
+                Err(ChargeError::Protocol(_)) => Ok(AuthDecision::InternalError),
+            },
+        }
+    }
+    fn budget_refusal(
+        &self,
+        token: &VerifiedAuthToken,
+        grant: &Budget,
+        now: i64,
+        challenge_jti: &str,
+        refusal: aauth_rust_budgets::Refusal,
+    ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
+        let Some(gate) = &self.budgets else {
+            return Ok(AuthDecision::InternalError);
+        };
+        let (reason, header) = match refusal {
+            aauth_rust_budgets::Refusal::Exhausted { header, .. } => ("budget-exhausted", header),
+            aauth_rust_budgets::Refusal::Insufficient {
+                remaining, header, ..
+            } => {
+                let header = if gate.omit_required {
+                    match unstated_required(grant, remaining) {
+                        Ok(header) => header,
+                        Err(()) => return Ok(AuthDecision::InternalError),
+                    }
+                } else {
+                    header
+                };
+                ("insufficient-budget", header)
             }
-            Err(ChargeError::Protocol(_)) => Ok(AuthDecision::InternalError),
+        };
+        let consumed = gate
+            .lock()
+            .committed(token.claims().iss.as_str(), token.claims().jti.as_str())
+            .unwrap_or(0);
+        let record = match ConsumptionRecord::new(token.claims().jti.clone(), consumed) {
+            Ok(record) => record,
+            Err(_) => return Ok(AuthDecision::InternalError),
+        };
+        let extra = match gate.challenge_extra(None, Some(&record), Some(grant)) {
+            Ok(extra) => extra,
+            Err(_) => return Ok(AuthDecision::InternalError),
+        };
+        match self.mint_step_up(token, now, challenge_jti, extra) {
+            Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired {
+                resource_token,
+                budget_reason: Some(reason.to_owned()),
+                budget_header: Some(header),
+            }),
+            Err(()) => Ok(AuthDecision::InternalError),
         }
     }
     fn finish_admission(
@@ -1183,13 +1420,24 @@ where
         token: VerifiedAuthToken,
         request: &Request<Vec<u8>>,
         budget_header: Option<String>,
+        meter: Meter,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
         match (self.policy)(&token, request).into_admission() {
-            Ok(admitted) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
-                token,
-                admitted,
-                budget_header,
-            }))),
+            Ok(admitted) => match meter {
+                Meter::Observe | Meter::Reserve => {
+                    Ok(AuthDecision::Observed(Box::new(ObservedAdmission {
+                        token,
+                        admitted,
+                        admitted_maximum: None,
+                    })))
+                }
+                Meter::Buffered => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
+                    token,
+                    admitted,
+                    budget_header,
+                    admitted_maximum: None,
+                }))),
+            },
             Err(Deny) => Ok(AuthDecision::Forbidden {
                 budget_header: None,
             }),
@@ -1291,6 +1539,9 @@ where
             role,
             ps: query.ps.clone(),
         };
+        if !gate.lock().caller_seen(&caller) {
+            return problem(StatusCode::FORBIDDEN, "access_denied");
+        }
         let value = {
             let ledger = gate.lock();
             answer_usage(&ledger, &caller, &query, now, &report)
@@ -1346,6 +1597,17 @@ where
         let grant = gate.open_grant(token)?;
         gate.reserve(token, &grant, maximum)
     }
+    /// Drop a reservation without posting consumption.
+    ///
+    /// # Errors
+    /// Returns a protocol error when budgets are off or the reservation is unknown.
+    pub fn budget_release(&self, reservation: &Reservation) -> Result<(), ChargeError> {
+        let gate = self
+            .budgets
+            .as_ref()
+            .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
+        gate.lock().release(reservation)
+    }
     /// Commit `actual` for a reservation and return the final `AAuth-Budget` field.
     ///
     /// # Errors
@@ -1374,11 +1636,18 @@ where
             .ok_or(ChargeError::Protocol(aauth_rust_budgets::Error::AccessMode))?;
         gate.stream_header(reservation)
     }
-    /// Trailer naming header and `cost`-only field. The trailer does not restate the header.
+    /// `Trailer` header value, field name, and `cost`-only field.
+    ///
+    /// The first string is `AAuth-Budget`, the value of the HTTP `Trailer`
+    /// header. The trailer does not restate the header.
     ///
     /// # Errors
     /// Returns a protocol error when `prior` already carried `cost`.
-    pub fn budget_trailer(&self, prior: &str, cost: i64) -> Result<(String, String), ChargeError> {
+    pub fn budget_trailer(
+        &self,
+        prior: &str,
+        cost: i64,
+    ) -> Result<(String, String, String), ChargeError> {
         let gate = self
             .budgets
             .as_ref()

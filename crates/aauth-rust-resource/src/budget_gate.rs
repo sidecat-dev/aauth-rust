@@ -44,20 +44,16 @@ impl BudgetGate {
         consumed: Option<&ConsumptionRecord>,
         locked: Option<&Budget>,
     ) -> Result<BTreeMap<String, Value>, Error> {
-        // A step-up that reports consumption keeps the presented grant's unit
-        // and decimals. Later `budget_units` edits are a different scale and
-        // must not relabel that figure.
-        let offer = match locked {
-            Some(grant) => Budget::new(
-                self.default_offer,
-                grant.unit().to_owned(),
-                grant.decimals(),
-            )?,
-            None => self.offer(requested)?,
-        };
+        // A step-up offers the scale declared now. A consumption record from a
+        // grant whose unit or decimals differ is omitted rather than relabeled.
+        let offer = self.offer(requested)?;
         let mut extra = BTreeMap::new();
         extra.insert("budget".into(), offer.to_value());
-        if let Some(record) = consumed {
+        if let Some(record) = consumed
+            && locked.is_some_and(|grant| {
+                grant.unit() == offer.unit() && grant.decimals() == offer.decimals()
+            })
+        {
             extra.insert("budget_consumed".into(), record.to_value());
         }
         Ok(extra)
@@ -71,21 +67,40 @@ impl BudgetGate {
     ) -> Result<String, Error> {
         let ledger = self.lock();
         let (committed, reserved) = ledger
-            .outstanding(token.claims().jti.as_str())
+            .outstanding(token.claims().iss.as_str(), token.claims().jti.as_str())
             .unwrap_or((0, 0));
         let remaining = grant.amount() - committed - reserved;
         let header = BudgetHeader::refusal(remaining, None, grant.unit(), grant.decimals())?;
         sender_field(&header, false)
     }
 
-    pub(super) fn bound(&self, request: &Request<Vec<u8>>) -> Result<i64, ()> {
+    /// Host bound, lowered by a client `AAuth-Max-Cost` when that figure is smaller.
+    /// A client value above the host bound does not raise it.
+    pub(super) fn admitted_cost(&self, request: &Request<Vec<u8>>) -> Result<i64, ()> {
+        let host = self.default_bound;
         match request.headers().get("aauth-max-cost") {
-            None => Ok(self.default_bound),
+            None => Ok(host),
             Some(value) => {
                 let text = value.to_str().map_err(|_| ())?;
-                parse_max_cost(text).map_err(|_| ())
+                let client = parse_max_cost(text).map_err(|_| ())?;
+                Ok(client.min(host))
             }
         }
+    }
+
+    pub(super) fn remaining(
+        &self,
+        token: &VerifiedAuthToken,
+        grant: &Budget,
+    ) -> Result<i64, ChargeError> {
+        let mut ledger = self.lock();
+        ledger
+            .open(account(token, grant).map_err(ChargeError::Protocol)?)
+            .map_err(ChargeError::Protocol)?;
+        let (committed, reserved) = ledger
+            .outstanding(token.claims().iss.as_str(), token.claims().jti.as_str())
+            .ok_or(ChargeError::Protocol(Error::Malformed))?;
+        Ok(grant.amount() - committed - reserved)
     }
 
     pub(super) fn reserve(
@@ -98,7 +113,11 @@ impl BudgetGate {
         ledger
             .open(account(token, grant).map_err(ChargeError::Protocol)?)
             .map_err(ChargeError::Protocol)?;
-        ledger.reserve(token.claims().jti.as_str(), maximum)
+        ledger.reserve(
+            token.claims().iss.as_str(),
+            token.claims().jti.as_str(),
+            maximum,
+        )
     }
 
     pub(super) fn commit(
@@ -118,10 +137,14 @@ impl BudgetGate {
         self.lock().stream_header(reservation)
     }
 
-    pub(super) fn trailer(&self, prior: &str, cost: i64) -> Result<(String, String), Error> {
+    pub(super) fn trailer(
+        &self,
+        prior: &str,
+        cost: i64,
+    ) -> Result<(String, String, String), Error> {
         let parsed = aauth_rust_budgets::parse_header(prior, None, None)?;
         let trailer = trailer_field(&parsed.header, cost)?;
-        Ok((trailer.name.into(), trailer.field))
+        Ok((trailer.listed.into(), trailer.name.into(), trailer.field))
     }
 
     pub(super) fn held_header(&self, token: &VerifiedAuthToken) -> Result<String, ChargeError> {
@@ -132,9 +155,13 @@ impl BudgetGate {
         ledger
             .open(account(token, &grant).map_err(ChargeError::Protocol)?)
             .map_err(ChargeError::Protocol)?;
-        let before = ledger.outstanding(token.claims().jti.as_str());
-        let header = ledger.held_refusal(token.claims().jti.as_str(), None)?;
-        if ledger.outstanding(token.claims().jti.as_str()) != before {
+        let before = ledger.outstanding(token.claims().iss.as_str(), token.claims().jti.as_str());
+        let header = ledger.held_refusal(
+            token.claims().iss.as_str(),
+            token.claims().jti.as_str(),
+            None,
+        )?;
+        if ledger.outstanding(token.claims().iss.as_str(), token.claims().jti.as_str()) != before {
             return Err(ChargeError::Protocol(Error::Malformed));
         }
         Ok(header)
@@ -155,7 +182,14 @@ impl BudgetGate {
         ledger
             .open(account(token, &grant).map_err(ChargeError::Protocol)?)
             .map_err(ChargeError::Protocol)?;
-        ledger.complete_held(pending, token.claims().jti.as_str(), maximum, actual, at)
+        ledger.complete_held(
+            pending,
+            token.claims().iss.as_str(),
+            token.claims().jti.as_str(),
+            maximum,
+            actual,
+            at,
+        )
     }
 
     pub(super) fn open_grant(&self, token: &VerifiedAuthToken) -> Result<Budget, ChargeError> {
