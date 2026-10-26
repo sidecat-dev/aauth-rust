@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "AAuth Rich Resource Requests: vocabularies, documents, grants, proposals, hints, and token claims"
+description = "AAuth Rich Resource Requests: vocabularies, authoritative definitions, documents, grants, proposals, hints, and token claims"
 
 [dependencies]
 aauth-rust-budgets.workspace = true

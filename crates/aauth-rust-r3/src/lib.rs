@@ -1,23 +1,32 @@
 //! AAuth Rich Resource Requests (`draft-hardt-aauth-r3`).
 //!
 //! Vocabulary grammar, whole-set algebra, R3 documents, direct grants,
-//! per-call proposals, operation access hints, and the R3 claims of Resource
-//! and Auth tokens. A host registers one codec per vocabulary; codecs for the
-//! seven standard vocabularies are included. This crate does not fetch a
-//! definition or artifact, decide policy, execute a call, or bind a token to a
-//! request.
+//! per-call proposals, operation access hints, authoritative definitions, and
+//! the R3 claims of Resource and Auth tokens. A host registers one codec per
+//! vocabulary; codecs for the seven standard vocabularies are included.
+//! Definition parsers are included for the MCP, OpenAPI, AsyncAPI, and
+//! GraphQL JSON sources; WSDL, OData, and gRPC definitions are not parsed yet.
+//! This crate does not fetch a definition or artifact, decide policy, execute
+//! a call, or bind a token to a request.
 #![deny(missing_docs)]
 
 mod annotation;
+mod asyncapi_definition;
 mod budget_token;
+mod definition;
+mod definition_support;
 mod digest;
 mod document;
 mod envelope;
 mod error;
 mod grant;
+mod graphql_definition;
 mod hints;
 mod issuance;
+mod json_schema;
 mod jsonvalue;
+mod mcp_definition;
+mod openapi_definition;
 mod proposal;
 mod reference;
 mod standard;
@@ -26,16 +35,25 @@ mod uri;
 mod vocabulary;
 
 pub use annotation::AnnotationEncoding;
+pub use asyncapi_definition::AsyncApiDocumentSource;
 pub use budget_token::{
     mint_budget_auth_token, mint_budget_resource_token, verify_budget_auth_token,
     verify_budget_resource_token,
+};
+pub use definition::{
+    AuthoritativeSnapshot, DefinedOperation, DefinitionCheckError, DefinitionCodec,
+    DefinitionError, DefinitionErrorKind, DefinitionMaterial, DefinitionParser,
+    DefinitionRegistration, DefinitionRegistry, SourceEncoding, SourceReceipt,
 };
 pub use digest::digest;
 pub use document::{Display, Document, DocumentOptions, validate_document_account};
 pub use error::Error;
 pub use grant::{Authorization, Grant};
+pub use graphql_definition::GraphQlIntrospectionSource;
 pub use hints::{AccessMode, ExpectedAccess, OperationHints};
 pub use issuance::{IssuanceError, IssuanceRecord, IssuanceStore};
+pub use mcp_definition::{ToolsListPage, ToolsListSnapshot};
+pub use openapi_definition::OpenApiDocumentSource;
 pub use proposal::{
     Parameter, ParameterDigest, Parameters, PresentedParameter, Proposal, ProposalDisplay,
     ProposalOptions, validate_proposal_account,
@@ -56,6 +74,10 @@ pub use vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Registry
 
 #[cfg(test)]
 mod artifact_tests;
+#[cfg(test)]
+mod definition_adapter_tests;
+#[cfg(test)]
+mod definition_tests;
 #[cfg(test)]
 mod hints_tests;
 #[cfg(test)]

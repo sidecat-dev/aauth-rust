@@ -277,6 +277,11 @@ impl Vocabulary {
         })
     }
 
+    /// Prove this value holds a codec registration.
+    pub(crate) fn validate_registration(&self) -> Result<(), Error> {
+        self.registration().map(|_| ())
+    }
+
     fn registration(&self) -> Result<&Registration, Error> {
         uri::validate(self.uri.as_str())?;
         self.annotation.validate()?;
@@ -348,6 +353,13 @@ pub(crate) fn compatible_grants(
     right: &GrantedOperations,
 ) -> Result<(), Error> {
     compatible_operations(&left.value, &right.value)
+}
+
+pub(crate) fn compatible_set_and_operation(
+    operation_set: &OperationSet,
+    operation: &Operation,
+) -> Result<(), Error> {
+    compatible_operations(&operation_set.value, &operation.value)
 }
 
 fn compatible_operations(left: &OperationValue, right: &OperationValue) -> Result<(), Error> {
