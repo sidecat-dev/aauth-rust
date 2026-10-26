@@ -887,7 +887,10 @@ fn proposal_with_parameter(value: &str) -> String {
 }
 
 fn refused_for_depth<T>(result: Result<T, Error>) -> bool {
-    result.is_err_and(|err| err.to_string().contains("JSON nesting exceeds the depth limit"))
+    result.is_err_and(|err| {
+        err.to_string()
+            .contains("JSON nesting exceeds the depth limit")
+    })
 }
 
 #[test]
@@ -920,7 +923,9 @@ fn inline_parameters_compare_at_the_depth_limit_and_refuse_past_it() -> Result<(
 
     let past = nested_json(128, "1");
     assert!(refused_for_depth(Parameter::inline(past.as_bytes())));
-    assert!(refused_for_depth(PresentedParameter::inline(past.as_bytes())));
+    assert!(refused_for_depth(PresentedParameter::inline(
+        past.as_bytes()
+    )));
     Ok(())
 }
 
@@ -951,8 +956,14 @@ fn very_deep_json_is_refused_through_public_entry_points() {
     let deep = nested_json(1_000_000, "1");
     let document = document_with_operation(&deep);
     let proposal = proposal_with_parameter(&deep);
-    assert!(refused_for_depth(registry.parse_document(document.as_bytes())));
-    assert!(refused_for_depth(registry.parse_proposal(proposal.as_bytes())));
+    assert!(refused_for_depth(
+        registry.parse_document(document.as_bytes())
+    ));
+    assert!(refused_for_depth(
+        registry.parse_proposal(proposal.as_bytes())
+    ));
     assert!(refused_for_depth(Parameter::inline(deep.as_bytes())));
-    assert!(refused_for_depth(PresentedParameter::inline(deep.as_bytes())));
+    assert!(refused_for_depth(PresentedParameter::inline(
+        deep.as_bytes()
+    )));
 }
