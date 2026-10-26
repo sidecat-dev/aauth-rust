@@ -223,9 +223,10 @@ and decimals, and does not exceed the parameter or its own cap. A parameter
 below the cap is issued at that amount. A decimals mismatch, an amount above
 the resource offer, a malformed object, or a parameter when the resource token
 had no budget is `400` `invalid_budget`. Omitting the parameter issues no
-budget claim. `IssuerPolicy::omit_above` sends no parameter when the resource
-offer amount is above that limit. An offer equal to the limit is still narrowed
-to the cap. A person server whose cached unit disagrees with the resource
+budget claim. `IssuerPolicy::omit_above` omits the four-party parameter when
+the resource offer amount is above that limit. Three-party issuance still
+narrows that offer to the cap and counts the grant. An offer equal to the
+limit is still narrowed to the cap. A person server whose cached unit disagrees with the resource
 token's decimals returns `400` `invalid_budget` and does not rescale. The
 resource meters an already issued token on the signed unit and decimals,
 including after `replace_budget_units`. The host's `default_bound` is the
@@ -254,17 +255,21 @@ an observed admission is `500` `server_error` and does not commit. Streaming
 uses `budget_stream_header` (`reserved`, no `cost`) and `budget_trailer`. That
 call returns the `Trailer` header value `AAuth-Budget`, the field name
 `aauth-budget`, and a field that carries `cost` only. A response that never
-delivers the trailer is complete. Held completion stores one cost for
+delivers the trailer is complete. `into_response` and `into_result` on a hold
+release the reservation, so the grant and `as_of` are not pinned. Held
+completion stores one cost for
 `(pending, iss, jti)` and a replay does not add consumption. The ledger key is
 `(iss, jti)`. The same issuer and `jti` with a different grant, or a different
 `ps`, `sub`, or `aud`, is `500` and omits `AAuth-Budget`. The same `jti` from
 two issuers keeps two grants. Consumption for one person is aggregated on
 `(ps, sub, aud)`. A high per-person total does not refuse a request that fits
-its token. `POST` on the usage endpoint answers a caller who has appeared as
-`iss` or `ps` on an accepted token. A caller who has not is `403`
-`access_denied`. The caller signs with `jwks_uri`, covering `content-type` and
-`content-digest`. An unsigned request, a `jwt` scheme, or a body the digest
-does not cover is `401`. While a reservation is open, `as_of` stays at the
+its token. Two person servers behind one access server keep separate totals.
+`POST` on the usage endpoint returns figures only for tokens whose `iss` or
+`ps` names the caller. An unrecognized scope key, including a caller who has
+not appeared, is `200` with `usage` omitted. The caller signs with `jwks_uri`,
+covering `content-type` and `content-digest`. An unsigned request, a `jwt`
+scheme, or a body the digest does not cover is `401`. While a reservation is
+open, `as_of` stays at the
 newest commit time and does not move backward when a later commit carries an
 earlier timestamp. With no reservation open, `as_of` is the request time.
 The response signature covers `@status`, `content-type`, `content-digest`,

@@ -49,7 +49,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(child) = &context.subagent {
             body["subagent_token"] = json!(child.compact());
         }
-        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss)?;
+        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss, true)?;
         if let Some(sent) = &sent {
             body["budget"] = sent.to_value();
         }

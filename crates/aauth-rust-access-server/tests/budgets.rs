@@ -224,6 +224,11 @@ fn decimals_mismatch_amount_above_offer_and_a_budget_without_an_offer_are_reject
     let malformed = server().handle(&request(offer, Some(json!({"amount": 1}))));
     assert_eq!(malformed.status(), 400);
     assert_eq!(error(&malformed), "invalid_budget");
+    let mut stale = BTreeMap::new();
+    stale.insert("budget".into(), budget(5_000, 2));
+    let resource_scale = server().handle(&request(stale, None));
+    assert_eq!(resource_scale.status(), 400);
+    assert_eq!(error(&resource_scale), "invalid_budget");
 }
 
 #[test]

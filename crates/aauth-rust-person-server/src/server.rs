@@ -221,8 +221,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
     /// Account for budgets. `policy.cap` is this server's per-token maximum and
     /// the standing sum of outstanding grants for one subject at one resource.
-    /// `policy.omit_above` sends no parameter when the resource offer amount is
-    /// above that limit. An empty `policy.units` cache accepts the scale signed on the resource token.
+    /// `policy.omit_above` omits the four-party PS-to-AS parameter when the
+    /// resource offer amount is above that limit. Three-party issuance still
+    /// narrows that offer and counts the grant. An empty `policy.units` cache
+    /// accepts the scale signed on the resource token.
     ///
     /// # Errors
     /// Returns [`ConfigurationError`] when `cap` or `omit_above` is outside the carrier.
@@ -253,10 +255,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .accounted()
         })
     }
-    /// Forget outstanding allocations so the next grant sees the full cap.
+    /// Drop every live allocation for every subject.
     ///
-    /// One conformance process serves many independent exchanges. The ceiling
-    /// still applies to grants that share the book.
+    /// Tokens already issued stay valid. The next grant sees the full ceiling
+    /// while those earlier grants are still live, so the standing sum starts
+    /// over. This is not an HTTP route. It exists so one conformance process
+    /// can reset the book between scenarios.
+    #[doc(hidden)]
     pub fn clear_outstanding_budgets(&self) {
         if let Some(state) = &self.budgets {
             *state
@@ -855,7 +860,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             expires_at = expires_at.min(end);
         }
-        let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss)?;
+        let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss, false)?;
         let mut extra = std::collections::BTreeMap::new();
         if let Some(budget) = &granted_budget {
             extra.insert("budget".into(), budget.to_value());
@@ -969,6 +974,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         offer: Option<&Budget>,
         subject: &str,
         resource: &str,
+        parameter: bool,
     ) -> Result<Option<Budget>, Failure> {
         let Some(state) = &self.budgets else {
             return Ok(None);
@@ -976,10 +982,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Some(offer) = offer else {
             return Ok(None);
         };
-        if state
-            .policy
-            .omit_above
-            .is_some_and(|limit| offer.amount() > limit)
+        // Only the PS-to-AS parameter may be omitted. Three-party issuance
+        // still narrows and counts the grant. Omitting the claim there would
+        // leave this library's resource serving the token unmetered.
+        if parameter
+            && state
+                .policy
+                .omit_above
+                .is_some_and(|limit| offer.amount() > limit)
         {
             return Ok(None);
         }

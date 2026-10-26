@@ -13,10 +13,12 @@ pub struct IssuerPolicy {
     /// Latest Unix second an issued auth token may expire. A calendar-period
     /// ceiling passes the period boundary. `None` leaves the other lifetimes alone.
     pub period_end: Option<i64>,
-    /// Offer amount above which the person server sends no budget parameter.
+    /// Offer amount above which the person server omits the four-party parameter.
     ///
-    /// This is not a narrowing cap. An offer equal to the limit is still narrowed
-    /// to [`Self::cap`]. `None` narrows every offer the cache accepts.
+    /// This is not a narrowing cap, and it does not apply when the person server
+    /// itself issues the auth token. Three-party issuance still narrows to
+    /// [`Self::cap`] and counts the grant. An offer equal to the limit is still
+    /// narrowed to the cap. `None` narrows every offer the cache accepts.
     pub omit_above: Option<i64>,
 }
 
@@ -36,8 +38,9 @@ impl IssuerPolicy {
         }
     }
 
-    /// Send no budget parameter when the resource offer amount is above `limit`.
+    /// Omit the four-party PS-to-AS parameter when the offer amount is above `limit`.
     ///
+    /// Three-party issuance ignores the limit and still narrows to the cap.
     /// An offer equal to `limit` is still narrowed to the cap.
     pub fn omit_above(mut self, limit: i64) -> Self {
         self.omit_above = Some(limit);

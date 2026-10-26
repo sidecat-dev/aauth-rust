@@ -1,7 +1,7 @@
 //! Three-party issuance copies the resource unit and narrows the amount.
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
-use aauth_rust_budgets::{Budget, IssuerPolicy, UnitDeclaration};
+use aauth_rust_budgets::{IssuerPolicy, UnitDeclaration, parse_budget};
 use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, AuthToken, Confirmation, ResourceClaims, TokenError,
@@ -128,7 +128,14 @@ fn call(server: &Server, path: &str, body: Value) -> http::Response<Vec<u8>> {
 
 #[test]
 fn person_server_narrows_amount_without_changing_unit_or_decimals() {
-    let server = server();
+    let declared = UnitDeclaration::with_max(
+        "USD",
+        6,
+        10_000_000,
+        "pay <b>now</b> [x](javascript:alert(1))",
+    )
+    .unwrap();
+    let server = server_with(IssuerPolicy::capped(2_000_000, vec![declared.clone()]));
     let person = call(
         &server,
         "/person",
@@ -200,12 +207,25 @@ fn person_server_narrows_amount_without_changing_unit_or_decimals() {
     assert_eq!(got["unit"], "USD");
     assert_eq!(got["decimals"], 6);
     assert_eq!(server.budget_accounted(), Some(2_000_000));
+    let offer = parse_budget(resource.extra.get("budget").unwrap()).unwrap();
+    assert_eq!(
+        (offer.amount(), offer.unit(), offer.decimals()),
+        (5_000_000, "USD", 6)
+    );
     let figure = server
-        .budget_consent(&Budget::new(2_000_000, "USD", 6).unwrap(), "pay <b>now</b>")
+        .budget_consent(&offer, declared.description())
         .unwrap();
-    assert_eq!(figure.amount, "$2.00");
-    assert!(!figure.description.contains('<'));
+    assert_eq!(figure.amount, "$5.00");
     assert_ne!(figure.amount, figure.description);
+    assert!(!figure.description.contains('<'));
+    assert!(
+        !figure
+            .description
+            .to_ascii_lowercase()
+            .contains("javascript:")
+    );
+    assert!(!figure.description.contains("$5.00"));
+    assert!(!figure.description.contains("5000000"));
 }
 
 fn person_token(server: &Server) -> String {
@@ -328,14 +348,100 @@ fn clearing_outstanding_budgets_opens_the_cap_for_the_next_exchange() {
 }
 
 #[test]
-fn an_offer_above_the_host_limit_is_omitted_and_one_at_the_limit_is_narrowed() {
+fn an_offer_above_the_host_limit_is_still_narrowed_in_three_party_access() {
     let server = server_with(IssuerPolicy::capped(2_000_000, dollars()).omit_above(5_000_000));
-    let person = person_token(&server);
-    let fitted = issue_offer(&server, &person, "challenge-fit", 5_000_000);
+    let fitted = issue_offer(&server, &person_token(&server), "challenge-fit", 5_000_000);
     assert_eq!(fitted.claims().extra["budget"]["amount"], 2_000_000);
-    let wide = issue_offer(&server, &person, "challenge-wide", 9_000_000);
-    assert!(!wide.claims().extra.contains_key("budget"));
-    assert_eq!(server.budget_accounted(), Some(2_000_000));
+    let wide_server = server_with(IssuerPolicy::capped(2_000_000, dollars()).omit_above(5_000_000));
+    let wide = issue_offer(
+        &wide_server,
+        &person_token(&wide_server),
+        "challenge-wide",
+        9_000_000,
+    );
+    assert_eq!(wide.claims().extra["budget"]["amount"], 2_000_000);
+    assert_eq!(wide_server.budget_accounted(), Some(2_000_000));
+}
+
+struct CapturedParameter(Arc<Mutex<Vec<Option<i64>>>>);
+impl Federation for CapturedParameter {
+    fn endpoint(&self, access_server: &str) -> Result<String, FederationError> {
+        if access_server == AS {
+            Ok(format!("{AS}/token"))
+        } else {
+            Err(FederationError)
+        }
+    }
+    fn send(&self, request: &Request<Vec<u8>>) -> Result<Response<Vec<u8>>, FederationError> {
+        let body: Value = serde_json::from_slice(request.body()).expect("ps request is json");
+        let amount = body
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(|amount| amount.as_i64());
+        self.0.lock().unwrap().push(amount);
+        Err(FederationError)
+    }
+}
+
+#[test]
+fn omit_above_drops_only_the_four_party_parameter() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = PersonServer::new(
+        Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        Host,
+        clock as fn() -> i64,
+        ids as fn() -> String,
+    )
+    .unwrap()
+    .with_federation(CapturedParameter(Arc::clone(&seen)))
+    .with_budgets(IssuerPolicy::capped(2_000_000, dollars()).omit_above(5_000_000))
+    .unwrap();
+    let person = person_token(&server);
+    for (challenge, amount) in [("omit-wide", 9_000_000), ("omit-fit", 5_000_000)] {
+        let claims: Value =
+            serde_json::from_slice(aauth_rust_jose::Jws::parse(&person).unwrap().payload())
+                .unwrap();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "budget".into(),
+            json!({"amount": amount, "unit": "USD", "decimals": 6}),
+        );
+        let resource_token = mint_resource_token(
+            &SigningKey::from_seed([5; 32]),
+            "resource",
+            &ResourceClaims {
+                iss: RESOURCE.into(),
+                dwk: "aauth-resource.json".into(),
+                aud: AS.into(),
+                ps: PS.into(),
+                sub: "directed".into(),
+                jti: challenge.into(),
+                presented_jti: claims["jti"].as_str().unwrap().into(),
+                agent_jkt: agent().public_jwk().thumbprint().unwrap(),
+                iat: 1000,
+                exp: 1300,
+                scope: Some("read".into()),
+                account: None,
+                login_hint: None,
+                nbf: None,
+                tenant: None,
+                mission_s256: None,
+                extra,
+            },
+        )
+        .unwrap();
+        let _ = call(
+            &server,
+            "/token",
+            json!({
+                "resource_token": resource_token,
+                "presented_token": person
+            }),
+        );
+    }
+    assert_eq!(*seen.lock().unwrap(), vec![None, Some(2_000_000)]);
 }
 
 #[test]

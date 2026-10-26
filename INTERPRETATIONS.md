@@ -63,7 +63,10 @@ the draft required each spelling.
   not convert. A counter that would exceed 15 digits is omitted. When
   `all_time` would exceed that limit, or is zero, the `usage` object is
   omitted. An unrecognized scope key also omits `usage`, so those two cases
-  are not distinguished on the wire.
+  are not distinguished on the wire. A caller who has not appeared on an
+  accepted token is the same `200` with `usage` omitted, not `403`. A caller
+  who has appeared still does not receive another caller's `tenant`,
+  `mission_s256`, or key thumbprint.
 - A JSON number that is not an integer in the i64 range, including `1.0`, is
   malformed. It is not rounded.
 - Duplicate `budget_units` names are rejected at configuration. An empty unit
@@ -85,13 +88,18 @@ the draft required each spelling.
   sends `Cache-Control: no-store`. That field is outside the signature base.
   A parser still accepts an unsigned usage body. The resource's `usage`
   method always signs.
-- `IssuerPolicy::omit_above` sends no budget parameter when the resource
-  offer amount is above that limit. An offer equal to the limit is still
-  narrowed to the cap. The standing ceiling is separate: a later grant is
-  narrowed by outstanding allocations for that subject at that resource.
-  `clear_outstanding_budgets` drops that book. Grants after the clear see
-  the full cap again. The conformance adapter clears it when a scenario
-  starts, so one process does not carry the ceiling across scenarios.
+- `IssuerPolicy::omit_above` omits the four-party PS-to-AS parameter when the
+  resource offer amount is above that limit. It does not apply to three-party
+  issuance: the person server still narrows the offer and counts the grant.
+  Omitting the claim there would leave this library's resource serving the
+  token unmetered, and the ceiling would not count it. An offer equal to the
+  limit is still narrowed to the cap. The standing ceiling is separate: a
+  later grant is narrowed by outstanding allocations for that subject at that
+  resource. `clear_outstanding_budgets` is a hidden conformance hook. It drops
+  every live allocation for every subject. Tokens already issued stay valid,
+  and the next grant sees the full cap. The conformance adapter calls it when
+  a scenario starts, so one process does not carry the ceiling across
+  scenarios. It is not an HTTP route.
 - This library is not an intermediary, so it does not implement a rule about
   rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
   with normative keywords sit in non-normative prior art and are not executed.
