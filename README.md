@@ -11,6 +11,11 @@ including opt-in AS payment and approval, while retaining consent and polling.
 [CONFORMANCE.md](CONFORMANCE.md) names
 the tested behavior and limits.
 
+The separate [R3 library](crates/aauth-rust-r3/README.md) supplies operation
+vocabularies, documents, per-call proposals and signed-reference verification.
+Its built-consumer coverage is separate from the role endpoints described above;
+an integrated R3 authorization exchange remains unfinished.
+
 The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
 is the project home. Development forks may carry changes before upstream accepts
 them. The commands below start in a development checkout containing this README

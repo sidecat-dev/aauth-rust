@@ -49,6 +49,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(child) = &context.subagent {
             body["subagent_token"] = json!(child.compact());
         }
+        let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss, true)?;
+        if let Some(sent) = &sent {
+            body["budget"] = sent.to_value();
+        }
         let mut request = Request::builder()
             .method("POST")
             .uri(uri)
@@ -69,7 +73,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
-        self.accept_federation(response, agent, prepared, &endpoint)
+        self.accept_federation(response, agent, prepared, &endpoint, sent)
     }
     pub(super) fn accept_federation(
         &self,
@@ -77,6 +81,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
         endpoint: &str,
+        sent: Option<Budget>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -89,7 +94,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if self.deferred.is_some()
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
-            return self.defer_federation(&response, agent, resource, presented, context, endpoint);
+            return self.defer_federation(
+                &response,
+                agent,
+                resource,
+                presented,
+                context,
+                endpoint,
+                sent.clone(),
+            );
         }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
@@ -211,7 +224,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.tenant != r.tenant
             || c.account != r.account
             || c.mission_s256 != r.mission_s256
-            || unsupported(&c.extra)
+            || extra_blocks(&c.extra, self.budgets.is_some(), false)
             || c.exp > agent.claims().exp
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
@@ -219,6 +232,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
             return Err(failed(Reason::InvalidGrant));
+        }
+        let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
+        if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {
+            return Err(failed(Reason::InvalidGrant));
+        }
+        if let Some(budget) = &issued
+            && let Some(state) = &self.budgets
+        {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert_owned(
+                    c.jti.clone(),
+                    budget.amount(),
+                    c.exp,
+                    super::budget_owner(&c.sub, &c.aud),
+                );
         }
         let mut record = self.record(
             compact,

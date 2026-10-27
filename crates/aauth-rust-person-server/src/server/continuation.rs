@@ -78,6 +78,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.deferred = Some(config);
         Ok(self)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn defer_federation(
         &self,
         response: &Response<Vec<u8>>,
@@ -86,6 +87,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         presented: &Presented,
         context: &AuthorizationRequest,
         endpoint: &str,
+        sent: Option<Budget>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let d = self.deferred.as_ref().ok_or_else(Failure::internal)?;
         let pending = PendingResponse::parse(endpoint, response).map_err(|_| {
@@ -128,7 +130,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let location = format!("{}/token/pending/{id}", self.config.signed_origin);
         let ps_pending = self.agent_pending(&location, &pending)?;
         let interval = d.retry_after.max(pending.retry_after);
-        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(interval as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now)});
+        let sent_budget = sent.as_ref().map(Budget::to_value).unwrap_or(Value::Null);
+        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(interval as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now),"sent_budget":sent_budget});
         d.store
             .insert(&id, value.clone())
             .map_err(|_| Failure::internal())?;
@@ -406,6 +409,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     &original_agent,
                     &prepared,
                     required_string(&value, "endpoint")?,
+                    stored_sent_budget(&value)?,
                 )
             })();
             let held = d
@@ -511,6 +515,15 @@ fn safe_id(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
+fn stored_sent_budget(value: &Value) -> Result<Option<Budget>, Failure> {
+    match value.get("sent_budget") {
+        None | Some(Value::Null) => Ok(None),
+        Some(other) => parse_budget(other)
+            .map(Some)
+            .map_err(|_| Failure::internal()),
+    }
+}
+
 fn number(v: &Value, k: &str) -> Result<i64, Failure> {
     v[k].as_i64().ok_or_else(Failure::internal)
 }

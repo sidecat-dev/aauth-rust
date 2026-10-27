@@ -28,7 +28,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return Err(super::revocation::revoked_parameter(parameter));
                 }
                 let c = token.claims();
-                if unsupported(&c.extra) {
+                if extra_blocks(&c.extra, false, false) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
                 }
                 Presented {
@@ -67,8 +67,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 } else {
                     c.dwk == "aauth-person.json"
                 };
-                if !valid_role || unsupported(&c.extra) {
+                let allow_budget = self.budgets.is_some();
+                if !valid_role || extra_blocks(&c.extra, allow_budget, false) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
+                }
+                if allow_budget && let Some(budget) = c.extra.get("budget") {
+                    aauth_rust_budgets::parse_budget(budget)
+                        .map_err(|_| Failure::parameter("invalid_budget"))?;
                 }
                 Presented {
                     kind: TokenKind::Auth,

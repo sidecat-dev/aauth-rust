@@ -264,7 +264,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 waiting = true;
                 return Ok(response);
             }
-            self.accept_federation(response, &agent, &prepared, endpoint)
+            self.accept_federation(
+                response,
+                &agent,
+                &prepared,
+                endpoint,
+                stored_sent_budget(&value).map_err(|_| Failure::internal())?,
+            )
         })();
         let mut response = result.unwrap_or_else(Failure::response);
         let current = (self.clock)();

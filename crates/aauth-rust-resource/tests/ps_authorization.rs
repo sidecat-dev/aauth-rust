@@ -649,7 +649,7 @@ fn valid_auth_from_access_discovery_cannot_enter_ps_authorization_resource() {
 fn auth_challenge_debug_does_not_print_forwardable_token_bytes() {
     let resource = resource(Arc::new(AtomicUsize::new(0)), true);
     let decision = resource.authorize(&signed(&person()), NOW, "challenge");
-    let AuthDecision::AuthTokenRequired { resource_token } = &decision else {
+    let AuthDecision::AuthTokenRequired { resource_token, .. } = &decision else {
         panic!("missing challenge")
     };
     assert!(!format!("{decision:?}").contains(resource_token));

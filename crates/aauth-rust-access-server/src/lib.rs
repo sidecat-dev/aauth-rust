@@ -38,6 +38,10 @@
 mod continuation;
 mod revocation;
 mod wire;
+use aauth_rust_budgets::{
+    Budget, IssuerPolicy, MAX_AMOUNT, check_declared, issue_auth_budget, parse_budget,
+    parse_resource_claims,
+};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
     ResourceToken, TokenError, VerifiedAgentToken, VerifiedResourceToken, mint_auth_token,
@@ -103,6 +107,8 @@ pub struct AuthorizationRequest {
     pub resource: VerifiedResourceToken,
     /// Nonempty distinct requested Core scope values.
     pub scopes: Vec<String>,
+    /// Budget the person server asked to grant. `None` means issue no budget claim.
+    pub budget: Option<Budget>,
 }
 /// Resource-policy grant; scopes must be a nonempty subset of the request.
 #[derive(Clone, Debug)]
@@ -140,6 +146,7 @@ pub struct AccessServer<K, P, C, I> {
     ids: I,
     deferred: Option<continuation::Deferred>,
     revocation: Option<revocation::Gate>,
+    budgets: Option<IssuerPolicy>,
 }
 struct Resolver<'a, K> {
     config: &'a Config,
@@ -197,7 +204,22 @@ impl<
             ids,
             deferred: None,
             revocation: None,
+            budgets: None,
         })
+    }
+    /// Cap issued budgets. An empty unit cache accepts the signed scale.
+    ///
+    /// # Errors
+    /// Returns [`ConfigurationError`] when `cap` is outside the carrier.
+    pub fn with_budgets(mut self, policy: IssuerPolicy) -> Result<Self, ConfigurationError> {
+        if policy
+            .cap
+            .is_some_and(|cap| !(0..=MAX_AMOUNT).contains(&cap))
+        {
+            return Err(ConfigurationError);
+        }
+        self.budgets = Some(policy);
+        Ok(self)
     }
     /// Metadata served at /.well-known/aauth-access.json. No unsupported endpoints
     /// or companion capabilities are advertised.
@@ -311,13 +333,15 @@ impl<
             .as_object()
             .ok_or_else(|| Failure::parameter("invalid_request"))?;
         if object.keys().any(|k| {
-            ![
+            let known = [
                 "agent_token",
                 "subagent_token",
                 "resource_token",
                 "presented_token",
             ]
-            .contains(&k.as_str())
+            .contains(&k.as_str());
+            let budget = self.budgets.is_some() && k == "budget";
+            !known && !budget
         }) {
             return Err(Failure::parameter("invalid_request"));
         }
@@ -363,13 +387,20 @@ impl<
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
             || r.mission_s256.is_some()
-            || unsupported(&r.extra)
+            || extra_blocks(&r.extra, self.budgets.is_some(), self.budgets.is_some())
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
+        let resource_budget = self.resource_budget(&r.extra, &r.presented_jti)?;
+        let parameter = self.budget_parameter(object.get("budget"), resource_budget.as_ref())?;
         let presented_compact = required(body, "presented_token")?;
         self.refuse_revoked_parameter(presented_compact, now, "presented")?;
-        let presented = presented(presented_compact, &self.resolver(), now)?;
+        let presented = presented(
+            presented_compact,
+            &self.resolver(),
+            now,
+            self.budgets.is_some(),
+        )?;
         presented.matches(r)?;
         let requested_scopes = scopes(r.scope.as_deref().unwrap_or(""))
             .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
@@ -379,8 +410,65 @@ impl<
             subagent,
             resource: resource.clone(),
             scopes: requested_scopes,
+            budget: parameter,
         };
         Ok((context, presented))
+    }
+    fn resource_budget(
+        &self,
+        extra: &std::collections::BTreeMap<String, Value>,
+        presented_jti: &str,
+    ) -> Result<Option<Budget>, Failure> {
+        if self.budgets.is_none() {
+            return Ok(None);
+        }
+        let claims = parse_resource_claims(extra, presented_jti)
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        if let Some(budget) = &claims.budget {
+            check_declared(budget, &self.budgets.as_ref().expect("budgets").units)
+                .map_err(|_| Failure::parameter("invalid_budget"))?;
+        }
+        Ok(claims.budget)
+    }
+    fn budget_parameter(
+        &self,
+        value: Option<&Value>,
+        offer: Option<&Budget>,
+    ) -> Result<Option<Budget>, Failure> {
+        let Some(policy) = &self.budgets else {
+            return Ok(None);
+        };
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let parameter = parse_budget(value).map_err(|_| Failure::parameter("invalid_budget"))?;
+        let Some(offer) = offer else {
+            return Err(Failure::parameter("invalid_budget"));
+        };
+        check_declared(&parameter, &policy.units)
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        aauth_rust_budgets::validate_narrowing(offer, &parameter)
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        Ok(Some(parameter))
+    }
+    fn issued_extra(
+        &self,
+        context: &AuthorizationRequest,
+    ) -> Result<std::collections::BTreeMap<String, Value>, Failure> {
+        let Some(policy) = &self.budgets else {
+            return Ok(std::collections::BTreeMap::new());
+        };
+        let claims = context.resource.claims();
+        let offer = parse_resource_claims(&claims.extra, &claims.presented_jti)
+            .map_err(|_| Failure::parameter("invalid_budget"))?
+            .budget;
+        let issued = issue_auth_budget(offer.as_ref(), context.budget.as_ref(), policy)
+            .map_err(|_| Failure::parameter("invalid_budget"))?;
+        let mut extra = std::collections::BTreeMap::new();
+        if let Some(budget) = issued {
+            extra.insert("budget".into(), budget.to_value());
+        }
+        Ok(extra)
     }
     fn issue(
         &self,
@@ -399,11 +487,14 @@ impl<
         }
         let issued_at = (self.clock)();
         current(issued_at, &context, &presented)?;
-        let expires_at = issued_at
+        let mut expires_at = issued_at
             .saturating_add(decision.lifetime)
             .min(context.agent.claims().exp)
             .min(holder.claims().exp)
             .min(presented.exp);
+        if let Some(end) = self.budgets.as_ref().and_then(|policy| policy.period_end) {
+            expires_at = expires_at.min(end);
+        }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-access.json".into(),
@@ -421,7 +512,7 @@ impl<
             tenant: r.tenant.clone(),
             mission_s256: None,
             nbf: None,
-            extra: Default::default(),
+            extra: self.issued_extra(&context)?,
         };
         let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
             .map_err(|_| Failure::internal())?;
@@ -468,14 +559,19 @@ impl Presented {
         Ok(())
     }
 }
-fn presented(compact: &str, keys: &dyn AgentKeyResolver, now: i64) -> Result<Presented, Failure> {
+fn presented(
+    compact: &str,
+    keys: &dyn AgentKeyResolver,
+    now: i64,
+    budgets: bool,
+) -> Result<Presented, Failure> {
     let result = (|| -> Result<Presented, TokenError> {
         let jws = Jws::parse(compact)?;
         match jws.header().get("typ").and_then(Value::as_str) {
             Some("aa-person+jwt") => {
                 let t = PersonToken::parse(compact)?.verify(keys, now)?;
                 let c = t.claims();
-                if unsupported(&c.extra) {
+                if extra_blocks(&c.extra, false, false) {
                     return Err(TokenError::InvalidJwt);
                 }
                 Ok(Presented {
@@ -494,8 +590,11 @@ fn presented(compact: &str, keys: &dyn AgentKeyResolver, now: i64) -> Result<Pre
             Some("aa-auth+jwt") => {
                 let t = AuthToken::parse(compact)?.verify(keys, now)?;
                 let c = t.claims();
-                if unsupported(&c.extra) {
+                if extra_blocks(&c.extra, budgets, false) {
                     return Err(TokenError::InvalidJwt);
+                }
+                if budgets && let Some(budget) = c.extra.get("budget") {
+                    parse_budget(budget).map_err(|_| TokenError::InvalidJwt)?;
                 }
                 Ok(Presented {
                     issuer: c.iss.clone(),
@@ -567,16 +666,15 @@ fn scopes(value: &str) -> Option<Vec<String>> {
         Some(values)
     }
 }
-fn unsupported(extra: &std::collections::BTreeMap<String, Value>) -> bool {
-    [
-        "interaction",
-        "r3_uri",
-        "r3_s256",
-        "r3_granted",
-        "r3_per_call",
-        "budget",
-        "budget_consumed",
-    ]
-    .iter()
-    .any(|k| extra.contains_key(*k))
+fn extra_blocks(
+    extra: &std::collections::BTreeMap<String, Value>,
+    allow_budget: bool,
+    allow_consumed: bool,
+) -> bool {
+    extra.keys().any(|name| match name.as_str() {
+        "interaction" | "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" => true,
+        "budget" => !allow_budget,
+        "budget_consumed" => !allow_consumed,
+        _ => false,
+    })
 }

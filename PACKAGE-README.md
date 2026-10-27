@@ -18,11 +18,13 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-access-server` | Access Server grant issuance and deferred continuations. |
 | `aauth-rust-person-server` | Person bindings, consent, credential issuance and federation custody. |
 | `aauth-rust-person-server-redb` | Transactional file-backed Person Server storage on supported Unix filesystems. |
+| `aauth-rust-budgets` | Budget objects, narrowing, metering, and usage counters. |
+| `aauth-rust-r3` | Vocabularies, documents, grants, and proposals. |
 | `aauth-rust-resource` | Resource request verification and application admission policy. |
 
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
-other eight crates or the workspace's complete service guides. The root
+other ten crates or the workspace's complete service guides. The root
 `README.md`, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and `SPECIFICATIONS.md`
 in the full development checkout describe executable examples, host integration,
 the implemented subset and pinned protocol sources. This is a partial protocol
@@ -40,7 +42,7 @@ aauth-rust-resource = { version = "0.1.0-alpha.2", path = "../aauth-rust/crates/
 ```
 
 Adjust the path to your checkout. A single archive cannot supply its unpublished
-sibling dependencies. To create and compile-verify all nine archives together,
+sibling dependencies. To create and compile-verify all ten archives together,
 run this from the full workspace with its lockfile:
 
 ```sh
