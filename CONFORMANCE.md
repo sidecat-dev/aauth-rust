@@ -93,6 +93,23 @@ cross-implementation equivalence is claimed by these native tests.
 advertise or negotiate R3 authorization. Unsupported R3 claims fail closed in
 that profile rather than conferring scope authority.
 
+`PsAuthorizationResource::with_r3` is an opt-in, unexecuted source batch for
+immediate, unmetered class R3 on the direct Person-Server path. Metadata names
+each host-selected definition in `r3_vocabularies`. `POST /authorize` validates
+`r3_operations` against that definition, serializes one document, commits its
+exact bytes, PS entitlement and Resource-token lineage to the host's durable
+store, and only then releases the token. A conflicting or uncertain commit is
+`500` with no token. `r3_document` serves those bytes only to the `ps` or `aud`
+signer, under its retained discovery role, after its `jwks_uri` proof verifies.
+A host-mapped route needs a verified PS Auth token and request proof whose
+`r3_granted` covers the operation, whose reference names a retained document
+of this Resource, and whose PS, subject, tenant, agent key and account match
+it. Core scope is enforced as well only when configured. Unmapped routes keep
+Core scope and refuse R3 tokens. Per-call operations are refused rather than
+challenged; proposals, budgets, missions, AS federation and deferred delivery
+are refused compositions. The checks in `tests/r3_class.rs` have not been run,
+and no Go journey has qualified this path.
+
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
 fetching and MCP/OpenAPI/AsyncAPI definition adapters. Actual library consumers
