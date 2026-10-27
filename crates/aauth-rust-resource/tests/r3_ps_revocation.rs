@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicI64, AtomicUsize, Ordering},
     mpsc,
 };
 use std::time::Instant;
@@ -100,7 +100,7 @@ impl R3DocumentStore for Documents {
     }
 }
 type Resource = PsAuthorizationResource<Keys, BoxedAuthPolicy>;
-fn resource() -> Arc<Resource> {
+fn resource(require_core_scope: bool) -> Arc<Resource> {
     let mapper: aauth_rust_resource::BoxedR3OperationMapper =
         Box::new(|request: &Request<Vec<u8>>| {
             Ok((request.uri().path() == "/records/read").then(|| mcp("records.read")))
@@ -133,7 +133,7 @@ fn resource() -> Arc<Resource> {
             }],
             documents: Arc::new(Documents::default()),
             operation_for_request: mapper,
-            require_core_scope: false,
+            require_core_scope,
         })
         .unwrap(),
     )
@@ -235,22 +235,34 @@ struct Fixture {
     agent: Agent,
     audit: Arc<Audit>,
     cascade: Arc<Recorder>,
+    /// The PS trusted clock; starts at `NOW`.
+    clock: Arc<AtomicI64>,
 }
 fn fixture(policy_hold: Option<Arc<Hold>>) -> Fixture {
     fixture_with(policy_hold, &[])
 }
 /// `granted_scopes` is the host decision's Core scope grant.
 fn fixture_with(policy_hold: Option<Arc<Hold>>, granted_scopes: &'static [&'static str]) -> Fixture {
-    let resource = resource();
+    fixture_full(policy_hold, granted_scopes, false)
+}
+/// `require_core_scope` configures the Resource's R3 profile.
+fn fixture_full(
+    policy_hold: Option<Arc<Hold>>,
+    granted_scopes: &'static [&'static str],
+    require_core_scope: bool,
+) -> Fixture {
+    let resource = resource(require_core_scope);
     let audit = Arc::new(Audit::default());
     let cascade = Arc::new(Recorder::default());
     let ids = AtomicUsize::new(0);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let reading = clock.clone();
     let ps = PersonServer::new(
         Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
         keys(),
         MemoryStore::default(),
         HostPolicy,
-        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || reading.load(Ordering::SeqCst)) as BoxedClock,
         Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
     )
     .unwrap()
@@ -307,6 +319,7 @@ fn fixture_with(policy_hold: Option<Arc<Hold>>, granted_scopes: &'static [&'stat
         agent: Agent::new(key, token).unwrap(),
         audit,
         cascade,
+        clock,
     }
 }
 fn post(agent: &Agent, uri: &str, body: Value) -> Request<Vec<u8>> {
@@ -395,9 +408,18 @@ fn race(
     let ps = f.ps.clone();
     let exchange = std::thread::spawn(move || ps.handle(&request));
     control.entered.recv().expect("host callback entered");
-    assert_eq!(revoke(), 200, "revocation completed before release");
+    let revoked = revoke();
     control.release.send(()).unwrap();
-    exchange.join().unwrap()
+    let response = exchange.join().unwrap();
+    // Recorded before any assertion so a failing run keeps the observed outcome.
+    eprintln!(
+        "r3 race: revocation_status={revoked} token_status={} error={:?} auth_token_present={}",
+        response.status().as_u16(),
+        member(&response, "error"),
+        member(&response, "auth_token").is_some()
+    );
+    assert_eq!(revoked, 200, "revocation completed before release");
+    response
 }
 
 #[test]
@@ -424,6 +446,122 @@ fn resource_token_revoked_during_r3_policy_releases_no_auth_token() {
     );
     assert!(member(&response, "auth_token").is_none());
     assert!(f.audit.records.lock().unwrap().is_empty());
+}
+
+#[test]
+fn known_agent_revocation_precedes_resource_expiry_after_r3_policy() {
+    let (paused, control) = hold();
+    let f = fixture(Some(paused));
+    let (person, resource_token) = tokens(&f);
+    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
+        // Revoke while the clock is still current, so the signed request is fresh.
+        let status = f
+            .ps
+            .handle(&revocation(
+                AP,
+                "aauth-agent.json",
+                "ap-1",
+                1,
+                "agent-1",
+                NOW + 1800,
+            ))
+            .status()
+            .as_u16();
+        // Then the Resource token (exp NOW+300) expires while policy is blocked;
+        // the Agent and presented tokens stay current.
+        f.clock.store(NOW + 301, Ordering::SeqCst);
+        status
+    });
+    // The known revocation is reported, not the later expiry.
+    assert_eq!(response.status(), 401);
+    assert_eq!(member(&response, "error").as_deref(), Some("revoked_jwt"));
+    assert!(member(&response, "auth_token").is_none());
+    assert!(f.audit.records.lock().unwrap().is_empty());
+}
+
+/// Sign a protected call with `auth` as the Agent.
+fn protected_call(f: &Fixture, auth: &str) -> Request<Vec<u8>> {
+    let mut call = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/records/read"))
+        .header("content-type", "application/json")
+        .body(br#"{"record":"r-1"}"#.to_vec())
+        .unwrap();
+    f.agent
+        .with_token(auth.to_owned())
+        .unwrap()
+        .sign(&mut call, NOW)
+        .unwrap();
+    call
+}
+/// A PS-signed fetch of the literal document URI.
+fn ps_fetch(uri: &str) -> Request<Vec<u8>> {
+    let mut fetch = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut fetch,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps-1".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    fetch
+}
+
+#[test]
+fn resource_requiring_core_scope_denies_an_agent_accepted_no_scope_r3_grant() {
+    let registry = standard_registry().unwrap();
+    // Scope requested; host consent grants the operation and no Core scope.
+    let f = fixture_full(None, &[], true);
+    let (verified, person, _, issued) = deliver(&f, Some("records.read"));
+    assert_eq!(issued.status(), 200);
+    let auth = member(&issued, "auth_token").unwrap();
+    let delivered = f
+        .agent
+        .verify_r3_auth_delivery(&auth, RESOURCE, &verified, &person, &registry, &keys(), NOW)
+        .expect("the Agent accepts a grant of no Core scope");
+    assert!(delivered.claims().scope.is_none());
+    // The retained document is valid and served to the PS, so the denial
+    // below is the scope requirement, not a missing document.
+    let retained = f
+        .resource
+        .r3_document(&ps_fetch(verified.reference().uri()), NOW);
+    assert_eq!(retained.status(), 200);
+    registry
+        .parse_referenced_document(verified.reference(), retained.body())
+        .unwrap();
+    let denied = f
+        .resource
+        .authorize(&protected_call(&f, &auth), NOW, "call-1")
+        .into_response();
+    assert_eq!(denied.status(), 403);
+    assert!(!denied.headers().contains_key("signature-error"));
+
+    // The same profile admits the grant that carries the required Core scope.
+    let scoped = fixture_full(None, &["records.read"], true);
+    let (verified, person, _, issued) = deliver(&scoped, Some("records.read"));
+    let auth = member(&issued, "auth_token").unwrap();
+    scoped
+        .agent
+        .verify_r3_auth_delivery(&auth, RESOURCE, &verified, &person, &registry, &keys(), NOW)
+        .unwrap();
+    match scoped
+        .resource
+        .authorize(&protected_call(&scoped, &auth), NOW, "call-2")
+    {
+        AuthDecision::Granted(admitted) => {
+            assert_eq!(admitted.r3_grant().unwrap().reference(), verified.reference());
+            assert_eq!(admitted.token().claims().scope.as_deref(), Some("records.read"));
+        }
+        other => panic!("expected Granted, got {other:?}"),
+    }
 }
 
 #[test]

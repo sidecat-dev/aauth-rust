@@ -215,9 +215,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|_| Failure::internal())?;
 
         let now = (self.clock)();
-        self.inputs_current(&agent, &resource, &presented, now)?;
-        // Fetch and policy may block; a revocation recorded meanwhile refuses here.
+        // Fetch and policy may block; a revocation recorded meanwhile refuses
+        // here. Known revocation precedes expiry, as at request verification.
         self.inputs_unrevoked(&agent, &resource, &presented, now)?;
+        self.inputs_current(&agent, &resource, &presented, now)?;
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
@@ -297,12 +298,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
-        self.inputs_current(&agent, &resource, &presented, released_at)?;
         // Checked only after the issuance is registered in the store. A
         // revocation records its token in the ledger before it reads the store
         // for its cascade: one that began before this check sees it here and
         // the token is withheld; one that begins after reads this issuance.
+        // Known revocation precedes expiry.
         self.inputs_unrevoked(&agent, &resource, &presented, released_at)?;
+        self.inputs_current(&agent, &resource, &presented, released_at)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
