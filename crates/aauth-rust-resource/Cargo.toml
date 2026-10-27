@@ -17,9 +17,10 @@ aauth-rust-jose.workspace = true
 aauth-rust-core.workspace = true
 aauth-rust-signature-key.workspace = true
 aauth-rust-budgets.workspace = true
+aauth-rust-r3.workspace = true
 http.workspace = true
 httpdate = "1"
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 
 [dev-dependencies]
 aauth-rust-person-server = { version = "0.1.0-alpha.2", path = "../aauth-rust-person-server" }

@@ -1,0 +1,734 @@
+//! Immediate, unmetered class R3 on the direct Person-Server path.
+//!
+//! `draft-hardt-aauth-r3` at the pinned revision: Resource Metadata Extensions,
+//! Authorization Endpoint Extensions, Content Addressing, R3 Document Access
+//! Restriction, Operation Validation and Resource Enforcement. The host selects
+//! the authoritative definitions, maps each protected request to at most one
+//! operation, and supplies a durable immutable document store. Per-call
+//! proposals, budgets, missions, deferred delivery and AS federation are refused.
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use aauth_rust_core::{AgentKeyResolver, ResourceClaims, TokenError, VerifiedAuthToken};
+use aauth_rust_jose::strict_json;
+use aauth_rust_r3::{
+    AuthoritativeSnapshot, DefinitionRegistry, Display, Document, DocumentOptions, Operation,
+    OperationAccess, OperationSet, Reference, Registry, VocabularyUri, digest,
+    validate_document_account, verify_auth_token_claims,
+};
+use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
+use http::{Request, Response, StatusCode};
+use serde_json::{Value, json, value::RawValue};
+
+use super::{
+    AuthDecision, ProactiveDecision, PsAuthorizationResource, PsConfigurationError, refusal,
+};
+use crate::{PolicyOutcome, SignatureFailure};
+
+const PERSON_DOCUMENT: &str = "aauth-person.json";
+
+/// A host adapter or store could not answer. Nothing is disclosed or admitted.
+#[derive(Debug)]
+pub struct R3HostError(Box<dyn std::error::Error + Send + Sync>);
+impl R3HostError {
+    /// Keep the host cause for logging. It is never sent to the caller.
+    pub fn new(cause: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
+        Self(cause.into())
+    }
+}
+impl std::fmt::Display for R3HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "R3 host adapter: {}", self.0)
+    }
+}
+impl std::error::Error for R3HostError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+/// Host consent description for one validated operation set.
+pub type BoxedR3Display = Box<dyn Fn(&OperationSet) -> Result<Display, R3HostError> + Send + Sync>;
+
+/// Host mapping from one protected request to its R3 operation.
+///
+/// `Ok(None)` names a Core-only route. The mapping runs only after the
+/// credential and HTTP proof verified, and it must not depend on the token.
+pub type BoxedR3OperationMapper =
+    Box<dyn Fn(&Request<Vec<u8>>) -> Result<Option<Operation>, R3HostError> + Send + Sync>;
+
+/// One advertised vocabulary and the authoritative snapshot the host selected for it.
+pub struct R3Vocabulary {
+    /// Operations a host-chosen parser derived from the source at its
+    /// advertised discovery endpoint. The Resource never refreshes it.
+    pub definition: AuthoritativeSnapshot,
+    /// Optional resource-asserted consent text placed in each document.
+    pub display: Option<BoxedR3Display>,
+}
+
+/// Host configuration for immediate class R3 on a direct Person-Server Resource.
+pub struct R3Config {
+    /// Allowlist used for every request, document and token claim.
+    pub registry: Registry,
+    /// Parser registrations every snapshot must come from.
+    pub definitions: DefinitionRegistry,
+    /// Simultaneously advertised vocabularies, at most one per URI.
+    pub vocabularies: Vec<R3Vocabulary>,
+    /// Durable immutable document custody. The Resource never prunes it.
+    pub documents: Arc<dyn R3DocumentStore>,
+    /// Request-to-operation mapping for protected routes.
+    pub operation_for_request: BoxedR3OperationMapper,
+    /// Also require this Resource's Core scopes on R3 routes.
+    ///
+    /// When set, an `r3_operations` request must name `scope`, and an R3 Auth
+    /// token must carry every configured scope as well as the operation.
+    pub require_core_scope: bool,
+}
+
+/// One exact class document and the entitlement and lineage it was issued for.
+///
+/// The record is committed before its Resource token is released and is the
+/// only source the signed document endpoint serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R3DocumentRecord {
+    /// `r3_uri` and `r3_s256` of the released Resource token.
+    pub reference: Reference,
+    /// Exact document bytes. They are served verbatim and never reserialized.
+    pub exact_json: Vec<u8>,
+    /// `ps` of the Resource token; entitled to fetch with `aauth-person.json`.
+    pub person_server: String,
+    /// `aud` of the Resource token: the Auth-token issuer entitled to fetch.
+    pub auth_token_issuer: String,
+    /// Discovery role of that issuer; `aauth-person.json` on the direct path.
+    pub auth_token_issuer_document: String,
+    /// `jti` of the Resource token. It is part of the document URI.
+    pub resource_token_jti: String,
+    /// Exact compact Resource token that carries this reference.
+    pub resource_token: String,
+    /// `presented_jti` of the Resource token.
+    pub presented_jti: String,
+    /// Directed `sub` of the Resource token.
+    pub subject: String,
+    /// `agent_jkt` of the Resource token.
+    pub agent_jkt: String,
+    /// `tenant` of the Resource token.
+    pub tenant: Option<String>,
+    /// `account` of the Resource token and the document.
+    pub account: Option<String>,
+    /// Core `scope` of the Resource token, when it carried one.
+    pub scope: Option<String>,
+    /// `iat` of the Resource token.
+    pub issued_at: i64,
+    /// `exp` of the Resource token.
+    pub expires_at: i64,
+}
+
+/// A document record could not be committed or loaded.
+#[derive(Debug)]
+pub enum R3StoreError {
+    /// A different record is already retained at that URI. Nothing changed.
+    Conflict,
+    /// Storage failed. A commit may or may not have been retained.
+    Unavailable(R3HostError),
+}
+
+/// Durable, confidential, immutable document custody owned by the host.
+///
+/// `commit` copies the whole record atomically, accepts an exact repeat, and
+/// returns [`R3StoreError::Conflict`] for any different record at the same
+/// URI without changing it. Any other failure may have committed. The
+/// Resource then withholds the token and does not retry. `load` returns an
+/// independent copy by exact URI, `Ok(None)` for a URI never committed, and
+/// survives process restart. A volatile map does not satisfy this contract.
+pub trait R3DocumentStore: Send + Sync {
+    /// Retain `record` before its Resource token becomes observable.
+    ///
+    /// # Errors
+    /// Returns [`R3StoreError`] as described on the trait.
+    fn commit(&self, record: &R3DocumentRecord) -> Result<(), R3StoreError>;
+    /// Load the record committed at exactly `uri`.
+    ///
+    /// # Errors
+    /// Returns [`R3StoreError::Unavailable`] when storage cannot answer.
+    fn load(&self, uri: &str) -> Result<Option<R3DocumentRecord>, R3StoreError>;
+}
+
+/// The class grant that admitted a protected R3 request.
+#[derive(Clone)]
+pub struct R3Grant {
+    reference: Reference,
+    operation: Operation,
+}
+impl std::fmt::Debug for R3Grant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let operation = self
+            .operation
+            .json()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        f.debug_struct("R3Grant")
+            .field("reference", &self.reference)
+            .field("operation", &operation)
+            .finish()
+    }
+}
+impl R3Grant {
+    /// The signed `r3_uri` and `r3_s256`.
+    pub fn reference(&self) -> &Reference {
+        &self.reference
+    }
+    /// The mapped operation found in `r3_granted`.
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+}
+
+pub(super) struct R3Profile {
+    registry: Registry,
+    vocabularies: BTreeMap<VocabularyUri, R3Vocabulary>,
+    documents: Arc<dyn R3DocumentStore>,
+    operation_for_request: BoxedR3OperationMapper,
+    pub(super) require_core_scope: bool,
+}
+
+enum Issue {
+    Host,
+    Retention,
+}
+
+impl R3Profile {
+    fn new(config: R3Config) -> Result<Self, PsConfigurationError> {
+        let invalid = PsConfigurationError::InvalidR3Profile;
+        if config.registry.is_empty()
+            || config.definitions.is_empty()
+            || config.vocabularies.is_empty()
+        {
+            return Err(invalid);
+        }
+        let mut vocabularies = BTreeMap::new();
+        for vocabulary in config.vocabularies {
+            let definition = &vocabulary.definition;
+            config
+                .definitions
+                .validate(definition)
+                .map_err(|_| invalid)?;
+            config
+                .registry
+                .validate_operation_set(&definition.operations())
+                .map_err(|_| invalid)?;
+            let uri = definition.vocabulary().clone();
+            if vocabularies.insert(uri, vocabulary).is_some() {
+                return Err(invalid);
+            }
+        }
+        Ok(Self {
+            registry: config.registry,
+            vocabularies,
+            documents: config.documents,
+            operation_for_request: config.operation_for_request,
+            require_core_scope: config.require_core_scope,
+        })
+    }
+
+    fn metadata(&self) -> Value {
+        let advertised: BTreeMap<&str, &str> = self
+            .vocabularies
+            .iter()
+            .map(|(uri, vocabulary)| {
+                (
+                    uri.as_str(),
+                    vocabulary.definition.receipt().discovery_endpoint(),
+                )
+            })
+            .collect();
+        json!(advertised)
+    }
+
+    /// Operation Validation: the set must be defined by the advertised source.
+    fn defined(&self, operations: &OperationSet) -> Result<(), ()> {
+        self.registry
+            .validate_operation_set(operations)
+            .map_err(|_| ())?;
+        let vocabulary = self.vocabularies.get(operations.vocabulary()).ok_or(())?;
+        vocabulary
+            .definition
+            .validate_defined(operations)
+            .map_err(|_| ())
+    }
+
+    /// Map a verified request. A mapped operation outside the definition is a host error.
+    fn route(&self, request: &Request<Vec<u8>>) -> Result<Option<Operation>, ()> {
+        match (self.operation_for_request)(request).map_err(|_| ())? {
+            None => Ok(None),
+            Some(operation) => {
+                let set = OperationSet::new(std::slice::from_ref(&operation)).map_err(|_| ())?;
+                self.defined(&set)?;
+                Ok(Some(operation))
+            }
+        }
+    }
+
+    /// `r3_operations` from an `/authorize` body. `Ok(None)` is a Core request.
+    fn requested(&self, body: &[u8]) -> Result<Option<OperationSet>, ()> {
+        let value = strict_json(body).map_err(|_| ())?;
+        let Some(object) = value.as_object() else {
+            return Ok(None);
+        };
+        if !object.contains_key("r3_operations") {
+            return Ok(None);
+        }
+        // This immediate profile has no account binding or budget offer at
+        // `/authorize`; refusing them is clearer than issuing without them.
+        if object.contains_key("account") || object.contains_key("budget") {
+            return Err(());
+        }
+        let members: BTreeMap<String, Box<RawValue>> =
+            serde_json::from_slice(body).map_err(|_| ())?;
+        let raw = members.get("r3_operations").ok_or(())?;
+        let operations = self
+            .registry
+            .parse_operation_set(raw.get().as_bytes())
+            .map_err(|_| ())?;
+        self.defined(&operations)?;
+        Ok(Some(operations))
+    }
+}
+
+/// Identity of one class document: its digest, who may fetch it, and the
+/// Resource token it was issued for. Distinct issuances never share a URI.
+/// `origin` is the canonical signed origin, so the URI is the one fetched.
+fn class_document_uri(
+    origin: &str,
+    document_digest: &str,
+    person_server: &str,
+    auth_token_issuer: &str,
+    resource_token_jti: &str,
+) -> String {
+    let entitlement = serde_json::to_vec(&json!([
+        "aauth-r3-entitlement-v1",
+        person_server,
+        auth_token_issuer
+    ]))
+    .unwrap_or_default();
+    let lineage = format!("aauth-r3-lineage-v1\0{resource_token_jti}");
+    format!(
+        "{origin}/r3/c.{document_digest}.{}.{}",
+        digest(&entitlement),
+        digest(lineage.as_bytes())
+    )
+}
+
+pub(super) fn carries_r3(extra: &BTreeMap<String, Value>) -> bool {
+    ["r3_uri", "r3_s256", "r3_granted", "r3_per_call"]
+        .iter()
+        .any(|name| extra.contains_key(*name))
+}
+
+fn document_response(status: StatusCode, code: &str) -> Response<Vec<u8>> {
+    let mut response = refusal(status, code);
+    no_store(&mut response);
+    response
+}
+
+fn no_store(response: &mut Response<Vec<u8>>) {
+    let headers = response.headers_mut();
+    headers.insert(
+        "cache-control",
+        "private, no-store, no-transform"
+            .parse()
+            .expect("static cache control"),
+    );
+    headers.insert(
+        "vary",
+        "Signature-Key, Signature-Input, Signature"
+            .parse()
+            .expect("static vary"),
+    );
+}
+
+impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
+where
+    P: Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> O,
+    O: PolicyOutcome,
+{
+    /// Enable immediate, unmetered class R3 on this direct Person-Server Resource.
+    ///
+    /// Metadata advertises `r3_vocabularies`. `POST /authorize` accepts
+    /// `r3_operations`, validates them against the selected definition, commits
+    /// the exact document and its PS fetch entitlement, and only then returns
+    /// the Resource token. [`Self::r3_document`] serves those bytes to the
+    /// entitled signer. A protected request that the host maps to an operation
+    /// requires a PS Auth token whose `r3_granted` covers it. Unmapped routes
+    /// keep Core scope authorization and refuse R3 Auth tokens.
+    ///
+    /// # Errors
+    /// [`PsConfigurationError::InvalidR3Profile`] for an empty registry,
+    /// definition set or vocabulary list, a snapshot from an unregistered
+    /// parser or registration, a repeated vocabulary, or an AS, budget or
+    /// mission composition this profile does not implement. Calling
+    /// [`Self::with_mission_context`] afterwards makes every request a `500`.
+    pub fn with_r3(mut self, config: R3Config) -> Result<Self, PsConfigurationError> {
+        if self.access_server.is_some() || self.budgets.is_some() || self.mission_context {
+            return Err(PsConfigurationError::InvalidR3Profile);
+        }
+        self.r3 = Some(Box::new(R3Profile::new(config)?));
+        Ok(self)
+    }
+
+    /// A composition added after [`Self::with_r3`] that this profile refuses.
+    pub(super) fn r3_composition_refused(&self) -> bool {
+        self.r3.is_some()
+            && (self.mission_context || self.budgets.is_some() || self.access_server.is_some())
+    }
+
+    pub(super) fn r3_metadata(&self) -> Option<Value> {
+        self.r3.as_ref().map(|profile| profile.metadata())
+    }
+
+    /// Canonical HTTPS signed origin: every class document URI is issued,
+    /// reconstructed, served and admitted under it. JWT `iss`/`aud` keep the
+    /// published issuer identity.
+    fn document_origin(&self) -> String {
+        format!("https://{}", self.authority)
+    }
+
+    /// Serve `GET {signed_origin}/r3/c.…` to a signer entitled to that document.
+    ///
+    /// The caller signs as a server with `jwks_uri`. Its key is resolved through
+    /// the host trust set and the proof verifies before storage is read. Only
+    /// the Resource token's `ps` signing with `aauth-person.json`, or its `aud`
+    /// signing with the retained issuer role, receives the exact committed
+    /// bytes. Any other verified signer, a query, or an unknown URI is `404`.
+    /// A store failure or a record that no longer matches its URI is `500`
+    /// and discloses no document.
+    pub fn r3_document(&self, request: &Request<Vec<u8>>, now: i64) -> Response<Vec<u8>> {
+        let Some(profile) = &self.r3 else {
+            return document_response(StatusCode::NOT_FOUND, "not_found");
+        };
+        if self.r3_composition_refused() {
+            return document_response(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+        let path = request.uri().path();
+        let id = path.strip_prefix("/r3/").unwrap_or("");
+        if request.method() != http::Method::GET
+            || request.uri().query().is_some()
+            || !id.starts_with("c.")
+            || id.contains('/')
+            || aauth_rust_signature_key::canonical_authority(request.uri())
+                .ok()
+                .as_deref()
+                != Some(self.authority.as_str())
+        {
+            return document_response(StatusCode::NOT_FOUND, "not_found");
+        }
+        let exact_uri = format!("{}{path}", self.document_origin());
+        let failure = match self.verified_fetcher(request, now) {
+            Ok((signer, role)) => {
+                return self.serve_document(profile, &exact_uri, &signer, &role);
+            }
+            Err(failure) => failure,
+        };
+        let mut response = AuthDecision::<()>::SignatureFailure(failure).into_response();
+        no_store(&mut response);
+        response
+    }
+
+    fn verified_fetcher(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<(String, String), SignatureFailure> {
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
+            .map_err(|error| match error {
+            Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+            Error::InvalidInput => SignatureFailure::Input(required_components(request)),
+            other => SignatureFailure::Proof(other),
+        })?;
+        let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
+            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+        };
+        let key = self
+            .keys
+            .key(id, dwk, kid)
+            .map_err(SignatureFailure::Token)?;
+        proof.verify(&key).map_err(SignatureFailure::Proof)?;
+        Ok((id.clone(), dwk.clone()))
+    }
+
+    fn serve_document(
+        &self,
+        profile: &R3Profile,
+        exact_uri: &str,
+        signer: &str,
+        role: &str,
+    ) -> Response<Vec<u8>> {
+        let record = match profile.documents.load(exact_uri) {
+            Ok(Some(record)) => record,
+            Ok(None) => return document_response(StatusCode::NOT_FOUND, "not_found"),
+            Err(_) => {
+                return document_response(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+            }
+        };
+        if self.retained_record(profile, &record, exact_uri).is_err() {
+            return document_response(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+        }
+        let entitled = (signer == record.person_server && role == PERSON_DOCUMENT)
+            || (signer == record.auth_token_issuer && role == record.auth_token_issuer_document);
+        if !entitled {
+            return document_response(StatusCode::NOT_FOUND, "not_found");
+        }
+        let mut response = Response::new(record.exact_json);
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            "content-type",
+            "application/json".parse().expect("static content type"),
+        );
+        no_store(&mut response);
+        response
+    }
+
+    /// The record still names exactly this URI, its entitlement, and valid document bytes.
+    fn retained_record(
+        &self,
+        profile: &R3Profile,
+        record: &R3DocumentRecord,
+        exact_uri: &str,
+    ) -> Result<(), ()> {
+        if record.reference.uri() != exact_uri
+            || record.person_server.is_empty()
+            || record.auth_token_issuer.is_empty()
+            || record.auth_token_issuer_document != PERSON_DOCUMENT
+            || class_document_uri(
+                &self.document_origin(),
+                record.reference.digest(),
+                &record.person_server,
+                &record.auth_token_issuer,
+                &record.resource_token_jti,
+            ) != exact_uri
+        {
+            return Err(());
+        }
+        let document = profile
+            .registry
+            .parse_referenced_document(&record.reference, &record.exact_json)
+            .map_err(|_| ())?;
+        validate_document_account(&document, record.account.as_deref()).map_err(|_| ())
+    }
+
+    /// Mint the class Resource token after its exact document is retained.
+    fn issue_r3(
+        &self,
+        profile: &R3Profile,
+        claims: &ResourceClaims,
+        operations: &OperationSet,
+    ) -> Result<String, Issue> {
+        let vocabulary = profile
+            .vocabularies
+            .get(operations.vocabulary())
+            .ok_or(Issue::Host)?;
+        let display = match &vocabulary.display {
+            Some(describe) => Some(describe(operations).map_err(|_| Issue::Host)?),
+            None => None,
+        };
+        let document = Document::new(
+            operations,
+            DocumentOptions {
+                account: claims.account.as_deref(),
+                display: display.as_ref(),
+            },
+        )
+        .map_err(|_| Issue::Host)?;
+        // Serialized once; the digest, the record and every fetch use these bytes.
+        let exact = serde_json::to_vec(&document).map_err(|_| Issue::Host)?;
+        let uri = class_document_uri(
+            &self.document_origin(),
+            &digest(&exact),
+            &claims.ps,
+            &claims.aud,
+            &claims.jti,
+        );
+        let (compact, reference) = aauth_rust_r3::mint_resource_token(
+            &profile.registry,
+            &self.config.signing_key,
+            &self.config.kid,
+            claims,
+            &uri,
+            &exact,
+        )
+        .map_err(|_| Issue::Host)?;
+        let record = R3DocumentRecord {
+            reference,
+            exact_json: exact,
+            person_server: claims.ps.clone(),
+            auth_token_issuer: claims.aud.clone(),
+            auth_token_issuer_document: PERSON_DOCUMENT.into(),
+            resource_token_jti: claims.jti.clone(),
+            resource_token: compact.clone(),
+            presented_jti: claims.presented_jti.clone(),
+            subject: claims.sub.clone(),
+            agent_jkt: claims.agent_jkt.clone(),
+            tenant: claims.tenant.clone(),
+            account: claims.account.clone(),
+            scope: claims.scope.clone(),
+            issued_at: claims.iat,
+            expires_at: claims.exp,
+        };
+        // A conflict or an uncertain commit withholds the token. An uncertain
+        // commit may leave a record whose URI was never released.
+        profile
+            .documents
+            .commit(&record)
+            .map_err(|_| Issue::Retention)?;
+        Ok(compact)
+    }
+
+    /// `/authorize` with `r3_operations`. `None` continues the Core request unchanged.
+    pub(super) fn proactive_r3(
+        &self,
+        request: &Request<Vec<u8>>,
+        challenge: &ResourceClaims,
+    ) -> Option<ProactiveDecision> {
+        let profile = self.r3.as_ref()?;
+        let operations = match profile.requested(request.body()) {
+            Ok(Some(operations)) => operations,
+            Ok(None) => return None,
+            Err(()) => return Some(ProactiveDecision::InvalidRequest),
+        };
+        let mut claims = challenge.clone();
+        let scope_present = strict_json(request.body())
+            .ok()
+            .is_some_and(|value| value.get("scope").is_some());
+        claims.scope = if scope_present {
+            match super::requested_scope(request, &self.config.scopes) {
+                Ok(scope) => Some(scope),
+                Err(decision) => return Some(decision),
+            }
+        } else if profile.require_core_scope {
+            return Some(ProactiveDecision::InvalidScope);
+        } else {
+            None
+        };
+        Some(match self.issue_r3(profile, &claims, &operations) {
+            Ok(resource_token) => ProactiveDecision::ResourceToken { resource_token },
+            Err(Issue::Host) => ProactiveDecision::InternalError,
+            Err(Issue::Retention) => ProactiveDecision::RetentionFailed,
+        })
+    }
+
+    /// Person challenge on a mapped R3 route: one class document for that operation.
+    /// `None` keeps the Core challenge for an unmapped route.
+    pub(super) fn r3_challenge(
+        &self,
+        request: &Request<Vec<u8>>,
+        challenge: &ResourceClaims,
+    ) -> Option<AuthDecision<O::Context>> {
+        let profile = self.r3.as_ref()?;
+        let operation = match profile.route(request) {
+            Ok(Some(operation)) => operation,
+            Ok(None) => return None,
+            Err(()) => return Some(AuthDecision::InternalError),
+        };
+        let Ok(operations) = OperationSet::new(std::slice::from_ref(&operation)) else {
+            return Some(AuthDecision::InternalError);
+        };
+        let mut claims = challenge.clone();
+        claims.scope = profile
+            .require_core_scope
+            .then(|| self.config.scopes.join(" "));
+        Some(match self.issue_r3(profile, &claims, &operations) {
+            Ok(resource_token) => AuthDecision::AuthTokenRequired {
+                resource_token,
+                budget_reason: None,
+                budget_header: None,
+            },
+            Err(_) => AuthDecision::InternalError,
+        })
+    }
+
+    /// Resource Enforcement for one verified, proved, non-revoked PS Auth token.
+    ///
+    /// `Ok(None)` is a Core token on an unmapped route. A Core token on a
+    /// mapped route, and an R3 token on an unmapped route, are refused.
+    pub(super) fn r3_gate(
+        &self,
+        token: &VerifiedAuthToken,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<Option<R3Grant>, AuthDecision<O::Context>> {
+        let Some(profile) = &self.r3 else {
+            return Ok(None);
+        };
+        let forbidden = || AuthDecision::Forbidden {
+            budget_header: None,
+        };
+        let claims = token.claims();
+        let verified = if carries_r3(&claims.extra) {
+            // Reads every R3 member from the signed payload bytes.
+            Some(
+                verify_auth_token_claims(&profile.registry, token.compact(), &self.keys, now)
+                    .map_err(|_| {
+                        AuthDecision::SignatureFailure(SignatureFailure::Token(
+                            TokenError::InvalidJwt,
+                        ))
+                    })?,
+            )
+        } else {
+            None
+        };
+        let route = profile
+            .route(request)
+            .map_err(|()| AuthDecision::InternalError)?;
+        let (verified, operation) = match (verified, route) {
+            (None, None) => return Ok(None),
+            (None, Some(_)) | (Some(_), None) => return Err(forbidden()),
+            (Some(verified), Some(operation)) => (verified, operation),
+        };
+        let reference = verified.reference();
+        if !reference
+            .uri()
+            .starts_with(&format!("{}/r3/c.", self.document_origin()))
+        {
+            return Err(forbidden());
+        }
+        let record = match profile.documents.load(reference.uri()) {
+            Ok(Some(record)) => record,
+            Ok(None) => return Err(forbidden()),
+            Err(_) => return Err(AuthDecision::InternalError),
+        };
+        self.retained_record(profile, &record, reference.uri())
+            .map_err(|()| AuthDecision::InternalError)?;
+        let agent_jkt = claims
+            .cnf
+            .jwk
+            .thumbprint()
+            .map_err(|_| AuthDecision::InternalError)?;
+        // The grant belongs to the Person Server, subject, tenant and agent key
+        // the document was issued for, and to no other lineage.
+        if &record.reference != reference
+            || record.person_server != claims.ps
+            || record.auth_token_issuer != claims.iss
+            || record.auth_token_issuer_document != claims.dwk
+            || record.subject != claims.sub
+            || record.tenant != claims.tenant
+            || record.agent_jkt != agent_jkt
+        {
+            return Err(forbidden());
+        }
+        // Account parity, and both claims are disjoint subsets of the exact document.
+        if verified
+            .prove_against_document(&profile.registry, &record.reference, &record.exact_json)
+            .is_err()
+        {
+            return Err(forbidden());
+        }
+        match verified.operations().access_for(&operation) {
+            Ok(OperationAccess::Granted) => Ok(Some(R3Grant {
+                reference: reference.clone(),
+                operation,
+            })),
+            // Per-call proposals are not implemented: the call is not served.
+            Ok(OperationAccess::PerCall | OperationAccess::Denied) => Err(forbidden()),
+            Err(_) => Err(AuthDecision::InternalError),
+        }
+    }
+}
