@@ -640,22 +640,29 @@ where
         })
     }
 
-    /// Claim an admitted per-call completion. A class grant passes through.
+    /// Recheck R3 admission after callbacks, then claim a per-call completion.
+    /// A class grant needs no claim. A revocation noticed after a claim never
+    /// rolls it back or redispatches the operation; the host receives no effect.
     pub(crate) fn r3_claim(
         &self,
         grant: Option<R3Grant>,
+        token: &VerifiedAuthToken,
         now: i64,
     ) -> Result<Option<R3Grant>, AuthDecision<O::Context>> {
         let Some(mut grant) = grant else {
             return Ok(None);
         };
+        let claims = token.claims();
+        if self.presented_revoked(&claims.iss, &claims.jti, now) {
+            return Err(AuthDecision::Revoked { auth_token: true });
+        }
         let Some(completion) = grant.completion.as_mut() else {
             return Ok(Some(grant));
         };
         let Some(per_call) = self.r3.as_ref().and_then(|profile| profile.per_call.as_ref()) else {
             return Err(AuthDecision::InternalError);
         };
-        match per_call.calls.claim(&completion.uri, &completion.token, now) {
+        let outcome = match per_call.calls.claim(&completion.uri, &completion.token, now) {
             Ok(R3Claim::Execute { fence }) if !fence.is_empty() => {
                 completion.fence = Some(fence);
                 Ok(Some(grant))
@@ -666,6 +673,13 @@ where
             }),
             // Unfinished, an empty fence, or an uncertain store: never a second effect.
             Ok(_) | Err(_) => Err(AuthDecision::InternalError),
+        };
+        // The store is host code too. A completed revocation during its callback
+        // must fence both first execution and retained-result release.
+        if self.presented_revoked(&claims.iss, &claims.jti, now) {
+            Err(AuthDecision::Revoked { auth_token: true })
+        } else {
+            outcome
         }
     }
 }

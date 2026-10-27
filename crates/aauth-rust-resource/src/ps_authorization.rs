@@ -1190,16 +1190,22 @@ where
                 }
                 // A per-call completion is claimed only after every check and
                 // host policy admitted it, so a refusal never consumes it.
-                match self.admit_auth(token, request, now, challenge_jti, grant, meter)? {
+                // The poll's proof was verified above. Host policy must instead
+                // admit the verified held request that the host will execute.
+                let policy_request = r3
+                    .as_ref()
+                    .and_then(R3Grant::held_request)
+                    .unwrap_or(request);
+                match self.admit_auth(token, policy_request, now, challenge_jti, grant, meter)? {
                     AuthDecision::Granted(mut admitted) if r3.is_some() => {
-                        match self.r3_claim(r3, now) {
+                        match self.r3_claim(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
                             Err(decision) => return Ok(decision),
                         }
                         Ok(AuthDecision::Granted(admitted))
                     }
                     AuthDecision::Observed(mut admitted) if r3.is_some() => {
-                        match self.r3_claim(r3, now) {
+                        match self.r3_claim(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
                             Err(decision) => return Ok(decision),
                         }
