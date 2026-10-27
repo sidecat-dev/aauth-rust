@@ -70,7 +70,7 @@ pub use policy::{
 pub use server::{
     AdvanceError, BoxedR3Policy, Config, ConfigurationError, DeferredConfig, FederationInput,
     Governance, GovernanceError, InteractionDecision, PersonServer, R3AuthorizationRequest,
-    R3Decision, R3IssuerConfig, R3Policy,
+    R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,

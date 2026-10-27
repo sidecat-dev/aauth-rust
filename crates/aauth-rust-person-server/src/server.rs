@@ -8,7 +8,10 @@ pub use governance::{Governance, GovernanceError, InteractionDecision};
 mod lineage;
 mod missions;
 mod r3;
-pub use r3::{BoxedR3Policy, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy};
+pub use r3::{
+    BoxedR3Policy, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy,
+    R3ProposalDecision, R3ProposalRequest,
+};
 mod subagents;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -775,7 +778,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
             (offer, scopes)
         };
-        let presented = self.verify_presented(presented_compact, verified_at, "presented")?;
+        let presented =
+            self.verify_presented_with(presented_compact, verified_at, "presented", r3)?;
         self.match_resource(&presented, r)?;
         let retained = self.load_record(&presented, presented_compact, verified_at, "presented")?;
         if retained.agent != Self::identity(holder)

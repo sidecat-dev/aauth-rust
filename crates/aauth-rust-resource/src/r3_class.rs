@@ -5,7 +5,8 @@
 //! Restriction, Operation Validation and Resource Enforcement. The host selects
 //! the authoritative definitions, maps each protected request to at most one
 //! operation, and supplies a durable immutable document store. Per-call
-//! proposals, budgets, missions, deferred delivery and AS federation are refused.
+//! proposals are opt-in through `with_r3_per_call`. Budgets, missions, release
+//! gating and AS federation are refused.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -26,6 +27,13 @@ use super::{
 use crate::{PolicyOutcome, SignatureFailure};
 
 const PERSON_DOCUMENT: &str = "aauth-person.json";
+
+#[path = "r3_per_call.rs"]
+mod per_call;
+pub use per_call::{
+    BoxedR3Describe, BoxedR3Present, R3CallDescription, R3CallResult, R3CallStore, R3CallToken,
+    R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord,
+};
 
 /// A host adapter or store could not answer. Nothing is disclosed or admitted.
 #[derive(Debug)]
@@ -153,11 +161,12 @@ pub trait R3DocumentStore: Send + Sync {
     fn load(&self, uri: &str) -> Result<Option<R3DocumentRecord>, R3StoreError>;
 }
 
-/// The class grant that admitted a protected R3 request.
+/// The class grant, or the per-call completion, that admitted a protected R3 request.
 #[derive(Clone)]
 pub struct R3Grant {
     reference: Reference,
     operation: Operation,
+    completion: Option<per_call::R3Completion>,
 }
 impl std::fmt::Debug for R3Grant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -189,6 +198,7 @@ pub(super) struct R3Profile {
     documents: Arc<dyn R3DocumentStore>,
     operation_for_request: BoxedR3OperationMapper,
     pub(super) require_core_scope: bool,
+    per_call: Option<R3PerCallConfig>,
 }
 
 enum Issue {
@@ -227,6 +237,7 @@ impl R3Profile {
             documents: config.documents,
             operation_for_request: config.operation_for_request,
             require_core_scope: config.require_core_scope,
+            per_call: None,
         })
     }
 
@@ -415,9 +426,10 @@ where
         }
         let path = request.uri().path();
         let id = path.strip_prefix("/r3/").unwrap_or("");
+        let proposal = id.starts_with("p.");
         if request.method() != http::Method::GET
             || request.uri().query().is_some()
-            || !id.starts_with("c.")
+            || !(id.starts_with("c.") || proposal)
             || id.contains('/')
             || aauth_rust_signature_key::canonical_authority(request.uri())
                 .ok()
@@ -428,6 +440,9 @@ where
         }
         let exact_uri = format!("{}{path}", self.document_origin());
         let failure = match self.verified_fetcher(request, now) {
+            Ok((signer, role)) if proposal => {
+                return self.serve_proposal(profile, &exact_uri, &signer, &role);
+            }
             Ok((signer, role)) => {
                 return self.serve_document(profile, &exact_uri, &signer, &role);
             }
@@ -659,6 +674,7 @@ where
         token: &VerifiedAuthToken,
         request: &Request<Vec<u8>>,
         now: i64,
+        challenge_jti: &str,
     ) -> Result<Option<R3Grant>, AuthDecision<O::Context>> {
         let Some(profile) = &self.r3 else {
             return Ok(None);
@@ -667,6 +683,15 @@ where
             budget_header: None,
         };
         let claims = token.claims();
+        // A 202 held invocation completes only at its pending URL, with an R3 token.
+        if let Some(id) = request.uri().path().strip_prefix("/r3/pending/") {
+            if !carries_r3(&claims.extra) || id.is_empty() || id.contains('/') {
+                return Err(forbidden());
+            }
+            return self
+                .per_call_completion(profile, token, request, None, Some(id), now)
+                .map(Some);
+        }
         let verified = if carries_r3(&claims.extra) {
             // Reads every R3 member from the signed payload bytes.
             Some(
@@ -689,6 +714,15 @@ where
             (Some(verified), Some(operation)) => (verified, operation),
         };
         let reference = verified.reference();
+        // A per-call Auth token references its proposal; the 401 retry completes it.
+        if reference
+            .uri()
+            .starts_with(&format!("{}/r3/p.", self.document_origin()))
+        {
+            return self
+                .per_call_completion(profile, token, request, Some(&operation), None, now)
+                .map(Some);
+        }
         if !reference
             .uri()
             .starts_with(&format!("{}/r3/c.", self.document_origin()))
@@ -730,9 +764,19 @@ where
             Ok(OperationAccess::Granted) => Ok(Some(R3Grant {
                 reference: reference.clone(),
                 operation,
+                completion: None,
             })),
-            // Per-call proposals are not implemented: the call is not served.
-            Ok(OperationAccess::PerCall | OperationAccess::Denied) => Err(forbidden()),
+            // Challenged with a retained proposal; refused when per-call is not enabled.
+            Ok(OperationAccess::PerCall) => Err(self.per_call_challenge(
+                profile,
+                token,
+                &record.reference,
+                request,
+                &operation,
+                now,
+                challenge_jti,
+            )),
+            Ok(OperationAccess::Denied) => Err(forbidden()),
             Err(_) => Err(AuthDecision::InternalError),
         }
     }
