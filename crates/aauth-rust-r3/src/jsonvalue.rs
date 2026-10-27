@@ -915,7 +915,10 @@ mod tests {
             parse_raw_object(repeated.as_bytes()).map(|_| ()),
         ] {
             let err = err.expect_err("duplicate accepted");
-            assert!(err.to_string().contains(r#"duplicate member "k00000""#), "{err}");
+            assert!(
+                err.to_string().contains(r#"duplicate member "k00000""#),
+                "{err}"
+            );
         }
         // One changed value among WIDTH members breaks equality; a respelled number does not.
         let changed = parsed(&scrambled.replacen(r#""k00000":0"#, r#""k00000":1"#, 1));
@@ -944,7 +947,11 @@ mod tests {
         ];
         for (left, right, equal) in pairs {
             let (left_value, right_value) = (parsed(left), parsed(right));
-            assert_eq!(json_equal(&left_value, &right_value), equal, "{left} vs {right}");
+            assert_eq!(
+                json_equal(&left_value, &right_value),
+                equal,
+                "{left} vs {right}"
+            );
             assert_eq!(
                 canonical_json(&left_value) == canonical_json(&right_value),
                 equal,

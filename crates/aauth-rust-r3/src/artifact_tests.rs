@@ -1097,8 +1097,9 @@ fn proposal_result_marks_release_gating_and_round_trips() -> Result<(), Error> {
     let without = registry.parse_proposal(proposal_with_parameters("{}").as_bytes())?;
     assert!(without.result().is_none());
     assert!(!json_text(&without).contains("result"));
-    let empty_source =
-        format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{{}}}}"#);
+    let empty_source = format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{{}}}}"#
+    );
     let empty = registry.parse_proposal(empty_source.as_bytes())?;
     assert_eq!(empty.result().expect("empty result").json(), b"{}");
     assert_eq!(json_text(&empty), empty_source);
@@ -1137,7 +1138,10 @@ fn proposal_result_marks_release_gating_and_round_trips() -> Result<(), Error> {
         let source = format!(
             r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{value}}}"#
         );
-        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+        assert!(
+            registry.parse_proposal(source.as_bytes()).is_err(),
+            "{source}"
+        );
     }
     for value in ["", "{", "{} {}", r#"{"a":1}x"#] {
         assert!(ProposalResult::new(value.as_bytes()).is_err(), "{value}");
@@ -1153,10 +1157,14 @@ fn proposal_result_marks_release_gating_and_round_trips() -> Result<(), Error> {
         format!(r#"{{"vocabulary":"{NAMED}","operations":[],"parameters":{{}},"result":{{}}}}"#),
     ];
     for source in refused {
-        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+        assert!(
+            registry.parse_proposal(source.as_bytes()).is_err(),
+            "{source}"
+        );
     }
     // `result` belongs to proposals, not documents.
-    let document = format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"result":{{}}}}"#);
+    let document =
+        format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"result":{{}}}}"#);
     assert!(registry.parse_document(document.as_bytes()).is_err());
     Ok(())
 }
@@ -1278,7 +1286,10 @@ fn optional_strings_keep_absent_and_present_empty_apart() -> Result<(), Error> {
         let source = format!(
             r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"x"}}],"display":{display}}}"#
         );
-        assert!(registry.parse_document(source.as_bytes()).is_err(), "{source}");
+        assert!(
+            registry.parse_document(source.as_bytes()).is_err(),
+            "{source}"
+        );
     }
     for value in [
         format!(r#"{{"s256":"{s256}","media_type":" text/plain"}}"#),
@@ -1287,7 +1298,10 @@ fn optional_strings_keep_absent_and_present_empty_apart() -> Result<(), Error> {
         r#"{"s256":"short","excerpt":""}"#.to_owned(),
     ] {
         let source = proposal_with_parameter(&value);
-        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+        assert!(
+            registry.parse_proposal(source.as_bytes()).is_err(),
+            "{source}"
+        );
     }
     let detail_null = format!(
         r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"display":{{"summary":"Send","detail":null}}}}"#
@@ -1369,12 +1383,11 @@ fn digest_media_types_follow_rfc_9110() -> Result<(), Error> {
         "text/plain ",
     ];
     for media_type in invalid {
-        let err = must_err(Parameter::from_digest(
-            s256.clone(),
-            None,
-            Some(media_type),
-        ));
-        assert!(err.to_string().contains("media_type"), "{media_type}: {err}");
+        let err = must_err(Parameter::from_digest(s256.clone(), None, Some(media_type)));
+        assert!(
+            err.to_string().contains("media_type"),
+            "{media_type}: {err}"
+        );
         let encoded = serde_json::to_string(media_type).expect("media type");
         let source =
             proposal_with_parameter(&format!(r#"{{"s256":"{s256}","media_type":{encoded}}}"#));
