@@ -94,6 +94,9 @@ pub struct Transcript {
     pub revoked_completion_error: String,
     pub revocation_effect_delta: usize,
     pub revocation_claim_consumed: bool,
+    pub revocation_retry_status: u16,
+    pub revocation_claim_unchanged: bool,
+    pub revocation_result_retained: bool,
 }
 
 /// Adversarial admission paths exercised over the same real TLS roles.
@@ -101,6 +104,7 @@ pub struct Transcript {
 pub enum AdmissionCase {
     HeldPolicy,
     Revocation,
+    ClaimRevocation,
 }
 
 #[derive(Default)]
@@ -108,6 +112,7 @@ struct AdmissionControl {
     deny_delete: AtomicBool,
     revocation: bool,
     barrier: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    claim_barrier: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 impl AdmissionControl {
     fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
@@ -291,7 +296,7 @@ impl R3DocumentStore for FileDocuments {
 
 /// Proposals, pending ids, claims and retained results. Create-only records;
 /// one claim file per proposal, bound once and never re-opened for execution.
-struct FileCalls(PathBuf, Mutex<()>);
+struct FileCalls(PathBuf, Mutex<()>, Arc<AdmissionControl>);
 impl FileCalls {
     fn record_path(&self, uri: &str) -> PathBuf {
         self.0.join(format!("p-{}.json", digest(uri.as_bytes())))
@@ -442,6 +447,14 @@ impl R3CallStore for FileCalls {
                 // Bound once: a lost race or an uncertain write never executes.
                 if !write_new(&path, &bytes).map_err(unavailable)? {
                     return Ok(R3Claim::Unfinished);
+                }
+                // Optional control pauses after binding the claim, before the host
+                // callback returns Execute. Revocation must suppress release without
+                // rolling back that durable binding or dispatching the application.
+                let barrier = self.2.claim_barrier.lock().unwrap().take();
+                if let Some((entered, released)) = barrier {
+                    entered.send(()).map_err(unavailable)?;
+                    released.recv_timeout(Duration::from_secs(2)).map_err(unavailable)?;
                 }
                 Ok(R3Claim::Execute { fence })
             }
@@ -670,7 +683,7 @@ fn compose(
                 })
             },
         ),
-        calls: Arc::new(FileCalls(root.to_path_buf(), Mutex::new(()))),
+        calls: Arc::new(FileCalls(root.to_path_buf(), Mutex::new(()), control.clone())),
         hold,
     })?;
     Ok(if control.revocation { resource.with_revocation() } else { resource })
@@ -780,7 +793,7 @@ pub fn run_admission_case(case: AdmissionCase) -> Result<Transcript> {
 
 fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let control = Arc::new(AdmissionControl {
-        revocation: case == Some(AdmissionCase::Revocation),
+        revocation: matches!(case, Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)),
         ..AdmissionControl::default()
     });
     let mut t = Transcript::default();
@@ -975,7 +988,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         let before = effects.deletes.lock().unwrap().len();
         t.held_policy_denied_status = api.send(&poll)?.status().as_u16();
         t.held_policy_effect_delta = effects.deletes.lock().unwrap().len() - before;
-        t.held_policy_claim_consumed = FileCalls(root.clone(), Mutex::new(()))
+        t.held_policy_claim_consumed = FileCalls(root.clone(), Mutex::new(()), control.clone())
             .claim_path(held_proposal.reference().uri()).exists();
         control.deny_delete.store(false, Ordering::SeqCst);
         poller.sign(&mut poll, now())?;
@@ -985,7 +998,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     poller.sign(&mut again, now())?;
     t.held_replay_status = api.send(&again)?.status().as_u16();
 
-    if case == Some(AdmissionCase::Revocation) {
+    if matches!(case, Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)) {
         // A fresh, unclaimed proposal: previously admitted effects remain separate.
         let held = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R1)?)?;
         let location = held.headers()["location"].to_str()?.to_owned();
@@ -1006,10 +1019,15 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             id: PS.into(), dwk: "aauth-person.json".into(), kid: "ps-1".into(),
         }, now())?;
         let mut poll = get(&location)?;
-        agent.with_token(grant)?.sign(&mut poll, now())?;
+        let revocation_holder = agent.with_token(grant)?;
+        revocation_holder.sign(&mut poll, now())?;
         let (entered, observed) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        *control.barrier.lock().unwrap() = Some((entered, released));
+        if case == Some(AdmissionCase::ClaimRevocation) {
+            *control.claim_barrier.lock().unwrap() = Some((entered, released));
+        } else {
+            *control.barrier.lock().unwrap() = Some((entered, released));
+        }
         let before = effects.deletes.lock().unwrap().len();
         let sending = api.clone();
         let pending = std::thread::spawn(move || sending.send(&poll));
@@ -1028,8 +1046,20 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         t.revoked_completion_error = completion.headers().get("signature-error")
             .and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
         t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
-        t.revocation_claim_consumed = FileCalls(root.clone(), Mutex::new(()))
-            .claim_path(proposal.reference().uri()).exists();
+        let claim_path = FileCalls(root.clone(), Mutex::new(()), control.clone())
+            .claim_path(proposal.reference().uri());
+        t.revocation_claim_consumed = claim_path.exists();
+        if case == Some(AdmissionCase::ClaimRevocation) {
+            let retained = fs::read(&claim_path)?;
+            let value: Value = serde_json::from_slice(&retained)?;
+            t.revocation_result_retained = !value["result"].is_null();
+            let mut retry = get(&location)?;
+            revocation_holder.sign(&mut retry, now())?;
+            t.revocation_retry_status = api.send(&retry)?.status().as_u16();
+            t.revocation_claim_unchanged = fs::read(&claim_path)? == retained;
+            // Count again after retry, so redispatch cannot escape the control.
+            t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
+        }
     }
 
     t.reads = effects.reads.load(Ordering::SeqCst);
