@@ -9,14 +9,20 @@
 //! against the stored exact bytes, the class lineage and the holder, then
 //! claims the proposal once: the first exact token gets a fence to execute,
 //! the same token again gets the retained result, and anything uncertain
-//! executes nothing. Result-bearing proposals (release gating) are never built.
+//! executes nothing.
+//!
+//! Approving Release Rather Than Execution: under `202` only, a host
+//! [`BoxedR3Release`] may run a side-effect-free call before approval. The
+//! proposal then carries `result` and a release `display`, and the computed
+//! response is committed with the record. Completion releases that stored
+//! response once to the first exact per-call token; the host executes nothing.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
 use aauth_rust_r3::{
     Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
-    Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token,
+    ProposalResult, Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token,
     validate_proposal_account, verify_per_call_auth_token,
 };
 use http::{Request, Response, StatusCode};
@@ -61,8 +67,41 @@ pub struct R3CallDescription {
     /// Proposed parameters. They must match the presented values exactly as
     /// completion will check them, or no proposal is published.
     pub parameters: Parameters,
-    /// Per-call consent text. The call has not run; this is execution approval.
+    /// Per-call consent text for execution approval. A release proposal uses
+    /// [`R3Release::display`] instead.
     pub display: Option<ProposalDisplay>,
+}
+
+/// Host execution of one call before approval (`draft-hardt-aauth-r3`,
+/// Approving Release Rather Than Execution).
+///
+/// It runs only under `202` holding, for a verified call already mapped to
+/// `operation` and described, at most once per challenge. `Ok(None)` keeps
+/// execution approval. `Ok(Some(_))` means the host has run the call and
+/// holds its response for release. Return `Some` only when nothing outside the
+/// result changes when the call runs: the draft forbids executing first where
+/// execution is audited, metered or billed, or calls another party.
+pub type BoxedR3Release = Box<
+    dyn Fn(
+            &Request<Vec<u8>>,
+            &Operation,
+            &BTreeMap<String, PresentedParameter>,
+            Option<&str>,
+        ) -> Result<Option<R3Release>, R3HostError>
+        + Send
+        + Sync,
+>;
+
+/// A response computed before approval and held for release.
+pub struct R3Release {
+    /// Resource-defined `result` members describing what the response holds,
+    /// for the issuer and the Person Server. The response is not carried.
+    pub result: ProposalResult,
+    /// Consent text. It MUST state that the operation has run and that what is
+    /// approved is release of its result; this crate does not judge prose.
+    pub display: ProposalDisplay,
+    /// The computed response, released once on approval and never otherwise.
+    pub response: Response<Vec<u8>>,
 }
 
 /// One held request, retained so the `202` completion runs the exact call.
@@ -115,6 +154,9 @@ pub struct R3ProposalRecord {
     pub expires_at: i64,
     /// The held call under `202`; `None` for the `401` retry.
     pub held: Option<R3HeldRequest>,
+    /// Release gating: the response computed before approval, present exactly
+    /// when the proposal carries `result`. Confidential until released.
+    pub released: Option<R3CallResult>,
 }
 
 /// The exact Auth token claiming one proposal.
@@ -216,6 +258,9 @@ pub struct R3PerCallConfig {
     /// Hold the invocation and answer `202` instead of a `401` retry. The draft
     /// recommends holding when the Resource can.
     pub hold: bool,
+    /// Execute side-effect-free calls before approval and seek release
+    /// instead. Requires `hold`; `None` always seeks execution approval.
+    pub release: Option<BoxedR3Release>,
 }
 
 /// One per-call completion, carried on the [`R3Grant`] the host receives.
@@ -225,6 +270,8 @@ pub(super) struct R3Completion {
     pub(super) token: R3CallToken,
     pub(super) fence: Option<String>,
     pub(super) held: Option<Request<Vec<u8>>>,
+    /// Release gating: retained and answered at claim; never reaches the host.
+    pub(super) released: Option<R3CallResult>,
 }
 
 fn proposal_uri(
@@ -315,11 +362,16 @@ where
     /// refused with `403` and never served.
     ///
     /// # Errors
-    /// [`PsConfigurationError::InvalidR3Profile`] when class R3 is not enabled.
+    /// [`PsConfigurationError::InvalidR3Profile`] when class R3 is not enabled,
+    /// or when `release` is set without `hold`: release gating holds the
+    /// invocation under `202`.
     pub fn with_r3_per_call(
         mut self,
         config: R3PerCallConfig,
     ) -> Result<Self, PsConfigurationError> {
+        if config.release.is_some() && !config.hold {
+            return Err(PsConfigurationError::InvalidR3Profile);
+        }
         let Some(profile) = self.r3.as_mut() else {
             return Err(PsConfigurationError::InvalidR3Profile);
         };
@@ -386,13 +438,26 @@ where
         if !matches!(description.parameters.matches(&presented), Ok(true)) {
             return AuthDecision::InternalError;
         }
+        // Release gating runs the call now, only under 202; with_r3_per_call
+        // refuses release without hold, and this refuses it again.
+        let release = match (&per_call.release, per_call.hold) {
+            (Some(run), true) => match run(request, operation, &presented, c.account.as_deref()) {
+                Ok(release) => release,
+                Err(_) => return AuthDecision::InternalError,
+            },
+            (Some(_), false) => return AuthDecision::InternalError,
+            (None, _) => None,
+        };
         let Ok(proposal) = Proposal::new(
             operation,
             &description.parameters,
             ProposalOptions {
                 account: c.account.as_deref(),
-                result: None,
-                display: description.display.as_ref(),
+                result: release.as_ref().map(|release| &release.result),
+                display: match &release {
+                    Some(release) => Some(&release.display),
+                    None => description.display.as_ref(),
+                },
             },
         ) else {
             return AuthDecision::InternalError;
@@ -461,8 +526,10 @@ where
             issued_at: claims.iat,
             expires_at: claims.exp,
             held,
+            released: release.map(|release| snapshot(&release.response)),
         };
-        // Committed before the challenge is observable; any failure withholds it.
+        // Committed before the challenge is observable; any failure withholds it
+        // and discards a computed result unreleased.
         if per_call.calls.commit(&record).is_err() {
             return AuthDecision::InternalError;
         }
@@ -506,7 +573,10 @@ where
             .registry
             .parse_referenced_proposal(&record.reference, &record.exact_json)
             .map_err(|_| ())?;
-        if proposal.result().is_some() {
+        // `result` exactly when a computed response is held for a 202 release.
+        if proposal.result().is_some() != record.released.is_some()
+            || (record.released.is_some() && record.held.is_none())
+        {
             return Err(());
         }
         validate_proposal_account(&proposal, record.account.as_deref()).map_err(|_| ())?;
@@ -550,7 +620,7 @@ where
     }
 
     /// Per-call completion: `401` retry at the mapped route, or a `202` poll
-    /// at the pending URL. Nothing is claimed here; [`Self::r3_claim`] claims
+    /// at the pending URL. Nothing is claimed here; [`Self::post_callback_admission`] claims
     /// after host policy admitted the request.
     pub(super) fn per_call_completion(
         &self,
@@ -649,26 +719,33 @@ where
                 },
                 fence: None,
                 held,
+                released: record.released.clone(),
             }),
         })
     }
 
-    /// Recheck R3 admission after callbacks, then claim a per-call completion.
-    /// A class grant needs no claim. A revocation noticed after a claim never
-    /// rolls it back or redispatches the operation; the host receives no effect.
-    pub(crate) fn r3_claim(
+    /// Shared post-callback verification for every admitted Auth token, Core
+    /// or R3: recheck revocation after host policy, then claim a per-call
+    /// completion. A Core or class grant needs no claim. A revocation noticed
+    /// after a claim never rolls it back, redispatches the operation or
+    /// releases a result; the host receives no effect.
+    ///
+    /// A release-gated completion is retained and answered here as
+    /// [`AuthDecision::Replayed`]; the host never executes it.
+    pub(crate) fn post_callback_admission(
         &self,
         grant: Option<R3Grant>,
         token: &VerifiedAuthToken,
         now: i64,
     ) -> Result<Option<R3Grant>, AuthDecision<O::Context>> {
-        let Some(mut grant) = grant else {
-            return Ok(None);
-        };
         let claims = token.claims();
+        // Host policy is a callback: a revocation it completed fences admission.
         if self.presented_revoked(&claims.iss, &claims.jti, now) {
             return Err(AuthDecision::Revoked { auth_token: true });
         }
+        let Some(mut grant) = grant else {
+            return Ok(None);
+        };
         let Some(completion) = grant.completion.as_mut() else {
             return Ok(Some(grant));
         };
@@ -683,9 +760,23 @@ where
             .calls
             .claim(&completion.uri, &completion.token, now)
         {
+            // Release: the claim consumes the proposal and the stored response
+            // is retained under the fence; nothing executes.
             Ok(R3Claim::Execute { fence }) if !fence.is_empty() => {
-                completion.fence = Some(fence);
-                Ok(Some(grant))
+                if let Some(released) = completion.released.take() {
+                    // Revoked during the claim callback: the claim stays bound
+                    // and nothing is retained, so no later replay can release.
+                    if self.presented_revoked(&claims.iss, &claims.jti, now) {
+                        return Err(AuthDecision::Revoked { auth_token: true });
+                    }
+                    match per_call.calls.retain(&completion.uri, &fence, &released) {
+                        Ok(stored) => Err(AuthDecision::Replayed(Box::new(restore(&stored)))),
+                        Err(_) => Err(AuthDecision::InternalError),
+                    }
+                } else {
+                    completion.fence = Some(fence);
+                    Ok(Some(grant))
+                }
             }
             Ok(R3Claim::Replay(result)) => Err(AuthDecision::Replayed(Box::new(restore(&result)))),
             Ok(R3Claim::DifferentToken | R3Claim::Expired) => Err(AuthDecision::Forbidden {
@@ -694,8 +785,8 @@ where
             // Unfinished, an empty fence, or an uncertain store: never a second effect.
             Ok(_) | Err(_) => Err(AuthDecision::InternalError),
         };
-        // The store is host code too. A completed revocation during its callback
-        // must fence both first execution and retained-result release.
+        // The store is host code too. A completed revocation during its claim or
+        // retain callback fences first execution, first release and replay.
         if self.presented_revoked(&claims.iss, &claims.jti, now) {
             Err(AuthDecision::Revoked { auth_token: true })
         } else {

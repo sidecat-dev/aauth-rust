@@ -8,10 +8,11 @@
 //! bytes. A class document is granted through [`R3Policy::authorize_document`],
 //! optionally with `r3_per_call` operations. A per-call proposal is approved
 //! only through [`R3Policy::authorize_proposal`], against the presented class
-//! Auth token, and yields one single-operation Auth token. Either way the R3
-//! audit record and the exact issuance commit before release.
-//! Result-bearing proposals (release gating), budgets, missions, sub-agents,
-//! call chaining and AS federation are refused.
+//! Auth token, and yields one single-operation Auth token. A proposal carrying
+//! `result` (release gating) is release consent and goes only through
+//! [`R3Policy::authorize_release`]; the token shape is the same. Either way the
+//! R3 audit record and the exact issuance commit before release.
+//! Budgets, missions, sub-agents, call chaining and AS federation are refused.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
@@ -62,7 +63,8 @@ pub struct R3ProposalRequest<'a> {
     pub reference: &'a Reference,
     /// Proposal fetched from exactly `r3_uri`, matched to `r3_s256` and the
     /// account. Its `parameters` are the concrete call; `display` is
-    /// Resource-asserted text. It carries no `result`.
+    /// Resource-asserted text. It carries `result` exactly when this request
+    /// reached [`R3Policy::authorize_release`].
     pub proposal: &'a Proposal,
     /// The presented class Auth token, verified; the proposal operation is in
     /// its `r3_per_call`.
@@ -96,6 +98,24 @@ pub trait R3Policy: Send + Sync {
     /// # Errors
     /// [`PolicyError::Denied`] refuses; [`PolicyError::Unavailable`] is operational.
     fn authorize_proposal(
+        &self,
+        _request: &R3ProposalRequest<'_>,
+    ) -> Result<R3ProposalDecision, PolicyError> {
+        Err(PolicyError::Denied)
+    }
+    /// Approve release of a result the Resource already computed: the
+    /// proposal carries `result`, and its `display` should say the operation
+    /// has run (`draft-hardt-aauth-r3`, Approving Release Rather Than
+    /// Execution). This is disclosure consent, not execution consent, and
+    /// `result` is what later requests from the same Agent may be judged
+    /// against. Declining releases nothing.
+    ///
+    /// The default refuses, so a policy that approves execution never
+    /// approves a release it did not inspect.
+    ///
+    /// # Errors
+    /// [`PolicyError::Denied`] refuses; [`PolicyError::Unavailable`] is operational.
+    fn authorize_release(
         &self,
         _request: &R3ProposalRequest<'_>,
     ) -> Result<R3ProposalDecision, PolicyError> {
@@ -310,9 +330,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 mint,
             )
         } else if let Some(proposal) = artifact.proposal() {
-            // Release gating executes before approval; it is not execution consent.
-            if proposal.result().is_some() {
-                return Err(Failure::parameter("invalid_request"));
+            // Release gating executed before approval: release consent, never
+            // execution consent. A person cannot be told it already ran
+            // without a display.
+            let release = proposal.result().is_some();
+            if release && proposal.display().is_none() {
+                return Err(Failure::parameter("invalid_resource_token"));
             }
             validate_proposal_account(proposal, r.account.as_deref())
                 .map_err(|_| Failure::parameter("invalid_resource_token"))?;
@@ -339,15 +362,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             ) {
                 return Err(Failure::parameter("invalid_resource_token"));
             }
-            let decision = r3
-                .policy
-                .authorize_proposal(&R3ProposalRequest {
-                    core: &context,
-                    reference: &reference,
-                    proposal,
-                    class: &class,
-                })
-                .map_err(Failure::policy)?;
+            let request = R3ProposalRequest {
+                core: &context,
+                reference: &reference,
+                proposal,
+                class: &class,
+            };
+            let decision = if release {
+                r3.policy.authorize_release(&request)
+            } else {
+                r3.policy.authorize_proposal(&request)
+            }
+            .map_err(Failure::policy)?;
             if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
                 return Err(Failure::internal());
             }
