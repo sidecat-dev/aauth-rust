@@ -176,10 +176,35 @@ This is a bounded direct-R3 qualification, not a full suite or full conformance
 claim. Resource recomposition from files occurred within one process; no actual
 OS restart or generic durable `R3CallStore` adapter/crash contract was qualified.
 PS store/audit custody in the example is volatile. Mixed-language per-call flows,
-result-bearing proposal release gating, recorded-approval reuse after
-`expired_presented_token`, and composition with budgets, missions, AS,
-sub-agents or chaining remain unqualified or unsupported. The digest-parameter
+recorded-approval reuse after `expired_presented_token`, and composition with
+budgets, missions, AS, sub-agents or chaining remain unqualified or unsupported. The digest-parameter
 source path has no separate actual journey in this batch.
+
+The result-release increment was executed at source `71b09d5a`: six actual
+HTTP admission scenarios and five Core revocation controls passed, followed by
+strict Clippy across Resource, Person Server and R3 targets. These are focused
+results, not full conformance. The existing `r3-per-call` executable also ran at
+`e8354bb7`, observing one read, two deletes and three audit records; the later
+formatting and Core-control changes are separately identified.
+
+For side-effect-free queries, set `R3PerCallConfig::hold` and supply its optional
+`release` callback. Return `R3Release` only when running the query changes nothing
+outside its result; audited, billed, metered or third-party operations require
+execution consent instead. The callback supplies the held response, structural
+`result` and consent `display`. The PS routes this proposal exclusively through
+`R3Policy::authorize_release`, which refuses by default. Execution approval does
+not imply disclosure approval. See the `records.query` implementation in
+[the per-call example](crates/aauth-rust-resource/examples/r3_per_call/mod.rs).
+
+The HTTP scenarios observed one computation before approval, disclosure denial,
+wrong-proposal and substituted-call refusals, and identical approved replay
+without recomputation. Signed revocation during policy refuses before claim;
+revocation during claim preserves the consumed claim while withholding the
+result. The plain-Core control likewise refuses a token revoked during host
+policy, refuses its replay before another policy call, and admits a fresh token.
+The release profile is202-only and unmetered. The host must enforce the callback's
+side-effect-free contract; durable crash recovery and budget composition remain
+unqualified.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
