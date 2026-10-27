@@ -289,6 +289,7 @@ fn fixture_full(
                 let vocabulary = McpCodec::vocabulary().unwrap();
                 Ok(R3Decision {
                     granted: GrantedOperations::new(&vocabulary, &[mcp("records.read")]).unwrap(),
+                    per_call: None,
                     scopes: granted_scopes
                         .iter()
                         .map(|scope| (*scope).to_owned())
