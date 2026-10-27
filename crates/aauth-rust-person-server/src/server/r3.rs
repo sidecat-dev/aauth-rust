@@ -114,6 +114,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         Ok(self)
     }
 
+    /// Refuse when the Agent, presented or Resource token is now revoked,
+    /// with the same typed errors the request-time checks use.
+    fn inputs_unrevoked(
+        &self,
+        agent: &VerifiedAgentToken,
+        resource: &VerifiedResourceToken,
+        presented: &Presented,
+        now: i64,
+    ) -> Result<(), Failure> {
+        let a = agent.claims();
+        if self.token_revoked(&a.iss, &a.jti, now) {
+            return Err(Failure::revoked_jwt());
+        }
+        if self.token_revoked(&presented.issuer, &presented.jti, now) {
+            return Err(revocation::revoked_parameter("presented"));
+        }
+        let r = resource.claims();
+        if self.token_revoked(&r.iss, &r.jti, now) {
+            return Err(revocation::revoked_parameter("resource"));
+        }
+        Ok(())
+    }
+
     pub(super) fn auth_r3(
         &self,
         agent: VerifiedAgentToken,
@@ -193,6 +216,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 
         let now = (self.clock)();
         self.inputs_current(&agent, &resource, &presented, now)?;
+        // Fetch and policy may block; a revocation recorded meanwhile refuses here.
+        self.inputs_unrevoked(&agent, &resource, &presented, now)?;
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
@@ -273,6 +298,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
         self.inputs_current(&agent, &resource, &presented, released_at)?;
+        // Checked only after the issuance is registered in the store. A
+        // revocation records its token in the ledger before it reads the store
+        // for its cascade: one that began before this check sees it here and
+        // the token is withheld; one that begins after reads this issuance.
+        self.inputs_unrevoked(&agent, &resource, &presented, released_at)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }

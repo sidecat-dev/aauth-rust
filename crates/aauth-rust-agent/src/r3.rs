@@ -64,6 +64,13 @@ fn scope_values(scope: &str) -> bool {
         })
 }
 
+/// Core scope on an R3 grant: absent grants none, which is never broader than
+/// the request; present must be a subset of a requested scope (Core `scope` is
+/// optional and no broader than requested; R3 enforces it independently).
+fn r3_granted_scope(granted: Option<&str>, requested: Option<&str>) -> bool {
+    granted.is_none() || narrowed_scope(granted, requested)
+}
+
 impl Agent {
     /// Prepare `POST` to the Resource's advertised `authorization_endpoint`.
     ///
@@ -215,8 +222,10 @@ impl Agent {
     /// Verify a direct PS class grant against the verified R3 Resource token.
     ///
     /// Core checks match [`Self::verify_auth_delivery`]: PS role and issuer,
-    /// audience, subject, tenant, mission, account, holder key, Core scope
-    /// narrowing, and expiry no later than the presented credential. The R3
+    /// audience, subject, tenant, mission, account, holder key, and expiry no
+    /// later than the presented credential. A granted `scope` must be within the
+    /// requested scope; an absent `scope` grants no Core scope and is accepted
+    /// even when scope was requested. The R3
     /// reference must equal the Resource token's, and the token must be
     /// direct-only: `r3_per_call` is refused because per-call proposals are not
     /// implemented. The Agent cannot prove `r3_granted` against the document it
@@ -268,7 +277,7 @@ impl Agent {
             || claims.account != requested.account
             || holder != own
             || claims.exp > parent.exp
-            || !narrowed_scope(claims.scope.as_deref(), requested.scope.as_deref())
+            || !r3_granted_scope(claims.scope.as_deref(), requested.scope.as_deref())
             || token.reference() != resource.reference()
         {
             return Err(R3AgentError::Context);
