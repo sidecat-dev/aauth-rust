@@ -7,6 +7,8 @@ pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
 pub use governance::{Governance, GovernanceError, InteractionDecision};
 mod lineage;
 mod missions;
+mod r3;
+pub use r3::{BoxedR3Policy, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy};
 mod subagents;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -92,6 +94,7 @@ pub struct PersonServer<K, S, P, C, I> {
     mission_http: Option<mission_http::Gate>,
     governance: Option<governance::Gate>,
     budgets: Option<BudgetState>,
+    r3: Option<Box<R3IssuerConfig>>,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -210,6 +213,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             mission_http: None,
             governance: None,
             budgets: None,
+            r3: None,
         })
     }
     /// Enable AS federation for every /token request, including
@@ -698,6 +702,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         verified_at: i64,
         upstream: Option<&Upstream>,
     ) -> Result<PreparedAuthorization, Failure> {
+        self.prepare_authorization_with(agent, parameters, verified_at, upstream, false)
+    }
+    /// Core verification of every exchange. `r3` admits only `r3_uri` and
+    /// `r3_s256` as Resource-token companions and makes `scope` optional; the
+    /// caller must then verify those claims and the referenced document.
+    fn prepare_authorization_with(
+        &self,
+        agent: &VerifiedAgentToken,
+        parameters: Value,
+        verified_at: i64,
+        upstream: Option<&Upstream>,
+        r3: bool,
+    ) -> Result<PreparedAuthorization, Failure> {
         let subagent = self.subagent(agent, &parameters, verified_at)?;
         let holder = subagent.as_ref().unwrap_or(agent);
         let resource_compact = required_string(&parameters, "resource_token")?;
@@ -735,13 +752,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
-        let offer = self.admit_resource_budget(&r.extra, &r.presented_jti)?;
-        let scopes = parse_scopes(
-            r.scope
-                .as_deref()
-                .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,
-        )
-        .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
+        let (offer, scopes) = if r3 {
+            let mut core = r.extra.clone();
+            core.remove("r3_uri");
+            core.remove("r3_s256");
+            if extra_blocks(&core, false, false) || r.mission_s256.is_some() {
+                return Err(Failure::parameter("invalid_resource_token"));
+            }
+            let scopes = match r.scope.as_deref() {
+                Some(scope) => parse_scopes(scope)
+                    .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,
+                None => Vec::new(),
+            };
+            (None, scopes)
+        } else {
+            let offer = self.admit_resource_budget(&r.extra, &r.presented_jti)?;
+            let scopes = parse_scopes(
+                r.scope
+                    .as_deref()
+                    .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,
+            )
+            .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
+            (offer, scopes)
+        };
         let presented = self.verify_presented(presented_compact, verified_at, "presented")?;
         self.match_resource(&presented, r)?;
         let retained = self.load_record(&presented, presented_compact, verified_at, "presented")?;
@@ -815,6 +848,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         verified_at: i64,
         upstream: Option<Upstream>,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        // Unverified dispatch only: the R3 path verifies every claim it uses.
+        if self.r3.is_some() && self.federation.is_none() && r3::carries_reference(&parameters) {
+            return self.auth_r3(agent, parameters, verified_at, upstream);
+        }
         let prepared =
             self.prepare_authorization(&agent, parameters, verified_at, upstream.as_ref())?;
         if self.federation.is_some() {

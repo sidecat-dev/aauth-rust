@@ -392,6 +392,11 @@ where
         format!("https://{}", self.authority)
     }
 
+    /// The signed origin when R3 is enabled, for endpoint metadata.
+    pub(super) fn r3_document_origin(&self) -> Option<String> {
+        self.r3.as_ref().map(|_| self.document_origin())
+    }
+
     /// Serve `GET {signed_origin}/r3/c.…` to a signer entitled to that document.
     ///
     /// The caller signs as a server with `jwks_uri`. Its key is resolved through

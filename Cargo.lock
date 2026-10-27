@@ -23,6 +23,7 @@ version = "0.1.0-alpha.2"
 dependencies = [
  "aauth-rust-core",
  "aauth-rust-jose",
+ "aauth-rust-r3",
  "aauth-rust-signature-key",
  "http",
  "serde_json",
@@ -93,6 +94,7 @@ dependencies = [
  "aauth-rust-budgets",
  "aauth-rust-core",
  "aauth-rust-jose",
+ "aauth-rust-r3",
  "aauth-rust-signature-key",
  "base64",
  "http",

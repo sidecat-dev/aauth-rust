@@ -373,8 +373,15 @@ fn metadata_advertises_the_selected_definition_and_core_metadata_is_unchanged() 
     let r3: Value =
         serde_json::from_slice(&resource(&store, &calls, false).metadata().unwrap()).unwrap();
     assert_eq!(r3["r3_vocabularies"], json!({ MCP_URI: MCP_ENDPOINT }));
+    // Core metadata keeps the issuer form; R3 names the endpoint it serves.
+    assert_eq!(
+        core["authorization_endpoint"],
+        format!("{RESOURCE}/authorize")
+    );
+    assert_eq!(r3["authorization_endpoint"], format!("{ORIGIN}/authorize"));
     let mut without = r3.clone();
     without.as_object_mut().unwrap().remove("r3_vocabularies");
+    without["authorization_endpoint"] = core["authorization_endpoint"].clone();
     assert_eq!(without, core);
 }
 
