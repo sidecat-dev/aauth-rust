@@ -121,9 +121,7 @@ fn snapshot() -> AuthoritativeSnapshot {
     .unwrap()
 }
 fn mapper() -> BoxedR3OperationMapper {
-    Box::new(|request: &Request<Vec<u8>>| {
-        Ok(request.uri().path().strip_prefix("/mcp/").map(mcp))
-    })
+    Box::new(|request: &Request<Vec<u8>>| Ok(request.uri().path().strip_prefix("/mcp/").map(mcp)))
 }
 fn r3_config(store: &Arc<VolatileTestStore>, require_core_scope: bool) -> R3Config {
     R3Config {
@@ -663,8 +661,8 @@ fn signed_fetch_serves_exact_bytes_only_to_the_entitled_person_server() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
     // A Resource without R3 publishes no document route.
-    let core = core_resource(&calls)
-        .r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
+    let core =
+        core_resource(&calls).r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
     assert_eq!(core.status(), 404);
 }
 
@@ -673,15 +671,30 @@ fn class_grant_admits_only_the_mapped_granted_operation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(VolatileTestStore::default());
     let resource = resource(&store, &calls, false);
-    let record = issue(&resource, &store, &["records.read", "records.delete"], "rt-1");
-    let token = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-1",
+    );
+    let token = class_token(
+        &record,
+        &["records.read"],
+        &[],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
 
     match resource.authorize(&call("/mcp/records.read", &token, 2), NOW, "unused") {
         AuthDecision::Granted(admitted) => {
             assert_eq!(admitted.admitted(), "receipt");
             let grant = admitted.r3_grant().unwrap();
             assert_eq!(grant.reference(), &record.reference);
-            assert_eq!(grant.operation().json().unwrap(), br#"{"tool":"records.read"}"#);
+            assert_eq!(
+                grant.operation().json().unwrap(),
+                br#"{"tool":"records.read"}"#
+            );
         }
         other => panic!("expected a grant, got {other:?}"),
     }
@@ -738,43 +751,103 @@ fn wrong_signer_audience_key_lineage_digest_or_grant_has_no_application_effect()
     let cases = [
         // Audience and issuer signature are verified before policy.
         (
-            call(path, &class_token(&record, &["records.read"], &[], &audience, 3, "ps-1"), 2),
+            call(
+                path,
+                &class_token(&record, &["records.read"], &[], &audience, 3, "ps-1"),
+                2,
+            ),
             401,
         ),
         (
-            call(path, &class_token(&record, &["records.read"], &[], &auth_claims(None), 5, "ps-1"), 2),
+            call(
+                path,
+                &class_token(
+                    &record,
+                    &["records.read"],
+                    &[],
+                    &auth_claims(None),
+                    5,
+                    "ps-1",
+                ),
+                2,
+            ),
             401,
         ),
         // The HTTP request proof must use the token's confirmation key.
         (
-            call(path, &class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1"), 7),
+            call(
+                path,
+                &class_token(
+                    &record,
+                    &["records.read"],
+                    &[],
+                    &auth_claims(None),
+                    3,
+                    "ps-1",
+                ),
+                7,
+            ),
             401,
         ),
         // A trusted but different Person Server is not the document's entitlement.
         (
-            call(path, &class_token(&record, &["records.read"], &[], &other_ps, 5, "ops-1"), 2),
+            call(
+                path,
+                &class_token(&record, &["records.read"], &[], &other_ps, 5, "ops-1"),
+                2,
+            ),
             403,
         ),
         // The grant is bound to the agent key and subject the document was issued for.
         (
-            call(path, &class_token(&record, &["records.read"], &[], &other_agent, 3, "ps-1"), 6),
+            call(
+                path,
+                &class_token(&record, &["records.read"], &[], &other_agent, 3, "ps-1"),
+                6,
+            ),
             403,
         ),
         (
-            call(path, &class_token(&record, &["records.read"], &[], &other_subject, 3, "ps-1"), 2),
+            call(
+                path,
+                &class_token(&record, &["records.read"], &[], &other_subject, 3, "ps-1"),
+                2,
+            ),
             403,
         ),
         // A grant beyond the document, a changed digest, or an added account.
         (
-            call(path, &forged(&record, record.reference.digest(), &["records.read", "records.delete"], None), 2),
+            call(
+                path,
+                &forged(
+                    &record,
+                    record.reference.digest(),
+                    &["records.read", "records.delete"],
+                    None,
+                ),
+                2,
+            ),
             403,
         ),
         (
-            call(path, &forged(&record, &digest(b"{}"), &["records.read"], None), 2),
+            call(
+                path,
+                &forged(&record, &digest(b"{}"), &["records.read"], None),
+                2,
+            ),
             403,
         ),
         (
-            call(path, &forged(&record, record.reference.digest(), &["records.read"], Some("acct-1")), 2),
+            call(
+                path,
+                &forged(
+                    &record,
+                    record.reference.digest(),
+                    &["records.read"],
+                    Some("acct-1"),
+                ),
+                2,
+            ),
             403,
         ),
     ];
@@ -796,7 +869,14 @@ fn wrong_signer_audience_key_lineage_digest_or_grant_has_no_application_effect()
         .authorize(&call(path, &unknown, 2), NOW, "unused")
         .into_response();
     assert_eq!(response.status(), 403);
-    let token = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    let token = class_token(
+        &record,
+        &["records.read"],
+        &[],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
     store.load_fails.store(true, Ordering::SeqCst);
     let response = resource
         .authorize(&call(path, &token, 2), NOW, "unused")
@@ -827,9 +907,23 @@ fn core_scope_is_enforced_independently_when_configured() {
         )
         .into_response();
     assert_eq!(response.status(), 200);
-    let record = store.records.lock().unwrap().values().next().unwrap().clone();
+    let record = store
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
     assert_eq!(record.scope.as_deref(), Some("records.read"));
-    let without_scope = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    let without_scope = class_token(
+        &record,
+        &["records.read"],
+        &[],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
     let refused = resource
         .authorize(&call("/mcp/records.read", &without_scope, 2), NOW, "unused")
         .into_response();
@@ -852,7 +946,14 @@ fn core_scope_is_enforced_independently_when_configured() {
     let relaxed_store = Arc::new(VolatileTestStore::default());
     let relaxed = self::resource(&relaxed_store, &calls, false);
     let record = issue(&relaxed, &relaxed_store, &["records.read"], "rt-2");
-    let token = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    let token = class_token(
+        &record,
+        &["records.read"],
+        &[],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
     relaxed
         .authorize(&call("/mcp/records.read", &token, 2), NOW, "unused")
         .into_result()
@@ -900,7 +1001,12 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(VolatileTestStore::default());
     let resource = resource(&store, &calls, false);
-    let record = issue(&resource, &store, &["records.read", "records.delete"], "rt-1");
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-1",
+    );
     let token = class_token(
         &record,
         &["records.read"],
@@ -1029,7 +1135,14 @@ fn literal_reference_fetch_and_grant_compose_on_a_differing_signed_origin() {
     assert!(!discloses(&elsewhere, &record));
 
     // The PS grant over that literal reference admits a call at the signed origin.
-    let token = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    let token = class_token(
+        &record,
+        &["records.read"],
+        &[],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
     match resource.authorize(
         &call_at(SIGNED, "/mcp/records.read", &token, 2),
         NOW,

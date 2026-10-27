@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, TokenError, VerifiedAuthToken};
+use aauth_rust_jose::strict_json;
 use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionRegistry, Display, Document, DocumentOptions, Operation,
     OperationAccess, OperationSet, Reference, Registry, VocabularyUri, digest,
     validate_document_account, verify_auth_token_claims,
 };
-use aauth_rust_jose::strict_json;
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json, value::RawValue};
@@ -48,8 +48,7 @@ impl std::error::Error for R3HostError {
 }
 
 /// Host consent description for one validated operation set.
-pub type BoxedR3Display =
-    Box<dyn Fn(&OperationSet) -> Result<Display, R3HostError> + Send + Sync>;
+pub type BoxedR3Display = Box<dyn Fn(&OperationSet) -> Result<Display, R3HostError> + Send + Sync>;
 
 /// Host mapping from one protected request to its R3 operation.
 ///
@@ -415,7 +414,9 @@ where
             || request.uri().query().is_some()
             || !id.starts_with("c.")
             || id.contains('/')
-            || aauth_rust_signature_key::canonical_authority(request.uri()).ok().as_deref()
+            || aauth_rust_signature_key::canonical_authority(request.uri())
+                .ok()
+                .as_deref()
                 != Some(self.authority.as_str())
         {
             return document_response(StatusCode::NOT_FOUND, "not_found");
@@ -439,14 +440,17 @@ where
     ) -> Result<(String, String), SignatureFailure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
             .map_err(|error| match error {
-                Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
-                Error::InvalidInput => SignatureFailure::Input(required_components(request)),
-                other => SignatureFailure::Proof(other),
-            })?;
+            Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+            Error::InvalidInput => SignatureFailure::Input(required_components(request)),
+            other => SignatureFailure::Proof(other),
+        })?;
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
             return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
         };
-        let key = self.keys.key(id, dwk, kid).map_err(SignatureFailure::Token)?;
+        let key = self
+            .keys
+            .key(id, dwk, kid)
+            .map_err(SignatureFailure::Token)?;
         proof.verify(&key).map_err(SignatureFailure::Proof)?;
         Ok((id.clone(), dwk.clone()))
     }
