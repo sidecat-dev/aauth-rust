@@ -14,7 +14,7 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions | Core, Signature-Key, JOSE |
 | `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
-| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering | Core, Signature-Key, Budgets, JOSE |
+| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3 | Core, Signature-Key, Budgets, R3, JOSE |
 | `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
@@ -51,6 +51,16 @@ verified PS-issued Auth token, or the explicitly configured AS role/issuer,
 with the right audience, holder key and route
 scopes. Its origin-wide value has one fixed scope profile; the host router owns
 route selection. Policy receives verified Auth claims and the actual request.
+
+`with_r3` adds immediate class R3 to the direct PS path without a second
+runtime. The host supplies authoritative definition snapshots, a mapping from
+a verified request to at most one operation, and a durable immutable
+`R3DocumentStore`; the role never selects a source or a database. Each
+document URI is under the canonical signed origin, so the advertised `r3_uri`
+is the URI fetched, while JWT `iss`/`aud` keep the published issuer. It binds
+its digest, PS/issuer entitlement and Resource-token `jti`.
+The record is committed before the token is released, and the signed document
+endpoint and protected admission read only that record.
 
 The Person Server verifies the requesting Agent's proof, token parameters and
 exact retained lineage before policy. Its `Policy` authenticates a person,
