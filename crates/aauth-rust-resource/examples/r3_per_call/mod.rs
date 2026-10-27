@@ -36,7 +36,7 @@ use aauth_rust_r3::{
     ToolsListPage, ToolsListSnapshot, digest, standard_registry,
 };
 use aauth_rust_resource::{
-    AuthDecision, PsAuthorizationConfig, PsAuthorizationResource, R3CallDescription, R3CallResult,
+    AuthDecision, BoxedAuthPolicy, PsAuthorizationConfig, PsAuthorizationResource, R3CallDescription, R3CallResult,
     R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore, R3HeldRequest,
     R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError, R3Vocabulary,
 };
@@ -49,10 +49,10 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex, RwLock, mpsc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tls::TlsServer;
 
@@ -86,6 +86,43 @@ pub struct Transcript {
     pub deletes: Vec<String>,
     pub reads: usize,
     pub audit_records: usize,
+    pub held_policy_denied_status: u16,
+    pub held_policy_effect_delta: usize,
+    pub held_policy_claim_consumed: bool,
+    pub revocation_status: u16,
+    pub revoked_completion_status: u16,
+    pub revoked_completion_error: String,
+    pub revocation_effect_delta: usize,
+    pub revocation_claim_consumed: bool,
+}
+
+/// Adversarial admission paths exercised over the same real TLS roles.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionCase {
+    HeldPolicy,
+    Revocation,
+}
+
+#[derive(Default)]
+struct AdmissionControl {
+    deny_delete: AtomicBool,
+    revocation: bool,
+    barrier: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+}
+impl AdmissionControl {
+    fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
+        let barrier = self.barrier.lock().unwrap().take();
+        if let Some((entered, released)) = barrier {
+            if entered.send(()).is_err() || released.recv_timeout(Duration::from_secs(2)).is_err() {
+                return false;
+            }
+        }
+        token.claims().ps == PS
+            && !(self.deny_delete.load(Ordering::SeqCst)
+                && request.method() == http::Method::DELETE
+                && request.uri().path() == "/records/delete"
+                && request.body() == R1)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -544,10 +581,7 @@ impl FetchTransport for TlsFetch {
 
 // ---- Resource composition ---------------------------------------------------
 
-type Resource = PsAuthorizationResource<Trust, fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool>;
-fn admit(token: &VerifiedAuthToken, _: &Request<Vec<u8>>) -> bool {
-    token.claims().ps == PS
-}
+type Resource = PsAuthorizationResource<Trust, BoxedAuthPolicy>;
 fn record_parameter(request: &Request<Vec<u8>>) -> std::result::Result<Vec<u8>, R3HostError> {
     let value: Value = serde_json::from_slice(request.body())
         .map_err(|e| R3HostError::new(e.to_string()))?;
@@ -562,8 +596,10 @@ fn compose(
     seed: [u8; 32],
     trust: &Trust,
     hold: bool,
+    control: Arc<AdmissionControl>,
 ) -> Result<Resource> {
-    Ok(PsAuthorizationResource::new(
+    let policy_control = control.clone();
+    let resource = PsAuthorizationResource::new(
         PsAuthorizationConfig {
             issuer: RECORDS.into(),
             signed_origin: RECORDS.into(),
@@ -572,7 +608,9 @@ fn compose(
             scopes: vec!["records.read".into()],
         },
         trust.clone(),
-        admit as fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool,
+        Box::new(move |token: &VerifiedAuthToken, request: &Request<Vec<u8>>| {
+            policy_control.admit(token, request)
+        }) as BoxedAuthPolicy,
     )?
     .with_authorization_endpoint()
     .with_r3(R3Config {
@@ -634,7 +672,8 @@ fn compose(
         ),
         calls: Arc::new(FileCalls(root.to_path_buf(), Mutex::new(()))),
         hold,
-    })?)
+    })?;
+    Ok(if control.revocation { resource.with_revocation() } else { resource })
 }
 
 /// The application: one effect per admitted call, recorded by the host.
@@ -656,6 +695,9 @@ fn serve(resource: &Resource, effects: &Effects, request: Request<Vec<u8>>) -> R
     }
     if path == "/.well-known/jwks.json" {
         return json_response(200, serde_json::from_slice(&resource.jwks().unwrap()).unwrap());
+    }
+    if path == "/revoke" {
+        return resource.revoke(&request, now());
     }
     if path == "/authorize" {
         return resource.authorize_endpoint(&request, now(), &jti).into_response();
@@ -729,6 +771,18 @@ fn approve(agent: &Agent, ps: &TlsServer, resource_token: &str, class: &str) -> 
 }
 
 pub fn run() -> Result<Transcript> {
+    run_case(None)
+}
+
+pub fn run_admission_case(case: AdmissionCase) -> Result<Transcript> {
+    run_case(Some(case))
+}
+
+fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
+    let control = Arc::new(AdmissionControl {
+        revocation: case == Some(AdmissionCase::Revocation),
+        ..AdmissionControl::default()
+    });
     let mut t = Transcript::default();
     let trust = Trust::default();
     let registry = standard_registry()?;
@@ -775,7 +829,7 @@ pub fn run() -> Result<Transcript> {
         reads: AtomicUsize::new(0),
         deletes: Mutex::new(Vec::new()),
     });
-    let current = Arc::new(RwLock::new(Arc::new(compose(&root, seed, &trust, false)?)));
+    let current = Arc::new(RwLock::new(Arc::new(compose(&root, seed, &trust, false, control.clone())?)));
     let (serving, serving_effects) = (current.clone(), effects.clone());
     let api = Arc::new(TlsServer::start("records.example", move |request| {
         let resource = serving.read().unwrap().clone();
@@ -785,8 +839,10 @@ pub fn run() -> Result<Transcript> {
 
     let audit = Arc::new(AuditLog::default());
     let ids = AtomicUsize::new(0);
+    // Fixture key retained only to sign the genuine PS revocation control.
+    let ps_seed = seed.map(|byte| byte ^ 0x5a);
     let ps = PersonServer::new(
-        Config::new(PS, "ps-1", SigningKey::generate()),
+        Config::new(PS, "ps-1", SigningKey::from_seed(ps_seed)),
         trust.clone(),
         MemoryStore::default(),
         HostPolicy,
@@ -871,7 +927,7 @@ pub fn run() -> Result<Transcript> {
     t.replay_matches_first = replay.body() == first.body();
 
     // Recompose the Resource from its files, now holding invocations (202).
-    *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true)?);
+    *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true, control.clone())?);
     t.replay_after_restart_status = api
         .send(&post(&completing, &format!("{RECORDS}/records/delete"), R1)?)?
         .status()
@@ -885,7 +941,12 @@ pub fn run() -> Result<Transcript> {
         .as_u16();
 
     // Per call (202): the held invocation completes at its pending URL.
-    let held = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R1)?)?;
+    let mut held_request = post(&holder, &format!("{RECORDS}/records/delete"), R1)?;
+    if case == Some(AdmissionCase::HeldPolicy) {
+        *held_request.method_mut() = http::Method::DELETE;
+        holder.sign(&mut held_request, now())?;
+    }
+    let held = api.send(&held_request)?;
     t.held_status = held.status().as_u16();
     let location = held
         .headers()
@@ -909,10 +970,67 @@ pub fn run() -> Result<Transcript> {
     let poller = agent.with_token(held_grant)?;
     let mut poll = get(&location)?;
     poller.sign(&mut poll, now())?;
+    if case == Some(AdmissionCase::HeldPolicy) {
+        control.deny_delete.store(true, Ordering::SeqCst);
+        let before = effects.deletes.lock().unwrap().len();
+        t.held_policy_denied_status = api.send(&poll)?.status().as_u16();
+        t.held_policy_effect_delta = effects.deletes.lock().unwrap().len() - before;
+        t.held_policy_claim_consumed = FileCalls(root.clone(), Mutex::new(()))
+            .claim_path(held_proposal.reference().uri()).exists();
+        control.deny_delete.store(false, Ordering::SeqCst);
+        poller.sign(&mut poll, now())?;
+    }
     t.held_completion_status = api.send(&poll)?.status().as_u16();
     let mut again = get(&location)?;
     poller.sign(&mut again, now())?;
     t.held_replay_status = api.send(&again)?.status().as_u16();
+
+    if case == Some(AdmissionCase::Revocation) {
+        // A fresh, unclaimed proposal: previously admitted effects remain separate.
+        let held = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R1)?)?;
+        let location = held.headers()["location"].to_str()?.to_owned();
+        let proposal_token = challenge(&held)?;
+        let proposal = agent.verify_r3_proposal_challenge(
+            &proposal_token, RECORDS, PS, &class, &trust, now(),
+        )?;
+        let grant = member(&approve(&agent, &ps_tls, &proposal_token, &class)?, "auth_token")
+            .ok_or("revocation-control approval refused")?;
+        let verified = agent.verify_r3_per_call_delivery(
+            &grant, RECORDS, &proposal, &class, &registry, &trust, now(),
+        )?;
+        let mut revoke = Request::builder().method("POST").uri(format!("{RECORDS}/revoke"))
+            .header("content-type", "application/json")
+            .body(json!({"jti": verified.claims().jti, "exp": verified.claims().exp})
+                .to_string().into_bytes())?;
+        sign_request(&mut revoke, &SigningKey::from_seed(ps_seed), KeyMaterial::JwksUri {
+            id: PS.into(), dwk: "aauth-person.json".into(), kid: "ps-1".into(),
+        }, now())?;
+        let mut poll = get(&location)?;
+        agent.with_token(grant)?.sign(&mut poll, now())?;
+        let (entered, observed) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *control.barrier.lock().unwrap() = Some((entered, released));
+        let before = effects.deletes.lock().unwrap().len();
+        let sending = api.clone();
+        let pending = std::thread::spawn(move || sending.send(&poll));
+        observed.recv_timeout(Duration::from_secs(2))?;
+        // The example transport is serial per listener. A second TLS listener
+        // shares this exact Resource and ledger, permitting a concurrent revoke.
+        let revoking = current.read().unwrap().clone();
+        let revoke_api = TlsServer::start("records.example", move |request| {
+            revoking.revoke(&request, now())
+        })?;
+        let revoked = revoke_api.send(&revoke);
+        release.send(())?;
+        let completion = pending.join().map_err(|_| "completion thread panicked")??;
+        t.revocation_status = revoked?.status().as_u16();
+        t.revoked_completion_status = completion.status().as_u16();
+        t.revoked_completion_error = completion.headers().get("signature-error")
+            .and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+        t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
+        t.revocation_claim_consumed = FileCalls(root.clone(), Mutex::new(()))
+            .claim_path(proposal.reference().uri()).exists();
+    }
 
     t.reads = effects.reads.load(Ordering::SeqCst);
     t.deletes = effects.deletes.lock().unwrap().clone();
