@@ -577,8 +577,7 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(data: &'a [u8]) -> Result<Self, Error> {
-        let text = std::str::from_utf8(data)
-            .map_err(|_| Error::new("JSON must be valid UTF-8"))?;
+        let text = std::str::from_utf8(data).map_err(|_| Error::new("JSON must be valid UTF-8"))?;
         Ok(Self {
             text,
             data,
