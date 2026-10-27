@@ -11,11 +11,11 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
 | `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
-| `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions | Core, Signature-Key, JOSE |
+| `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions; R3 `/authorize` preparation and class-grant verification | Core, Signature-Key, R3, JOSE |
 | `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
 | `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3 | Core, Signature-Key, Budgets, R3, JOSE |
-| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance | Core, Signature-Key, Budgets, JOSE |
+| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance, opt-in direct class R3 issuance | Core, Signature-Key, Budgets, R3, JOSE |
 | `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 

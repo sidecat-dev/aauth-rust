@@ -9,6 +9,8 @@ pub use subagents::Subagent;
 
 mod polling;
 pub use polling::{PollError, PollSession};
+mod r3;
+pub use r3::{R3AgentError, R3TransportError};
 mod attempts;
 mod governance;
 mod requirements;

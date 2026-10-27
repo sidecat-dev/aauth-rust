@@ -106,12 +106,27 @@ Resource process restart, signed POST, exact-body receipt and refusals. A
 separate actual signed HTTP control used explicit endpoints at a different
 host/nondefault port, fetched the advertised URI verbatim and reused its grant.
 Qualification used host HTTP/disk adapters and volatile Go PS custody;
-production host/store integration remains application work. Per-call challenges,
-Observed grant context and differing-origin authorization metadata remain
-unfinished. Proposals, budgets, missions, AS federation and deferred delivery
+production host/store integration remains application work. Per-call challenges
+remain unfinished. Proposals, budgets, missions, AS federation and deferred delivery
 remain unsupported compositions. `/authorize` refuses account-bearing bodies;
 host-account challenge composition remains unqualified. Full R3 conformance
 is unclaimed.
+
+An unexecuted source batch adds the Rust Agent and Person Server sides of the
+same direct class flow. `Agent::r3_authorization_request`/`r3_authorize` sign an
+exact `r3_operations` body with the Person token through a host transport;
+`verify_r3_resource_token` and `verify_r3_auth_delivery` check Resource, PS,
+holder, lineage, scope, reference and lifetime, and refuse `r3_per_call`.
+`PersonServer::with_r3` keeps Core verification of the Agent proof, presented
+lineage and Resource token, then verifies `r3_uri`/`r3_s256`, fetches the literal
+URI with the PS `jwks_uri` signature through host egress and transport, checks
+digest and account, asks an explicit host `R3Policy`, proves the grant against
+the document, and commits the R3 audit record and exact issuance before release.
+Sub-agents, chaining, missions, budgets and federation are refused on that path.
+With R3 enabled, Resource metadata names `authorization_endpoint` at the signed
+origin, and Observed admissions carry the class grant. The `r3-three-party` TLS
+example runs Rust Agent → Rust PS → Rust Resource with those refusals; it has not
+been run, and no mixed-language journey has qualified the Agent or PS sides.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact

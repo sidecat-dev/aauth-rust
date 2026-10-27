@@ -15,6 +15,7 @@ description = "Sign AAuth Agent requests using caller-owned keys and exact token
 [dependencies]
 aauth-rust-jose.workspace = true
 aauth-rust-core.workspace = true
+aauth-rust-r3.workspace = true
 aauth-rust-signature-key.workspace = true
 http.workspace = true
 sfv.workspace = true
