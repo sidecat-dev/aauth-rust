@@ -22,6 +22,9 @@ use aauth_rust_r3::{
 };
 use std::sync::Arc;
 
+type TokenMint<'a> = Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + 'a>;
+type PreparedR3Grant<'a> = (Vec<String>, i64, VocabularyUri, TokenMint<'a>);
+
 /// What host consent sees for one exact class document.
 pub struct R3AuthorizationRequest<'a> {
     /// Core context verified as for any exchange. `scopes` is empty when the
@@ -247,12 +250,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let exact = artifact.exact_bytes().to_vec();
 
         // Each branch ends with the scopes, lifetime, signer and vocabulary to issue.
-        let (scopes, lifetime, vocabulary, mint): (
-            Vec<String>,
-            i64,
-            VocabularyUri,
-            Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + '_>,
-        ) = if let Some(document) = artifact.document() {
+        let (scopes, lifetime, vocabulary, mint): PreparedR3Grant<'_> = if let Some(document) =
+            artifact.document()
+        {
             validate_document_account(document, r.account.as_deref())
                 .map_err(|_| Failure::parameter("invalid_resource_token"))?;
             let decision = r3
@@ -267,44 +267,42 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(Failure::internal());
             }
             // A grant wider than the exact document is a host error: nothing is issued.
-            let mint: Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + '_> =
-                match &decision.per_call {
-                    None => {
-                        let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
-                            .map_err(|_| Failure::internal())?;
-                        let (reference, exact) = (reference.clone(), exact.clone());
-                        Box::new(move |claims: &AuthClaims| {
-                            mint_direct_auth_token(
-                                &r3.registry,
-                                &self.config.signing_key,
-                                &self.config.kid,
-                                claims,
-                                &reference,
-                                &exact,
-                                &grant,
-                            )
-                            .map_err(|_| Failure::internal())
-                        })
-                    }
-                    Some(per_call) => {
-                        let authorization =
-                            Authorization::new(&decision.granted, per_call, document)
-                                .map_err(|_| Failure::internal())?;
-                        let (reference, exact) = (reference.clone(), exact.clone());
-                        Box::new(move |claims: &AuthClaims| {
-                            mint_r3_auth_token(
-                                &r3.registry,
-                                &self.config.signing_key,
-                                &self.config.kid,
-                                claims,
-                                &reference,
-                                &exact,
-                                &authorization,
-                            )
-                            .map_err(|_| Failure::internal())
-                        })
-                    }
-                };
+            let mint: TokenMint<'_> = match &decision.per_call {
+                None => {
+                    let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
+                        .map_err(|_| Failure::internal())?;
+                    let (reference, exact) = (reference.clone(), exact.clone());
+                    Box::new(move |claims: &AuthClaims| {
+                        mint_direct_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                            &grant,
+                        )
+                        .map_err(|_| Failure::internal())
+                    })
+                }
+                Some(per_call) => {
+                    let authorization = Authorization::new(&decision.granted, per_call, document)
+                        .map_err(|_| Failure::internal())?;
+                    let (reference, exact) = (reference.clone(), exact.clone());
+                    Box::new(move |claims: &AuthClaims| {
+                        mint_r3_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                            &authorization,
+                        )
+                        .map_err(|_| Failure::internal())
+                    })
+                }
+            };
             (
                 decision.scopes,
                 decision.lifetime,
@@ -354,18 +352,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(Failure::internal());
             }
             let (reference, exact) = (reference.clone(), exact.clone());
-            let mint: Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + '_> =
-                Box::new(move |claims: &AuthClaims| {
-                    mint_per_call_auth_token(
-                        &r3.registry,
-                        &self.config.signing_key,
-                        &self.config.kid,
-                        claims,
-                        &reference,
-                        &exact,
-                    )
-                    .map_err(|_| Failure::internal())
-                });
+            let mint: TokenMint<'_> = Box::new(move |claims: &AuthClaims| {
+                mint_per_call_auth_token(
+                    &r3.registry,
+                    &self.config.signing_key,
+                    &self.config.kid,
+                    claims,
+                    &reference,
+                    &exact,
+                )
+                .map_err(|_| Failure::internal())
+            });
             (
                 decision.scopes,
                 decision.lifetime,
