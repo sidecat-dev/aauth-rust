@@ -1,6 +1,7 @@
 //! Immediate Person-Server authorization with route challenges.
 //! Mission context is opt-in through `with_mission_context`.
 //! Budgets are opt-in through `with_budgets`.
+//! Immediate class R3 is opt-in through `with_r3`.
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,13 @@ enum Meter {
 
 #[path = "resource_revocation.rs"]
 mod revocation;
+
+#[path = "r3_class.rs"]
+mod r3_class;
+pub use r3_class::{
+    BoxedR3Display, BoxedR3OperationMapper, R3Config, R3DocumentRecord, R3DocumentStore, R3Grant,
+    R3HostError, R3StoreError, R3Vocabulary,
+};
 
 /// Named captured-state policy for a PS-authorized Resource in application state.
 pub type BoxedAuthPolicy = Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
@@ -70,6 +78,8 @@ pub enum PsConfigurationError {
     InvalidAccessServer,
     /// Budget units, bounds, or `usage_endpoint` are not a usable profile.
     InvalidBudgetProfile,
+    /// R3 definitions, registry or composition are not a usable class profile.
+    InvalidR3Profile,
 }
 impl std::fmt::Display for PsConfigurationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -88,6 +98,9 @@ impl std::fmt::Display for PsConfigurationError {
             Self::InvalidBudgetProfile => {
                 "budget profile needs declared units, a finite bound, and an HTTPS usage endpoint"
             }
+            Self::InvalidR3Profile => {
+                "R3 needs registered authoritative definitions on a direct, unmetered, missionless Resource"
+            }
         })
     }
 }
@@ -100,6 +113,7 @@ pub struct AuthAuthorized<T = ()> {
     admitted: T,
     budget_header: Option<String>,
     admitted_maximum: Option<i64>,
+    r3: Option<R3Grant>,
 }
 impl<T> AuthAuthorized<T> {
     /// Authenticated authorization token whose HTTP holder proof also succeeded.
@@ -109,6 +123,10 @@ impl<T> AuthAuthorized<T> {
     /// Application context produced by the admission policy.
     pub fn admitted(&self) -> &T {
         &self.admitted
+    }
+    /// Class grant that admitted a mapped R3 route. `None` on a Core route.
+    pub fn r3_grant(&self) -> Option<&R3Grant> {
+        self.r3.as_ref()
     }
     /// `AAuth-Budget` field value for this admission, when the request was metered.
     pub fn budget_header(&self) -> Option<&str> {
@@ -374,6 +392,8 @@ pub enum ProactiveDecision {
     InternalError,
     /// A budget object was present and could not be narrowed.
     InvalidBudget,
+    /// The R3 document store conflicted or failed. No resource token is released.
+    RetentionFailed,
 }
 impl ProactiveDecision {
     /// Map the decision to the authorization-endpoint HTTP response.
@@ -416,7 +436,9 @@ impl ProactiveDecision {
                 );
                 response
             }
-            Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+            Self::InternalError | Self::RetentionFailed => {
+                refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error")
+            }
         }
     }
 }
@@ -532,6 +554,7 @@ pub struct PsAuthorizationResource<K, P> {
     revocation: Option<revocation::Gate>,
     budgets: Option<Arc<BudgetGate>>,
     omit_required: bool,
+    r3: Option<Box<r3_class::R3Profile>>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -585,6 +608,7 @@ where
             revocation: None,
             budgets: None,
             omit_required: false,
+            r3: None,
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
@@ -657,6 +681,10 @@ where
         default_bound: i64,
         default_offer: i64,
     ) -> Result<Self, PsConfigurationError> {
+        // The combined R3 and Budgets profile is not implemented here.
+        if self.r3.is_some() {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        }
         metered_access_mode("auth-token")
             .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
         let usage_endpoint = usage_endpoint.into();
@@ -734,6 +762,8 @@ where
     /// Accurate public metadata; serve at the published Resource well-known path.
     /// `revocation_endpoint` is present only after [`Self::with_revocation`].
     /// `authorization_endpoint` is present only after [`Self::with_authorization_endpoint`].
+    /// `r3_vocabularies` is present only after [`Self::with_r3`] and names each
+    /// selected definition's discovery endpoint.
     /// AS selection is carried by its signed challenge audience.
     ///
     /// # Errors
@@ -752,6 +782,9 @@ where
         }
         if let Some(descriptions) = &self.scope_descriptions {
             metadata["scope_descriptions"] = json!(descriptions);
+        }
+        if let Some(vocabularies) = self.r3_metadata() {
+            metadata["r3_vocabularies"] = vocabularies;
         }
         serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
     }
@@ -906,6 +939,9 @@ where
         asked: Option<&AuthorizationAsk>,
         meter: Meter,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
+        if self.r3_composition_refused() {
+            return Ok(AuthDecision::InternalError);
+        }
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
             .map_err(|error| match error {
                 Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
@@ -957,7 +993,7 @@ where
                     return Ok(AuthDecision::Revoked { auth_token: false });
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra, false)
+                    || unsupported_companion(&claims.extra, false, false)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
@@ -1005,6 +1041,9 @@ where
                     },
                     extra,
                 };
+                if let Some(decision) = self.r3_challenge(request, &challenge) {
+                    return Ok(decision);
+                }
                 match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
                     Ok(resource_token) => Ok(AuthDecision::AuthTokenRequired {
                         resource_token,
@@ -1049,7 +1088,11 @@ where
                 };
                 if !valid_role
                     || self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra, self.budgets.is_some())
+                    || unsupported_companion(
+                        &claims.extra,
+                        self.budgets.is_some(),
+                        self.r3.is_some(),
+                    )
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
@@ -1067,16 +1110,34 @@ where
                         return Ok(self.forbidden_budget(&token, grant.as_ref()));
                     }
                 }
+                let r3 = match self.r3_gate(&token, request, now) {
+                    Ok(r3) => r3,
+                    Err(decision) => return Ok(decision),
+                };
+                // A Core route always needs the scope profile; an R3 route needs
+                // it as well only when the host configured both to be enforced.
+                let scope_required = r3.is_none()
+                    || self
+                        .r3
+                        .as_ref()
+                        .is_some_and(|profile| profile.require_core_scope);
                 let granted: Vec<&str> = claims.scope.as_deref().unwrap_or("").split(' ').collect();
-                if self
-                    .config
-                    .scopes
-                    .iter()
-                    .any(|scope| !granted.contains(&scope.as_str()))
+                if scope_required
+                    && self
+                        .config
+                        .scopes
+                        .iter()
+                        .any(|scope| !granted.contains(&scope.as_str()))
                 {
                     return Ok(self.forbidden_budget(&token, grant.as_ref()));
                 }
-                self.admit_auth(token, request, now, challenge_jti, grant, meter)
+                match self.admit_auth(token, request, now, challenge_jti, grant, meter)? {
+                    AuthDecision::Granted(mut admitted) if r3.is_some() => {
+                        admitted.r3 = r3;
+                        Ok(AuthDecision::Granted(admitted))
+                    }
+                    decision => Ok(decision),
+                }
             }
             _ => Err(SignatureFailure::Token(TokenError::UnexpectedTokenType)),
         }
@@ -1087,6 +1148,8 @@ where
     /// The person token is verified before `scope` is read. A missing or empty
     /// `scope` is `invalid_request`. A scope this resource does not publish is
     /// `invalid_scope`. A recognized scope returns that resource token.
+    /// After [`Self::with_r3`], a body carrying `r3_operations` may omit
+    /// `scope`; see that method for validation and retention before release.
     pub fn authorize_endpoint(
         &self,
         request: &Request<Vec<u8>>,
@@ -1120,6 +1183,9 @@ where
             .all(|name| !request.headers().contains_key(*name))
         {
             return ProactiveDecision::PersonTokenRequired;
+        }
+        if self.r3_composition_refused() {
+            return ProactiveDecision::InternalError;
         }
         match self.proactive_person(request, now, challenge_jti) {
             Ok(decision) => decision,
@@ -1183,19 +1249,11 @@ where
                     return Ok(ProactiveDecision::Revoked);
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
-                    || unsupported_companion(&claims.extra, false)
+                    || unsupported_companion(&claims.extra, false, false)
                 {
                     return Err(SignatureFailure::Token(TokenError::InvalidJwt));
                 }
-                let scope = match requested_scope(request, &self.config.scopes) {
-                    Ok(scope) => scope,
-                    Err(decision) => return Ok(decision),
-                };
-                let extra = match self.proactive_extra(request) {
-                    Ok(extra) => extra,
-                    Err(decision) => return Ok(decision),
-                };
-                let challenge = ResourceClaims {
+                let mut challenge = ResourceClaims {
                     iss: self.config.issuer.clone(),
                     dwk: "aauth-resource.json".into(),
                     aud: self
@@ -1213,7 +1271,7 @@ where
                         .map_err(|error| SignatureFailure::Token(error.into()))?,
                     iat: now,
                     exp: now.saturating_add(300),
-                    scope: Some(scope),
+                    scope: None,
                     account: None,
                     login_hint: None,
                     nbf: None,
@@ -1223,7 +1281,18 @@ where
                     } else {
                         None
                     },
-                    extra,
+                    extra: BTreeMap::new(),
+                };
+                if let Some(decision) = self.proactive_r3(request, &challenge) {
+                    return Ok(decision);
+                }
+                challenge.scope = match requested_scope(request, &self.config.scopes) {
+                    Ok(scope) => Some(scope),
+                    Err(decision) => return Ok(decision),
+                };
+                challenge.extra = match self.proactive_extra(request) {
+                    Ok(extra) => extra,
+                    Err(decision) => return Ok(decision),
                 };
                 match mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge) {
                     Ok(resource_token) => Ok(ProactiveDecision::ResourceToken { resource_token }),
@@ -1373,6 +1442,7 @@ where
                             admitted,
                             budget_header: Some(header),
                             admitted_maximum: Some(maximum),
+                            r3: None,
                         }))),
                         Err(()) => Ok(AuthDecision::InternalError),
                     },
@@ -1457,6 +1527,7 @@ where
                     admitted,
                     budget_header,
                     admitted_maximum: None,
+                    r3: None,
                 }))),
             },
             Err(Deny) => Ok(AuthDecision::Forbidden {
@@ -1722,9 +1793,14 @@ fn scope_value(scope: &str) -> bool {
             .bytes()
             .all(|b| b == 0x21 || (0x23..=0x5b).contains(&b) || (0x5d..=0x7e).contains(&b))
 }
-fn unsupported_companion(claims: &BTreeMap<String, Value>, allow_budget: bool) -> bool {
+fn unsupported_companion(
+    claims: &BTreeMap<String, Value>,
+    allow_budget: bool,
+    allow_r3: bool,
+) -> bool {
     claims.keys().any(|name| match name.as_str() {
-        "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" | "budget_consumed" => true,
+        "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" => !allow_r3,
+        "budget_consumed" => true,
         "budget" => !allow_budget,
         _ => false,
     })
