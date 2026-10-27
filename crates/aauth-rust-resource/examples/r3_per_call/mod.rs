@@ -105,6 +105,7 @@ pub struct Transcript {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionCase {
     HeldPolicy,
+    #[allow(dead_code, reason = "Constructed by the policy-race integration control.")]
     Revocation,
     ClaimRevocation,
 }
@@ -119,10 +120,10 @@ struct AdmissionControl {
 impl AdmissionControl {
     fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
         let barrier = self.barrier.lock().unwrap().take();
-        if let Some((entered, released)) = barrier {
-            if entered.send(()).is_err() || released.recv_timeout(Duration::from_secs(2)).is_err() {
-                return false;
-            }
+        if let Some((entered, released)) = barrier
+            && (entered.send(()).is_err() || released.recv_timeout(Duration::from_secs(2)).is_err())
+        {
+            return false;
         }
         token.claims().ps == PS
             && !(self.deny_delete.load(Ordering::SeqCst)
@@ -838,10 +839,12 @@ fn approve(
     )?)
 }
 
+#[allow(dead_code, reason = "Shared entry point used by the ordinary example and TLS test.")]
 pub fn run() -> Result<Transcript> {
     run_case(None)
 }
 
+#[allow(dead_code, reason = "Shared entry point used by the admission integration tests.")]
 pub fn run_admission_case(case: AdmissionCase) -> Result<Transcript> {
     run_case(Some(case))
 }
