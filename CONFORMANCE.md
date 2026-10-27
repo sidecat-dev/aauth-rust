@@ -89,12 +89,16 @@ Terminal clock_skew at 400 or 401 preserves AS Date. Endpoint/transport/malforme
 unverifiable grants and unsupported continuations remain as_unreachable. No shared four-party harness result or full
 cross-implementation equivalence is claimed by these native tests.
 
-**R3-FULL-COMPLIANCE:** postponed by vocabulary. The current Rust Core-scope
-profile has no R3 authorization vocabulary. General-purpose media/service
-vocabularies may be defined in R3 and implemented in both Go and Rust on demand,
-one test at a time; full compliance remains unclaimed. Application-specific
-formats belong to the application. Unsupported R3 claims fail closed in this
-profile rather than conferring scope authority.
+**R3-FULL-COMPLIANCE:** unclaimed. The current Core endpoint profile does not
+advertise or negotiate R3 authorization. Unsupported R3 claims fail closed in
+that profile rather than conferring scope authority.
+
+The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
+operation codecs, artifact/proposal validation, signed claims, bounded artifact
+fetching and MCP/OpenAPI/AsyncAPI definition adapters. Actual library consumers
+and Go/Rust exchanges have exercised those paths. This does not qualify role
+endpoints, discovery, consent, complete definition coverage or the normative
+R3 table. Application-specific formats remain application-owned.
 
 ## One-level parent-mediated sub-agents
 
