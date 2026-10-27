@@ -5,13 +5,13 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_resource::{
-    BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig, PsAuthorizationResource,
+    AuthDecision, BoxedAuthAdmissionPolicy, Deny, PsAuthorizationConfig, PsAuthorizationResource,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -288,6 +288,86 @@ fn revoked_auth_token_is_revoked_jwt_with_person_requirement() {
         "error=revoked_jwt"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+type CoreResource = PsAuthorizationResource<Keys, BoxedAuthAdmissionPolicy<String>>;
+
+#[test]
+fn core_revocation_completed_during_host_policy_refuses_admission_without_effect_or_replay() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let handle: Arc<OnceLock<Weak<CoreResource>>> = Arc::new(OnceLock::new());
+    let (policy_calls, policy_recorded, policy_handle) =
+        (calls.clone(), recorded.clone(), handle.clone());
+    // Plain Core, no R3: the signed revocation completes inside host policy.
+    let resource = Arc::new(
+        PsAuthorizationResource::new(
+            config(),
+            keys(),
+            Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+                policy_calls.fetch_add(1, Ordering::SeqCst);
+                if token.claims().jti == "auth-raced"
+                    && let Some(resource) = policy_handle.get().and_then(Weak::upgrade)
+                {
+                    let response = resource.revoke(
+                        &server_post(
+                            3,
+                            PS,
+                            "aauth-person.json",
+                            "ps-1",
+                            json!({"jti":"auth-raced","exp":2500}),
+                        ),
+                        NOW,
+                    );
+                    policy_recorded
+                        .lock()
+                        .unwrap()
+                        .push(response.status().as_u16());
+                }
+                Ok("host".to_owned()) as Result<String, Deny>
+            }) as BoxedAuthAdmissionPolicy<String>,
+        )
+        .unwrap()
+        .with_revocation(),
+    );
+    handle.set(Arc::downgrade(&resource)).unwrap();
+
+    // Policy admitted, but the post-callback check refuses: no grant reaches the host.
+    let raced = auth("auth-raced", NOW, 2500);
+    let decision = resource.authorize(&present(&raced, 2), NOW, "unused");
+    assert!(
+        matches!(decision, AuthDecision::Revoked { auth_token: true }),
+        "{decision:?}"
+    );
+    assert_eq!(*recorded.lock().unwrap(), [200]);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let response = decision.into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(response.headers()["signature-error"], "error=revoked_jwt");
+    assert_eq!(
+        response.headers()["aauth-requirement"],
+        "requirement=person-token"
+    );
+
+    // No replay: the same token is refused before policy and never admitted.
+    let again = resource.authorize(&present(&raced, 2), NOW, "unused");
+    assert!(
+        matches!(again, AuthDecision::Revoked { auth_token: true }),
+        "{again:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*recorded.lock().unwrap(), [200]);
+
+    // Control: an unrevoked Core token on the same Resource is admitted.
+    let live = auth("auth-live", NOW, 2500);
+    assert!(
+        resource
+            .authorize(&present(&live, 2), NOW, "unused")
+            .into_result()
+            .is_ok()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*recorded.lock().unwrap(), [200]);
 }
 
 #[test]
