@@ -206,8 +206,13 @@ pub struct ObservedAdmission<T = ()> {
     token: VerifiedAuthToken,
     admitted: T,
     admitted_maximum: Option<i64>,
+    r3: Option<R3Grant>,
 }
 impl<T> ObservedAdmission<T> {
+    /// Class grant that admitted a mapped R3 route. `None` on a Core route.
+    pub fn r3_grant(&self) -> Option<&R3Grant> {
+        self.r3.as_ref()
+    }
     /// Authenticated authorization token whose HTTP holder proof also succeeded.
     pub fn token(&self) -> &VerifiedAuthToken {
         &self.token
@@ -774,7 +779,13 @@ where
             metadata["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
         }
         if self.authorization_endpoint {
-            metadata["authorization_endpoint"] = json!(format!("{}/authorize", self.config.issuer));
+            // Under R3 every endpoint this Resource serves is named at its signed
+            // origin, as its document URIs are. Core-only keeps the issuer form.
+            let origin = match self.r3_document_origin() {
+                Some(origin) => origin,
+                None => self.config.issuer.clone(),
+            };
+            metadata["authorization_endpoint"] = json!(format!("{origin}/authorize"));
         }
         if let Some(gate) = &self.budgets {
             metadata["budget_units"] = metadata_units(&gate.declarations());
@@ -1136,6 +1147,10 @@ where
                         admitted.r3 = r3;
                         Ok(AuthDecision::Granted(admitted))
                     }
+                    AuthDecision::Observed(mut admitted) if r3.is_some() => {
+                        admitted.r3 = r3;
+                        Ok(AuthDecision::Observed(admitted))
+                    }
                     decision => Ok(decision),
                 }
             }
@@ -1410,6 +1425,7 @@ where
                         token,
                         admitted,
                         admitted_maximum: Some(maximum),
+                        r3: None,
                     }))),
                     Err(Deny) => Ok(self.forbidden_budget(&token, Some(&grant))),
                 },
@@ -1520,6 +1536,7 @@ where
                         token,
                         admitted,
                         admitted_maximum: None,
+                        r3: None,
                     })))
                 }
                 Meter::Buffered => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {

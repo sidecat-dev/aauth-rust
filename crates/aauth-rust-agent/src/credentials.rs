@@ -41,17 +41,18 @@ impl<'a> CredentialVerifier<'a> {
     }
 }
 
-struct ParentContext {
-    ps: String,
+pub(crate) struct ParentContext {
+    pub(crate) ps: String,
     aud: String,
-    sub: String,
+    pub(crate) sub: String,
     jti: String,
-    exp: i64,
+    pub(crate) iat: i64,
+    pub(crate) exp: i64,
     cnf: Jwk,
     mission: Option<String>,
     tenant: Option<String>,
 }
-fn verify_parent(
+pub(crate) fn verify_parent(
     compact: &str,
     keys: &dyn AgentKeyResolver,
     now: i64,
@@ -67,6 +68,7 @@ fn verify_parent(
                 aud: claims.aud.clone(),
                 sub: claims.sub.clone(),
                 jti: claims.jti.clone(),
+                iat: claims.iat,
                 exp: claims.exp,
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
@@ -88,6 +90,7 @@ fn verify_parent(
                 aud: claims.aud.clone(),
                 sub: claims.sub.clone(),
                 jti: claims.jti.clone(),
+                iat: claims.iat,
                 exp: claims.exp,
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
@@ -97,7 +100,7 @@ fn verify_parent(
         _ => Err(TokenError::UnexpectedTokenType),
     }
 }
-fn challenge_context(
+pub(crate) fn challenge_context(
     claims: &ResourceClaims,
     intended_resource: &str,
     parent: &ParentContext,
@@ -201,7 +204,7 @@ impl CredentialVerifier<'_> {
         Ok(token)
     }
 }
-fn narrowed_scope(granted: Option<&str>, requested: Option<&str>) -> bool {
+pub(crate) fn narrowed_scope(granted: Option<&str>, requested: Option<&str>) -> bool {
     match (granted, requested) {
         (Some(granted), Some(requested)) => granted
             .split(' ')

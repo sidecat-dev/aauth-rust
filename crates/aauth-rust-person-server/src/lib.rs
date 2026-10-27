@@ -68,8 +68,9 @@ pub use policy::{
     Policy, PolicyError, UpstreamContext,
 };
 pub use server::{
-    AdvanceError, Config, ConfigurationError, DeferredConfig, FederationInput, Governance,
-    GovernanceError, InteractionDecision, PersonServer,
+    AdvanceError, BoxedR3Policy, Config, ConfigurationError, DeferredConfig, FederationInput,
+    Governance, GovernanceError, InteractionDecision, PersonServer, R3AuthorizationRequest,
+    R3Decision, R3IssuerConfig, R3Policy,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,
