@@ -16,15 +16,17 @@ use std::sync::Arc;
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
 use aauth_rust_r3::{
     Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
-    Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token, validate_proposal_account,
-    verify_per_call_auth_token,
+    Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token,
+    validate_proposal_account, verify_per_call_auth_token,
 };
 use http::{Request, Response, StatusCode};
 use serde_json::json;
 
 use super::{R3Grant, R3HostError, R3Profile, R3StoreError, document_response, no_store};
 use crate::PolicyOutcome;
-use crate::ps_authorization::{AuthDecision, PsAuthorizationResource, PsConfigurationError, refusal};
+use crate::ps_authorization::{
+    AuthDecision, PsAuthorizationResource, PsConfigurationError, refusal,
+};
 
 const PERSON_DOCUMENT: &str = "aauth-person.json";
 
@@ -35,7 +37,10 @@ const PERSON_DOCUMENT: &str = "aauth-person.json";
 /// SHA-256 against a digest parameter. It must be a deterministic function of
 /// the request and operation: it runs again on the `401` retry.
 pub type BoxedR3Present = Box<
-    dyn Fn(&Request<Vec<u8>>, &Operation) -> Result<BTreeMap<String, PresentedParameter>, R3HostError>
+    dyn Fn(
+            &Request<Vec<u8>>,
+            &Operation,
+        ) -> Result<BTreeMap<String, PresentedParameter>, R3HostError>
         + Send
         + Sync,
 >;
@@ -311,7 +316,10 @@ where
     ///
     /// # Errors
     /// [`PsConfigurationError::InvalidR3Profile`] when class R3 is not enabled.
-    pub fn with_r3_per_call(mut self, config: R3PerCallConfig) -> Result<Self, PsConfigurationError> {
+    pub fn with_r3_per_call(
+        mut self,
+        config: R3PerCallConfig,
+    ) -> Result<Self, PsConfigurationError> {
         let Some(profile) = self.r3.as_mut() else {
             return Err(PsConfigurationError::InvalidR3Profile);
         };
@@ -330,11 +338,16 @@ where
         };
         let (Some(fence), Some(per_call)) = (
             completion.fence.as_deref(),
-            self.r3.as_ref().and_then(|profile| profile.per_call.as_ref()),
+            self.r3
+                .as_ref()
+                .and_then(|profile| profile.per_call.as_ref()),
         ) else {
             return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
         };
-        match per_call.calls.retain(&completion.uri, fence, &snapshot(&response)) {
+        match per_call
+            .calls
+            .retain(&completion.uri, fence, &snapshot(&response))
+        {
             Ok(stored) => restore(&stored),
             Err(_) => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         }
@@ -615,8 +628,8 @@ where
                 if !matches!(operation.equal(mapped), Ok(true)) {
                     return Err(forbidden());
                 }
-                let presented = (per_call.present)(request, mapped)
-                    .map_err(|_| AuthDecision::InternalError)?;
+                let presented =
+                    (per_call.present)(request, mapped).map_err(|_| AuthDecision::InternalError)?;
                 // Inline structurally, digest parameters byte-exact. Anything else refuses.
                 if !matches!(proposal.parameters().matches(&presented), Ok(true)) {
                     return Err(forbidden());
@@ -659,10 +672,17 @@ where
         let Some(completion) = grant.completion.as_mut() else {
             return Ok(Some(grant));
         };
-        let Some(per_call) = self.r3.as_ref().and_then(|profile| profile.per_call.as_ref()) else {
+        let Some(per_call) = self
+            .r3
+            .as_ref()
+            .and_then(|profile| profile.per_call.as_ref())
+        else {
             return Err(AuthDecision::InternalError);
         };
-        let outcome = match per_call.calls.claim(&completion.uri, &completion.token, now) {
+        let outcome = match per_call
+            .calls
+            .claim(&completion.uri, &completion.token, now)
+        {
             Ok(R3Claim::Execute { fence }) if !fence.is_empty() => {
                 completion.fence = Some(fence);
                 Ok(Some(grant))

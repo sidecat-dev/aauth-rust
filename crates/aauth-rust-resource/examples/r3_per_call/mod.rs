@@ -36,9 +36,10 @@ use aauth_rust_r3::{
     ToolsListPage, ToolsListSnapshot, digest, standard_registry,
 };
 use aauth_rust_resource::{
-    AuthDecision, BoxedAuthPolicy, PsAuthorizationConfig, PsAuthorizationResource, R3CallDescription, R3CallResult,
-    R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore, R3HeldRequest,
-    R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError, R3Vocabulary,
+    AuthDecision, BoxedAuthPolicy, PsAuthorizationConfig, PsAuthorizationResource,
+    R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,
+    R3DocumentStore, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError,
+    R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -49,8 +50,9 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock, mpsc,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -103,6 +105,10 @@ pub struct Transcript {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionCase {
     HeldPolicy,
+    #[allow(
+        dead_code,
+        reason = "Constructed by the policy-race integration control."
+    )]
     Revocation,
     ClaimRevocation,
 }
@@ -117,10 +123,10 @@ struct AdmissionControl {
 impl AdmissionControl {
     fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
         let barrier = self.barrier.lock().unwrap().take();
-        if let Some((entered, released)) = barrier {
-            if entered.send(()).is_err() || released.recv_timeout(Duration::from_secs(2)).is_err() {
-                return false;
-            }
+        if let Some((entered, released)) = barrier
+            && (entered.send(()).is_err() || released.recv_timeout(Duration::from_secs(2)).is_err())
+        {
+            return false;
         }
         token.claims().ps == PS
             && !(self.deny_delete.load(Ordering::SeqCst)
@@ -203,7 +209,11 @@ fn mcp(tool: &str) -> std::result::Result<Operation, R3HostError> {
 // ---- Resource custody: exact class documents and per-call proposals -------
 
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
-    match fs::OpenOptions::new().write(true).create_new(true).open(path) {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
         Ok(mut file) => {
             file.write_all(bytes)?;
             file.sync_all()?;
@@ -245,7 +255,9 @@ struct FileDocuments(PathBuf, Mutex<()>);
 impl R3DocumentStore for FileDocuments {
     fn commit(&self, r: &R3DocumentRecord) -> std::result::Result<(), R3StoreError> {
         let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
-        let path = self.0.join(format!("c-{}.json", digest(r.reference.uri().as_bytes())));
+        let path = self
+            .0
+            .join(format!("c-{}.json", digest(r.reference.uri().as_bytes())));
         let bytes = json!({
             "uri": r.reference.uri(), "digest": r.reference.digest(), "exact_json": r.exact_json,
             "person_server": r.person_server, "auth_token_issuer": r.auth_token_issuer,
@@ -302,7 +314,8 @@ impl FileCalls {
         self.0.join(format!("p-{}.json", digest(uri.as_bytes())))
     }
     fn claim_path(&self, uri: &str) -> PathBuf {
-        self.0.join(format!("claim-{}.json", digest(uri.as_bytes())))
+        self.0
+            .join(format!("claim-{}.json", digest(uri.as_bytes())))
     }
     fn decode(bytes: &[u8]) -> Result<R3ProposalRecord> {
         let v: Value = serde_json::from_slice(bytes)?;
@@ -429,7 +442,9 @@ impl R3CallStore for FileCalls {
                 if now > number(&v, "retain_until").map_err(unavailable)? {
                     return Ok(R3Claim::Expired);
                 }
-                Ok(R3Claim::Replay(Self::result(&v["result"]).map_err(unavailable)?))
+                Ok(R3Claim::Replay(
+                    Self::result(&v["result"]).map_err(unavailable)?,
+                ))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let fence = format!(
@@ -454,7 +469,9 @@ impl R3CallStore for FileCalls {
                 let barrier = self.2.claim_barrier.lock().unwrap().take();
                 if let Some((entered, released)) = barrier {
                     entered.send(()).map_err(unavailable)?;
-                    released.recv_timeout(Duration::from_secs(2)).map_err(unavailable)?;
+                    released
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(unavailable)?;
                 }
                 Ok(R3Claim::Execute { fence })
             }
@@ -514,8 +531,11 @@ impl R3Policy for HostConsent {
         let unavailable = |_| PolicyError::Unavailable;
         let vocabulary = McpCodec::vocabulary().map_err(|_| PolicyError::Unavailable)?;
         Ok(R3Decision {
-            granted: GrantedOperations::new(&vocabulary, &[mcp("records.read").map_err(unavailable)?])
-                .map_err(|_| PolicyError::Unavailable)?,
+            granted: GrantedOperations::new(
+                &vocabulary,
+                &[mcp("records.read").map_err(unavailable)?],
+            )
+            .map_err(|_| PolicyError::Unavailable)?,
             per_call: Some(
                 GrantedOperations::new(&vocabulary, &[mcp("records.delete").map_err(unavailable)?])
                     .map_err(|_| PolicyError::Unavailable)?,
@@ -552,9 +572,10 @@ impl IssuanceStore for AuditLog {
             .0
             .lock()
             .map_err(|_| IssuanceError::Store("audit lock poisoned".into()))?;
-        if records.iter().any(|existing| {
-            existing.auth_token_jti == record.auth_token_jti && existing != record
-        }) {
+        if records
+            .iter()
+            .any(|existing| existing.auth_token_jti == record.auth_token_jti && existing != record)
+        {
             return Err(IssuanceError::Conflict);
         }
         records.push(record.clone());
@@ -596,8 +617,8 @@ impl FetchTransport for TlsFetch {
 
 type Resource = PsAuthorizationResource<Trust, BoxedAuthPolicy>;
 fn record_parameter(request: &Request<Vec<u8>>) -> std::result::Result<Vec<u8>, R3HostError> {
-    let value: Value = serde_json::from_slice(request.body())
-        .map_err(|e| R3HostError::new(e.to_string()))?;
+    let value: Value =
+        serde_json::from_slice(request.body()).map_err(|e| R3HostError::new(e.to_string()))?;
     let record = value
         .get("record")
         .ok_or_else(|| R3HostError::new("call names no record"))?;
@@ -621,9 +642,11 @@ fn compose(
             scopes: vec!["records.read".into()],
         },
         trust.clone(),
-        Box::new(move |token: &VerifiedAuthToken, request: &Request<Vec<u8>>| {
-            policy_control.admit(token, request)
-        }) as BoxedAuthPolicy,
+        Box::new(
+            move |token: &VerifiedAuthToken, request: &Request<Vec<u8>>| {
+                policy_control.admit(token, request)
+            },
+        ) as BoxedAuthPolicy,
     )?
     .with_authorization_endpoint()
     .with_r3(R3Config {
@@ -635,8 +658,13 @@ fn compose(
                 &ToolsListSnapshot::new(vec![ToolsListPage::initial(TOOLS)]),
             )?,
             display: Some(Box::new(|_: &OperationSet| {
-                Display::new("Read records; delete with per-call approval", None, None, None)
-                    .map_err(|e| R3HostError::new(e.to_string()))
+                Display::new(
+                    "Read records; delete with per-call approval",
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|e| R3HostError::new(e.to_string()))
             })),
         }],
         documents: Arc::new(FileDocuments(root.to_path_buf(), Mutex::new(()))),
@@ -650,8 +678,8 @@ fn compose(
     .with_r3_per_call(R3PerCallConfig {
         present: Box::new(|request: &Request<Vec<u8>>, _: &Operation| {
             let record = record_parameter(request)?;
-            let presented = PresentedParameter::inline(&record)
-                .map_err(|e| R3HostError::new(e.to_string()))?;
+            let presented =
+                PresentedParameter::inline(&record).map_err(|e| R3HostError::new(e.to_string()))?;
             Ok(BTreeMap::from([("record".to_owned(), presented)]))
         }),
         describe: Box::new(
@@ -674,7 +702,9 @@ fn compose(
                         Some("Deletion cannot be undone"),
                     )
                     .map_err(|e| R3HostError::new(e.to_string()))?,
-                    Some(&format!("## Action\nDelete a record\n\n## Details\nRecord {shown}")),
+                    Some(&format!(
+                        "## Action\nDelete a record\n\n## Details\nRecord {shown}"
+                    )),
                 )
                 .map_err(|e| R3HostError::new(e.to_string()))?;
                 Ok(R3CallDescription {
@@ -683,10 +713,18 @@ fn compose(
                 })
             },
         ),
-        calls: Arc::new(FileCalls(root.to_path_buf(), Mutex::new(()), control.clone())),
+        calls: Arc::new(FileCalls(
+            root.to_path_buf(),
+            Mutex::new(()),
+            control.clone(),
+        )),
         hold,
     })?;
-    Ok(if control.revocation { resource.with_revocation() } else { resource })
+    Ok(if control.revocation {
+        resource.with_revocation()
+    } else {
+        resource
+    })
 }
 
 /// The application: one effect per admitted call, recorded by the host.
@@ -704,16 +742,24 @@ fn serve(resource: &Resource, effects: &Effects, request: Request<Vec<u8>>) -> R
     );
     let path = request.uri().path().to_owned();
     if path == "/.well-known/aauth-resource.json" {
-        return json_response(200, serde_json::from_slice(&resource.metadata().unwrap()).unwrap());
+        return json_response(
+            200,
+            serde_json::from_slice(&resource.metadata().unwrap()).unwrap(),
+        );
     }
     if path == "/.well-known/jwks.json" {
-        return json_response(200, serde_json::from_slice(&resource.jwks().unwrap()).unwrap());
+        return json_response(
+            200,
+            serde_json::from_slice(&resource.jwks().unwrap()).unwrap(),
+        );
     }
     if path == "/revoke" {
         return resource.revoke(&request, now());
     }
     if path == "/authorize" {
-        return resource.authorize_endpoint(&request, now(), &jti).into_response();
+        return resource
+            .authorize_endpoint(&request, now(), &jti)
+            .into_response();
     }
     if path.starts_with("/r3/") && !path.starts_with("/r3/pending/") {
         return resource.r3_document(&request, now());
@@ -771,36 +817,61 @@ fn class_grant(
     let verified =
         agent.verify_r3_resource_token(&resource_token, RECORDS, PS, person, None, trust, now())?;
     let body = json!({"resource_token": resource_token, "presented_token": person});
-    let response = ps.send(&post(agent, &format!("{PS}/token"), body.to_string().as_bytes())?)?;
+    let response = ps.send(&post(
+        agent,
+        &format!("{PS}/token"),
+        body.to_string().as_bytes(),
+    )?)?;
     let auth = member(&response, "auth_token").ok_or("class grant refused")?;
     agent.verify_r3_auth_delivery(&auth, RECORDS, &verified, person, registry, trust, now())?;
     Ok(auth)
 }
 
 /// The per-call challenge's PS exchange; returns the PS response.
-fn approve(agent: &Agent, ps: &TlsServer, resource_token: &str, class: &str) -> Result<Response<Vec<u8>>> {
+fn approve(
+    agent: &Agent,
+    ps: &TlsServer,
+    resource_token: &str,
+    class: &str,
+) -> Result<Response<Vec<u8>>> {
     let body = json!({"resource_token": resource_token, "presented_token": class});
-    ps.send(&post(agent, &format!("{PS}/token"), body.to_string().as_bytes())?)
+    ps.send(&post(
+        agent,
+        &format!("{PS}/token"),
+        body.to_string().as_bytes(),
+    )?)
 }
 
+#[allow(
+    dead_code,
+    reason = "Shared entry point used by the ordinary example and TLS test."
+)]
 pub fn run() -> Result<Transcript> {
     run_case(None)
 }
 
+#[allow(
+    dead_code,
+    reason = "Shared entry point used by the admission integration tests."
+)]
 pub fn run_admission_case(case: AdmissionCase) -> Result<Transcript> {
     run_case(Some(case))
 }
 
 fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let control = Arc::new(AdmissionControl {
-        revocation: matches!(case, Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)),
+        revocation: matches!(
+            case,
+            Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)
+        ),
         ..AdmissionControl::default()
     });
     let mut t = Transcript::default();
     let trust = Trust::default();
     let registry = standard_registry()?;
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    let root = std::env::temp_dir().join(format!("aauth-r3-per-call-{}-{nanos}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("aauth-r3-per-call-{}-{nanos}", std::process::id()));
     fs::create_dir_all(&root)?;
     // Example-only identity seed: the recomposed Resource keeps its signing key.
     let mut seed = [7u8; 32];
@@ -827,12 +898,14 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let agent = Agent::new(agent_key, token)?;
     let serving = provider.clone();
     let ap_tls = TlsServer::start("ap.example", move |request| match request.uri().path() {
-        "/.well-known/aauth-agent.json" => {
-            json_response(200, serde_json::from_slice(&serving.metadata().unwrap()).unwrap())
-        }
-        "/.well-known/jwks.json" => {
-            json_response(200, serde_json::from_slice(&serving.jwks().unwrap()).unwrap())
-        }
+        "/.well-known/aauth-agent.json" => json_response(
+            200,
+            serde_json::from_slice(&serving.metadata().unwrap()).unwrap(),
+        ),
+        "/.well-known/jwks.json" => json_response(
+            200,
+            serde_json::from_slice(&serving.jwks().unwrap()).unwrap(),
+        ),
         _ => json_response(404, json!({"error":"not_found"})),
     })?;
     trust.discover(&ap_tls, AP, "aauth-agent.json")?;
@@ -842,7 +915,13 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         reads: AtomicUsize::new(0),
         deletes: Mutex::new(Vec::new()),
     });
-    let current = Arc::new(RwLock::new(Arc::new(compose(&root, seed, &trust, false, control.clone())?)));
+    let current = Arc::new(RwLock::new(Arc::new(compose(
+        &root,
+        seed,
+        &trust,
+        false,
+        control.clone(),
+    )?)));
     let (serving, serving_effects) = (current.clone(), effects.clone());
     let api = Arc::new(TlsServer::start("records.example", move |request| {
         let resource = serving.read().unwrap().clone();
@@ -865,11 +944,15 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     .with_r3(R3IssuerConfig {
         registry: standard_registry()?,
         egress: Box::new(|uri: &str, _: Instant| -> io::Result<()> {
-            if uri.starts_with(&format!("{RECORDS}/r3/c.")) || uri.starts_with(&format!("{RECORDS}/r3/p."))
+            if uri.starts_with(&format!("{RECORDS}/r3/c."))
+                || uri.starts_with(&format!("{RECORDS}/r3/p."))
             {
                 Ok(())
             } else {
-                Err(io::Error::new(io::ErrorKind::PermissionDenied, "egress refused"))
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "egress refused",
+                ))
             }
         }),
         transport: Box::new(TlsFetch(api.clone())),
@@ -907,20 +990,34 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let approved = approve(&agent, &ps_tls, &proposal_token, &class)?;
     let per_call = member(&approved, "auth_token").ok_or("per-call approval refused")?;
     let delivered = agent.verify_r3_per_call_delivery(
-        &per_call, RECORDS, &proposal, &class, &registry, &trust, now(),
+        &per_call,
+        RECORDS,
+        &proposal,
+        &class,
+        &registry,
+        &trust,
+        now(),
     )?;
     t.proposal_operation = delivered
         .operations()
         .granted_operations()
         .operations()?
         .first()
-        .map(|operation| operation.json().map(|b| String::from_utf8_lossy(&b).into_owned()))
+        .map(|operation| {
+            operation
+                .json()
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        })
         .transpose()?
         .unwrap_or_default();
     let completing = agent.with_token(per_call.clone())?;
     // Substituted parameters are refused before any claim.
     t.substituted_parameters_status = api
-        .send(&post(&completing, &format!("{RECORDS}/records/delete"), R2)?)?
+        .send(&post(
+            &completing,
+            &format!("{RECORDS}/records/delete"),
+            R2,
+        )?)?
         .status()
         .as_u16();
     // A different holder presenting the per-call token fails its proof.
@@ -929,20 +1026,33 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         .uri(format!("{RECORDS}/records/delete"))
         .header("content-type", "application/json")
         .body(R1.to_vec())?;
-    sign_request(&mut stolen, &SigningKey::generate(), KeyMaterial::Jwt(per_call.clone()), now())?;
+    sign_request(
+        &mut stolen,
+        &SigningKey::generate(),
+        KeyMaterial::Jwt(per_call.clone()),
+        now(),
+    )?;
     t.wrong_holder_status = api.send(&stolen)?.status().as_u16();
     // The approved call runs once; the same exact token is answered from the retained result.
     let retry = post(&completing, &format!("{RECORDS}/records/delete"), R1)?;
     let first = api.send(&retry)?;
     t.retry_status = first.status().as_u16();
-    let replay = api.send(&post(&completing, &format!("{RECORDS}/records/delete"), R1)?)?;
+    let replay = api.send(&post(
+        &completing,
+        &format!("{RECORDS}/records/delete"),
+        R1,
+    )?)?;
     t.replay_status = replay.status().as_u16();
     t.replay_matches_first = replay.body() == first.body();
 
     // Recompose the Resource from its files, now holding invocations (202).
     *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true, control.clone())?);
     t.replay_after_restart_status = api
-        .send(&post(&completing, &format!("{RECORDS}/records/delete"), R1)?)?
+        .send(&post(
+            &completing,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+        )?)?
         .status()
         .as_u16();
 
@@ -971,10 +1081,19 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let held_token = challenge(&held)?;
     let held_proposal =
         agent.verify_r3_proposal_challenge(&held_token, RECORDS, PS, &class, &trust, now())?;
-    let held_grant = member(&approve(&agent, &ps_tls, &held_token, &class)?, "auth_token")
-        .ok_or("held approval refused")?;
+    let held_grant = member(
+        &approve(&agent, &ps_tls, &held_token, &class)?,
+        "auth_token",
+    )
+    .ok_or("held approval refused")?;
     agent.verify_r3_per_call_delivery(
-        &held_grant, RECORDS, &held_proposal, &class, &registry, &trust, now(),
+        &held_grant,
+        RECORDS,
+        &held_proposal,
+        &class,
+        &registry,
+        &trust,
+        now(),
     )?;
     // The earlier per-call token is not this pending invocation's approval.
     let mut foreign = get(&location)?;
@@ -989,7 +1108,8 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         t.held_policy_denied_status = api.send(&poll)?.status().as_u16();
         t.held_policy_effect_delta = effects.deletes.lock().unwrap().len() - before;
         t.held_policy_claim_consumed = FileCalls(root.clone(), Mutex::new(()), control.clone())
-            .claim_path(held_proposal.reference().uri()).exists();
+            .claim_path(held_proposal.reference().uri())
+            .exists();
         control.deny_delete.store(false, Ordering::SeqCst);
         poller.sign(&mut poll, now())?;
     }
@@ -998,26 +1118,55 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     poller.sign(&mut again, now())?;
     t.held_replay_status = api.send(&again)?.status().as_u16();
 
-    if matches!(case, Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)) {
+    if matches!(
+        case,
+        Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)
+    ) {
         // A fresh, unclaimed proposal: previously admitted effects remain separate.
         let held = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R1)?)?;
         let location = held.headers()["location"].to_str()?.to_owned();
         let proposal_token = challenge(&held)?;
         let proposal = agent.verify_r3_proposal_challenge(
-            &proposal_token, RECORDS, PS, &class, &trust, now(),
+            &proposal_token,
+            RECORDS,
+            PS,
+            &class,
+            &trust,
+            now(),
         )?;
-        let grant = member(&approve(&agent, &ps_tls, &proposal_token, &class)?, "auth_token")
-            .ok_or("revocation-control approval refused")?;
+        let grant = member(
+            &approve(&agent, &ps_tls, &proposal_token, &class)?,
+            "auth_token",
+        )
+        .ok_or("revocation-control approval refused")?;
         let verified = agent.verify_r3_per_call_delivery(
-            &grant, RECORDS, &proposal, &class, &registry, &trust, now(),
+            &grant,
+            RECORDS,
+            &proposal,
+            &class,
+            &registry,
+            &trust,
+            now(),
         )?;
-        let mut revoke = Request::builder().method("POST").uri(format!("{RECORDS}/revoke"))
+        let mut revoke = Request::builder()
+            .method("POST")
+            .uri(format!("{RECORDS}/revoke"))
             .header("content-type", "application/json")
-            .body(json!({"jti": verified.claims().jti, "exp": verified.claims().exp})
-                .to_string().into_bytes())?;
-        sign_request(&mut revoke, &SigningKey::from_seed(ps_seed), KeyMaterial::JwksUri {
-            id: PS.into(), dwk: "aauth-person.json".into(), kid: "ps-1".into(),
-        }, now())?;
+            .body(
+                json!({"jti": verified.claims().jti, "exp": verified.claims().exp})
+                    .to_string()
+                    .into_bytes(),
+            )?;
+        sign_request(
+            &mut revoke,
+            &SigningKey::from_seed(ps_seed),
+            KeyMaterial::JwksUri {
+                id: PS.into(),
+                dwk: "aauth-person.json".into(),
+                kid: "ps-1".into(),
+            },
+            now(),
+        )?;
         let mut poll = get(&location)?;
         let revocation_holder = agent.with_token(grant)?;
         revocation_holder.sign(&mut poll, now())?;
@@ -1043,8 +1192,12 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         let completion = pending.join().map_err(|_| "completion thread panicked")??;
         t.revocation_status = revoked?.status().as_u16();
         t.revoked_completion_status = completion.status().as_u16();
-        t.revoked_completion_error = completion.headers().get("signature-error")
-            .and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
+        t.revoked_completion_error = completion
+            .headers()
+            .get("signature-error")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
         let claim_path = FileCalls(root.clone(), Mutex::new(()), control.clone())
             .claim_path(proposal.reference().uri());

@@ -238,6 +238,10 @@ impl TlsServer {
     pub fn send(&self, request: &Request<Vec<u8>>) -> Result<Response<Vec<u8>>> {
         self.send_using(request, self.client.clone())
     }
+    #[allow(
+        dead_code,
+        reason = "Shared TLS helper; only trust-refusal journeys call it."
+    )]
     pub fn refuses_untrusted_certificate(&self) -> bool {
         let roots = RootCertStore::empty();
         let result = client_config(roots).and_then(|config| {
