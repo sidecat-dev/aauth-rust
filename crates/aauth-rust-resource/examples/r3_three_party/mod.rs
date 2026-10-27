@@ -32,8 +32,7 @@ use aauth_rust_person_server::{
 use aauth_rust_r3::{
     DefinitionRegistry, Display, FetchBody, FetchLimits, FetchResponse, FetchTransport,
     GrantedOperations, IssuanceError, IssuanceRecord, IssuanceStore, McpCodec, Operation,
-    OperationSet, Reference, Registry, ToolsListPage, ToolsListSnapshot, digest,
-    standard_registry,
+    OperationSet, Reference, Registry, ToolsListPage, ToolsListSnapshot, digest, standard_registry,
 };
 use aauth_rust_resource::{
     AuthDecision, PsAuthorizationConfig, PsAuthorizationResource, R3Config, R3DocumentRecord,
@@ -266,9 +265,10 @@ impl R3DocumentStore for FileCustody {
         if self.fail_commit.load(Ordering::SeqCst) {
             return Err(unavailable("injected commit failure"));
         }
-        let path = self
-            .root
-            .join(format!("{}.json", digest(record.reference.uri().as_bytes())));
+        let path = self.root.join(format!(
+            "{}.json",
+            digest(record.reference.uri().as_bytes())
+        ));
         let bytes = encode(record);
         match fs::read(&path) {
             Ok(existing) if existing == bytes => return Ok(()),
@@ -311,8 +311,7 @@ impl R3DocumentStore for FileCustody {
 struct HostPolicy;
 impl Policy for HostPolicy {
     fn bind_person(&self, request: &PersonRequest) -> std::result::Result<Person, PolicyError> {
-        if request.agent.claims().sub != "aauth:analyst@ap.example" || request.resource != RECORDS
-        {
+        if request.agent.claims().sub != "aauth:analyst@ap.example" || request.resource != RECORDS {
             return Err(PolicyError::Denied);
         }
         Ok(Person {
@@ -343,7 +342,8 @@ impl HostConsent {
             return Err(PolicyError::Denied);
         }
         let read = mcp("records.read").map_err(unavailable)?;
-        let wanted = OperationSet::new(std::slice::from_ref(&read)).map_err(|_| PolicyError::Unavailable)?;
+        let wanted =
+            OperationSet::new(std::slice::from_ref(&read)).map_err(|_| PolicyError::Unavailable)?;
         if !wanted
             .is_subset_of(&request.document.operation_set())
             .map_err(|_| PolicyError::Unavailable)?
@@ -436,8 +436,14 @@ fn exchange_status(
     trust: &Trust,
 ) -> Result<u16> {
     let operations = mcp_operations(&["records.read", "records.export"])?;
-    let resource_token =
-        agent.r3_authorize(|request| api.send(&request), endpoint, person, &operations, None, now())?;
+    let resource_token = agent.r3_authorize(
+        |request| api.send(&request),
+        endpoint,
+        person,
+        &operations,
+        None,
+        now(),
+    )?;
     agent.verify_r3_resource_token(&resource_token, RECORDS, PS, person, None, trust, now())?;
     let body = json!({"resource_token": resource_token, "presented_token": person});
     let response = ps.send(&signed(
@@ -535,7 +541,9 @@ pub fn run() -> Result<Transcript> {
         let path = request.uri().path().to_owned();
         match path.as_str() {
             "/mcp" => json_document(TOOLS.to_vec()),
-            "/authorize" => api.authorize_endpoint(&request, now(), &jti).into_response(),
+            "/authorize" => api
+                .authorize_endpoint(&request, now(), &jti)
+                .into_response(),
             p if p.starts_with("/r3/") => {
                 let response = api.r3_document(&request, now());
                 if response.status() == 200 {
@@ -633,8 +641,15 @@ pub fn run() -> Result<Transcript> {
         None,
         now(),
     )?;
-    let verified_resource =
-        agent.verify_r3_resource_token(&resource_token, RECORDS, PS, &person, None, &trust, now())?;
+    let verified_resource = agent.verify_r3_resource_token(
+        &resource_token,
+        RECORDS,
+        PS,
+        &person,
+        None,
+        &trust,
+        now(),
+    )?;
     let r3_uri = verified_resource.reference().uri().to_owned();
 
     // Agents are not entitled to the document, signed or not.
@@ -713,7 +728,11 @@ pub fn run() -> Result<Transcript> {
     )?;
     let wrong_holder_status = api_tls.send(&stolen)?.status().as_u16();
     let not_granted_status = api_tls
-        .send(&signed(&holder, &format!("{API}/records/export"), READ_BODY)?)?
+        .send(&signed(
+            &holder,
+            &format!("{API}/records/export"),
+            READ_BODY,
+        )?)?
         .status()
         .as_u16();
     let authorized = api_tls.send(&read)?;
@@ -764,7 +783,11 @@ pub fn run() -> Result<Transcript> {
     fail_commit.store(false, Ordering::SeqCst);
 
     let receipts = receipts.lock().map_err(|_| "receipt lock poisoned")?.len();
-    let audit_records = audit.records.lock().map_err(|_| "audit lock poisoned")?.len();
+    let audit_records = audit
+        .records
+        .lock()
+        .map_err(|_| "audit lock poisoned")?
+        .len();
     Ok(Transcript {
         authorization_endpoint: endpoint,
         r3_uri_at_signed_origin: r3_uri.starts_with(&format!("{API}/r3/c.")),

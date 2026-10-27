@@ -12,8 +12,8 @@
 use super::*;
 use aauth_rust_r3::{
     Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits, FetchTransport,
-    GrantedOperations, IssuanceRecord, IssuanceStore, Reference, Registry,
-    mint_direct_auth_token, validate_document_account, verify_resource_token,
+    GrantedOperations, IssuanceRecord, IssuanceStore, Reference, Registry, mint_direct_auth_token,
+    validate_document_account, verify_resource_token,
 };
 use std::sync::Arc;
 
