@@ -10,10 +10,10 @@
 //! `patternProperties` names, which Go compiles with RE2. A pattern Go refuses
 //! is accepted here. Format assertion stays off, as in Go.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::definition_support::{json_pointer, member, percent_decode};
-use crate::jsonvalue::{Json, json_equal};
+use crate::jsonvalue::{Json, canonical_json};
 
 /// Why a schema resource was refused.
 pub(crate) enum SchemaRefusal {
@@ -511,12 +511,10 @@ fn is_name_list(value: &Json, non_empty: bool) -> bool {
         && all_unique(items)
 }
 
+/// JSON value uniqueness in O(n log n): canonical bytes are equal exactly when values are.
 fn all_unique(items: &[Json]) -> bool {
-    items.iter().enumerate().all(|(index, item)| {
-        !items[..index]
-            .iter()
-            .any(|earlier| json_equal(earlier, item))
-    })
+    let mut seen = BTreeSet::new();
+    items.iter().all(|item| seen.insert(canonical_json(item)))
 }
 
 /// `$anchor` grammar: 2019-09 `[A-Za-z][-A-Za-z0-9.:_]*`, 2020-12 `[A-Za-z_][-A-Za-z0-9._]*`.

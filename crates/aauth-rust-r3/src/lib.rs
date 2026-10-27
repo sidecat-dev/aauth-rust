@@ -65,7 +65,7 @@ pub use mcp_definition::{ToolsListPage, ToolsListSnapshot};
 pub use openapi_definition::OpenApiDocumentSource;
 pub use proposal::{
     Parameter, ParameterDigest, Parameters, PresentedParameter, Proposal, ProposalDisplay,
-    ProposalOptions, validate_proposal_account,
+    ProposalOptions, ProposalResult, validate_proposal_account,
 };
 pub use reference::Reference;
 pub use standard::{

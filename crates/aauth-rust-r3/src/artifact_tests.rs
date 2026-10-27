@@ -4,12 +4,12 @@ use serde::Deserialize;
 
 use crate::annotation::AnnotationEncoding;
 use crate::error::Error;
-use crate::jsonvalue::{Json, parse_json};
+use crate::jsonvalue::{Json, parse_json, take_name_comparisons};
 use crate::vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Registry, Vocabulary};
 use crate::{
     Authorization, Display, Document, DocumentOptions, Grant, Parameter, Parameters,
-    PresentedParameter, Proposal, ProposalDisplay, ProposalOptions, Reference, digest,
-    validate_document_account, validate_proposal_account,
+    PresentedParameter, Proposal, ProposalDisplay, ProposalOptions, ProposalResult, Reference,
+    digest, validate_document_account, validate_proposal_account,
 };
 
 const NAMED: &str = "https://example.test/vocabulary/named";
@@ -152,9 +152,9 @@ fn document_validation_and_strict_json() -> Result<(), Error> {
     let registry = registry(&vocabulary);
     let display = Display::new(
         "Create events",
-        "May send invitations",
-        "Calendar data",
-        "Invitations cannot be unsent",
+        Some("May send invitations"),
+        Some("Calendar data"),
+        Some("Invitations cannot be unsent"),
     )?;
     let account = "work-account";
     let document = Document::new(
@@ -172,11 +172,11 @@ fn document_validation_and_strict_json() -> Result<(), Error> {
     assert_eq!(parsed.account(), Some(account));
     let parsed_display = parsed.display().expect("display");
     assert_eq!(parsed_display.summary(), "Create events");
-    assert_eq!(parsed_display.implications(), "May send invitations");
-    assert_eq!(parsed_display.data_accessed(), "Calendar data");
+    assert_eq!(parsed_display.implications(), Some("May send invitations"));
+    assert_eq!(parsed_display.data_accessed(), Some("Calendar data"));
     assert_eq!(
         parsed_display.irreversible(),
-        "Invitations cannot be unsent"
+        Some("Invitations cannot be unsent")
     );
 
     let invalid = [
@@ -203,7 +203,7 @@ fn document_validation_and_strict_json() -> Result<(), Error> {
         .parse_document(br#"{"vocabulary":"https://example.test/vocabulary/named","operations":[{"name":"x"}],"display":{}}"#)
         .map_or_else(|err| err, |_| panic!("expected an error"));
     assert!(missing_summary.to_string().contains("summary"));
-    assert!(Display::new("   ", "", "", "").is_err());
+    assert!(Display::new("   ", None, None, None).is_err());
 
     let empty_account = Document::new(
         &operation_set(&vocabulary, &["create_event"]),
@@ -537,16 +537,20 @@ fn proposal_json_round_trip_and_copy_safety() -> Result<(), Error> {
     let operation = operation(&vocabulary, "send_email");
     let to = Parameter::inline(br#""mom@example.com""#)?;
     let body_bytes = b"Hi Mom, are you free for dinner?";
-    let body =
-        Parameter::from_exact_bytes(body_bytes, "Hi Mom, are you free\u{2026}", "text/plain")?;
+    let body = Parameter::from_exact_bytes(
+        body_bytes,
+        Some("Hi Mom, are you free\u{2026}"),
+        Some("text/plain"),
+    )?;
     let parameters = Parameters::new([("to".to_owned(), to), ("body".to_owned(), body)])?;
-    let display = Display::new("Send an email as you", "", "", "")?;
-    let proposal_display = ProposalDisplay::new(&display, "## Action\nSend an email")?;
+    let display = Display::new("Send an email as you", None, None, None)?;
+    let proposal_display = ProposalDisplay::new(&display, Some("## Action\nSend an email"))?;
     let proposal = Proposal::new(
         &operation,
         &parameters,
         ProposalOptions {
             account: Some("personal"),
+            result: None,
             display: Some(&proposal_display),
         },
     )?;
@@ -561,7 +565,7 @@ fn proposal_json_round_trip_and_copy_safety() -> Result<(), Error> {
     assert_eq!(parsed.operation().json()?, name_json("send_email"));
     assert_eq!(parsed.account(), Some("personal"));
     let parsed_display = parsed.display().expect("display");
-    assert_eq!(parsed_display.detail(), "## Action\nSend an email");
+    assert_eq!(parsed_display.detail(), Some("## Action\nSend an email"));
     assert_eq!(parsed_display.summary(), "Send an email as you");
     let mut inline = parsed
         .parameters()
@@ -585,8 +589,11 @@ fn proposal_json_round_trip_and_copy_safety() -> Result<(), Error> {
         .parameter_digest()
         .expect("digest");
     assert_eq!(digest_parameter.s256(), digest(body_bytes));
-    assert_eq!(digest_parameter.excerpt(), "Hi Mom, are you free\u{2026}");
-    assert_eq!(digest_parameter.media_type(), "text/plain");
+    assert_eq!(
+        digest_parameter.excerpt(),
+        Some("Hi Mom, are you free\u{2026}")
+    );
+    assert_eq!(digest_parameter.media_type(), Some("text/plain"));
     assert!(serde_json::from_slice::<Proposal>(encoded.as_bytes()).is_err());
     Ok(())
 }
@@ -621,7 +628,7 @@ fn proposal_parameter_matching_uses_structural_json_and_exact_digest_bytes() -> 
     assert!(PresentedParameter::inline(br#"{"count":1,"count":1}"#).is_err());
 
     let exact = [0u8, 1, 2, 3, 255];
-    let digested = Parameter::from_exact_bytes(&exact, "", "application/octet-stream")?;
+    let digested = Parameter::from_exact_bytes(&exact, None, Some("application/octet-stream"))?;
     let digest_set = Parameters::new([("value".to_owned(), digested.clone())])?;
     assert!(digest_set.matches(&BTreeMap::from([(
         "value".to_owned(),
@@ -773,7 +780,14 @@ fn proposal_rejects_ambiguous_or_invalid_shapes() -> Result<(), Error> {
     let set = Parameters::new([("value".to_owned(), approved)])?;
     assert!(set.matches(&BTreeMap::from([("value".to_owned(), actual)]))?);
 
-    assert!(Parameter::from_digest(valid_digest, "x".repeat(4097), "text/plain").is_ok());
+    assert!(
+        Parameter::from_digest(
+            valid_digest,
+            Some("x".repeat(4097).as_str()),
+            Some("text/plain")
+        )
+        .is_ok()
+    );
     let excerpt_only = registry.parse_proposal(
         format!(
             r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{"x":{{"excerpt":"ordinary application value"}}}}}}"#
@@ -823,6 +837,7 @@ fn proposal_account_parity_and_referenced_digest() -> Result<(), Error> {
         &parameters,
         ProposalOptions {
             account: Some("personal"),
+            result: None,
             display: None,
         },
     )?;
@@ -966,4 +981,407 @@ fn very_deep_json_is_refused_through_public_entry_points() {
     assert!(refused_for_depth(PresentedParameter::inline(
         deep.as_bytes()
     )));
+}
+
+/// `{"k00000":0,...}` with members in `order`.
+fn wide_members(order: impl IntoIterator<Item = usize>) -> String {
+    let members: Vec<String> = order
+        .into_iter()
+        .map(|index| format!(r#""k{index:05}":{index}"#))
+        .collect();
+    format!("{{{}}}", members.join(","))
+}
+
+fn proposal_with_parameters(parameters: &str) -> String {
+    format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{parameters}}}"#)
+}
+
+fn presented_value(value: &str) -> Result<BTreeMap<String, PresentedParameter>, Error> {
+    Ok(BTreeMap::from([(
+        "value".to_owned(),
+        PresentedParameter::inline(value.as_bytes())?,
+    )]))
+}
+
+#[test]
+fn wide_parameter_objects_match_and_refuse_duplicates_in_n_log_n() -> Result<(), Error> {
+    const WIDTH_LOG2: u32 = 14;
+    const WIDTH: usize = 1 << WIDTH_LOG2;
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    let approved = wide_members(0..WIDTH);
+    let reversed = wide_members((0..WIDTH).rev());
+    let one = Parameters::new([("value".to_owned(), Parameter::inline(approved.as_bytes())?)])?;
+    let reordered = presented_value(&reversed)?;
+
+    take_name_comparisons();
+    assert!(one.matches(&reordered)?);
+    let comparisons = take_name_comparisons();
+    // `matches` parses each side again and compares once. A pairwise scan
+    // needs WIDTH * (WIDTH - 1) / 2 (over 2^27) comparisons for one parse.
+    assert!(
+        comparisons <= 64 * WIDTH as u64 * u64::from(WIDTH_LOG2),
+        "{comparisons} name comparisons for {WIDTH} members"
+    );
+
+    let changed = reversed.replacen(r#""k00000":0"#, r#""k00000":1"#, 1);
+    assert!(!one.matches(&presented_value(&changed)?)?);
+    let respelled = reversed.replacen(r#""k00000":0"#, r#""k00000":-0.0e9"#, 1);
+    assert!(one.matches(&presented_value(&respelled)?)?);
+    let renamed = reversed.replacen(r#""k00000":0"#, r#""k0000":0"#, 1);
+    assert!(!one.matches(&presented_value(&renamed)?)?);
+
+    // A repeat of the last-read name, placed at the end, is refused at every entry.
+    let repeated = format!(r#"{},"k00000":0}}"#, &reversed[..reversed.len() - 1]);
+    for result in [
+        Parameter::inline(repeated.as_bytes()).map(|_| ()),
+        PresentedParameter::inline(repeated.as_bytes()).map(|_| ()),
+        registry
+            .parse_proposal(proposal_with_parameter(&repeated).as_bytes())
+            .map(|_| ()),
+        registry
+            .parse_proposal(proposal_with_parameters(&repeated).as_bytes())
+            .map(|_| ()),
+    ] {
+        let err = must_err(result);
+        assert!(
+            err.to_string().contains(r#"duplicate member "k00000""#),
+            "{err}"
+        );
+    }
+
+    // A wide parameters object keeps every name.
+    let proposal = registry.parse_proposal(proposal_with_parameters(&reversed).as_bytes())?;
+    let names = proposal.parameters().names();
+    assert_eq!(names.len(), WIDTH);
+    assert_eq!(names[0], "k00000");
+    assert_eq!(names[WIDTH - 1], format!("k{:05}", WIDTH - 1));
+    Ok(())
+}
+
+#[test]
+fn proposal_result_marks_release_gating_and_round_trips() -> Result<(), Error> {
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    // The draft's release-gating example, in this test's named vocabulary.
+    let source = format!(
+        r###"{{"vocabulary":"{NAMED}","operations":[{{"name":"runQuery"}}],"parameters":{{"query":"SELECT * FROM employees WHERE department = 'Engineering'"}},"result":{{"records":214,"contains":["national_id","compensation","home_address"]}},"display":{{"summary":"Release the result of a query over employee records","data_accessed":"214 employee records, including national identifiers, compensation, and home addresses","detail":"## Action\nThis query has already run. What you are approving is release of its result to the agent."}}}}"###
+    );
+    let proposal = registry.parse_proposal(source.as_bytes())?;
+    let held = proposal.result().expect("result");
+    assert_eq!(
+        held.json(),
+        br#"{"contains":["national_id","compensation","home_address"],"records":214}"#
+    );
+    let encoded = json_text(&proposal);
+    let want = source.replacen(
+        r#""result":{"records":214,"contains":["national_id","compensation","home_address"]}"#,
+        r#""result":{"contains":["national_id","compensation","home_address"],"records":214}"#,
+        1,
+    );
+    assert_eq!(encoded, want);
+    let again = registry.parse_proposal(encoded.as_bytes())?;
+    assert_eq!(json_text(&again), encoded);
+    let reference = Reference::new(
+        "https://resource.example/r3/release",
+        digest(encoded.as_bytes()),
+    )?;
+    assert!(
+        registry
+            .parse_referenced_proposal(&reference, encoded.as_bytes())?
+            .result()
+            .is_some()
+    );
+
+    // Absent means approval for execution; present and empty is still present.
+    let without = registry.parse_proposal(proposal_with_parameters("{}").as_bytes())?;
+    assert!(without.result().is_none());
+    assert!(!json_text(&without).contains("result"));
+    let empty_source =
+        format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{{}}}}"#);
+    let empty = registry.parse_proposal(empty_source.as_bytes())?;
+    assert_eq!(empty.result().expect("empty result").json(), b"{}");
+    assert_eq!(json_text(&empty), empty_source);
+
+    // Construction sorts names, keeps number spelling, and serializes `result` after `parameters`.
+    let built_result =
+        ProposalResult::new(br#" { "rows" : 2.140e2 , "nested" : { "b" : 1 , "a" : 0 } } "#)?;
+    assert_eq!(
+        built_result.json(),
+        br#"{"nested":{"a":0,"b":1},"rows":2.140e2}"#
+    );
+    let built = Proposal::new(
+        &operation(&vocabulary, "runQuery"),
+        &Parameters::new([])?,
+        ProposalOptions {
+            account: Some(""),
+            result: Some(&built_result),
+            display: None,
+        },
+    )?;
+    let built_json = json_text(&built);
+    assert_eq!(
+        built_json,
+        format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"runQuery"}}],"parameters":{{}},"result":{{"nested":{{"a":0,"b":1}},"rows":2.140e2}},"account":""}}"#
+        )
+    );
+    let reparsed = registry.parse_proposal(built_json.as_bytes())?;
+    assert_eq!(
+        reparsed.result().expect("result").json(),
+        built_result.json()
+    );
+
+    for value in ["null", "[]", r#""ran""#, "214", "true", r#"{"a":1,"a":2}"#] {
+        assert!(ProposalResult::new(value.as_bytes()).is_err(), "{value}");
+        let source = format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{value}}}"#
+        );
+        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+    }
+    for value in ["", "{", "{} {}", r#"{"a":1}x"#] {
+        assert!(ProposalResult::new(value.as_bytes()).is_err(), "{value}");
+    }
+    let refused = [
+        format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"result":{{}},"result":{{}}}}"#
+        ),
+        format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"Result":{{}}}}"#
+        ),
+        format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"result":{{}}}}"#),
+        format!(r#"{{"vocabulary":"{NAMED}","operations":[],"parameters":{{}},"result":{{}}}}"#),
+    ];
+    for source in refused {
+        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+    }
+    // `result` belongs to proposals, not documents.
+    let document = format!(r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"result":{{}}}}"#);
+    assert!(registry.parse_document(document.as_bytes()).is_err());
+    Ok(())
+}
+
+#[test]
+fn optional_strings_keep_absent_and_present_empty_apart() -> Result<(), Error> {
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    let full = format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"x"}}],"display":{{"summary":"Read","implications":"","data_accessed":"","irreversible":""}}}}"#
+    );
+    let document = registry.parse_document(full.as_bytes())?;
+    let display = document.display().expect("display");
+    assert_eq!(
+        (
+            display.implications(),
+            display.data_accessed(),
+            display.irreversible()
+        ),
+        (Some(""), Some(""), Some(""))
+    );
+    // A host that re-serializes a parsed document gets the signed bytes back.
+    let encoded = json_text(&document);
+    assert_eq!(encoded, full);
+    assert_eq!(digest(encoded.as_bytes()), digest(full.as_bytes()));
+
+    let sparse = format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"x"}}],"display":{{"summary":"Read","data_accessed":""}}}}"#
+    );
+    let document = registry.parse_document(sparse.as_bytes())?;
+    let display = document.display().expect("display");
+    assert_eq!(
+        (
+            display.implications(),
+            display.data_accessed(),
+            display.irreversible()
+        ),
+        (None, Some(""), None)
+    );
+    assert_eq!(json_text(&document), sparse);
+
+    let built = Display::new("Read", Some(""), None, Some(""))?;
+    let document = Document::new(
+        &operation_set(&vocabulary, &["x"]),
+        DocumentOptions {
+            account: None,
+            display: Some(&built),
+        },
+    )?;
+    assert_eq!(
+        json_text(&document),
+        format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"x"}}],"display":{{"summary":"Read","implications":"","irreversible":""}}}}"#
+        )
+    );
+    let absent = Display::new("Read", None, None, None)?;
+    assert_eq!(json_text(&absent), r#"{"summary":"Read"}"#);
+
+    let s256 = digest(b"body");
+    let proposal_source = format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{"body":{{"s256":"{s256}","excerpt":"","media_type":""}},"note":{{"s256":"{s256}"}}}},"display":{{"summary":"Send","implications":"","detail":""}}}}"#
+    );
+    let proposal = registry.parse_proposal(proposal_source.as_bytes())?;
+    let parameters = proposal.parameters();
+    let body = parameters
+        .get("body")
+        .and_then(|parameter| parameter.parameter_digest())
+        .expect("body digest");
+    assert_eq!((body.excerpt(), body.media_type()), (Some(""), Some("")));
+    let note = parameters
+        .get("note")
+        .and_then(|parameter| parameter.parameter_digest())
+        .expect("note digest");
+    assert_eq!((note.excerpt(), note.media_type()), (None, None));
+    let display = proposal.display().expect("display");
+    assert_eq!(
+        (
+            display.implications(),
+            display.data_accessed(),
+            display.detail()
+        ),
+        (Some(""), None, Some(""))
+    );
+    assert_eq!(json_text(&proposal), proposal_source);
+    let reference = Reference::new(
+        "https://resource.example/r3/proposal",
+        digest(proposal_source.as_bytes()),
+    )?;
+    let referenced = registry.parse_referenced_proposal(&reference, proposal_source.as_bytes())?;
+    assert_eq!(json_text(&referenced), proposal_source);
+
+    let built = Parameter::from_digest(s256.clone(), Some(""), None)?;
+    let built_digest = built.parameter_digest().expect("digest");
+    assert_eq!(
+        (built_digest.excerpt(), built_digest.media_type()),
+        (Some(""), None)
+    );
+    let built_set = Parameters::new([("body".to_owned(), built)])?;
+    assert_eq!(
+        json_text(&built_set),
+        format!(r#"{{"body":{{"s256":"{s256}","excerpt":""}}}}"#)
+    );
+    let typed = Parameter::from_exact_bytes(b"body", None, Some(""))?;
+    assert_eq!(
+        typed.parameter_digest().expect("digest").media_type(),
+        Some("")
+    );
+    let with_detail = ProposalDisplay::new(&absent, Some(""))?;
+    assert_eq!(with_detail.detail(), Some(""));
+    assert_eq!(ProposalDisplay::new(&absent, None)?.detail(), None);
+
+    // Required members and string types are still enforced.
+    for display in [
+        r#"{"summary":"","implications":""}"#,
+        r#"{"implications":""}"#,
+        r#"{"summary":"Read","implications":null}"#,
+        r#"{"summary":"Read","detail":""}"#,
+    ] {
+        let source = format!(
+            r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"x"}}],"display":{display}}}"#
+        );
+        assert!(registry.parse_document(source.as_bytes()).is_err(), "{source}");
+    }
+    for value in [
+        format!(r#"{{"s256":"{s256}","media_type":" text/plain"}}"#),
+        format!(r#"{{"s256":"{s256}","excerpt":null}}"#),
+        format!(r#"{{"s256":"{s256}","media_type":null}}"#),
+        r#"{"s256":"short","excerpt":""}"#.to_owned(),
+    ] {
+        let source = proposal_with_parameter(&value);
+        assert!(registry.parse_proposal(source.as_bytes()).is_err(), "{source}");
+    }
+    let detail_null = format!(
+        r#"{{"vocabulary":"{NAMED}","operations":[{{"name":"a"}}],"parameters":{{}},"display":{{"summary":"Send","detail":null}}}}"#
+    );
+    assert!(registry.parse_proposal(detail_null.as_bytes()).is_err());
+    assert!(Display::new(" ", Some("x"), None, None).is_err());
+    Ok(())
+}
+
+#[test]
+fn digest_media_types_follow_rfc_9110() -> Result<(), Error> {
+    let vocabulary = vocabulary();
+    let registry = registry(&vocabulary);
+    let s256 = digest(b"body");
+    let valid = [
+        "text/plain",
+        "Text/Plain",
+        "application/vnd.example+json",
+        "text/plain;charset=utf-8",
+        "text/plain; charset=\"utf-8\"",
+        "text/plain ;\tcharset=utf-8 ; format=flowed",
+        "text/plain;x=\"\"",
+        "text/plain;x=\"\";y=z",
+        "text/plain;x=\"a;b\";y=c",
+        "text/plain;x=\"a\\\"b\"",
+        "text/plain;x=\"a\\\\\"",
+        "text/plain;x=\"caf\u{e9} \t!#\"",
+        "text/plain;",
+        "text/plain;;x=y",
+    ];
+    for media_type in valid {
+        let built = Parameter::from_digest(s256.clone(), None, Some(media_type))?;
+        assert_eq!(
+            built.parameter_digest().expect("digest").media_type(),
+            Some(media_type)
+        );
+        let encoded = serde_json::to_string(media_type).expect("media type");
+        let source =
+            proposal_with_parameter(&format!(r#"{{"s256":"{s256}","media_type":{encoded}}}"#));
+        let proposal = registry.parse_proposal(source.as_bytes())?;
+        let again = registry.parse_proposal(json_text(&proposal).as_bytes())?;
+        for parsed in [proposal, again] {
+            let digest_value = parsed
+                .parameters()
+                .get("p")
+                .and_then(|parameter| parameter.parameter_digest())
+                .expect("digest");
+            assert_eq!(digest_value.media_type(), Some(media_type), "{source}");
+        }
+    }
+    let invalid = [
+        "text",
+        "text/",
+        "/plain",
+        "text/plain/x",
+        "text /plain",
+        "text/ plain",
+        "text/{plain}",
+        "text/pl\u{e9}in",
+        "text/plain x",
+        "text/plain;x",
+        "text/plain;x=",
+        "text/plain;=y",
+        "text/plain;x =y",
+        "text/plain;x= y",
+        "text/plain;x=a b",
+        "text/plain;x=a\"b\"",
+        "text/plain;x=\"a\"b\"",
+        "text/plain;x=\"a\"\"b\"",
+        "text/plain;x=\"a",
+        "text/plain;x=\"a\\\"",
+        "text/plain;x=\"a\\",
+        "text/plain;x=\"\u{7f}\"",
+        "text/plain;x=\"\u{1}\"",
+        "text/plain;x=\"a\\\u{1}\"",
+        "text/plain;x=a;X=b",
+        "text/plain;x=a;x=\"a\"",
+        " text/plain",
+        "text/plain ",
+    ];
+    for media_type in invalid {
+        let err = must_err(Parameter::from_digest(
+            s256.clone(),
+            None,
+            Some(media_type),
+        ));
+        assert!(err.to_string().contains("media_type"), "{media_type}: {err}");
+        let encoded = serde_json::to_string(media_type).expect("media type");
+        let source =
+            proposal_with_parameter(&format!(r#"{{"s256":"{s256}","media_type":{encoded}}}"#));
+        assert!(
+            registry.parse_proposal(source.as_bytes()).is_err(),
+            "{source}"
+        );
+    }
+    Ok(())
 }

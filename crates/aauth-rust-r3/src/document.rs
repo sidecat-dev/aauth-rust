@@ -14,27 +14,28 @@ use crate::vocabulary::{OperationSet, Registry, SetUse, new_parsed};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Display {
     summary: String,
-    implications: String,
-    data_accessed: String,
-    irreversible: String,
+    implications: Option<String>,
+    data_accessed: Option<String>,
+    irreversible: Option<String>,
 }
 
 impl Display {
-    /// Build a display. The last three strings are optional and may be empty.
+    /// Build a display. For the last three members, `None` omits the member and
+    /// `Some("")` keeps it present and empty.
     ///
     /// # Errors
     /// Returns [`Error`] when `summary` is blank after trimming.
     pub fn new(
         summary: impl Into<String>,
-        implications: impl Into<String>,
-        data_accessed: impl Into<String>,
-        irreversible: impl Into<String>,
+        implications: Option<&str>,
+        data_accessed: Option<&str>,
+        irreversible: Option<&str>,
     ) -> Result<Self, Error> {
         let display = Self {
             summary: summary.into(),
-            implications: implications.into(),
-            data_accessed: data_accessed.into(),
-            irreversible: irreversible.into(),
+            implications: implications.map(str::to_owned),
+            data_accessed: data_accessed.map(str::to_owned),
+            irreversible: irreversible.map(str::to_owned),
         };
         display.validate()?;
         Ok(display)
@@ -45,19 +46,20 @@ impl Display {
         &self.summary
     }
 
-    /// Optional side-effect description.
-    pub fn implications(&self) -> &str {
-        &self.implications
+    /// Side-effect description when the member is present, including a present empty string.
+    pub fn implications(&self) -> Option<&str> {
+        self.implications.as_deref()
     }
 
-    /// Optional accessed-data description.
-    pub fn data_accessed(&self) -> &str {
-        &self.data_accessed
+    /// Accessed-data description when the member is present, including a present empty string.
+    pub fn data_accessed(&self) -> Option<&str> {
+        self.data_accessed.as_deref()
     }
 
-    /// Optional irreversible-action description.
-    pub fn irreversible(&self) -> &str {
-        &self.irreversible
+    /// Irreversible-action description when the member is present, including a present empty
+    /// string.
+    pub fn irreversible(&self) -> Option<&str> {
+        self.irreversible.as_deref()
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -72,9 +74,9 @@ impl Display {
         out.push(b'{');
         push_key(out, "summary");
         push_string(out, &self.summary);
-        push_optional_string(out, "implications", &self.implications);
-        push_optional_string(out, "data_accessed", &self.data_accessed);
-        push_optional_string(out, "irreversible", &self.irreversible);
+        push_optional_string(out, "implications", self.implications());
+        push_optional_string(out, "data_accessed", self.data_accessed());
+        push_optional_string(out, "irreversible", self.irreversible());
         out.push(b'}');
         Ok(())
     }
@@ -296,9 +298,9 @@ pub fn validate_document_account(
 
 fn parse_display(data: &[u8]) -> Result<Display, Error> {
     let mut summary = None;
-    let mut implications = String::new();
-    let mut data_accessed = String::new();
-    let mut irreversible = String::new();
+    let mut implications = None;
+    let mut data_accessed = None;
+    let mut irreversible = None;
     let seen = decode_strict_object(
         data,
         &["summary", "implications", "data_accessed", "irreversible"],
@@ -306,9 +308,9 @@ fn parse_display(data: &[u8]) -> Result<Display, Error> {
             let text = expect_json_string(raw)?;
             match name {
                 "summary" => summary = Some(text),
-                "implications" => implications = text,
-                "data_accessed" => data_accessed = text,
-                "irreversible" => irreversible = text,
+                "implications" => implications = Some(text),
+                "data_accessed" => data_accessed = Some(text),
+                "irreversible" => irreversible = Some(text),
                 _ => return Err(Error::new(format!("unknown member \"{name}\""))),
             }
             Ok(())
@@ -320,8 +322,8 @@ fn parse_display(data: &[u8]) -> Result<Display, Error> {
     }
     Display::new(
         summary.unwrap_or_default(),
-        implications,
-        data_accessed,
-        irreversible,
+        implications.as_deref(),
+        data_accessed.as_deref(),
+        irreversible.as_deref(),
     )
 }

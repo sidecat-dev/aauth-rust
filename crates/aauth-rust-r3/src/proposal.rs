@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -19,18 +19,18 @@ use crate::vocabulary::{Operation, Registry, SetUse, new_operation_value};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposalDisplay {
     display: Display,
-    detail: String,
+    detail: Option<String>,
 }
 
 impl ProposalDisplay {
-    /// Copy `display` and `detail`. `detail` may be empty.
+    /// Copy `display` and `detail`. `None` omits `detail`; `Some("")` keeps it present and empty.
     ///
     /// # Errors
     /// Returns [`Error`] when `display` is invalid.
-    pub fn new(display: &Display, detail: impl Into<String>) -> Result<Self, Error> {
+    pub fn new(display: &Display, detail: Option<&str>) -> Result<Self, Error> {
         let value = Self {
             display: display.clone(),
-            detail: detail.into(),
+            detail: detail.map(str::to_owned),
         };
         value.validate()?;
         Ok(value)
@@ -41,24 +41,24 @@ impl ProposalDisplay {
         self.display.summary()
     }
 
-    /// Optional side-effect description.
-    pub fn implications(&self) -> &str {
+    /// Side-effect description when the member is present.
+    pub fn implications(&self) -> Option<&str> {
         self.display.implications()
     }
 
-    /// Optional accessed-data description.
-    pub fn data_accessed(&self) -> &str {
+    /// Accessed-data description when the member is present.
+    pub fn data_accessed(&self) -> Option<&str> {
         self.display.data_accessed()
     }
 
-    /// Optional irreversible-action description.
-    pub fn irreversible(&self) -> &str {
+    /// Irreversible-action description when the member is present.
+    pub fn irreversible(&self) -> Option<&str> {
         self.display.irreversible()
     }
 
-    /// Optional Markdown detail.
-    pub fn detail(&self) -> &str {
-        &self.detail
+    /// Markdown detail when the member is present, including a present empty string.
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -73,7 +73,7 @@ impl ProposalDisplay {
         push_optional_string(out, "implications", self.implications());
         push_optional_string(out, "data_accessed", self.data_accessed());
         push_optional_string(out, "irreversible", self.irreversible());
-        push_optional_string(out, "detail", &self.detail);
+        push_optional_string(out, "detail", self.detail());
         out.push(b'}');
         Ok(())
     }
@@ -83,8 +83,8 @@ impl ProposalDisplay {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParameterDigest {
     s256: String,
-    excerpt: String,
-    media_type: String,
+    excerpt: Option<String>,
+    media_type: Option<String>,
 }
 
 impl ParameterDigest {
@@ -93,14 +93,47 @@ impl ParameterDigest {
         &self.s256
     }
 
-    /// Optional human-readable excerpt.
-    pub fn excerpt(&self) -> &str {
-        &self.excerpt
+    /// Human-readable excerpt when the member is present, including a present empty string.
+    pub fn excerpt(&self) -> Option<&str> {
+        self.excerpt.as_deref()
     }
 
-    /// Optional media type.
-    pub fn media_type(&self) -> &str {
-        &self.media_type
+    /// Media type when the member is present, including a present empty string.
+    pub fn media_type(&self) -> Option<&str> {
+        self.media_type.as_deref()
+    }
+}
+
+/// The OPTIONAL proposal `result`: what the resource holds after it has
+/// already run the operation and seeks approval to release the result.
+///
+/// Its members are resource-defined. They describe the result for the issuer
+/// and Person Server; the result itself is not carried. Members are stored as
+/// compact JSON with names sorted, and number spelling is preserved.
+#[derive(Clone, Debug)]
+pub struct ProposalResult {
+    json: Vec<u8>,
+}
+
+impl ProposalResult {
+    /// Strictly parse one JSON object. An empty object is a present result.
+    ///
+    /// # Errors
+    /// Returns [`Error`] when `value` is not exactly one strict JSON object.
+    pub fn new(value: &[u8]) -> Result<Self, Error> {
+        let parsed =
+            parse_json(value).map_err(|err| Error::wrap("r3: invalid proposal result", err))?;
+        if !matches!(parsed, Json::Object(_)) {
+            return Err(Error::new("r3: proposal result must be a JSON object"));
+        }
+        Ok(Self {
+            json: compact_json(&parsed),
+        })
+    }
+
+    /// Owned compact JSON object.
+    pub fn json(&self) -> Vec<u8> {
+        self.json.clone()
     }
 }
 
@@ -142,14 +175,21 @@ impl Parameter {
 
     /// Build a digest descriptor from a canonical hash and optional display metadata.
     ///
+    /// `None` omits `excerpt` or `media_type`; `Some("")` keeps it present and empty.
+    ///
     /// # Errors
-    /// Returns [`Error`] when `s256` is not canonical SHA-256 or `media_type` is not a media type.
+    /// Returns [`Error`] when `s256` is not canonical SHA-256 or a non-empty `media_type`
+    /// is not an RFC 9110 media type.
     pub fn from_digest(
         s256: impl Into<String>,
-        excerpt: impl Into<String>,
-        media_type: impl Into<String>,
+        excerpt: Option<&str>,
+        media_type: Option<&str>,
     ) -> Result<Self, Error> {
-        let digest = parameter_digest(s256.into(), excerpt.into(), media_type.into())?;
+        let digest = parameter_digest(
+            s256.into(),
+            excerpt.map(str::to_owned),
+            media_type.map(str::to_owned),
+        )?;
         Ok(Self {
             kind: ParameterKind::Digest(digest),
         })
@@ -158,11 +198,11 @@ impl Parameter {
     /// Hash `exact` and build a digest descriptor.
     ///
     /// # Errors
-    /// Returns [`Error`] when `media_type` is not a media type.
+    /// Returns [`Error`] when a non-empty `media_type` is not an RFC 9110 media type.
     pub fn from_exact_bytes(
         exact: &[u8],
-        excerpt: impl Into<String>,
-        media_type: impl Into<String>,
+        excerpt: Option<&str>,
+        media_type: Option<&str>,
     ) -> Result<Self, Error> {
         Self::from_digest(digest(exact), excerpt, media_type)
     }
@@ -227,8 +267,8 @@ impl Parameter {
                 out.push(b'{');
                 push_key(out, "s256");
                 push_string(out, &digest.s256);
-                push_optional_string(out, "excerpt", &digest.excerpt);
-                push_optional_string(out, "media_type", &digest.media_type);
+                push_optional_string(out, "excerpt", digest.excerpt());
+                push_optional_string(out, "media_type", digest.media_type());
                 out.push(b'}');
             }
         }
@@ -393,11 +433,14 @@ impl Serialize for Parameters {
     }
 }
 
-/// Optional account and per-call display copied into a [`Proposal`].
+/// Optional account, release-gating result, and per-call display copied into a [`Proposal`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ProposalOptions<'a> {
     /// Account identifier. `Some("")` is present and empty. `None` omits the member.
     pub account: Option<&'a str>,
+    /// Release-gating result. `None` omits the member: the call has not run
+    /// and the approval is for execution.
+    pub result: Option<&'a ProposalResult>,
     /// Per-call display. `None` omits the member.
     pub display: Option<&'a ProposalDisplay>,
 }
@@ -407,12 +450,17 @@ pub struct ProposalOptions<'a> {
 pub struct Proposal {
     operation: Operation,
     parameters: Parameters,
+    result: Option<ProposalResult>,
     account: Option<String>,
     display: Option<ProposalDisplay>,
 }
 
 impl Proposal {
-    /// Copy the operation, parameters, and optional account and display.
+    /// Copy the operation, parameters, and optional account, result, and display.
+    ///
+    /// When `result` is present, the draft requires `display` to state that the
+    /// operation has run and that release of its result is being approved. This
+    /// crate does not judge display prose.
     ///
     /// # Errors
     /// Returns [`Error`] when the operation or parameters are uninitialized.
@@ -429,6 +477,7 @@ impl Proposal {
         Ok(Self {
             operation: operation.clone(),
             parameters: parameters.clone(),
+            result: options.result.cloned(),
             account: options.account.map(str::to_owned),
             display: options.display.cloned(),
         })
@@ -442,6 +491,13 @@ impl Proposal {
     /// Copy of the parameter set.
     pub fn parameters(&self) -> Parameters {
         self.parameters.clone()
+    }
+
+    /// Release-gating result when the member is present. Presence means the
+    /// resource has already run the operation and seeks approval to release
+    /// its result; absence means the approval is for execution.
+    pub fn result(&self) -> Option<&ProposalResult> {
+        self.result.as_ref()
     }
 
     /// Account value when the member is present.
@@ -468,6 +524,11 @@ impl Proposal {
         out.push(b',');
         push_key(&mut out, "parameters");
         self.parameters.write_json(&mut out)?;
+        if let Some(result) = &self.result {
+            out.push(b',');
+            push_key(&mut out, "result");
+            out.extend_from_slice(&result.json);
+        }
         if let Some(account) = &self.account {
             out.push(b',');
             push_key(&mut out, "account");
@@ -508,6 +569,7 @@ impl Registry {
         let mut vocabulary = None;
         let mut operations_raw = None;
         let mut parameters = None;
+        let mut result = None;
         let mut account = None;
         let mut display = None;
         let seen = decode_strict_object(
@@ -516,6 +578,7 @@ impl Registry {
                 "vocabulary",
                 "operations",
                 "parameters",
+                "result",
                 "account",
                 "display",
             ],
@@ -524,6 +587,7 @@ impl Registry {
                     "vocabulary" => vocabulary = Some(expect_json_string(raw)?),
                     "operations" => operations_raw = Some(raw.to_vec()),
                     "parameters" => parameters = Some(parse_parameters(raw)?),
+                    "result" => result = Some(ProposalResult::new(raw)?),
                     "account" => account = Some(expect_json_string(raw)?),
                     "display" => display = Some(parse_proposal_display(raw)?),
                     _ => return Err(Error::new(format!("unknown member \"{name}\""))),
@@ -570,6 +634,7 @@ impl Registry {
             &parameters,
             ProposalOptions {
                 account: account.as_deref(),
+                result: result.as_ref(),
                 display: display.as_ref(),
             },
         )
@@ -659,12 +724,15 @@ fn digest_parameter(members: &[(String, Json)]) -> Result<Parameter, Error> {
     Parameter::from_digest(s256.clone(), excerpt, media_type)
 }
 
-fn optional_digest_string(members: &[(String, Json)], name: &str) -> Result<String, Error> {
+fn optional_digest_string<'a>(
+    members: &'a [(String, Json)],
+    name: &str,
+) -> Result<Option<&'a str>, Error> {
     let Some((_, value)) = members.iter().find(|(key, _)| key == name) else {
-        return Ok(String::new());
+        return Ok(None);
     };
     match value {
-        Json::String(text) => Ok(text.clone()),
+        Json::String(text) => Ok(Some(text.as_str())),
         _ => Err(Error::new(format!(
             "r3: digest parameter {name} must be a string"
         ))),
@@ -673,8 +741,8 @@ fn optional_digest_string(members: &[(String, Json)], name: &str) -> Result<Stri
 
 fn parameter_digest(
     s256: String,
-    excerpt: String,
-    media_type: String,
+    excerpt: Option<String>,
+    media_type: Option<String>,
 ) -> Result<ParameterDigest, Error> {
     let Ok(bytes) = URL_SAFE_NO_PAD.decode(s256.as_bytes()) else {
         return Err(Error::new(
@@ -686,13 +754,20 @@ fn parameter_digest(
             "r3: parameter digest s256 must be canonical unpadded base64url SHA-256",
         ));
     }
-    if media_type != media_type.trim() {
-        return Err(Error::new(
-            "r3: parameter digest media_type must be valid trimmed UTF-8",
-        ));
-    }
-    if !media_type.is_empty() {
-        parse_media_type(&media_type)?;
+    if let Some(media_type) = &media_type {
+        if media_type != media_type.trim() {
+            return Err(Error::new(
+                "r3: parameter digest media_type must be valid trimmed UTF-8",
+            ));
+        }
+        // A present empty value names no media type. It is kept, not refused;
+        // Go also accepts it.
+        if !media_type.is_empty() && !is_media_type(media_type.as_bytes()) {
+            return Err(Error::wrap(
+                "r3: invalid parameter digest media_type",
+                Error::new("invalid media type"),
+            ));
+        }
     }
     Ok(ParameterDigest {
         s256,
@@ -701,66 +776,114 @@ fn parameter_digest(
     })
 }
 
-fn parse_media_type(value: &str) -> Result<(), Error> {
-    let invalid = Error::new("invalid media type");
-    let (type_part, params) = match value.split_once(';') {
-        Some((head, tail)) => (head.trim(), Some(tail)),
-        None => (value, None),
-    };
-    let Some((typ, sub)) = type_part.split_once('/') else {
-        return Err(Error::wrap(
-            "r3: invalid parameter digest media_type",
-            invalid,
-        ));
-    };
-    if !is_token(typ) || !is_token(sub) {
-        return Err(Error::wrap(
-            "r3: invalid parameter digest media_type",
-            Error::new("invalid media type"),
-        ));
+/// RFC 9110 section 8.3.1 `media-type`:
+///
+/// ```text
+/// media-type = type "/" subtype parameters
+/// parameters = *( OWS ";" OWS [ parameter ] )
+/// parameter  = token "=" ( token / quoted-string )
+/// ```
+///
+/// A quoted value may be empty and may hold `;` or a quoted-pair. A
+/// parameter name may not repeat, ignoring ASCII case (RFC 6838 section 4.3).
+///
+/// The `mime` crate does not fit: it does not handle a quoted-pair or an
+/// empty quoted string.
+fn is_media_type(bytes: &[u8]) -> bool {
+    let type_end = token_end(bytes, 0);
+    if type_end == 0 || bytes.get(type_end) != Some(&b'/') {
+        return false;
     }
-    if let Some(params) = params {
-        for param in params.split(';') {
-            let param = param.trim();
-            let Some((name, raw_value)) = param.split_once('=') else {
-                return Err(Error::wrap(
-                    "r3: invalid parameter digest media_type",
-                    Error::new("invalid media type"),
-                ));
-            };
-            let raw_value = raw_value.trim();
-            let value_ok = if let Some(quoted) = raw_value.strip_prefix('"') {
-                quoted.ends_with('"') && quoted.len() > 1
-            } else {
-                is_token(raw_value)
-            };
-            if !is_token(name.trim()) || !value_ok {
-                return Err(Error::wrap(
-                    "r3: invalid parameter digest media_type",
-                    Error::new("invalid media type"),
-                ));
-            }
+    let mut index = token_end(bytes, type_end + 1);
+    if index == type_end + 1 {
+        return false;
+    }
+    let mut names = BTreeSet::new();
+    loop {
+        let separator = skip_ows(bytes, index);
+        match bytes.get(separator) {
+            None if separator == index => return true,
+            Some(b';') => index = skip_ows(bytes, separator + 1),
+            _ => return false,
         }
+        let name_end = token_end(bytes, index);
+        if name_end == index {
+            continue;
+        }
+        if bytes.get(name_end) != Some(&b'=') {
+            return false;
+        }
+        let value_start = name_end + 1;
+        let value_end = if bytes.get(value_start) == Some(&b'"') {
+            match quoted_string_end(bytes, value_start) {
+                Some(end) => end,
+                None => return false,
+            }
+        } else {
+            token_end(bytes, value_start)
+        };
+        if value_end == value_start || !names.insert(bytes[index..name_end].to_ascii_lowercase()) {
+            return false;
+        }
+        index = value_end;
     }
-    Ok(())
 }
 
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.chars().all(|ch| {
-            let Ok(byte) = u8::try_from(u32::from(ch)) else {
-                return false;
-            };
-            (0x21..0x7f).contains(&byte) && !b"()<>@,;:\\\"/[]?=".contains(&byte)
-        })
+/// RFC 9110 `tchar`.
+fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// End of the run of `tchar` that starts at `start`.
+fn token_end(bytes: &[u8], start: usize) -> usize {
+    start
+        + bytes
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|byte| is_tchar(**byte))
+            .count()
+}
+
+/// End of the run of `SP` / `HTAB` that starts at `start`.
+fn skip_ows(bytes: &[u8], start: usize) -> usize {
+    start
+        + bytes
+            .get(start..)
+            .unwrap_or_default()
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count()
+}
+
+/// Index just past the RFC 9110 `quoted-string` whose opening quote is at `start`.
+///
+/// `qdtext` is `HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text`, and a
+/// `quoted-pair` is `\` before `HTAB / SP / VCHAR / obs-text`.
+fn quoted_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    loop {
+        match *bytes.get(index)? {
+            b'"' => return Some(index + 1),
+            b'\\' => {
+                let escaped = *bytes.get(index + 1)?;
+                if !matches!(escaped, b'\t' | b' ' | 0x21..=0x7e | 0x80..=0xff) {
+                    return None;
+                }
+                index += 2;
+            }
+            b'\t' | b' ' | 0x21 | 0x23..=0x5b | 0x5d..=0x7e | 0x80..=0xff => index += 1,
+            _ => return None,
+        }
+    }
 }
 
 fn parse_proposal_display(data: &[u8]) -> Result<ProposalDisplay, Error> {
     let mut summary = None;
-    let mut implications = String::new();
-    let mut data_accessed = String::new();
-    let mut irreversible = String::new();
-    let mut detail = String::new();
+    let mut implications = None;
+    let mut data_accessed = None;
+    let mut irreversible = None;
+    let mut detail = None;
     let seen = decode_strict_object(
         data,
         &[
@@ -774,10 +897,10 @@ fn parse_proposal_display(data: &[u8]) -> Result<ProposalDisplay, Error> {
             let text = expect_json_string(raw)?;
             match name {
                 "summary" => summary = Some(text),
-                "implications" => implications = text,
-                "data_accessed" => data_accessed = text,
-                "irreversible" => irreversible = text,
-                "detail" => detail = text,
+                "implications" => implications = Some(text),
+                "data_accessed" => data_accessed = Some(text),
+                "irreversible" => irreversible = Some(text),
+                "detail" => detail = Some(text),
                 _ => return Err(Error::new(format!("unknown member \"{name}\""))),
             }
             Ok(())
@@ -789,9 +912,9 @@ fn parse_proposal_display(data: &[u8]) -> Result<ProposalDisplay, Error> {
     }
     let display = Display::new(
         summary.unwrap_or_default(),
-        implications,
-        data_accessed,
-        irreversible,
+        implications.as_deref(),
+        data_accessed.as_deref(),
+        irreversible.as_deref(),
     )?;
-    ProposalDisplay::new(&display, detail)
+    ProposalDisplay::new(&display, detail.as_deref())
 }

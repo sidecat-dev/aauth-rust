@@ -567,6 +567,7 @@ fn token_per_call_binds_the_exact_proposal() -> Checked {
         &parameters,
         ProposalOptions {
             account: Some("work"),
+            result: None,
             display: None,
         },
     )?;
