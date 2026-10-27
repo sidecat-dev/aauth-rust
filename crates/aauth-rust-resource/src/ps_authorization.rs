@@ -37,10 +37,10 @@ mod revocation;
 #[path = "r3_class.rs"]
 mod r3_class;
 pub use r3_class::{
-    BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, R3CallDescription,
-    R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore,
-    R3Grant, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError,
-    R3Vocabulary,
+    BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, BoxedR3Release,
+    R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config,
+    R3DocumentRecord, R3DocumentStore, R3Grant, R3HeldRequest, R3HostError, R3PerCallConfig,
+    R3ProposalRecord, R3Release, R3StoreError, R3Vocabulary,
 };
 
 /// Named captured-state policy for a PS-authorized Resource in application state.
@@ -271,8 +271,9 @@ pub enum AuthDecision<T = ()> {
         /// Pending URL at this Resource's signed origin.
         location: String,
     },
-    /// The same exact per-call Auth token was presented again. This is the
-    /// retained result of the one execution it authorized; nothing ran.
+    /// The retained result for this exact per-call Auth token: a replay of
+    /// the one execution it authorized, or a release-gated result released
+    /// now on its first presentation. Nothing runs; the host sends it as is.
     Replayed(Box<Response<Vec<u8>>>),
 }
 impl<T> std::fmt::Debug for AuthDecision<T> {
@@ -1196,20 +1197,31 @@ where
                     .as_ref()
                     .and_then(R3Grant::held_request)
                     .unwrap_or(request);
+                // Every admission, Core or R3, passes the shared post-callback
+                // verification: a revocation completed during host policy fences it.
                 match self.admit_auth(token, policy_request, now, challenge_jti, grant, meter)? {
-                    AuthDecision::Granted(mut admitted) if r3.is_some() => {
-                        match self.r3_claim(r3, &admitted.token, now) {
+                    AuthDecision::Granted(mut admitted) => {
+                        match self.post_callback_admission(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
                             Err(decision) => return Ok(decision),
                         }
                         Ok(AuthDecision::Granted(admitted))
                     }
-                    AuthDecision::Observed(mut admitted) if r3.is_some() => {
-                        match self.r3_claim(r3, &admitted.token, now) {
+                    AuthDecision::Observed(mut admitted) => {
+                        match self.post_callback_admission(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
                             Err(decision) => return Ok(decision),
                         }
                         Ok(AuthDecision::Observed(admitted))
+                    }
+                    // Budgets do not compose with R3. Dropping a revoked hold
+                    // releases its reservation.
+                    AuthDecision::Held(admitted) => {
+                        match self.post_callback_admission(r3, &admitted.token, now) {
+                            Ok(None) => Ok(AuthDecision::Held(admitted)),
+                            Ok(Some(_)) => Ok(AuthDecision::InternalError),
+                            Err(decision) => Ok(decision),
+                        }
                     }
                     decision => Ok(decision),
                 }

@@ -347,6 +347,10 @@ impl FileCalls {
             issued_at: number(&v, "issued_at")?,
             expires_at: number(&v, "expires_at")?,
             held,
+            released: match v.get("released") {
+                Some(released) if !released.is_null() => Some(Self::result(released)?),
+                _ => None,
+            },
         })
     }
     fn result(v: &Value) -> Result<R3CallResult> {
@@ -364,6 +368,10 @@ impl R3CallStore for FileCalls {
             json!({"pending_id": held.pending_id, "method": held.method, "uri": held.uri,
                    "headers": held.headers, "body": held.body})
         });
+        let released = r.released.as_ref().map(|result| {
+            json!({"status": result.status, "content_type": result.content_type,
+                   "body": result.body})
+        });
         let bytes = json!({
             "uri": r.reference.uri(), "digest": r.reference.digest(), "exact_json": r.exact_json,
             "person_server": r.person_server, "auth_token_issuer": r.auth_token_issuer,
@@ -372,6 +380,7 @@ impl R3CallStore for FileCalls {
             "presented_jti": r.presented_jti, "subject": r.subject, "agent_jkt": r.agent_jkt,
             "tenant": r.tenant, "account": r.account, "scope": r.scope,
             "issued_at": r.issued_at, "expires_at": r.expires_at, "held": held,
+            "released": released,
         })
         .to_string()
         .into_bytes();
@@ -719,6 +728,8 @@ fn compose(
             control.clone(),
         )),
         hold,
+        // Deletion changes state outside its result: never executed before approval.
+        release: None,
     })?;
     Ok(if control.revocation {
         resource.with_revocation()
