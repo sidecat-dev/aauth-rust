@@ -1524,6 +1524,18 @@ where
             },
             Meter::Buffered => match gate.reserve(&token, &grant, maximum) {
                 Ok(reservation) => match (self.policy)(&token, request).into_admission() {
+                    // Post-callback revocation precedes the commit, so a
+                    // revoked call never draws down the grant.
+                    Ok(_)
+                        if self.presented_revoked(
+                            &token.claims().iss,
+                            &token.claims().jti,
+                            now,
+                        ) =>
+                    {
+                        gate.release(&reservation);
+                        Ok(AuthDecision::Revoked { auth_token: true })
+                    }
                     Ok(admitted) => match gate.commit(&reservation, maximum, now) {
                         Ok(header) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {
                             token,

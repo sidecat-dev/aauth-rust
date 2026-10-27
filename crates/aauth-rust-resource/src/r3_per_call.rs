@@ -764,6 +764,11 @@ where
             // is retained under the fence; nothing executes.
             Ok(R3Claim::Execute { fence }) if !fence.is_empty() => {
                 if let Some(released) = completion.released.take() {
+                    // Revoked during the claim callback: the claim stays bound
+                    // and nothing is retained, so no later replay can release.
+                    if self.presented_revoked(&claims.iss, &claims.jti, now) {
+                        return Err(AuthDecision::Revoked { auth_token: true });
+                    }
                     match per_call.calls.retain(&completion.uri, &fence, &released) {
                         Ok(stored) => Err(AuthDecision::Replayed(Box::new(restore(&stored)))),
                         Err(_) => Err(AuthDecision::InternalError),

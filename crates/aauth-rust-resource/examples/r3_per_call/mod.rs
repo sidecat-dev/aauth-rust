@@ -7,6 +7,12 @@
 //! the Resource is recomposed from its files, by a `202` held invocation.
 //! Every refusal is checked against explicit application-effect counters.
 //!
+//! `records.query` is side-effect free and also per call. Under `202` the
+//! Resource runs it before approval and proposes release of its result
+//! (`draft-hardt-aauth-r3`, Approving Release Rather Than Execution): the PS
+//! routes that proposal to release consent, and the stored result is released
+//! once at the pending URL without recomputation. Deletion is never run first.
+//!
 //! Host responsibilities shown here, not provided by the libraries:
 //! - Resource custody: `FileDocuments` and `FileCalls` in one per-run
 //!   directory. Recomposing the Resource from that directory stands in for a
@@ -32,14 +38,14 @@ use aauth_rust_person_server::{
 use aauth_rust_r3::{
     DefinitionRegistry, Display, FetchBody, FetchLimits, FetchResponse, FetchTransport,
     GrantedOperations, IssuanceError, IssuanceRecord, IssuanceStore, McpCodec, Operation,
-    OperationSet, Parameter, Parameters, PresentedParameter, ProposalDisplay, Reference, Registry,
-    ToolsListPage, ToolsListSnapshot, digest, standard_registry,
+    OperationSet, Parameter, Parameters, PresentedParameter, ProposalDisplay, ProposalResult,
+    Reference, Registry, ToolsListPage, ToolsListSnapshot, digest, standard_registry,
 };
 use aauth_rust_resource::{
-    AuthDecision, BoxedAuthPolicy, PsAuthorizationConfig, PsAuthorizationResource,
+    AuthDecision, BoxedAuthPolicy, BoxedR3Release, PsAuthorizationConfig, PsAuthorizationResource,
     R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,
-    R3DocumentStore, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError,
-    R3Vocabulary,
+    R3DocumentStore, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3Release,
+    R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -63,7 +69,7 @@ const AP: &str = "https://ap.example";
 const PS: &str = "https://ps.example";
 const RECORDS: &str = "https://records.example";
 const MCP: &str = "urn:aauth:vocabulary:mcp";
-const TOOLS: &[u8] = br#"{"tools":[{"name":"records.read","inputSchema":{"type":"object"}},{"name":"records.delete","inputSchema":{"type":"object"}}]}"#;
+const TOOLS: &[u8] = br#"{"tools":[{"name":"records.read","inputSchema":{"type":"object"}},{"name":"records.delete","inputSchema":{"type":"object"}},{"name":"records.query","inputSchema":{"type":"object"}}]}"#;
 const R1: &[u8] = br#"{"record":"r-1"}"#;
 const R2: &[u8] = br#"{"record":"r-2"}"#;
 
@@ -99,6 +105,24 @@ pub struct Transcript {
     pub revocation_retry_status: u16,
     pub revocation_claim_unchanged: bool,
     pub revocation_result_retained: bool,
+    /// Query computations, counted by the host release callback.
+    pub query_runs: usize,
+    /// Consent methods the PS called, in order: `execution` or `release`.
+    pub consents: Vec<String>,
+    /// `result` members the PS saw on the first release proposal.
+    pub release_result_seen: String,
+    pub release_held_status: u16,
+    pub release_runs_at_challenge: usize,
+    pub release_denied_ps_status: u16,
+    pub declined_pending_status: u16,
+    pub release_mismatch_status: u16,
+    pub release_at_route_status: u16,
+    pub release_status: u16,
+    pub release_body: String,
+    pub release_replay_status: u16,
+    pub release_replay_matches: bool,
+    pub release_runs_after_completion: usize,
+    pub release_claim_consumed: bool,
 }
 
 /// Adversarial admission paths exercised over the same real TLS roles.
@@ -110,7 +134,25 @@ pub enum AdmissionCase {
         reason = "Constructed by the policy-race integration control."
     )]
     Revocation,
+    #[allow(
+        dead_code,
+        reason = "Constructed by the claim-race integration control."
+    )]
     ClaimRevocation,
+    /// Release gating: consent, denial, mismatch, single use and replay.
+    Release,
+    /// Revocation completed during host policy on a release completion.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the release policy-race integration control."
+    )]
+    ReleaseRevocation,
+    /// Revocation completed during the store claim on a release completion.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the release claim-race integration control."
+    )]
+    ReleaseClaimRevocation,
 }
 
 #[derive(Default)]
@@ -119,6 +161,11 @@ struct AdmissionControl {
     revocation: bool,
     barrier: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     claim_barrier: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// Release-callback computations of `records.query`.
+    query_runs: AtomicUsize,
+    /// PS consent methods called, and the first release `result` seen.
+    consents: Mutex<Vec<String>>,
+    release_result: Mutex<String>,
 }
 impl AdmissionControl {
     fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
@@ -526,9 +573,19 @@ impl Policy for HostPolicy {
     }
 }
 
-/// Demonstration consent: read is granted; delete is per call and approved
-/// only for record `r-1`, after inspecting the proposal's parameters.
-struct HostConsent;
+/// Demonstration consent: read is granted; delete and query are per call.
+/// Execution of a delete, and release of a query result, are approved only
+/// for record `r-1`, after inspecting the proposal's parameters. The two are
+/// separate decisions and each is recorded.
+struct HostConsent(Arc<AdmissionControl>);
+fn record_r1(request: &R3ProposalRequest<'_>) -> bool {
+    request
+        .proposal
+        .parameters()
+        .get("record")
+        .and_then(|parameter| parameter.inline_json())
+        .is_some_and(|value| value == br#""r-1""#)
+}
 impl R3Policy for HostConsent {
     fn authorize_document(
         &self,
@@ -546,8 +603,14 @@ impl R3Policy for HostConsent {
             )
             .map_err(|_| PolicyError::Unavailable)?,
             per_call: Some(
-                GrantedOperations::new(&vocabulary, &[mcp("records.delete").map_err(unavailable)?])
-                    .map_err(|_| PolicyError::Unavailable)?,
+                GrantedOperations::new(
+                    &vocabulary,
+                    &[
+                        mcp("records.delete").map_err(unavailable)?,
+                        mcp("records.query").map_err(unavailable)?,
+                    ],
+                )
+                .map_err(|_| PolicyError::Unavailable)?,
             ),
             scopes: Vec::new(),
             lifetime: 600,
@@ -557,13 +620,32 @@ impl R3Policy for HostConsent {
         &self,
         request: &R3ProposalRequest<'_>,
     ) -> std::result::Result<R3ProposalDecision, PolicyError> {
-        let approved = request
-            .proposal
-            .parameters()
-            .get("record")
-            .and_then(|parameter| parameter.inline_json())
-            .is_some_and(|value| value == br#""r-1""#);
-        if !approved || request.core.resource.claims().iss != RECORDS {
+        self.0.consents.lock().unwrap().push("execution".into());
+        // Execution consent never covers a computed result.
+        if request.proposal.result().is_some()
+            || !record_r1(request)
+            || request.core.resource.claims().iss != RECORDS
+        {
+            return Err(PolicyError::Denied);
+        }
+        Ok(R3ProposalDecision {
+            scopes: Vec::new(),
+            lifetime: 300,
+        })
+    }
+    fn authorize_release(
+        &self,
+        request: &R3ProposalRequest<'_>,
+    ) -> std::result::Result<R3ProposalDecision, PolicyError> {
+        self.0.consents.lock().unwrap().push("release".into());
+        let Some(result) = request.proposal.result() else {
+            return Err(PolicyError::Denied);
+        };
+        let mut seen = self.0.release_result.lock().unwrap();
+        if seen.is_empty() {
+            *seen = String::from_utf8_lossy(&result.json()).into_owned();
+        }
+        if !record_r1(request) || request.core.resource.claims().iss != RECORDS {
             return Err(PolicyError::Denied);
         }
         Ok(R3ProposalDecision {
@@ -633,6 +715,54 @@ fn record_parameter(request: &Request<Vec<u8>>) -> std::result::Result<Vec<u8>, 
         .ok_or_else(|| R3HostError::new("call names no record"))?;
     serde_json::to_vec(record).map_err(|e| R3HostError::new(e.to_string()))
 }
+/// Release gating for `records.query`: nothing outside the result changes
+/// when it runs (no audit, meter, bill or call to another party), so the
+/// Resource runs it now and proposes release. Every other operation keeps
+/// execution approval.
+fn query_release(control: Arc<AdmissionControl>) -> BoxedR3Release {
+    Box::new(
+        move |_: &Request<Vec<u8>>,
+              operation: &Operation,
+              presented: &BTreeMap<String, PresentedParameter>,
+              _: Option<&str>| {
+            if !matches!(operation.equal(&mcp("records.query")?), Ok(true)) {
+                return Ok(None);
+            }
+            let record = presented
+                .get("record")
+                .and_then(PresentedParameter::inline_json)
+                .ok_or_else(|| R3HostError::new("record parameter is required"))?;
+            let shown = String::from_utf8_lossy(&record).into_owned();
+            control.query_runs.fetch_add(1, Ordering::SeqCst);
+            let response = json_response(
+                200,
+                json!({"record": shown, "name": "A. Person", "national_id": "000-00-0000"}),
+            );
+            let result = ProposalResult::new(br#"{"records":1,"contains":["national_id"]}"#)
+                .map_err(|e| R3HostError::new(e.to_string()))?;
+            let display = ProposalDisplay::new(
+                &Display::new(
+                    format!("Release the result of a query for record {shown}"),
+                    None,
+                    None,
+                    None,
+                )
+                .map_err(|e| R3HostError::new(e.to_string()))?,
+                Some(&format!(
+                    "## Action\nThis query has already run. What you are approving is \
+                     release of its result to the agent.\n\n## Details\nOne record \
+                     ({shown}), including a national identifier."
+                )),
+            )
+            .map_err(|e| R3HostError::new(e.to_string()))?;
+            Ok(Some(R3Release {
+                result,
+                display,
+                response,
+            }))
+        },
+    )
+}
 /// One Resource instance over the shared custody directory.
 fn compose(
     root: &Path,
@@ -680,6 +810,7 @@ fn compose(
         operation_for_request: Box::new(|request: &Request<Vec<u8>>| match request.uri().path() {
             "/records/read" => mcp("records.read").map(Some),
             "/records/delete" => mcp("records.delete").map(Some),
+            "/records/query" => mcp("records.query").map(Some),
             _ => Ok(None),
         }),
         require_core_scope: false,
@@ -728,8 +859,9 @@ fn compose(
             control.clone(),
         )),
         hold,
-        // Deletion changes state outside its result: never executed before approval.
-        release: None,
+        // Only a held Resource gates release. Deletion changes state outside
+        // its result and is never executed before approval.
+        release: hold.then(|| query_release(control.clone())),
     })?;
     Ok(if control.revocation {
         resource.with_revocation()
@@ -813,7 +945,9 @@ fn class_grant(
     registry: &Registry,
 ) -> Result<String> {
     let operations = registry.parse_operation_set(
-        json!({"vocabulary": MCP, "operations": [{"tool":"records.read"},{"tool":"records.delete"}]})
+        json!({"vocabulary": MCP, "operations": [
+            {"tool":"records.read"},{"tool":"records.delete"},{"tool":"records.query"}
+        ]})
             .to_string()
             .as_bytes(),
     )?;
@@ -873,7 +1007,12 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let control = Arc::new(AdmissionControl {
         revocation: matches!(
             case,
-            Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)
+            Some(
+                AdmissionCase::Revocation
+                    | AdmissionCase::ClaimRevocation
+                    | AdmissionCase::ReleaseRevocation
+                    | AdmissionCase::ReleaseClaimRevocation
+            )
         ),
         ..AdmissionControl::default()
     });
@@ -968,7 +1107,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         }),
         transport: Box::new(TlsFetch(api.clone())),
         limits: FetchLimits::default(),
-        policy: Box::new(HostConsent),
+        policy: Box::new(HostConsent(control.clone())),
         audit: audit.clone(),
     })?;
     let ps_tls = TlsServer::start("ps.example", move |request| ps.handle(&request))?;
@@ -1129,12 +1268,94 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     poller.sign(&mut again, now())?;
     t.held_replay_status = api.send(&again)?.status().as_u16();
 
-    if matches!(
+    if case == Some(AdmissionCase::Release) {
+        // Release gating (202): the query runs once at the challenge.
+        let runs = || control.query_runs.load(Ordering::SeqCst);
+        let before = runs();
+        let held = api.send(&post(&holder, &format!("{RECORDS}/records/query"), R1)?)?;
+        t.release_held_status = held.status().as_u16();
+        t.release_runs_at_challenge = runs() - before;
+        let location = held.headers()["location"].to_str()?.to_owned();
+        let release_token = challenge(&held)?;
+        let release_proposal =
+            agent.verify_r3_proposal_challenge(&release_token, RECORDS, PS, &class, &trust, now())?;
+
+        // Denial: release of another record's result is refused at the PS, and
+        // the class token at that pending URL releases nothing.
+        let other = api.send(&post(&holder, &format!("{RECORDS}/records/query"), R2)?)?;
+        let other_location = other.headers()["location"].to_str()?.to_owned();
+        let other_token = challenge(&other)?;
+        t.release_denied_ps_status = approve(&agent, &ps_tls, &other_token, &class)?
+            .status()
+            .as_u16();
+        let mut declined = get(&other_location)?;
+        holder.sign(&mut declined, now())?;
+        t.declined_pending_status = api.send(&declined)?.status().as_u16();
+
+        // Release consent for record r-1.
+        let release_grant = member(
+            &approve(&agent, &ps_tls, &release_token, &class)?,
+            "auth_token",
+        )
+        .ok_or("release approval refused")?;
+        agent.verify_r3_per_call_delivery(
+            &release_grant,
+            RECORDS,
+            &release_proposal,
+            &class,
+            &registry,
+            &trust,
+            now(),
+        )?;
+        let releasing = agent.with_token(release_grant)?;
+        // Mismatch: this approval is not the r-2 proposal's, and a held
+        // invocation never completes by re-sending the call.
+        let mut mismatched = get(&other_location)?;
+        releasing.sign(&mut mismatched, now())?;
+        t.release_mismatch_status = api.send(&mismatched)?.status().as_u16();
+        t.release_at_route_status = api
+            .send(&post(&releasing, &format!("{RECORDS}/records/query"), R1)?)?
+            .status()
+            .as_u16();
+
+        // Single use: the stored result is released, then answered again
+        // identically; nothing is recomputed.
+        let computed = runs();
+        let mut poll = get(&location)?;
+        releasing.sign(&mut poll, now())?;
+        let first = api.send(&poll)?;
+        t.release_status = first.status().as_u16();
+        t.release_body = String::from_utf8_lossy(first.body()).into_owned();
+        let mut again = get(&location)?;
+        releasing.sign(&mut again, now())?;
+        let replay = api.send(&again)?;
+        t.release_replay_status = replay.status().as_u16();
+        t.release_replay_matches = replay.body() == first.body();
+        t.release_runs_after_completion = runs() - computed;
+        t.release_claim_consumed = FileCalls(root.clone(), Mutex::new(()), control.clone())
+            .claim_path(release_proposal.reference().uri())
+            .exists();
+    }
+
+    let release_case = matches!(
         case,
-        Some(AdmissionCase::Revocation | AdmissionCase::ClaimRevocation)
-    ) {
+        Some(AdmissionCase::ReleaseRevocation | AdmissionCase::ReleaseClaimRevocation)
+    );
+    let claim_case = matches!(
+        case,
+        Some(AdmissionCase::ClaimRevocation | AdmissionCase::ReleaseClaimRevocation)
+    );
+    // Effects are deletes and query computations; a release never recomputes.
+    let effect_count =
+        || effects.deletes.lock().unwrap().len() + control.query_runs.load(Ordering::SeqCst);
+    if control.revocation {
         // A fresh, unclaimed proposal: previously admitted effects remain separate.
-        let held = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R1)?)?;
+        let path = if release_case {
+            "/records/query"
+        } else {
+            "/records/delete"
+        };
+        let held = api.send(&post(&holder, &format!("{RECORDS}{path}"), R1)?)?;
         let location = held.headers()["location"].to_str()?.to_owned();
         let proposal_token = challenge(&held)?;
         let proposal = agent.verify_r3_proposal_challenge(
@@ -1183,12 +1404,12 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         revocation_holder.sign(&mut poll, now())?;
         let (entered, observed) = mpsc::channel();
         let (release, released) = mpsc::channel();
-        if case == Some(AdmissionCase::ClaimRevocation) {
+        if claim_case {
             *control.claim_barrier.lock().unwrap() = Some((entered, released));
         } else {
             *control.barrier.lock().unwrap() = Some((entered, released));
         }
-        let before = effects.deletes.lock().unwrap().len();
+        let before = effect_count();
         let sending = api.clone();
         let pending = std::thread::spawn(move || sending.send(&poll));
         observed.recv_timeout(Duration::from_secs(2))?;
@@ -1209,11 +1430,11 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_owned();
-        t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
+        t.revocation_effect_delta = effect_count() - before;
         let claim_path = FileCalls(root.clone(), Mutex::new(()), control.clone())
             .claim_path(proposal.reference().uri());
         t.revocation_claim_consumed = claim_path.exists();
-        if case == Some(AdmissionCase::ClaimRevocation) {
+        if claim_case {
             let retained = fs::read(&claim_path)?;
             let value: Value = serde_json::from_slice(&retained)?;
             t.revocation_result_retained = !value["result"].is_null();
@@ -1222,10 +1443,13 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             t.revocation_retry_status = api.send(&retry)?.status().as_u16();
             t.revocation_claim_unchanged = fs::read(&claim_path)? == retained;
             // Count again after retry, so redispatch cannot escape the control.
-            t.revocation_effect_delta = effects.deletes.lock().unwrap().len() - before;
+            t.revocation_effect_delta = effect_count() - before;
         }
     }
 
+    t.query_runs = control.query_runs.load(Ordering::SeqCst);
+    t.consents = control.consents.lock().unwrap().clone();
+    t.release_result_seen = control.release_result.lock().unwrap().clone();
     t.reads = effects.reads.load(Ordering::SeqCst);
     t.deletes = effects.deletes.lock().unwrap().clone();
     t.audit_records = audit.0.lock().map_err(|_| "audit lock poisoned")?.len();
