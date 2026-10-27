@@ -242,7 +242,10 @@ fn fixture(policy_hold: Option<Arc<Hold>>) -> Fixture {
     fixture_with(policy_hold, &[])
 }
 /// `granted_scopes` is the host decision's Core scope grant.
-fn fixture_with(policy_hold: Option<Arc<Hold>>, granted_scopes: &'static [&'static str]) -> Fixture {
+fn fixture_with(
+    policy_hold: Option<Arc<Hold>>,
+    granted_scopes: &'static [&'static str],
+) -> Fixture {
     fixture_full(policy_hold, granted_scopes, false)
 }
 /// `require_core_scope` configures the Resource's R3 profile.
@@ -286,7 +289,10 @@ fn fixture_full(
                 let vocabulary = McpCodec::vocabulary().unwrap();
                 Ok(R3Decision {
                     granted: GrantedOperations::new(&vocabulary, &[mcp("records.read")]).unwrap(),
-                    scopes: granted_scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                    scopes: granted_scopes
+                        .iter()
+                        .map(|scope| (*scope).to_owned())
+                        .collect(),
                     lifetime: 600,
                 })
             },
@@ -344,13 +350,11 @@ fn tokens(f: &Fixture) -> (String, String) {
     tokens_with(f, None)
 }
 fn tokens_with(f: &Fixture, scope: Option<&str>) -> (String, String) {
-    let person = f
-        .ps
-        .handle(&post(
-            &f.agent,
-            &format!("{PS}/person"),
-            json!({ "resource": RESOURCE }),
-        ));
+    let person = f.ps.handle(&post(
+        &f.agent,
+        &format!("{PS}/person"),
+        json!({ "resource": RESOURCE }),
+    ));
     let person = member(&person, "person_token").expect("person token");
     let mut body = json!({ "r3_operations": {
         "vocabulary": "urn:aauth:vocabulary:mcp",
@@ -427,18 +431,23 @@ fn resource_token_revoked_during_r3_policy_releases_no_auth_token() {
     let (paused, control) = hold();
     let f = fixture(Some(paused));
     let (person, resource_token) = tokens(&f);
-    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
-        f.ps.handle(&revocation(
-            RESOURCE,
-            "aauth-resource.json",
-            "resource-1",
-            4,
-            "rt-1",
-            NOW + 300,
-        ))
-        .status()
-        .as_u16()
-    });
+    let response = race(
+        &f,
+        control,
+        token_request(&f, &person, &resource_token),
+        || {
+            f.ps.handle(&revocation(
+                RESOURCE,
+                "aauth-resource.json",
+                "resource-1",
+                4,
+                "rt-1",
+                NOW + 300,
+            ))
+            .status()
+            .as_u16()
+        },
+    );
     assert_eq!(response.status(), 400);
     assert_eq!(
         member(&response, "error").as_deref(),
@@ -453,25 +462,29 @@ fn known_agent_revocation_precedes_resource_expiry_after_r3_policy() {
     let (paused, control) = hold();
     let f = fixture(Some(paused));
     let (person, resource_token) = tokens(&f);
-    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
-        // Revoke while the clock is still current, so the signed request is fresh.
-        let status = f
-            .ps
-            .handle(&revocation(
-                AP,
-                "aauth-agent.json",
-                "ap-1",
-                1,
-                "agent-1",
-                NOW + 1800,
-            ))
-            .status()
-            .as_u16();
-        // Then the Resource token (exp NOW+300) expires while policy is blocked;
-        // the Agent and presented tokens stay current.
-        f.clock.store(NOW + 301, Ordering::SeqCst);
-        status
-    });
+    let response = race(
+        &f,
+        control,
+        token_request(&f, &person, &resource_token),
+        || {
+            // Revoke while the clock is still current, so the signed request is fresh.
+            let status =
+                f.ps.handle(&revocation(
+                    AP,
+                    "aauth-agent.json",
+                    "ap-1",
+                    1,
+                    "agent-1",
+                    NOW + 1800,
+                ))
+                .status()
+                .as_u16();
+            // Then the Resource token (exp NOW+300) expires while policy is blocked;
+            // the Agent and presented tokens stay current.
+            f.clock.store(NOW + 301, Ordering::SeqCst);
+            status
+        },
+    );
     // The known revocation is reported, not the later expiry.
     assert_eq!(response.status(), 401);
     assert_eq!(member(&response, "error").as_deref(), Some("revoked_jwt"));
@@ -557,8 +570,14 @@ fn resource_requiring_core_scope_denies_an_agent_accepted_no_scope_r3_grant() {
         .authorize(&protected_call(&scoped, &auth), NOW, "call-2")
     {
         AuthDecision::Granted(admitted) => {
-            assert_eq!(admitted.r3_grant().unwrap().reference(), verified.reference());
-            assert_eq!(admitted.token().claims().scope.as_deref(), Some("records.read"));
+            assert_eq!(
+                admitted.r3_grant().unwrap().reference(),
+                verified.reference()
+            );
+            assert_eq!(
+                admitted.token().claims().scope.as_deref(),
+                Some("records.read")
+            );
         }
         other => panic!("expected Granted, got {other:?}"),
     }
@@ -569,18 +588,23 @@ fn agent_token_revoked_during_r3_policy_releases_no_auth_token() {
     let (paused, control) = hold();
     let f = fixture(Some(paused));
     let (person, resource_token) = tokens(&f);
-    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
-        f.ps.handle(&revocation(
-            AP,
-            "aauth-agent.json",
-            "ap-1",
-            1,
-            "agent-1",
-            NOW + 1800,
-        ))
-        .status()
-        .as_u16()
-    });
+    let response = race(
+        &f,
+        control,
+        token_request(&f, &person, &resource_token),
+        || {
+            f.ps.handle(&revocation(
+                AP,
+                "aauth-agent.json",
+                "ap-1",
+                1,
+                "agent-1",
+                NOW + 1800,
+            ))
+            .status()
+            .as_u16()
+        },
+    );
     assert_eq!(response.status(), 401);
     assert_eq!(member(&response, "error").as_deref(), Some("revoked_jwt"));
     assert_eq!(response.headers()["signature-error"], "error=revoked_jwt");
@@ -598,9 +622,12 @@ fn presented_token_revoked_during_r3_policy_releases_no_auth_token() {
         .unverified_claims()
         .jti
         .clone();
-    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
-        f.ps.revoke_person_token(&person_jti).status().as_u16()
-    });
+    let response = race(
+        &f,
+        control,
+        token_request(&f, &person, &resource_token),
+        || f.ps.revoke_person_token(&person_jti).status().as_u16(),
+    );
     assert_eq!(response.status(), 400);
     assert_eq!(
         member(&response, "error").as_deref(),
@@ -615,18 +642,23 @@ fn resource_token_revoked_during_r3_audit_commit_releases_no_auth_token() {
     let f = fixture(None);
     *f.audit.hold.lock().unwrap() = Some(paused);
     let (person, resource_token) = tokens(&f);
-    let response = race(&f, control, token_request(&f, &person, &resource_token), || {
-        f.ps.handle(&revocation(
-            RESOURCE,
-            "aauth-resource.json",
-            "resource-1",
-            4,
-            "rt-1",
-            NOW + 300,
-        ))
-        .status()
-        .as_u16()
-    });
+    let response = race(
+        &f,
+        control,
+        token_request(&f, &person, &resource_token),
+        || {
+            f.ps.handle(&revocation(
+                RESOURCE,
+                "aauth-resource.json",
+                "resource-1",
+                4,
+                "rt-1",
+                NOW + 300,
+            ))
+            .status()
+            .as_u16()
+        },
+    );
     assert_eq!(response.status(), 400);
     assert_eq!(
         member(&response, "error").as_deref(),
@@ -684,7 +716,15 @@ fn deliver(
     let (person, resource_token) = tokens_with(f, requested);
     let verified = f
         .agent
-        .verify_r3_resource_token(&resource_token, RESOURCE, PS, &person, requested, &keys(), NOW)
+        .verify_r3_resource_token(
+            &resource_token,
+            RESOURCE,
+            PS,
+            &person,
+            requested,
+            &keys(),
+            NOW,
+        )
         .unwrap();
     let issued = f.ps.handle(&token_request(f, &person, &resource_token));
     (verified, person, resource_token, issued)
@@ -735,8 +775,15 @@ fn r3_grant_scope_must_stay_within_the_requested_scope() {
     // A PS-signed grant wider than the request is refused by the Agent.
     let wider = forged_scope(&f, &verified, "records.read records.write");
     assert!(matches!(
-        f.agent
-            .verify_r3_auth_delivery(&wider, RESOURCE, &verified, &person, &registry, &keys(), NOW),
+        f.agent.verify_r3_auth_delivery(
+            &wider,
+            RESOURCE,
+            &verified,
+            &person,
+            &registry,
+            &keys(),
+            NOW
+        ),
         Err(aauth_rust_agent::R3AgentError::Context)
     ));
 }
@@ -769,8 +816,7 @@ fn forged_scope(
         .parse_referenced_document(verified.reference(), &exact)
         .unwrap();
     let grant = aauth_rust_r3::Grant::new(
-        &GrantedOperations::new(&McpCodec::vocabulary().unwrap(), &[mcp("records.read")])
-            .unwrap(),
+        &GrantedOperations::new(&McpCodec::vocabulary().unwrap(), &[mcp("records.read")]).unwrap(),
         &document,
     )
     .unwrap();
@@ -811,15 +857,11 @@ fn observed_admission_carries_the_class_grant_for_the_mapped_request() {
     let (person, resource_token) = tokens(&f);
     let issued = f.ps.handle(&token_request(&f, &person, &resource_token));
     let auth = member(&issued, "auth_token").unwrap();
-    let reference = aauth_rust_r3::verify_auth_token_claims(
-        &standard_registry().unwrap(),
-        &auth,
-        &keys(),
-        NOW,
-    )
-    .unwrap()
-    .reference()
-    .clone();
+    let reference =
+        aauth_rust_r3::verify_auth_token_claims(&standard_registry().unwrap(), &auth, &keys(), NOW)
+            .unwrap()
+            .reference()
+            .clone();
     let holder = f.agent.with_token(auth).unwrap();
     let body = br#"{"record":"r-1"}"#.to_vec();
     let mut call = Request::builder()
