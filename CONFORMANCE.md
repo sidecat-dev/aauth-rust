@@ -106,9 +106,9 @@ Resource process restart, signed POST, exact-body receipt and refusals. A
 separate actual signed HTTP control used explicit endpoints at a different
 host/nondefault port, fetched the advertised URI verbatim and reused its grant.
 Qualification used host HTTP/disk adapters and volatile Go PS custody;
-production host/store integration remains application work. Per-call challenges
-remain unfinished. Proposals, budgets, missions, AS federation and deferred delivery
-remain unsupported compositions. `/authorize` refuses account-bearing bodies;
+production host/store integration remains application work. The direct per-call
+subset is described below. Budgets, missions, AS federation and deferred Auth
+delivery remain unsupported R3 compositions. `/authorize` refuses account-bearing bodies;
 host-account challenge composition remains unqualified. Full R3 conformance
 is unclaimed.
 
@@ -132,25 +132,54 @@ grant, exact-body application receipts and refusals. This does not claim Rust
 Agent → Go PS equivalence. Host transport, egress, consent, definition/request
 mapping and durable storage remain application responsibilities; cascades need
 a complete retained-token scan. The example PS stores/audit are volatile.
-Per-call authorization, proposals, budgets, missions, sub-agents, chaining and AS composition
+R3 compositions with budgets, missions, sub-agents, chaining and AS authorization
 remain refused or unfinished; full R3 conformance remains unclaimed.
 
-An unexecuted source batch adds direct-PS per-call proposals (draft Per-Call
-Proposals, Flow steps 1–4). With `with_r3_per_call`, an operation in the class
-token's `r3_per_call` is challenged with a proposal for that concrete call. The
-exact proposal and its lineage are committed to the host `R3CallStore` before a
-`401` retry or `202` held challenge is released; the signed document endpoint
-serves it to the entitled PS. The PS requires the presented class Auth token's
-lineage and `r3_per_call`, refuses result-bearing proposals, and approves only
-through an explicit `R3Policy::authorize_proposal` (default deny), issuing one
-operation that expires no later than the class token. Completion verifies the
-per-call token against the stored exact bytes, lineage and holder, compares
-inline parameters structurally and digest parameters byte-exactly on `401`,
-claims the proposal once after host policy, and answers the same exact token
-from the retained result. The `r3-per-call` TLS example exercises both paths,
-Resource recomposition from its files and refusals with effect counts; it has
-not been run. Release gating, budgets, missions, AS composition and PS reuse of
-a recorded approval after `expired_presented_token` remain unfinished.
+Direct, unmetered Person-Server per-call proposals now have executed `401` retry
+and `202` held-invocation paths. With `with_r3_per_call`, a class token operation
+listed in `r3_per_call` is challenged for one concrete call. The exact proposal
+and lineage are committed to the host `R3CallStore` before challenge release;
+the signed document endpoint serves it to the entitled PS. Explicit
+`R3Policy::authorize_proposal` consent (default deny) issues one operation bounded
+by the class token lifetime. Completion verifies stored bytes, lineage, holder
+and parameters before claim. The signed pending poll is authenticated as sent;
+host policy receives the verified held operation and body with the current
+per-call token. A denied policy leaves that proposal unconsumed. R3 revocation
+is checked after policy and on both sides of the host claim callback. Revocation
+after binding suppresses release without rolling back the claim or redispatching.
+
+At runtime source `9cc0c391f2301f7e04b62b9c28697e6ca00ed62e`, 114 focused CODE
+CHECKS passed (Resource 25, Agent 8, PS 81), with no failures or ignored cases.
+The two new [TLS admission controls](crates/aauth-rust-resource/tests/r3_per_call_admission.rs)
+first failed against unchanged `746b79da` production using control source
+`9eaa13b4`: both a denied held DELETE and revocation completed during blocked
+policy incorrectly returned `200`, performed an effect and consumed the claim.
+The repair returned `403` and `401 revoked_jwt`, respectively, with zero effects
+and no consumed claim. The same denied proposal then completed once when its
+original operation was allowed, and exact-token replay did not repeat the effect.
+
+The normal release `r3-per-call` and `r3-three-party` executables from `9cc0c391`
+both passed actual TLS journeys on 2026-10-27. Their respective SHA-256 identities
+were `b9d01764bdf23ec968db2ead7851984a584c2e32bf2e0396ee2f5214cb937883`
+and `464db16cccb75ec82ce901706217f8d3a944d135989a8e8eed727f2d8ab7af39`.
+Per-call execution observed one read, two intended deletes across retry and held
+paths, three audit records, retained-result replay, and parameter, holder and
+foreign-token refusals. The existing class journey retained exact-body receipts
+and its previous refusals. Separately, tests-only source `c5c09b88` passed all
+three admission controls, including the two repeated controls. Its added signed
+revocation during a blocked claim callback returned `401`; the bound claim stayed
+byte-for-byte unchanged, had no result, and retry returned `401` with zero effects.
+Production sources were unchanged from `9cc0c391`; those release binaries were
+not rebuilt or relabeled as `c5c09b88`.
+
+This is a bounded direct-R3 qualification, not a full suite or full conformance
+claim. Resource recomposition from files occurred within one process; no actual
+OS restart or generic durable `R3CallStore` adapter/crash contract was qualified.
+PS store/audit custody in the example is volatile. Mixed-language per-call flows,
+result-bearing proposal release gating, recorded-approval reuse after
+`expired_presented_token`, and composition with budgets, missions, AS,
+sub-agents or chaining remain unqualified or unsupported. The digest-parameter
+source path has no separate actual journey in this batch.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
@@ -263,8 +292,10 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   available through the optional same-store boundary described below. A direct
   Resource stays missionless unless `with_mission_context` is set. Other
   unsupported PS parameters are refused explicitly.
-- No R3, Events, Bootstrap or Supervision behavior. Pinning a document
-  does not imply implementing it. Opt-in budgets are the separate row above.
+- R3 behavior is limited to the opt-in subsets above; the default Core profile
+  does not negotiate it. Events, Bootstrap and Supervision behavior is absent.
+  Pinning a document does not imply implementing it. Opt-in budgets are the
+  separate row above.
 - Header web keys verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS
   and the jwt, jkt-jwt, self-jwt, jwks, and jwks_uri schemes remain Ed25519.
   ES512, Ed448, and other RSA hashes are `unsupported_algorithm`. Private/HSM
