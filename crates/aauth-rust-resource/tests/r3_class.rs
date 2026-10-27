@@ -143,9 +143,12 @@ fn r3_config(store: &Arc<VolatileTestStore>, require_core_scope: bool) -> R3Conf
     }
 }
 fn config() -> PsAuthorizationConfig {
+    config_at(ORIGIN)
+}
+fn config_at(signed_origin: &str) -> PsAuthorizationConfig {
     PsAuthorizationConfig {
         issuer: RESOURCE.into(),
-        signed_origin: ORIGIN.into(),
+        signed_origin: signed_origin.into(),
         kid: "resource-1".into(),
         signing_key: SigningKey::from_seed([4; 32]),
         scopes: vec!["records.read".into()],
@@ -223,9 +226,12 @@ fn auth_claims(scope: Option<&str>) -> AuthClaims {
     }
 }
 fn authorize(body: Value) -> Request<Vec<u8>> {
+    authorize_at(ORIGIN, body)
+}
+fn authorize_at(origin: &str, body: Value) -> Request<Vec<u8>> {
     let mut request = Request::builder()
         .method("POST")
-        .uri(format!("{ORIGIN}/authorize"))
+        .uri(format!("{origin}/authorize"))
         .header("content-type", "application/json")
         .body(serde_json::to_vec(&body).unwrap())
         .unwrap();
@@ -312,8 +318,11 @@ fn forged(record: &R3DocumentRecord, s256: &str, tools: &[&str], account: Option
     mint_auth_token(&SigningKey::from_seed([3; 32]), "ps-1", &claims).unwrap()
 }
 fn call(path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
+    call_at(ORIGIN, path, token, seed)
+}
+fn call_at(origin: &str, path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
     let mut request = Request::builder()
-        .uri(format!("{ORIGIN}{path}"))
+        .uri(format!("{origin}{path}"))
         .body(Vec::new())
         .unwrap();
     sign_request(
@@ -328,10 +337,11 @@ fn call(path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
 fn fetch(record: &R3DocumentRecord, id: &str, dwk: &str, kid: &str, seed: u8) -> Request<Vec<u8>> {
     fetch_uri(record.reference.uri(), id, dwk, kid, seed)
 }
+/// Signs a GET of `uri` exactly as advertised; nothing rewrites it.
 fn fetch_uri(uri: &str, id: &str, dwk: &str, kid: &str, seed: u8) -> Request<Vec<u8>> {
     let mut request = Request::builder()
         .method("GET")
-        .uri(uri.replacen(RESOURCE, ORIGIN, 1))
+        .uri(uri)
         .header("accept", "application/json")
         .body(Vec::new())
         .unwrap();
@@ -393,7 +403,7 @@ fn r3_operations_commit_exact_document_and_lineage_before_the_token_is_released(
         verified
             .reference()
             .uri()
-            .starts_with(&format!("{RESOURCE}/r3/c."))
+            .starts_with(&format!("{ORIGIN}/r3/c."))
     );
     let records = store.records.lock().unwrap();
     assert_eq!(records.len(), 1);
@@ -609,7 +619,7 @@ fn signed_fetch_serves_exact_bytes_only_to_the_entitled_person_server() {
     // Wrong key, an Agent-style JWT proof, and no proof are authentication failures.
     let mut agent_signed = Request::builder()
         .method("GET")
-        .uri(record.reference.uri().replacen(RESOURCE, ORIGIN, 1))
+        .uri(record.reference.uri())
         .body(Vec::new())
         .unwrap();
     sign_request(
@@ -621,7 +631,7 @@ fn signed_fetch_serves_exact_bytes_only_to_the_entitled_person_server() {
     .unwrap();
     let unsigned = Request::builder()
         .method("GET")
-        .uri(record.reference.uri().replacen(RESOURCE, ORIGIN, 1))
+        .uri(record.reference.uri())
         .body(Vec::new())
         .unwrap();
     for request in [
@@ -968,5 +978,83 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
     assert!(!has_resource_token(&response));
     let fetched = late.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
     assert_eq!(fetched.status(), 500);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn literal_reference_fetch_and_grant_compose_on_a_differing_signed_origin() {
+    // Different host and nondefault port from the published issuer identity.
+    const SIGNED: &str = "https://api.resource-host.example:9443";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let resource = PsAuthorizationResource::new(config_at(SIGNED), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap();
+    let response = resource
+        .authorize_endpoint(
+            &authorize_at(
+                SIGNED,
+                json!({ "r3_operations": operations(&["records.read"]) }),
+            ),
+            NOW,
+            "rt-1",
+        )
+        .into_response();
+    assert_eq!(response.status(), 200);
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    let verified =
+        verify_resource_token(body["resource_token"].as_str().unwrap(), &keys(), NOW).unwrap();
+    // JWT identity stays the published issuer; the document URI is the signed origin.
+    assert_eq!(verified.claims().iss, RESOURCE);
+    assert!(
+        verified
+            .reference()
+            .uri()
+            .starts_with(&format!("{SIGNED}/r3/c."))
+    );
+    let record = store.records.lock().unwrap()[verified.reference().uri()].clone();
+
+    // The literal advertised URI is served; the same path under the issuer host is not.
+    let served = resource.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
+    assert_eq!(served.status(), 200);
+    assert_eq!(served.body(), &record.exact_json);
+    let issuer_host = record.reference.uri().replacen(SIGNED, RESOURCE, 1);
+    let elsewhere = resource.r3_document(
+        &fetch_uri(&issuer_host, PS, "aauth-person.json", "ps-1", 3),
+        NOW,
+    );
+    assert_eq!(elsewhere.status(), 404);
+    assert!(!discloses(&elsewhere, &record));
+
+    // The PS grant over that literal reference admits a call at the signed origin.
+    let token = class_token(&record, &["records.read"], &[], &auth_claims(None), 3, "ps-1");
+    match resource.authorize(
+        &call_at(SIGNED, "/mcp/records.read", &token, 2),
+        NOW,
+        "unused",
+    ) {
+        AuthDecision::Granted(admitted) => {
+            assert_eq!(admitted.token().claims().aud, RESOURCE);
+            assert_eq!(admitted.r3_grant().unwrap().reference(), &record.reference);
+        }
+        other => panic!("expected a grant, got {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // The same digest under the issuer host is not a document of this Resource.
+    let mut moved = record.clone();
+    moved.reference =
+        aauth_rust_r3::Reference::new(issuer_host, record.reference.digest()).unwrap();
+    let foreign = forged(&moved, record.reference.digest(), &["records.read"], None);
+    let refused = resource
+        .authorize(
+            &call_at(SIGNED, "/mcp/records.read", &foreign, 2),
+            NOW,
+            "unused",
+        )
+        .into_response();
+    assert_eq!(refused.status(), 403);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

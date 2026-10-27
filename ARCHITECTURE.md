@@ -56,7 +56,9 @@ route selection. Policy receives verified Auth claims and the actual request.
 runtime. The host supplies authoritative definition snapshots, a mapping from
 a verified request to at most one operation, and a durable immutable
 `R3DocumentStore`; the role never selects a source or a database. Each
-document URI binds its digest, PS/issuer entitlement and Resource-token `jti`.
+document URI is under the canonical signed origin, so the advertised `r3_uri`
+is the URI fetched, while JWT `iss`/`aud` keep the published issuer. It binds
+its digest, PS/issuer entitlement and Resource-token `jti`.
 The record is committed before the token is released, and the signed document
 endpoint and protected admission read only that record.
 

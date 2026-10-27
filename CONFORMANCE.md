@@ -98,7 +98,9 @@ immediate, unmetered class R3 on the direct Person-Server path. Metadata names
 each host-selected definition in `r3_vocabularies`. `POST /authorize` validates
 `r3_operations` against that definition, serializes one document, commits its
 exact bytes, PS entitlement and Resource-token lineage to the host's durable
-store, and only then releases the token. A conflicting or uncertain commit is
+store, and only then releases the token. The `r3_uri` is under the canonical
+signed origin, not the published issuer, so it is fetched literally. A
+conflicting or uncertain commit is
 `500` with no token. `r3_document` serves those bytes only to the `ps` or `aud`
 signer, under its retained discovery role, after its `jwks_uri` proof verifies.
 A host-mapped route needs a verified PS Auth token and request proof whose

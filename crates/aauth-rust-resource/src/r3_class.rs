@@ -297,8 +297,9 @@ impl R3Profile {
 
 /// Identity of one class document: its digest, who may fetch it, and the
 /// Resource token it was issued for. Distinct issuances never share a URI.
+/// `origin` is the canonical signed origin, so the URI is the one fetched.
 fn class_document_uri(
-    issuer: &str,
+    origin: &str,
     document_digest: &str,
     person_server: &str,
     auth_token_issuer: &str,
@@ -312,7 +313,7 @@ fn class_document_uri(
     .unwrap_or_default();
     let lineage = format!("aauth-r3-lineage-v1\0{resource_token_jti}");
     format!(
-        "{issuer}/r3/c.{document_digest}.{}.{}",
+        "{origin}/r3/c.{document_digest}.{}.{}",
         digest(&entitlement),
         digest(lineage.as_bytes())
     )
@@ -385,7 +386,14 @@ where
         self.r3.as_ref().map(|profile| profile.metadata())
     }
 
-    /// Serve `GET {issuer}/r3/c.…` to a signer entitled to that document.
+    /// Canonical HTTPS signed origin: every class document URI is issued,
+    /// reconstructed, served and admitted under it. JWT `iss`/`aud` keep the
+    /// published issuer identity.
+    fn document_origin(&self) -> String {
+        format!("https://{}", self.authority)
+    }
+
+    /// Serve `GET {signed_origin}/r3/c.…` to a signer entitled to that document.
     ///
     /// The caller signs as a server with `jwks_uri`. Its key is resolved through
     /// the host trust set and the proof verifies before storage is read. Only
@@ -412,7 +420,7 @@ where
         {
             return document_response(StatusCode::NOT_FOUND, "not_found");
         }
-        let exact_uri = format!("{}{path}", self.config.issuer);
+        let exact_uri = format!("{}{path}", self.document_origin());
         let failure = match self.verified_fetcher(request, now) {
             Ok((signer, role)) => {
                 return self.serve_document(profile, &exact_uri, &signer, &role);
@@ -487,7 +495,7 @@ where
             || record.auth_token_issuer.is_empty()
             || record.auth_token_issuer_document != PERSON_DOCUMENT
             || class_document_uri(
-                &self.config.issuer,
+                &self.document_origin(),
                 record.reference.digest(),
                 &record.person_server,
                 &record.auth_token_issuer,
@@ -529,7 +537,7 @@ where
         // Serialized once; the digest, the record and every fetch use these bytes.
         let exact = serde_json::to_vec(&document).map_err(|_| Issue::Host)?;
         let uri = class_document_uri(
-            &self.config.issuer,
+            &self.document_origin(),
             &digest(&exact),
             &claims.ps,
             &claims.aud,
@@ -674,7 +682,7 @@ where
         let reference = verified.reference();
         if !reference
             .uri()
-            .starts_with(&format!("{}/r3/c.", self.config.issuer))
+            .starts_with(&format!("{}/r3/c.", self.document_origin()))
         {
             return Err(forbidden());
         }
