@@ -1,17 +1,19 @@
 //! Immediate class R3 with a direct Person Server.
 //!
 //! `draft-hardt-aauth-r3`: Authorization Endpoint Extensions, Resource Token
-//! Extensions and Auth Token Extensions. This module prepares the signed
-//! `r3_operations` request and verifies what comes back before use. The host
-//! supplies transport, trust snapshots and the clock. Per-call proposals,
-//! budgets, missions and AS federation are not handled here; a delivered token
-//! carrying `r3_per_call` is refused rather than partly used.
+//! Extensions, Auth Token Extensions and Per-Call Proposals. This module
+//! prepares the signed `r3_operations` request and verifies what comes back
+//! before use: the class Resource token, the class grant, a per-call proposal
+//! challenge and its single-operation grant. The host supplies transport,
+//! trust snapshots and the clock, and re-sends the call (`401`) or presents
+//! the per-call token at the pending URL (`202`). Budgets, missions and AS
+//! federation are not handled here.
 use crate::Agent;
 use crate::credentials::{challenge_context, narrowed_scope, verify_parent};
-use aauth_rust_core::{AgentKeyResolver, TokenError, validate_server_identifier};
+use aauth_rust_core::{AgentKeyResolver, AuthToken, TokenError, validate_server_identifier};
 use aauth_rust_r3::{
     OperationSet, R3TokenError, Registry, VerifiedR3AuthToken, VerifiedR3ResourceToken,
-    verify_direct_auth_token, verify_resource_token,
+    verify_auth_token_claims, verify_resource_token,
 };
 use http::{Request, Response};
 
@@ -225,14 +227,14 @@ impl Agent {
     /// audience, subject, tenant, mission, account, holder key, and expiry no
     /// later than the presented credential. A granted `scope` must be within the
     /// requested scope; an absent `scope` grants no Core scope and is accepted
-    /// even when scope was requested. The R3
-    /// reference must equal the Resource token's, and the token must be
-    /// direct-only: `r3_per_call` is refused because per-call proposals are not
-    /// implemented. The Agent cannot prove `r3_granted` against the document it
+    /// even when scope was requested. The R3 reference must equal the Resource
+    /// token's. `r3_granted` and a disjoint `r3_per_call` are read from the
+    /// signed payload; operations in `r3_per_call` are challenged per call by
+    /// the Resource. The Agent cannot prove either set against the document it
     /// may not read; the Person Server and Resource each do that.
     ///
     /// # Errors
-    /// [`R3AgentError::R3`] for an invalid or per-call token,
+    /// [`R3AgentError::R3`] for invalid R3 claims,
     /// [`R3AgentError::Context`] for any mismatch.
     #[allow(clippy::too_many_arguments)]
     pub fn verify_r3_auth_delivery(
@@ -245,6 +247,112 @@ impl Agent {
         keys: &dyn AgentKeyResolver,
         now: i64,
     ) -> Result<VerifiedR3AuthToken, R3AgentError> {
+        self.delivered(
+            compact,
+            intended_resource,
+            resource,
+            presented_compact,
+            registry,
+            keys,
+            now,
+            false,
+        )
+    }
+
+    /// Verify a per-call challenge: an R3 Resource token referencing one
+    /// proposal, issued on a call made with the class Auth token `class_compact`.
+    ///
+    /// The token must come from `intended_resource` for `person_server`, name
+    /// the class token's `jti` as `presented_jti`, carry its subject, tenant,
+    /// mission and account, bind this Agent's key, be issued and expire within
+    /// the class token's lifetime, carry no `interaction`, and carry `scope`
+    /// only within the class token's scope. The proposal is not fetched.
+    ///
+    /// # Errors
+    /// [`R3AgentError::Token`] or [`R3AgentError::R3`] for verification
+    /// failures, [`R3AgentError::Context`] for any mismatch.
+    pub fn verify_r3_proposal_challenge(
+        &self,
+        compact: &str,
+        intended_resource: &str,
+        person_server: &str,
+        class_compact: &str,
+        keys: &dyn AgentKeyResolver,
+        now: i64,
+    ) -> Result<VerifiedR3ResourceToken, R3AgentError> {
+        validate_server_identifier(person_server)?;
+        let parent = verify_parent(class_compact, keys, now, None)?;
+        let class = AuthToken::parse(class_compact)?.verify(keys, now)?;
+        let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
+        let claims = token.claims();
+        challenge_context(
+            claims,
+            intended_resource,
+            &parent,
+            &self.public_jwk(),
+            &parent.ps,
+        )
+        .map_err(|_| R3AgentError::Context)?;
+        let class_claims = class.claims();
+        if parent.ps != person_server
+            || class_claims.iss != person_server
+            || claims.iat < parent.iat
+            || claims.iat >= parent.exp
+            || claims.exp > parent.exp
+            || claims.account != class_claims.account
+            || claims.extra.contains_key("interaction")
+            || !r3_granted_scope(claims.scope.as_deref(), class_claims.scope.as_deref())
+        {
+            return Err(R3AgentError::Context);
+        }
+        Ok(token)
+    }
+
+    /// Verify a per-call Auth token against the verified proposal challenge.
+    ///
+    /// The checks of [`Self::verify_r3_auth_delivery`] apply with the class
+    /// Auth token as the presented credential, so the per-call token expires no
+    /// later than it. The token must echo the proposal reference, grant exactly
+    /// one operation, and carry no `r3_per_call`.
+    ///
+    /// # Errors
+    /// [`R3AgentError::R3`] for invalid R3 claims,
+    /// [`R3AgentError::Context`] for any mismatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_r3_per_call_delivery(
+        &self,
+        compact: &str,
+        intended_resource: &str,
+        proposal: &VerifiedR3ResourceToken,
+        class_compact: &str,
+        registry: &Registry,
+        keys: &dyn AgentKeyResolver,
+        now: i64,
+    ) -> Result<VerifiedR3AuthToken, R3AgentError> {
+        self.delivered(
+            compact,
+            intended_resource,
+            proposal,
+            class_compact,
+            registry,
+            keys,
+            now,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delivered(
+        &self,
+        compact: &str,
+        intended_resource: &str,
+        resource: &VerifiedR3ResourceToken,
+        presented_compact: &str,
+        registry: &Registry,
+        keys: &dyn AgentKeyResolver,
+        now: i64,
+        per_call: bool,
+    ) -> Result<VerifiedR3AuthToken, R3AgentError> {
         let parent = verify_parent(presented_compact, keys, now, None)?;
         let requested = resource.claims();
         challenge_context(
@@ -256,7 +364,21 @@ impl Agent {
         )
         .map_err(|_| R3AgentError::Context)?;
         let token =
-            verify_direct_auth_token(registry, compact, keys, now).map_err(R3AgentError::R3)?;
+            verify_auth_token_claims(registry, compact, keys, now).map_err(R3AgentError::R3)?;
+        if per_call {
+            let operations = token.operations();
+            let granted = operations
+                .granted_operations()
+                .operations()
+                .map_err(|_| R3AgentError::Context)?;
+            let deferred = operations
+                .per_call_operations()
+                .operations()
+                .map_err(|_| R3AgentError::Context)?;
+            if granted.len() != 1 || operations.per_call_claim_present() || !deferred.is_empty() {
+                return Err(R3AgentError::Context);
+            }
+        }
         let claims = token.claims();
         let holder = claims
             .cnf

@@ -23,6 +23,7 @@ cargo run --locked -p aauth-rust-resource --example axum
 cargo run --locked -p aauth-rust-resource --example direct-identity
 cargo run --locked -p aauth-rust-resource --example three-party
 cargo run --locked -p aauth-rust-resource --example r3-three-party
+cargo run --locked -p aauth-rust-resource --example r3-per-call
 cargo run --locked -p aauth-rust-resource --example four-party
 cargo run --locked -p aauth-rust-resource --example four-party -- --deferred
 cargo run --locked -p aauth-rust-person-server --example mixed-grants

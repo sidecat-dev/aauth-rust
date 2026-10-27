@@ -37,8 +37,10 @@ mod revocation;
 #[path = "r3_class.rs"]
 mod r3_class;
 pub use r3_class::{
-    BoxedR3Display, BoxedR3OperationMapper, R3Config, R3DocumentRecord, R3DocumentStore, R3Grant,
-    R3HostError, R3StoreError, R3Vocabulary,
+    BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, R3CallDescription,
+    R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore,
+    R3Grant, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3StoreError,
+    R3Vocabulary,
 };
 
 /// Named captured-state policy for a PS-authorized Resource in application state.
@@ -260,6 +262,18 @@ pub enum AuthDecision<T = ()> {
     Held(Box<HeldAdmission<T>>),
     /// Verified without reserving or committing. The host meters once.
     Observed(Box<ObservedAdmission<T>>),
+    /// An R3 per-call operation was challenged and its invocation is held
+    /// (`202`). The Agent obtains a per-call Auth token and presents it at
+    /// `location`; the held call runs once there.
+    R3Pending {
+        /// Resource token referencing the retained proposal.
+        resource_token: String,
+        /// Pending URL at this Resource's signed origin.
+        location: String,
+    },
+    /// The same exact per-call Auth token was presented again. This is the
+    /// retained result of the one execution it authorized; nothing ran.
+    Replayed(Box<Response<Vec<u8>>>),
 }
 impl<T> std::fmt::Debug for AuthDecision<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -291,6 +305,14 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
                 .field("token", &value.token)
                 .field("admitted_maximum", &value.admitted_maximum)
                 .finish_non_exhaustive(),
+            Self::R3Pending { location, .. } => f
+                .debug_struct("R3Pending")
+                .field("location", location)
+                .finish_non_exhaustive(),
+            Self::Replayed(response) => f
+                .debug_tuple("Replayed")
+                .field(&response.status())
+                .finish(),
         }
     }
 }
@@ -373,6 +395,30 @@ impl<T> AuthDecision<T> {
                 refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error")
             }
             Self::InternalError => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+            Self::R3Pending {
+                resource_token,
+                location,
+            } => {
+                let mut response = Response::new(json!({"status":"pending"}).to_string().into_bytes());
+                *response.status_mut() = StatusCode::ACCEPTED;
+                let requirement =
+                    format!("requirement=auth-token;resource-token=\"{resource_token}\"");
+                let (Ok(requirement), Ok(location)) = (requirement.parse(), location.parse())
+                else {
+                    return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+                };
+                let headers = response.headers_mut();
+                headers.insert("aauth-requirement", requirement);
+                headers.insert("location", location);
+                headers.insert("retry-after", "1".parse().expect("static retry"));
+                headers.insert("cache-control", "no-store".parse().expect("static cache"));
+                headers.insert(
+                    "content-type",
+                    "application/json".parse().expect("static content type"),
+                );
+                response
+            }
+            Self::Replayed(response) => *response,
         }
     }
 }
@@ -1121,7 +1167,7 @@ where
                         return Ok(self.forbidden_budget(&token, grant.as_ref()));
                     }
                 }
-                let r3 = match self.r3_gate(&token, request, now) {
+                let r3 = match self.r3_gate(&token, request, now, challenge_jti) {
                     Ok(r3) => r3,
                     Err(decision) => return Ok(decision),
                 };
@@ -1142,13 +1188,21 @@ where
                 {
                     return Ok(self.forbidden_budget(&token, grant.as_ref()));
                 }
+                // A per-call completion is claimed only after every check and
+                // host policy admitted it, so a refusal never consumes it.
                 match self.admit_auth(token, request, now, challenge_jti, grant, meter)? {
                     AuthDecision::Granted(mut admitted) if r3.is_some() => {
-                        admitted.r3 = r3;
+                        match self.r3_claim(r3, now) {
+                            Ok(claimed) => admitted.r3 = claimed,
+                            Err(decision) => return Ok(decision),
+                        }
                         Ok(AuthDecision::Granted(admitted))
                     }
                     AuthDecision::Observed(mut admitted) if r3.is_some() => {
-                        admitted.r3 = r3;
+                        match self.r3_claim(r3, now) {
+                            Ok(claimed) => admitted.r3 = claimed,
+                            Err(decision) => return Ok(decision),
+                        }
                         Ok(AuthDecision::Observed(admitted))
                     }
                     decision => Ok(decision),

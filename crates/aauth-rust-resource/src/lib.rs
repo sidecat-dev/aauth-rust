@@ -16,6 +16,10 @@ pub use ps_authorization::{
     PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError, R3Config,
     R3DocumentRecord, R3DocumentStore, R3Grant, R3HostError, R3StoreError, R3Vocabulary,
 };
+pub use ps_authorization::{
+    BoxedR3Describe, BoxedR3Present, R3CallDescription, R3CallResult, R3CallStore, R3CallToken,
+    R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord,
+};
 pub use session::{SessionAdmit, SessionLedger};
 
 /// Invalid host configuration, separate from a caller's proof or token failure.

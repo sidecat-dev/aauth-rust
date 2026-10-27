@@ -9,6 +9,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         now: i64,
         parameter: &'static str,
     ) -> Result<Presented, Failure> {
+        self.verify_presented_with(compact, now, parameter, false)
+    }
+    /// `allow_r3` admits R3 members on a presented Auth token only for the R3
+    /// exchange path, which verifies those claims from the signed payload itself.
+    pub(super) fn verify_presented_with(
+        &self,
+        compact: &str,
+        now: i64,
+        parameter: &'static str,
+        allow_r3: bool,
+    ) -> Result<Presented, Failure> {
         let parsed =
             Jws::parse(compact).map_err(|error| Failure::token(error.into(), parameter, now))?;
         let value = match parsed.header().get("typ").and_then(Value::as_str) {
@@ -68,7 +79,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     c.dwk == "aauth-person.json"
                 };
                 let allow_budget = self.budgets.is_some();
-                if !valid_role || extra_blocks(&c.extra, allow_budget, false) {
+                let mut core = c.extra.clone();
+                if allow_r3 {
+                    for name in ["r3_uri", "r3_s256", "r3_granted", "r3_per_call"] {
+                        core.remove(name);
+                    }
+                }
+                if !valid_role || extra_blocks(&core, allow_budget, false) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
                 }
                 if allow_budget && let Some(budget) = c.extra.get("budget") {

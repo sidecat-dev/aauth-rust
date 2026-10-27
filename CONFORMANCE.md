@@ -135,6 +135,23 @@ a complete retained-token scan. The example PS stores/audit are volatile.
 Per-call authorization, proposals, budgets, missions, sub-agents, chaining and AS composition
 remain refused or unfinished; full R3 conformance remains unclaimed.
 
+An unexecuted source batch adds direct-PS per-call proposals (draft Per-Call
+Proposals, Flow steps 1–4). With `with_r3_per_call`, an operation in the class
+token's `r3_per_call` is challenged with a proposal for that concrete call. The
+exact proposal and its lineage are committed to the host `R3CallStore` before a
+`401` retry or `202` held challenge is released; the signed document endpoint
+serves it to the entitled PS. The PS requires the presented class Auth token's
+lineage and `r3_per_call`, refuses result-bearing proposals, and approves only
+through an explicit `R3Policy::authorize_proposal` (default deny), issuing one
+operation that expires no later than the class token. Completion verifies the
+per-call token against the stored exact bytes, lineage and holder, compares
+inline parameters structurally and digest parameters byte-exactly on `401`,
+claims the proposal once after host policy, and answers the same exact token
+from the retained result. The `r3-per-call` TLS example exercises both paths,
+Resource recomposition from its files and refusals with effect counts; it has
+not been run. Release gating, budgets, missions, AS composition and PS reuse of
+a recorded approval after `expired_presented_token` remain unfinished.
+
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
 fetching and MCP/OpenAPI/AsyncAPI definition adapters. Actual library consumers
