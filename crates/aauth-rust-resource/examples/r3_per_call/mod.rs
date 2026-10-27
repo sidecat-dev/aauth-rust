@@ -105,7 +105,10 @@ pub struct Transcript {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionCase {
     HeldPolicy,
-    #[allow(dead_code, reason = "Constructed by the policy-race integration control.")]
+    #[allow(
+        dead_code,
+        reason = "Constructed by the policy-race integration control."
+    )]
     Revocation,
     ClaimRevocation,
 }
@@ -839,12 +842,18 @@ fn approve(
     )?)
 }
 
-#[allow(dead_code, reason = "Shared entry point used by the ordinary example and TLS test.")]
+#[allow(
+    dead_code,
+    reason = "Shared entry point used by the ordinary example and TLS test."
+)]
 pub fn run() -> Result<Transcript> {
     run_case(None)
 }
 
-#[allow(dead_code, reason = "Shared entry point used by the admission integration tests.")]
+#[allow(
+    dead_code,
+    reason = "Shared entry point used by the admission integration tests."
+)]
 pub fn run_admission_case(case: AdmissionCase) -> Result<Transcript> {
     run_case(Some(case))
 }
