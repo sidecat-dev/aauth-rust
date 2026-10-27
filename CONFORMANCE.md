@@ -93,24 +93,25 @@ cross-implementation equivalence is claimed by these native tests.
 advertise or negotiate R3 authorization. Unsupported R3 claims fail closed in
 that profile rather than conferring scope authority.
 
-`PsAuthorizationResource::with_r3` is an opt-in, unexecuted source batch for
-immediate, unmetered class R3 on the direct Person-Server path. Metadata names
-each host-selected definition in `r3_vocabularies`. `POST /authorize` validates
-`r3_operations` against that definition, serializes one document, commits its
-exact bytes, PS entitlement and Resource-token lineage to the host's durable
-store, and only then releases the token. The `r3_uri` is under the canonical
-signed origin, not the published issuer, so it is fetched literally. A
-conflicting or uncertain commit is
-`500` with no token. `r3_document` serves those bytes only to the `ps` or `aud`
-signer, under its retained discovery role, after its `jwks_uri` proof verifies.
-A host-mapped route needs a verified PS Auth token and request proof whose
-`r3_granted` covers the operation, whose reference names a retained document
-of this Resource, and whose PS, subject, tenant, agent key and account match
-it. Core scope is enforced as well only when configured. Unmapped routes keep
-Core scope and refuse R3 tokens. Per-call operations are refused rather than
-challenged; proposals, budgets, missions, AS federation and deferred delivery
-are refused compositions. The checks in `tests/r3_class.rs` have not been run,
-and no Go journey has qualified this path.
+`PsAuthorizationResource::with_r3` supports opt-in immediate, unmetered class
+R3 on the direct Person-Server path. The host selects definitions, maps requests
+to operations and provides an immutable document store; exact document bytes
+and entitlement are committed before token release. Buffered admission verifies
+request proof, token identity and document-bound grants before application
+effects. At `f763511`, 97 Resource CODE CHECKS passed, including 11 R3 controls,
+plus workspace compile, lint and docs. [Sprint qualification evidence](https://gitlab.com/sidecat-dev/sprint-aauth-20261024/sprint/-/tree/main/cycles/wc-05/r3-resource-role/)
+records the actual Go Agent/PS → Rust Resource workflow with matching issuer
+and signed origin: authorization, signed document fetch, narrowed grant,
+Resource process restart, signed POST, exact-body receipt and refusals. A
+separate actual signed HTTP control used explicit endpoints at a different
+host/nondefault port, fetched the advertised URI verbatim and reused its grant.
+Qualification used host HTTP/disk adapters and volatile Go PS custody;
+production host/store integration remains application work. Per-call challenges,
+Observed grant context and differing-origin authorization metadata remain
+unfinished. Proposals, budgets, missions, AS federation and deferred delivery
+remain unsupported compositions. `/authorize` refuses account-bearing bodies;
+host-account challenge composition remains unqualified. Full R3 conformance
+is unclaimed.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
