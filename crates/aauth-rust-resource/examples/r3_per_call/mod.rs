@@ -948,8 +948,8 @@ fn class_grant(
         json!({"vocabulary": MCP, "operations": [
             {"tool":"records.read"},{"tool":"records.delete"},{"tool":"records.query"}
         ]})
-            .to_string()
-            .as_bytes(),
+        .to_string()
+        .as_bytes(),
     )?;
     let resource_token = agent.r3_authorize(
         |request| api.send(&request),
@@ -1277,8 +1277,14 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         t.release_runs_at_challenge = runs() - before;
         let location = held.headers()["location"].to_str()?.to_owned();
         let release_token = challenge(&held)?;
-        let release_proposal =
-            agent.verify_r3_proposal_challenge(&release_token, RECORDS, PS, &class, &trust, now())?;
+        let release_proposal = agent.verify_r3_proposal_challenge(
+            &release_token,
+            RECORDS,
+            PS,
+            &class,
+            &trust,
+            now(),
+        )?;
 
         // Denial: release of another record's result is refused at the PS, and
         // the class token at that pending URL releases nothing.
