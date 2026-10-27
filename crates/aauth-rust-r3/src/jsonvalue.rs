@@ -569,6 +569,7 @@ fn sub_abs(left: &str, right: &str) -> String {
 }
 
 struct Parser<'a> {
+    text: &'a str,
     data: &'a [u8],
     index: usize,
     depth: usize,
@@ -576,10 +577,10 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn new(data: &'a [u8]) -> Result<Self, Error> {
-        if std::str::from_utf8(data).is_err() {
-            return Err(Error::new("JSON must be valid UTF-8"));
-        }
+        let text = std::str::from_utf8(data)
+            .map_err(|_| Error::new("JSON must be valid UTF-8"))?;
         Ok(Self {
+            text,
             data,
             index: 0,
             depth: 0,
@@ -777,8 +778,12 @@ impl<'a> Parser<'a> {
     }
 
     fn next_char(&mut self) -> Result<char, Error> {
-        let rest = std::str::from_utf8(&self.data[self.index..])
-            .map_err(|_| Error::new("JSON must be valid UTF-8"))?;
+        // The complete input was validated once in new(). A str slice checks
+        // this cursor's boundary without rescanning the remaining document.
+        let rest = self
+            .text
+            .get(self.index..)
+            .ok_or_else(|| Error::new("JSON must be valid UTF-8"))?;
         let ch = rest
             .chars()
             .next()
@@ -857,6 +862,33 @@ mod tests {
 
     fn parsed(text: &str) -> Json {
         parse_json(text.as_bytes()).expect("json")
+    }
+
+    #[test]
+    fn validated_utf8_cursor_preserves_scalars_escapes_and_raw_bytes() {
+        let raw = r#"{"é😀":"aé中😀\u0062\uD83D\uDE00","tail":1.00}"#;
+        let value = parse_json(raw.as_bytes()).expect("mixed UTF-8 and escapes");
+        assert!(json_equal(
+            &value,
+            &parsed(r#"{"tail":1,"é😀":"aé中😀b😀"}"#)
+        ));
+        let members = parse_raw_object(raw.as_bytes()).expect("exact member bytes");
+        assert_eq!(members[0].name, "é😀");
+        assert_eq!(members[0].raw, r#""aé中😀\u0062\uD83D\uDE00""#.as_bytes());
+        assert_eq!(members[1].raw, b"1.00");
+
+        // Validation still covers the complete input, including trailing bytes,
+        // and escape decoding still rejects invalid Unicode scalar values.
+        for invalid in [
+            b"\"ok\"\xff".as_slice(),
+            b"\"\xc0\xaf\"".as_slice(),
+            b"\"\xf0\x9f\x98\"".as_slice(),
+            br#""\uD800""#.as_slice(),
+            br#""\uDC00""#.as_slice(),
+        ] {
+            assert!(parse_json(invalid).is_err());
+        }
+        assert!(parse_json("\"é中😀".as_bytes()).is_err());
     }
 
     /// `{"k00000":0,...}` with members in `order`.
