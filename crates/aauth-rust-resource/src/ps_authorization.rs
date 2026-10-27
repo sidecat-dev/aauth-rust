@@ -309,10 +309,9 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
                 .debug_struct("R3Pending")
                 .field("location", location)
                 .finish_non_exhaustive(),
-            Self::Replayed(response) => f
-                .debug_tuple("Replayed")
-                .field(&response.status())
-                .finish(),
+            Self::Replayed(response) => {
+                f.debug_tuple("Replayed").field(&response.status()).finish()
+            }
         }
     }
 }
@@ -399,7 +398,8 @@ impl<T> AuthDecision<T> {
                 resource_token,
                 location,
             } => {
-                let mut response = Response::new(json!({"status":"pending"}).to_string().into_bytes());
+                let mut response =
+                    Response::new(json!({"status":"pending"}).to_string().into_bytes());
                 *response.status_mut() = StatusCode::ACCEPTED;
                 let requirement =
                     format!("requirement=auth-token;resource-token=\"{resource_token}\"");

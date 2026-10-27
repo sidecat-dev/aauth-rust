@@ -267,44 +267,44 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(Failure::internal());
             }
             // A grant wider than the exact document is a host error: nothing is issued.
-            let mint: Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + '_> =
-                match &decision.per_call {
-                    None => {
-                        let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
-                            .map_err(|_| Failure::internal())?;
-                        let (reference, exact) = (reference.clone(), exact.clone());
-                        Box::new(move |claims: &AuthClaims| {
-                            mint_direct_auth_token(
-                                &r3.registry,
-                                &self.config.signing_key,
-                                &self.config.kid,
-                                claims,
-                                &reference,
-                                &exact,
-                                &grant,
-                            )
-                            .map_err(|_| Failure::internal())
-                        })
-                    }
-                    Some(per_call) => {
-                        let authorization =
-                            Authorization::new(&decision.granted, per_call, document)
-                                .map_err(|_| Failure::internal())?;
-                        let (reference, exact) = (reference.clone(), exact.clone());
-                        Box::new(move |claims: &AuthClaims| {
-                            mint_r3_auth_token(
-                                &r3.registry,
-                                &self.config.signing_key,
-                                &self.config.kid,
-                                claims,
-                                &reference,
-                                &exact,
-                                &authorization,
-                            )
-                            .map_err(|_| Failure::internal())
-                        })
-                    }
-                };
+            let mint: Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + '_> = match &decision
+                .per_call
+            {
+                None => {
+                    let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
+                        .map_err(|_| Failure::internal())?;
+                    let (reference, exact) = (reference.clone(), exact.clone());
+                    Box::new(move |claims: &AuthClaims| {
+                        mint_direct_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                            &grant,
+                        )
+                        .map_err(|_| Failure::internal())
+                    })
+                }
+                Some(per_call) => {
+                    let authorization = Authorization::new(&decision.granted, per_call, document)
+                        .map_err(|_| Failure::internal())?;
+                    let (reference, exact) = (reference.clone(), exact.clone());
+                    Box::new(move |claims: &AuthClaims| {
+                        mint_r3_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                            &authorization,
+                        )
+                        .map_err(|_| Failure::internal())
+                    })
+                }
+            };
             (
                 decision.scopes,
                 decision.lifetime,
