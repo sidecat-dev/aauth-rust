@@ -31,8 +31,8 @@ const PERSON_DOCUMENT: &str = "aauth-person.json";
 #[path = "r3_per_call.rs"]
 mod per_call;
 pub use per_call::{
-    BoxedR3Describe, BoxedR3Present, R3CallDescription, R3CallResult, R3CallStore, R3CallToken,
-    R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord,
+    BoxedR3Describe, BoxedR3Present, BoxedR3Release, R3CallDescription, R3CallResult, R3CallStore,
+    R3CallToken, R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord, R3Release,
 };
 
 /// A host adapter or store could not answer. Nothing is disclosed or admitted.
