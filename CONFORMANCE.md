@@ -203,7 +203,15 @@ revocation during claim preserves the consumed claim while withholding the
 result. The plain-Core control likewise refuses a token revoked during host
 policy, refuses its replay before another policy call, and admits a fresh token.
 The release profile is202-only and unmetered. The host must enforce the callback's
-side-effect-free contract. Budget composition remains unqualified.
+side-effect-free contract.
+
+R3 and budgets do not compose. On the Resource, `with_r3` after `with_budgets`
+returns `InvalidR3Profile`, and `with_budgets` after `with_r3` returns
+`InvalidBudgetProfile`. `r3_and_budgets_refuse_either_order` pins both orders.
+The Person Server refuses `with_r3` when budgets are already enabled. Calling
+`with_budgets` after R3 is still accepted at configuration; a later R3
+authorization then returns an internal failure. That order is not a supported
+composition.
 
 The example file store writes each proposal record, then synchronizes the
 directory on Unix. `reopen_reads_the_same_held_release_from_the_directory`

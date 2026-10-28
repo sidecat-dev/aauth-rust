@@ -2,6 +2,7 @@
 //!
 //! `VolatileTestStore` is a test double with injected faults. It is process
 //! memory and does not satisfy the durable `R3DocumentStore` contract.
+use aauth_rust_budgets::UnitDeclaration;
 use aauth_rust_core::{
     AgentKeyResolver, AuthClaims, Confirmation, PersonClaims, ResourceToken, TokenError,
     TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
@@ -1092,6 +1093,31 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
     let fetched = late.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
     assert_eq!(fetched.status(), 500);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn r3_and_budgets_refuse_either_order() {
+    let store = Arc::new(VolatileTestStore::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
+    let after_r3 = resource(&store, &calls, false).with_budgets(
+        units.clone(),
+        "https://resource.example/usage",
+        1_000,
+        1_000,
+    );
+    assert!(matches!(
+        after_r3,
+        Err(PsConfigurationError::InvalidBudgetProfile)
+    ));
+    let after_budgets = core_resource(&calls)
+        .with_budgets(units, "https://resource.example/usage", 1_000, 1_000)
+        .unwrap()
+        .with_r3(r3_config(&store, false));
+    assert!(matches!(
+        after_budgets,
+        Err(PsConfigurationError::InvalidR3Profile)
+    ));
 }
 
 #[test]
