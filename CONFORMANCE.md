@@ -219,8 +219,11 @@ Server grant one of them. The Resource then admits that operation and refuses
 the other. The same permit and refusal also cross a loopback TLS HTTP/1.1
 client and server for each parser. Actual library consumers and Go/Rust
 exchanges have exercised the earlier MCP, OpenAPI, and AsyncAPI paths. The
-gRPC descriptor, self-contained WSDL 1.1, and OData CSDL 4.0 adapters,
-including that source join, have not been droplet-qualified. This does not
+gRPC descriptor, self-contained WSDL 1.1, and OData CSDL 4.0 adapters
+and their Resource/Person Server snapshot integration passed the Linux
+workspace checks and loopback TLS permit/refusal journeys at `918cc366`.
+This evidence covers the tested definition profiles; complete schema coverage
+and cross-platform qualification are not claimed. This does not
 qualify role endpoints, discovery, consent, or the normative R3 table.
 Application-specific formats remain application-owned.
 
