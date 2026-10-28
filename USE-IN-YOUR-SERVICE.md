@@ -506,6 +506,24 @@ application state. Wrong-audience Person/Auth tokens return local
 policy. Their wire code remains the pinned draft's `invalid_jwt`; obtain a
 credential for the intended Resource instead of refreshing an otherwise valid JWT.
 
+## Hold a side-effect-free call for release
+
+Use this when the Resource can run a query before the person approves disclosure.
+Set `R3PerCallConfig::hold` and `release`. The `release` callback must change
+nothing outside the result it returns. Audited, billed, or third-party work
+needs execution consent instead.
+
+`held_result_lifetime` is your retention, in seconds. It is not extended when a
+refreshed class token re-requests the call. The Resource returns the held
+bytes only while that horizon is still ahead, the prior proposal token has
+expired, and the new class token has a different `jti`. A still-live challenge
+stays in place. After the horizon, the same call may run again. The R3 draft
+has no invocation id and does not carry a digest of the result, so a Person
+Server approval that is still live can release the new bytes when the proposal
+document is unchanged. That limit is described in
+[CONFORMANCE.md](CONFORMANCE.md). The executable scene is
+`cargo run --locked -p aauth-rust-resource --example r3-per-call`.
+
 ## Make an immediate downstream call
 
 Run `cargo run --locked -p aauth-rust-resource --example three-party` for the

@@ -60,7 +60,6 @@ use std::{
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         mpsc,
     },
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tls::TlsServer;
@@ -170,7 +169,6 @@ pub struct Transcript {
     pub release_supersede_runs_delta: usize,
     pub release_superseded_poll_status: u16,
     pub release_superseded_runs_delta: usize,
-    pub release_superseded_token_at_successor_status: u16,
     /// Completion after `release_until` while the per-call token is unexpired.
     pub release_horizon_status: u16,
     pub release_horizon_error: String,
@@ -181,7 +179,6 @@ pub struct Transcript {
     pub release_fresh_body_is_new: bool,
     pub release_successor_status: u16,
     pub release_successor_body_matches_original: bool,
-    pub release_successor_replay_matches: bool,
     pub release_successor_runs_delta: usize,
 }
 
@@ -2294,7 +2291,7 @@ fn concurrent_supersede_leaves_one_successor_and_the_original_bytes() {
             &format!("pend-{name}"),
             b"run-1",
         );
-        handles.push(thread::spawn(move || {
+        handles.push(std::thread::spawn(move || {
             store.supersede(&prior_uri, &successor, 1_100)
         }));
     }
