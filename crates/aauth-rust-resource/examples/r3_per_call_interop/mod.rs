@@ -363,7 +363,8 @@ impl R3DocumentStore for FileDocuments {
 /// digest in base64url, so every later claim on that record is `DifferentToken`.
 const SUPERSEDED: &str = "(superseded)";
 
-struct FileCalls(PathBuf, Mutex<()>, Arc<AdmissionControl>);
+// The control stays with the store for the same lifetime as the main example.
+struct FileCalls(PathBuf, Mutex<()>, #[allow(dead_code)] Arc<AdmissionControl>);
 impl FileCalls {
     fn record_path(&self, uri: &str) -> PathBuf {
         self.0.join(format!("p-{}.json", digest(uri.as_bytes())))
