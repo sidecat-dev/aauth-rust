@@ -24,7 +24,34 @@ use aauth_rust_r3::{
 use std::sync::Arc;
 
 type TokenMint<'a> = Box<dyn Fn(&AuthClaims) -> Result<String, Failure> + 'a>;
-type PreparedR3Grant<'a> = (Vec<String>, i64, VocabularyUri, TokenMint<'a>);
+type PreparedR3Grant<'a> = (Vec<String>, i64, Option<i64>, VocabularyUri, TokenMint<'a>);
+
+/// Per-call approval recorded when the presented class Auth token expired
+/// while host consent ran (`draft-hardt-aauth-r3`, Per-Call Flow). Consumed at
+/// most once by a replacement proposal for the exact same person, principal,
+/// holder, Resource, subject, tenant, account, requested Core scopes, consent
+/// kind and proposal bytes, before `expires_at`.
+pub(super) struct RecordedApproval {
+    person_id: String,
+    principal: AgentIdentity,
+    agent: AgentIdentity,
+    agent_jti: String,
+    agent_jkt: String,
+    resource: String,
+    subject: String,
+    tenant: Option<String>,
+    account: Option<String>,
+    requested_scopes: Vec<String>,
+    proposal_s256: String,
+    exact_proposal: Vec<u8>,
+    release: bool,
+    expired_presented_issuer: String,
+    expired_presented_jti: String,
+    expired_resource_jti: String,
+    scopes: Vec<String>,
+    lifetime: i64,
+    expires_at: i64,
+}
 
 /// What host consent sees for one exact class document.
 pub struct R3AuthorizationRequest<'a> {
@@ -214,6 +241,107 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         Ok(())
     }
 
+    /// When a proposal Resource token capped its `exp` to the presented class
+    /// Auth token's `exp`, report the presented token's revocation or expiry
+    /// rather than `expired_resource_token`.
+    pub(super) fn r3_presented_failure_on_expired_resource(
+        &self,
+        presented_compact: &str,
+        resource: &ResourceToken,
+        verified_at: i64,
+    ) -> Option<Failure> {
+        let r = resource.unverified_claims();
+        resource.verify(&self.resolver(), r.iat).ok()?;
+        let parsed = AuthToken::parse(presented_compact).ok()?;
+        let c = parsed.unverified_claims();
+        if self.token_revoked(&c.iss, &c.jti, verified_at) {
+            return Some(revocation::revoked_parameter("presented"));
+        }
+        parsed.verify(&self.resolver(), c.iat).ok()?;
+        let jkt = c.cnf.jwk.thumbprint().ok()?;
+        (c.exp <= verified_at
+            && c.exp <= r.exp
+            && c.jti == r.presented_jti
+            && c.aud == r.iss
+            && c.ps == r.ps
+            && c.sub == r.sub
+            && c.tenant == r.tenant
+            && jkt == r.agent_jkt)
+            .then(|| Failure::parameter("expired_presented_token"))
+    }
+
+    fn approval_usable(&self, entry: &RecordedApproval, now: i64) -> bool {
+        entry.expires_at > now
+            && !self.token_revoked(&entry.agent.issuer, &entry.agent_jti, now)
+            && !self.token_revoked(
+                &entry.expired_presented_issuer,
+                &entry.expired_presented_jti,
+                now,
+            )
+            && !self.token_revoked(&entry.resource, &entry.expired_resource_jti, now)
+    }
+
+    fn record_approval(&self, approval: RecordedApproval, now: i64) {
+        if !self.approval_usable(&approval, now) {
+            return;
+        }
+        let mut approvals = self
+            .r3_approvals
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        approvals.retain(|entry| {
+            self.approval_usable(entry, now)
+                && !(entry.person_id == approval.person_id
+                    && entry.principal == approval.principal
+                    && entry.agent == approval.agent
+                    && entry.agent_jkt == approval.agent_jkt
+                    && entry.resource == approval.resource
+                    && entry.subject == approval.subject
+                    && entry.tenant == approval.tenant
+                    && entry.account == approval.account
+                    && entry.requested_scopes == approval.requested_scopes
+                    && entry.proposal_s256 == approval.proposal_s256
+                    && entry.release == approval.release)
+        });
+        approvals.push(approval);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn take_recorded_approval(
+        &self,
+        retained: &TokenRecord,
+        r: &aauth_rust_core::ResourceClaims,
+        requested_scopes: &[String],
+        proposal_s256: &str,
+        exact_proposal: &[u8],
+        release: bool,
+        presented_jti: &str,
+        now: i64,
+    ) -> Option<RecordedApproval> {
+        let mut approvals = self
+            .r3_approvals
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        approvals.retain(|entry| self.approval_usable(entry, now));
+        let position = approvals.iter().position(|entry| {
+            entry.person_id == retained.person_id
+                && entry.principal == retained.principal
+                && entry.agent == retained.agent
+                && entry.agent_jkt == r.agent_jkt
+                && entry.resource == r.iss
+                && entry.subject == r.sub
+                && entry.tenant == r.tenant
+                && entry.account == r.account
+                && entry.requested_scopes == requested_scopes
+                && entry.proposal_s256 == proposal_s256
+                && entry.exact_proposal == exact_proposal
+                && entry.release == release
+                && entry.expired_presented_jti != presented_jti
+                && entry.expired_resource_jti != r.jti
+        })?;
+        Some(approvals.remove(position))
+    }
+
     pub(super) fn auth_r3(
         &self,
         agent: VerifiedAgentToken,
@@ -269,135 +397,200 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         };
         let exact = artifact.exact_bytes().to_vec();
 
-        // Each branch ends with the scopes, lifetime, signer and vocabulary to issue.
-        let (scopes, lifetime, vocabulary, mint): PreparedR3Grant<'_> = if let Some(document) =
-            artifact.document()
-        {
-            validate_document_account(document, r.account.as_deref())
-                .map_err(|_| Failure::parameter("invalid_resource_token"))?;
-            let decision = r3
-                .policy
-                .authorize_document(&R3AuthorizationRequest {
-                    core: &context,
-                    reference: &reference,
-                    document,
-                })
-                .map_err(Failure::policy)?;
-            if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
-                return Err(Failure::internal());
-            }
-            // A grant wider than the exact document is a host error: nothing is issued.
-            let mint: TokenMint<'_> = match &decision.per_call {
-                None => {
-                    let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
-                        .map_err(|_| Failure::internal())?;
-                    let (reference, exact) = (reference.clone(), exact.clone());
-                    Box::new(move |claims: &AuthClaims| {
-                        mint_direct_auth_token(
-                            &r3.registry,
-                            &self.config.signing_key,
-                            &self.config.kid,
-                            claims,
-                            &reference,
-                            &exact,
-                            &grant,
-                        )
-                        .map_err(|_| Failure::internal())
+        // Each branch ends with the scopes, lifetime, recorded-approval cap, signer and vocabulary to issue.
+        let (scopes, lifetime, approval_expires_at, vocabulary, mint): PreparedR3Grant<'_> =
+            if let Some(document) = artifact.document() {
+                validate_document_account(document, r.account.as_deref())
+                    .map_err(|_| Failure::parameter("invalid_resource_token"))?;
+                let decision = r3
+                    .policy
+                    .authorize_document(&R3AuthorizationRequest {
+                        core: &context,
+                        reference: &reference,
+                        document,
                     })
+                    .map_err(Failure::policy)?;
+                if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
+                    return Err(Failure::internal());
                 }
-                Some(per_call) => {
-                    let authorization = Authorization::new(&decision.granted, per_call, document)
-                        .map_err(|_| Failure::internal())?;
-                    let (reference, exact) = (reference.clone(), exact.clone());
-                    Box::new(move |claims: &AuthClaims| {
-                        mint_r3_auth_token(
-                            &r3.registry,
-                            &self.config.signing_key,
-                            &self.config.kid,
-                            claims,
-                            &reference,
-                            &exact,
-                            &authorization,
-                        )
-                        .map_err(|_| Failure::internal())
-                    })
-                }
-            };
-            (
-                decision.scopes,
-                decision.lifetime,
-                document.operation_set().vocabulary().clone(),
-                mint,
-            )
-        } else if let Some(proposal) = artifact.proposal() {
-            // Release gating executed before approval: release consent, never
-            // execution consent. A person cannot be told it already ran
-            // without a display.
-            let release = proposal.result().is_some();
-            if release && proposal.display().is_none() {
-                return Err(Failure::parameter("invalid_resource_token"));
-            }
-            validate_proposal_account(proposal, r.account.as_deref())
-                .map_err(|_| Failure::parameter("invalid_resource_token"))?;
-            // The presented token is the class Auth token this PS issued; its
-            // retained lineage was verified above. Its R3 claims come from its
-            // signed payload, and the operation must be one it left per call.
-            if presented.kind != TokenKind::Auth {
-                return Err(Failure::parameter("invalid_resource_token"));
-            }
-            let class = verify_auth_token_claims(
-                &r3.registry,
-                &presented_compact,
-                &self.resolver(),
-                verified_at,
-            )
-            .map_err(|_| Failure::parameter("invalid_presented_token"))?;
-            let c = class.claims();
-            if c.iss != self.config.issuer || c.dwk != "aauth-person.json" || c.ps != r.ps {
-                return Err(Failure::parameter("invalid_presented_token"));
-            }
-            if !matches!(
-                class.operations().access_for(&proposal.operation()),
-                Ok(OperationAccess::PerCall)
-            ) {
-                return Err(Failure::parameter("invalid_resource_token"));
-            }
-            let request = R3ProposalRequest {
-                core: &context,
-                reference: &reference,
-                proposal,
-                class: &class,
-            };
-            let decision = if release {
-                r3.policy.authorize_release(&request)
-            } else {
-                r3.policy.authorize_proposal(&request)
-            }
-            .map_err(Failure::policy)?;
-            if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
-                return Err(Failure::internal());
-            }
-            let (reference, exact) = (reference.clone(), exact.clone());
-            let mint: TokenMint<'_> = Box::new(move |claims: &AuthClaims| {
-                mint_per_call_auth_token(
-                    &r3.registry,
-                    &self.config.signing_key,
-                    &self.config.kid,
-                    claims,
-                    &reference,
-                    &exact,
+                // A grant wider than the exact document is a host error: nothing is issued.
+                let mint: TokenMint<'_> = match &decision.per_call {
+                    None => {
+                        let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
+                            .map_err(|_| Failure::internal())?;
+                        let (reference, exact) = (reference.clone(), exact.clone());
+                        Box::new(move |claims: &AuthClaims| {
+                            mint_direct_auth_token(
+                                &r3.registry,
+                                &self.config.signing_key,
+                                &self.config.kid,
+                                claims,
+                                &reference,
+                                &exact,
+                                &grant,
+                            )
+                            .map_err(|_| Failure::internal())
+                        })
+                    }
+                    Some(per_call) => {
+                        let authorization =
+                            Authorization::new(&decision.granted, per_call, document)
+                                .map_err(|_| Failure::internal())?;
+                        let (reference, exact) = (reference.clone(), exact.clone());
+                        Box::new(move |claims: &AuthClaims| {
+                            mint_r3_auth_token(
+                                &r3.registry,
+                                &self.config.signing_key,
+                                &self.config.kid,
+                                claims,
+                                &reference,
+                                &exact,
+                                &authorization,
+                            )
+                            .map_err(|_| Failure::internal())
+                        })
+                    }
+                };
+                (
+                    decision.scopes,
+                    decision.lifetime,
+                    None,
+                    document.operation_set().vocabulary().clone(),
+                    mint,
                 )
-                .map_err(|_| Failure::internal())
-            });
-            (
-                decision.scopes,
-                decision.lifetime,
-                proposal.operation().vocabulary().clone(),
-                mint,
-            )
-        } else {
-            return Err(Failure::parameter("invalid_resource_token"));
-        };
+            } else if let Some(proposal) = artifact.proposal() {
+                // Release gating executed before approval: release consent, never
+                // execution consent. A person cannot be told it already ran
+                // without a display.
+                let release = proposal.result().is_some();
+                if release && proposal.display().is_none() {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
+                validate_proposal_account(proposal, r.account.as_deref())
+                    .map_err(|_| Failure::parameter("invalid_resource_token"))?;
+                // The presented token is the class Auth token this PS issued; its
+                // retained lineage was verified above. Its R3 claims come from its
+                // signed payload, and the operation must be one it left per call.
+                if presented.kind != TokenKind::Auth {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
+                let class = verify_auth_token_claims(
+                    &r3.registry,
+                    &presented_compact,
+                    &self.resolver(),
+                    verified_at,
+                )
+                .map_err(|_| Failure::parameter("invalid_presented_token"))?;
+                let c = class.claims();
+                if c.iss != self.config.issuer || c.dwk != "aauth-person.json" || c.ps != r.ps {
+                    return Err(Failure::parameter("invalid_presented_token"));
+                }
+                if !matches!(
+                    class.operations().access_for(&proposal.operation()),
+                    Ok(OperationAccess::PerCall)
+                ) {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
+                let check_now = (self.clock)();
+                let (decision, approval_expires_at) = if let Some(recorded) = self
+                    .take_recorded_approval(
+                        &retained,
+                        r,
+                        &context.scopes,
+                        reference.digest(),
+                        &exact,
+                        release,
+                        &presented.jti,
+                        check_now,
+                    ) {
+                    if !valid_grant_shape(&recorded.scopes, recorded.lifetime, &context.scopes) {
+                        return Err(Failure::internal());
+                    }
+                    (
+                        R3ProposalDecision {
+                            scopes: recorded.scopes,
+                            lifetime: recorded.lifetime,
+                        },
+                        Some(recorded.expires_at),
+                    )
+                } else {
+                    let request = R3ProposalRequest {
+                        core: &context,
+                        reference: &reference,
+                        proposal,
+                        class: &class,
+                    };
+                    let decision = if release {
+                        r3.policy.authorize_release(&request)
+                    } else {
+                        r3.policy.authorize_proposal(&request)
+                    }
+                    .map_err(Failure::policy)?;
+                    if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
+                        return Err(Failure::internal());
+                    }
+                    let approved_at = (self.clock)();
+                    self.inputs_unrevoked(&agent, &resource, &presented, approved_at)?;
+                    check_agent_current(&agent, approved_at)?;
+                    let binding = self
+                        .binding(&retained.principal, binding_context)?
+                        .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
+                    if binding.person_id != retained.person_id {
+                        return Err(binding_context.revoked());
+                    }
+                    if presented.exp <= approved_at && presented.exp <= r.exp {
+                        self.record_approval(
+                            RecordedApproval {
+                                person_id: retained.person_id.clone(),
+                                principal: retained.principal.clone(),
+                                agent: retained.agent.clone(),
+                                agent_jti: agent.claims().jti.clone(),
+                                agent_jkt: r.agent_jkt.clone(),
+                                resource: r.iss.clone(),
+                                subject: r.sub.clone(),
+                                tenant: r.tenant.clone(),
+                                account: r.account.clone(),
+                                requested_scopes: context.scopes.clone(),
+                                proposal_s256: reference.digest().to_owned(),
+                                exact_proposal: exact.clone(),
+                                release,
+                                expired_presented_issuer: presented.issuer.clone(),
+                                expired_presented_jti: presented.jti.clone(),
+                                expired_resource_jti: r.jti.clone(),
+                                scopes: decision.scopes,
+                                lifetime: decision.lifetime,
+                                expires_at: approved_at
+                                    .saturating_add(decision.lifetime)
+                                    .min(agent.claims().exp),
+                            },
+                            approved_at,
+                        );
+                        return Err(Failure::parameter("expired_presented_token"));
+                    }
+                    (decision, None)
+                };
+                let (reference, exact) = (reference.clone(), exact.clone());
+                let mint: TokenMint<'_> = Box::new(move |claims: &AuthClaims| {
+                    mint_per_call_auth_token(
+                        &r3.registry,
+                        &self.config.signing_key,
+                        &self.config.kid,
+                        claims,
+                        &reference,
+                        &exact,
+                    )
+                    .map_err(|_| Failure::internal())
+                });
+                (
+                    decision.scopes,
+                    decision.lifetime,
+                    approval_expires_at,
+                    proposal.operation().vocabulary().clone(),
+                    mint,
+                )
+            } else {
+                return Err(Failure::parameter("invalid_resource_token"));
+            };
 
         let now = (self.clock)();
         // Fetch and policy may block; a revocation recorded meanwhile refuses
@@ -410,11 +603,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if binding.person_id != retained.person_id {
             return Err(binding_context.revoked());
         }
-        // A per-call token never outlives the class Auth token it was presented with.
-        let expires_at = now
+        // A per-call token never outlives the class Auth token it was presented with
+        // or the recorded approval window it consumed.
+        let mut expires_at = now
             .saturating_add(lifetime)
             .min(agent.claims().exp)
             .min(presented.exp);
+        if let Some(cap) = approval_expires_at {
+            expires_at = expires_at.min(cap);
+        }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-person.json".into(),

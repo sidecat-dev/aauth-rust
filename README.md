@@ -12,9 +12,10 @@ including opt-in AS payment and approval, while retaining consent and polling.
 the tested behavior and limits.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) supplies operation
-vocabularies, documents, per-call proposals and signed-reference verification.
-Its built-consumer coverage is separate from the role endpoints described above;
-an integrated R3 authorization exchange remains unfinished.
+vocabularies, documents, definition adapters, per-call proposals and
+signed-reference verification. Resource and Person Server per-call wiring,
+including release gating and held-result refresh, is described in
+[CONFORMANCE.md](CONFORMANCE.md). Full R3 profile conformance is not claimed.
 
 The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
 is the project home. Development forks may carry changes before upstream accepts

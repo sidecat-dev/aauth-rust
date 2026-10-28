@@ -98,6 +98,7 @@ pub struct PersonServer<K, S, P, C, I> {
     governance: Option<governance::Gate>,
     budgets: Option<BudgetState>,
     r3: Option<Box<R3IssuerConfig>>,
+    r3_approvals: Mutex<Vec<r3::RecordedApproval>>,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -217,6 +218,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             governance: None,
             budgets: None,
             r3: None,
+            r3_approvals: Mutex::new(Vec::new()),
         })
     }
     /// Enable AS federation for every /token request, including
@@ -733,6 +735,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(revocation::revoked_parameter("resource"));
             }
+            Err(TokenError::ExpiredJwt)
+                if r3
+                    && let Some(failure) = self.r3_presented_failure_on_expired_resource(
+                        presented_compact,
+                        &parsed,
+                        verified_at,
+                    ) =>
+            {
+                return Err(failure);
+            }
             Err(error) => return Err(Failure::token(error, "resource", verified_at)),
         };
         if self.token_revoked(&resource_issuer, &resource_jti, verified_at) {
@@ -1062,6 +1074,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         now: i64,
     ) -> Result<(), Failure> {
         check_agent_current(agent, now)?;
+        if presented.exp <= now && presented.exp <= resource.claims().exp {
+            return Err(Failure::parameter("expired_presented_token"));
+        }
         if resource.claims().exp <= now {
             return Err(Failure::parameter("expired_resource_token"));
         }

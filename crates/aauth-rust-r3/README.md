@@ -6,10 +6,12 @@ vocabulary, parse a document or per-call proposal, check a grant against that
 document, and compare the proposed parameters with the actual call.
 
 The crate includes operation codecs for MCP, OpenAPI, AsyncAPI, GraphQL, WSDL,
-OData and gRPC. Authoritative definition adapters currently cover MCP tools,
-OpenAPI JSON and AsyncAPI. GraphQL introspection alone is refused because it
-does not identify an executable operation. WSDL, OData and gRPC definition
-adapters remain unfinished; the JSON Schema adapter lacks RE2 pattern validation.
+OData and gRPC. Definition parsers cover MCP tools, OpenAPI JSON, AsyncAPI,
+gRPC `FileDescriptorSet`, self-contained WSDL 1.1, and OData CSDL 4.0.
+GraphQL introspection is refused because it does not identify an executable
+operation. gRPC refuses hosted `.proto` text and live reflection. OData
+metadata does not prove HTTP methods. The JSON Schema adapter lacks RE2
+pattern validation.
 
 Resource/Auth token helpers verify signed R3 claims and exact artifact digests.
 The artifact fetcher requires the host to supply its trusted HTTPS transport
@@ -27,9 +29,11 @@ Built Rust and Go consumers have exchanged artifacts and signed references;
 the retained execution records distinguish each exact source and input set.
 The foundation batch also exercised large objects, quoted media parameters,
 malformed input, changed-byte and wrong-key refusals. These library workflows
-do not establish an integrated Resource/PS/AS R3 exchange. Endpoint wiring,
-discovery, entitlements, account binding, consent, caching and audit remain
-unfinished. See the repository's [conformance profile](../../CONFORMANCE.md).
+do not by themselves establish an integrated Resource/PS/AS R3 exchange.
+Role wiring, release gating, and held-result refresh are in the Resource and
+Person Server crates and are described in the repository's
+[conformance profile](../../CONFORMANCE.md). Discovery, entitlements, account
+binding, and audit remain unfinished there.
 
 The optional-field constructors/accessors use `Option<&str>`, and
 `ProposalOptions` includes `result`. Consumers of earlier development commits

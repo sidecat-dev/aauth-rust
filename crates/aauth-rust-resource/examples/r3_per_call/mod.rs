@@ -57,9 +57,10 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         mpsc,
     },
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tls::TlsServer;
@@ -123,6 +124,65 @@ pub struct Transcript {
     pub release_replay_matches: bool,
     pub release_runs_after_completion: usize,
     pub release_claim_consumed: bool,
+    pub expired_presented_status: u16,
+    pub expired_presented_error: String,
+    pub substituted_replacement_ps_status: u16,
+    pub replacement_approval_status: u16,
+    pub replacement_consents_delta: usize,
+    pub replacement_retry_status: u16,
+    pub replacement_replay_status: u16,
+    pub replacement_replay_matches: bool,
+    pub consumed_approval_reprompted: bool,
+    pub expired_per_call_status: u16,
+    pub expired_per_call_error: String,
+    pub release_expired_presented_status: u16,
+    pub release_expired_presented_error: String,
+    pub release_old_pending_expired_class_status: u16,
+    pub release_old_pending_refreshed_class_status: u16,
+    pub release_replacement_approval_status: u16,
+    pub release_replacement_consents_delta: usize,
+    pub release_old_pending_with_replacement_status: u16,
+    pub release_replacement_status: u16,
+    pub release_replacement_replay_status: u16,
+    pub release_replacement_replay_matches: bool,
+    pub release_expired_token_status: u16,
+    pub release_expired_token_error: String,
+    pub expired_recorded_approval_reprompted: bool,
+    /// Release retry: query computations caused by re-requesting the held call.
+    pub release_runs_at_replacement_challenge: usize,
+    /// Query computations of the r-1 call from its original challenge through
+    /// replacement release and replay; the r-2 control's own run is excluded.
+    pub release_runs_since_original_challenge: usize,
+    /// The replacement release is the original challenge's computation.
+    pub release_replacement_body_matches_original: bool,
+    /// The class token at the replacement pending URL before PS approval.
+    pub release_poll_before_approval_status: u16,
+    /// Changed parameters while the r-1 response is held: a fresh challenge.
+    pub release_changed_params_runs_delta: usize,
+    pub release_changed_params_ps_status: u16,
+    /// Re-request after an expired recorded approval still reuses the held response.
+    pub release_expired_approval_reuse_runs_delta: usize,
+    /// Re-request past the held response's horizon: a fresh challenge and consent.
+    pub release_expired_held_runs_delta: usize,
+    pub release_expired_held_reprompted: bool,
+    /// Supersede without expiry: the same call re-sent with the same class token.
+    pub release_supersede_status: u16,
+    pub release_supersede_runs_delta: usize,
+    pub release_superseded_poll_status: u16,
+    pub release_superseded_runs_delta: usize,
+    pub release_superseded_token_at_successor_status: u16,
+    /// Completion after `release_until` while the per-call token is unexpired.
+    pub release_horizon_status: u16,
+    pub release_horizon_error: String,
+    pub release_horizon_runs_delta: usize,
+    /// Recompute inside `[release_until, recorded-approval expiry)`.
+    pub release_fresh_runs_delta: usize,
+    pub release_fresh_consents_delta: usize,
+    pub release_fresh_body_is_new: bool,
+    pub release_successor_status: u16,
+    pub release_successor_body_matches_original: bool,
+    pub release_successor_replay_matches: bool,
+    pub release_successor_runs_delta: usize,
 }
 
 /// Adversarial admission paths exercised over the same real TLS roles.
@@ -153,6 +213,34 @@ pub enum AdmissionCase {
         reason = "Constructed by the release claim-race integration control."
     )]
     ReleaseClaimRevocation,
+    /// Presented class token expiry during approval, top-down refresh,
+    /// single-use recorded-approval replacement, and expired-approval refusal.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the approval-expiry integration control."
+    )]
+    ApprovalExpiry,
+    /// Release gating: a live same-token resubmit must not retire the in-flight
+    /// challenge. The second call is a new computation.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the release-supersede integration control."
+    )]
+    ReleaseSupersede,
+    /// Completion refuses once `release_until` has passed, even if the
+    /// per-call Auth token is still unexpired.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the held-result horizon integration control."
+    )]
+    ReleaseHorizon,
+    /// After the held result expires, a still-live recorded approval can
+    /// release a freshly computed body. This is the unresolved D2 gap.
+    #[allow(
+        dead_code,
+        reason = "Constructed by the fresh-bytes-under-prior-consent control."
+    )]
+    ReleaseFreshConsent,
 }
 
 #[derive(Default)]
@@ -166,8 +254,23 @@ struct AdmissionControl {
     /// PS consent methods called, and the first release `result` seen.
     consents: Mutex<Vec<String>>,
     release_result: Mutex<String>,
+    /// Clock offset in seconds for deterministic expiry controls.
+    clock_offset: AtomicI64,
+    /// Optional lifetime override for the next class grant at the PS.
+    next_class_lifetime: AtomicI64,
+    /// Optional clock advance (seconds) during the next PS approval callback.
+    advance_on_approval: AtomicI64,
+    /// Optional lifetime override for the next per-call approval at the PS.
+    next_proposal_lifetime: AtomicI64,
+    /// Held-result retention in seconds. Zero selects the 300-second default.
+    held_result_lifetime: AtomicI64,
+    /// After the successor record is created, the next tombstone write fails.
+    fail_supersede_tombstone: AtomicBool,
 }
 impl AdmissionControl {
+    fn now(&self) -> i64 {
+        now() + self.clock_offset.load(Ordering::SeqCst)
+    }
     fn admit(&self, token: &VerifiedAuthToken, request: &Request<Vec<u8>>) -> bool {
         let barrier = self.barrier.lock().unwrap().take();
         if let Some((entered, released)) = barrier
@@ -226,13 +329,24 @@ fn json_response(status: u16, value: Value) -> Response<Vec<u8>> {
         .unwrap()
 }
 fn post(agent: &Agent, uri: &str, body: &[u8]) -> Result<Request<Vec<u8>>> {
+    post_at(agent, uri, body, now())
+}
+fn post_at(agent: &Agent, uri: &str, body: &[u8], signed_at: i64) -> Result<Request<Vec<u8>>> {
     let mut request = Request::builder()
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
         .body(body.to_vec())?;
-    agent.sign(&mut request, now())?;
+    agent.sign(&mut request, signed_at)?;
     Ok(request)
+}
+/// The `query_run_seq` a released query response was computed as.
+fn query_run_seq(response: &Response<Vec<u8>>) -> Option<usize> {
+    serde_json::from_slice::<Value>(response.body())
+        .ok()?
+        .get("query_run_seq")?
+        .as_u64()
+        .and_then(|seq| usize::try_from(seq).ok())
 }
 fn member(response: &Response<Vec<u8>>, name: &str) -> Option<String> {
     serde_json::from_slice::<Value>(response.body())
@@ -353,8 +467,13 @@ impl R3DocumentStore for FileDocuments {
     }
 }
 
+/// Claim digest of a superseded release's tombstone. It is never a SHA-256
+/// digest in base64url, so every later claim on that record is `DifferentToken`.
+const SUPERSEDED: &str = "(superseded)";
+
 /// Proposals, pending ids, claims and retained results. Create-only records;
 /// one claim file per proposal, bound once and never re-opened for execution.
+/// A superseded release is retired by a tombstone claim file.
 struct FileCalls(PathBuf, Mutex<()>, Arc<AdmissionControl>);
 impl FileCalls {
     fn record_path(&self, uri: &str) -> PathBuf {
@@ -398,6 +517,8 @@ impl FileCalls {
                 Some(released) if !released.is_null() => Some(Self::result(released)?),
                 _ => None,
             },
+            release_until: v.get("release_until").and_then(Value::as_i64),
+            supersedes: optional(&v, "supersedes"),
         })
     }
     fn result(v: &Value) -> Result<R3CallResult> {
@@ -407,10 +528,8 @@ impl FileCalls {
             body: serde_json::from_value(v["body"].clone())?,
         })
     }
-}
-impl R3CallStore for FileCalls {
-    fn commit(&self, r: &R3ProposalRecord) -> std::result::Result<(), R3StoreError> {
-        let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
+    /// Create one record and its pending index. The caller holds the serial lock.
+    fn create(&self, r: &R3ProposalRecord) -> std::result::Result<(), R3StoreError> {
         let held = r.held.as_ref().map(|held| {
             json!({"pending_id": held.pending_id, "method": held.method, "uri": held.uri,
                    "headers": held.headers, "body": held.body})
@@ -427,7 +546,7 @@ impl R3CallStore for FileCalls {
             "presented_jti": r.presented_jti, "subject": r.subject, "agent_jkt": r.agent_jkt,
             "tenant": r.tenant, "account": r.account, "scope": r.scope,
             "issued_at": r.issued_at, "expires_at": r.expires_at, "held": held,
-            "released": released,
+            "released": released, "release_until": r.release_until, "supersedes": r.supersedes,
         })
         .to_string()
         .into_bytes();
@@ -446,6 +565,19 @@ impl R3CallStore for FileCalls {
             .and_then(|directory| directory.sync_all())
             .map_err(unavailable)?;
         Ok(())
+    }
+    /// Drop a successor that must not remain if retiring `prior` fails.
+    fn remove_successor(&self, record: &R3ProposalRecord) {
+        let _ = fs::remove_file(self.record_path(record.reference.uri()));
+        if let Some(held) = &record.held {
+            let _ = fs::remove_file(self.0.join(format!("pending-{}", held.pending_id)));
+        }
+    }
+}
+impl R3CallStore for FileCalls {
+    fn commit(&self, r: &R3ProposalRecord) -> std::result::Result<(), R3StoreError> {
+        let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
+        self.create(r)
     }
     fn load(&self, uri: &str) -> std::result::Result<Option<R3ProposalRecord>, R3StoreError> {
         match fs::read(self.record_path(uri)) {
@@ -485,6 +617,11 @@ impl R3CallStore for FileCalls {
         now: i64,
     ) -> std::result::Result<R3Claim, R3StoreError> {
         let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
+        if let Some(record) = self.load(uri)? {
+            if record.release_until.is_some_and(|until| now >= until) {
+                return Ok(R3Claim::Expired);
+            }
+        }
         let path = self.claim_path(uri);
         match fs::read(&path) {
             Ok(bytes) => {
@@ -495,7 +632,7 @@ impl R3CallStore for FileCalls {
                 if v["result"].is_null() {
                     return Ok(R3Claim::Unfinished);
                 }
-                if now > number(&v, "retain_until").map_err(unavailable)? {
+                if now >= number(&v, "retain_until").map_err(unavailable)? {
                     return Ok(R3Claim::Expired);
                 }
                 Ok(R3Claim::Replay(
@@ -503,6 +640,9 @@ impl R3CallStore for FileCalls {
                 ))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if now >= token.retain_until {
+                    return Ok(R3Claim::Expired);
+                }
                 let fence = format!(
                     "{}-{}",
                     std::process::id(),
@@ -552,6 +692,91 @@ impl R3CallStore for FileCalls {
         replace(&path, v.to_string().as_bytes()).map_err(unavailable)?;
         Ok(result.clone())
     }
+    fn held_releases(
+        &self,
+        agent_jkt: &str,
+        subject: &str,
+        now: i64,
+    ) -> std::result::Result<Vec<R3ProposalRecord>, R3StoreError> {
+        let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
+        let mut held = Vec::new();
+        for entry in fs::read_dir(&self.0).map_err(unavailable)? {
+            let name = entry.map_err(unavailable)?.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with("p-") || !name.ends_with(".json") {
+                continue;
+            }
+            let bytes = fs::read(self.0.join(name)).map_err(unavailable)?;
+            let record = Self::decode(&bytes).map_err(unavailable)?;
+            // Unclaimed and not superseded: both bind the claim file.
+            if record.released.is_some()
+                && record.agent_jkt == agent_jkt
+                && record.subject == subject
+                && record.release_until.is_some_and(|until| now < until)
+                && !self.claim_path(record.reference.uri()).exists()
+            {
+                held.push(record);
+            }
+        }
+        Ok(held)
+    }
+    fn supersede(
+        &self,
+        prior_uri: &str,
+        record: &R3ProposalRecord,
+        now: i64,
+    ) -> std::result::Result<(), R3StoreError> {
+        let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
+        let Some(prior) = self.load(prior_uri)? else {
+            return Err(R3StoreError::Conflict);
+        };
+        let tombstone = self.claim_path(prior_uri);
+        // Only an unclaimed, live held release is retired, and only for a
+        // successor that commit would create; otherwise nothing changes.
+        if prior.released.is_none()
+            || prior.release_until.is_none_or(|until| now >= until)
+            || tombstone.exists()
+            || self.record_path(record.reference.uri()).exists()
+            || record.held.as_ref().is_some_and(|held| {
+                self.0.join(format!("pending-{}", held.pending_id)).exists()
+            })
+        {
+            return Err(R3StoreError::Conflict);
+        }
+        // Successor first. A crash before the tombstone leaves `prior` usable.
+        // A tombstone failure rolls the successor back so the retry still
+        // finds the original held bytes and does not recompute.
+        if let Err(error) = self.create(record) {
+            self.remove_successor(record);
+            return Err(error);
+        }
+        if self
+            .2
+            .fail_supersede_tombstone
+            .swap(false, Ordering::SeqCst)
+        {
+            self.remove_successor(record);
+            return Err(unavailable("injected tombstone failure"));
+        }
+        let bytes = json!({"compact_sha256": SUPERSEDED, "jti": null,
+                           "retain_until": prior.expires_at, "fence": null, "result": null,
+                           "superseded_by": record.reference.uri(), "superseded_at": now})
+        .to_string()
+        .into_bytes();
+        match write_new(&tombstone, &bytes) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                self.remove_successor(record);
+                Err(R3StoreError::Conflict)
+            }
+            Err(error) => {
+                self.remove_successor(record);
+                Err(unavailable(error))
+            }
+        }
+    }
 }
 
 // ---- Person Server host: consent, audit, egress and transport -------------
@@ -596,6 +821,10 @@ impl R3Policy for HostConsent {
         }
         let unavailable = |_| PolicyError::Unavailable;
         let vocabulary = McpCodec::vocabulary().map_err(|_| PolicyError::Unavailable)?;
+        let lifetime = match self.0.next_class_lifetime.swap(0, Ordering::SeqCst) {
+            0 => 600,
+            override_lifetime => override_lifetime,
+        };
         Ok(R3Decision {
             granted: GrantedOperations::new(
                 &vocabulary,
@@ -613,7 +842,7 @@ impl R3Policy for HostConsent {
                 .map_err(|_| PolicyError::Unavailable)?,
             ),
             scopes: Vec::new(),
-            lifetime: 600,
+            lifetime,
         })
     }
     fn authorize_proposal(
@@ -628,9 +857,17 @@ impl R3Policy for HostConsent {
         {
             return Err(PolicyError::Denied);
         }
+        let advance = self.0.advance_on_approval.swap(0, Ordering::SeqCst);
+        if advance > 0 {
+            self.0.clock_offset.fetch_add(advance, Ordering::SeqCst);
+        }
+        let lifetime = match self.0.next_proposal_lifetime.swap(0, Ordering::SeqCst) {
+            0 => 300,
+            override_lifetime => override_lifetime,
+        };
         Ok(R3ProposalDecision {
             scopes: Vec::new(),
-            lifetime: 300,
+            lifetime,
         })
     }
     fn authorize_release(
@@ -648,9 +885,17 @@ impl R3Policy for HostConsent {
         if !record_r1(request) || request.core.resource.claims().iss != RECORDS {
             return Err(PolicyError::Denied);
         }
+        let advance = self.0.advance_on_approval.swap(0, Ordering::SeqCst);
+        if advance > 0 {
+            self.0.clock_offset.fetch_add(advance, Ordering::SeqCst);
+        }
+        let lifetime = match self.0.next_proposal_lifetime.swap(0, Ordering::SeqCst) {
+            0 => 300,
+            override_lifetime => override_lifetime,
+        };
         Ok(R3ProposalDecision {
             scopes: Vec::new(),
-            lifetime: 300,
+            lifetime,
         })
     }
 }
@@ -733,10 +978,12 @@ fn query_release(control: Arc<AdmissionControl>) -> BoxedR3Release {
                 .and_then(PresentedParameter::inline_json)
                 .ok_or_else(|| R3HostError::new("record parameter is required"))?;
             let shown = String::from_utf8_lossy(&record).into_owned();
-            control.query_runs.fetch_add(1, Ordering::SeqCst);
+            // The response, never the proposal, names which computation it is.
+            let run = control.query_runs.fetch_add(1, Ordering::SeqCst) + 1;
             let response = json_response(
                 200,
-                json!({"record": shown, "name": "A. Person", "national_id": "000-00-0000"}),
+                json!({"record": shown, "name": "A. Person", "national_id": "000-00-0000",
+                       "query_run_seq": run}),
             );
             let result = ProposalResult::new(br#"{"records":1,"contains":["national_id"]}"#)
                 .map_err(|e| R3HostError::new(e.to_string()))?;
@@ -862,6 +1109,10 @@ fn compose(
         // Only a held Resource gates release. Deletion changes state outside
         // its result and is never executed before approval.
         release: hold.then(|| query_release(control.clone())),
+        held_result_lifetime: match control.held_result_lifetime.load(Ordering::SeqCst) {
+            0 => 300,
+            lifetime => lifetime,
+        },
     })?;
     Ok(if control.revocation {
         resource.with_revocation()
@@ -875,7 +1126,12 @@ struct Effects {
     reads: AtomicUsize,
     deletes: Mutex<Vec<String>>,
 }
-fn serve(resource: &Resource, effects: &Effects, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+fn serve(
+    resource: &Resource,
+    effects: &Effects,
+    clock: i64,
+    request: Request<Vec<u8>>,
+) -> Response<Vec<u8>> {
     let jti = format!(
         "rid-{}",
         SystemTime::now()
@@ -897,17 +1153,17 @@ fn serve(resource: &Resource, effects: &Effects, request: Request<Vec<u8>>) -> R
         );
     }
     if path == "/revoke" {
-        return resource.revoke(&request, now());
+        return resource.revoke(&request, clock);
     }
     if path == "/authorize" {
         return resource
-            .authorize_endpoint(&request, now(), &jti)
+            .authorize_endpoint(&request, clock, &jti)
             .into_response();
     }
     if path.starts_with("/r3/") && !path.starts_with("/r3/pending/") {
-        return resource.r3_document(&request, now());
+        return resource.r3_document(&request, clock);
     }
-    match resource.authorize(&request, now(), &jti) {
+    match resource.authorize(&request, clock, &jti) {
         AuthDecision::Granted(admitted) => {
             let Some(grant) = admitted.r3_grant() else {
                 return json_response(403, json!({"error":"access_denied"}));
@@ -943,6 +1199,7 @@ fn class_grant(
     ps: &TlsServer,
     trust: &Trust,
     registry: &Registry,
+    control: &AdmissionControl,
 ) -> Result<String> {
     let operations = registry.parse_operation_set(
         json!({"vocabulary": MCP, "operations": [
@@ -951,24 +1208,26 @@ fn class_grant(
         .to_string()
         .as_bytes(),
     )?;
+    let clock = control.now();
     let resource_token = agent.r3_authorize(
         |request| api.send(&request),
         &format!("{RECORDS}/authorize"),
         person,
         &operations,
         None,
-        now(),
+        clock,
     )?;
     let verified =
-        agent.verify_r3_resource_token(&resource_token, RECORDS, PS, person, None, trust, now())?;
+        agent.verify_r3_resource_token(&resource_token, RECORDS, PS, person, None, trust, clock)?;
     let body = json!({"resource_token": resource_token, "presented_token": person});
-    let response = ps.send(&post(
+    let response = ps.send(&post_at(
         agent,
         &format!("{PS}/token"),
         body.to_string().as_bytes(),
+        clock,
     )?)?;
     let auth = member(&response, "auth_token").ok_or("class grant refused")?;
-    agent.verify_r3_auth_delivery(&auth, RECORDS, &verified, person, registry, trust, now())?;
+    agent.verify_r3_auth_delivery(&auth, RECORDS, &verified, person, registry, trust, clock)?;
     Ok(auth)
 }
 
@@ -978,12 +1237,14 @@ fn approve(
     ps: &TlsServer,
     resource_token: &str,
     class: &str,
+    control: &AdmissionControl,
 ) -> Result<Response<Vec<u8>>> {
     let body = json!({"resource_token": resource_token, "presented_token": class});
-    ps.send(&post(
+    ps.send(&post_at(
         agent,
         &format!("{PS}/token"),
         body.to_string().as_bytes(),
+        control.now(),
     )?)
 }
 
@@ -1072,10 +1333,16 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         false,
         control.clone(),
     )?)));
-    let (serving, serving_effects) = (current.clone(), effects.clone());
+    let (serving, serving_effects, serving_control) =
+        (current.clone(), effects.clone(), control.clone());
     let api = Arc::new(TlsServer::start("records.example", move |request| {
         let resource = serving.read().unwrap().clone();
-        serve(&resource, &serving_effects, request)
+        serve(
+            &resource,
+            &serving_effects,
+            serving_control.now(),
+            request,
+        )
     })?);
     trust.discover(&api, RECORDS, "aauth-resource.json")?;
 
@@ -1083,12 +1350,13 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let ids = AtomicUsize::new(0);
     // Fixture key retained only to sign the genuine PS revocation control.
     let ps_seed = seed.map(|byte| byte ^ 0x5a);
+    let ps_clock = control.clone();
     let ps = PersonServer::new(
         Config::new(PS, "ps-1", SigningKey::from_seed(ps_seed)),
         trust.clone(),
         MemoryStore::default(),
         HostPolicy,
-        now,
+        move || ps_clock.now(),
         move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)),
     )?
     .with_r3(R3IssuerConfig {
@@ -1122,7 +1390,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         "person_token",
     )
     .ok_or("person token refused")?;
-    let class = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry)?;
+    let class = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
     let holder = agent.with_token(class.clone())?;
 
     // Class grant: read is served directly.
@@ -1137,7 +1405,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let proposal_token = challenge(&challenged)?;
     let proposal =
         agent.verify_r3_proposal_challenge(&proposal_token, RECORDS, PS, &class, &trust, now())?;
-    let approved = approve(&agent, &ps_tls, &proposal_token, &class)?;
+    let approved = approve(&agent, &ps_tls, &proposal_token, &class, &control)?;
     let per_call = member(&approved, "auth_token").ok_or("per-call approval refused")?;
     let delivered = agent.verify_r3_per_call_delivery(
         &per_call,
@@ -1209,7 +1477,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     // Parameter-sensitive consent: the PS refuses a proposal for another record.
     let other = api.send(&post(&holder, &format!("{RECORDS}/records/delete"), R2)?)?;
     let other_token = challenge(&other)?;
-    t.denied_parameters_ps_status = approve(&agent, &ps_tls, &other_token, &class)?
+    t.denied_parameters_ps_status = approve(&agent, &ps_tls, &other_token, &class, &control)?
         .status()
         .as_u16();
 
@@ -1232,7 +1500,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     let held_proposal =
         agent.verify_r3_proposal_challenge(&held_token, RECORDS, PS, &class, &trust, now())?;
     let held_grant = member(
-        &approve(&agent, &ps_tls, &held_token, &class)?,
+        &approve(&agent, &ps_tls, &held_token, &class, &control)?,
         "auth_token",
     )
     .ok_or("held approval refused")?;
@@ -1291,7 +1559,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         let other = api.send(&post(&holder, &format!("{RECORDS}/records/query"), R2)?)?;
         let other_location = other.headers()["location"].to_str()?.to_owned();
         let other_token = challenge(&other)?;
-        t.release_denied_ps_status = approve(&agent, &ps_tls, &other_token, &class)?
+        t.release_denied_ps_status = approve(&agent, &ps_tls, &other_token, &class, &control)?
             .status()
             .as_u16();
         let mut declined = get(&other_location)?;
@@ -1300,7 +1568,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
 
         // Release consent for record r-1.
         let release_grant = member(
-            &approve(&agent, &ps_tls, &release_token, &class)?,
+            &approve(&agent, &ps_tls, &release_token, &class, &control)?,
             "auth_token",
         )
         .ok_or("release approval refused")?;
@@ -1343,6 +1611,481 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             .exists();
     }
 
+    if case == Some(AdmissionCase::ReleaseSupersede) {
+        // A live same-token duplicate must not tombstone the in-flight challenge.
+        let runs = || control.query_runs.load(Ordering::SeqCst);
+        let first = api.send(&post(&holder, &format!("{RECORDS}/records/query"), R1)?)?;
+        let original_runs = runs();
+        let first_location = first.headers()["location"].to_str()?.to_owned();
+        let first_token = challenge(&first)?;
+        let first_proposal =
+            agent.verify_r3_proposal_challenge(&first_token, RECORDS, PS, &class, &trust, now())?;
+        let duplicate = api.send(&post(&holder, &format!("{RECORDS}/records/query"), R1)?)?;
+        t.release_supersede_status = duplicate.status().as_u16();
+        t.release_supersede_runs_delta = runs() - original_runs;
+        let first_grant = member(
+            &approve(&agent, &ps_tls, &first_token, &class, &control)?,
+            "auth_token",
+        )
+        .ok_or("live challenge approval refused")?;
+        agent.verify_r3_per_call_delivery(
+            &first_grant,
+            RECORDS,
+            &first_proposal,
+            &class,
+            &registry,
+            &trust,
+            now(),
+        )?;
+        let first_holder = agent.with_token(first_grant)?;
+        let before_poll = runs();
+        let mut poll_first = get(&first_location)?;
+        first_holder.sign(&mut poll_first, now())?;
+        let released = api.send(&poll_first)?;
+        t.release_superseded_poll_status = released.status().as_u16();
+        t.release_superseded_runs_delta = runs() - before_poll;
+        t.release_successor_body_matches_original =
+            query_run_seq(&released) == Some(original_runs);
+        t.release_successor_status = released.status().as_u16();
+        t.release_successor_runs_delta = runs() - original_runs;
+    }
+
+    if case == Some(AdmissionCase::ReleaseHorizon) {
+        control.held_result_lifetime.store(15, Ordering::SeqCst);
+        *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true, control.clone())?);
+        let class = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let holder = agent.with_token(class.clone())?;
+        let runs = || control.query_runs.load(Ordering::SeqCst);
+        let held = api.send(&post_at(
+            &holder,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        let before = runs();
+        let location = held.headers()["location"].to_str()?.to_owned();
+        let proposal_token = challenge(&held)?;
+        control.next_proposal_lifetime.store(300, Ordering::SeqCst);
+        let approved = approve(&agent, &ps_tls, &proposal_token, &class, &control)?;
+        let grant = member(&approved, "auth_token").ok_or("horizon approval refused")?;
+        let completing = agent.with_token(grant)?;
+        control.clock_offset.fetch_add(20, Ordering::SeqCst);
+        let mut poll = get(&location)?;
+        completing.sign(&mut poll, control.now())?;
+        let response = api.send(&poll)?;
+        t.release_horizon_status = response.status().as_u16();
+        t.release_horizon_error = response
+            .headers()
+            .get("signature-error")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        t.release_horizon_runs_delta = runs() - before;
+    }
+
+    if case == Some(AdmissionCase::ReleaseFreshConsent) {
+        // Held result lasts 10s. Class token lasts 8s, so approval records
+        // `expired_presented_token`. Approval lifetime is 120s. The re-request
+        // is after `release_until` and before that approval expires.
+        control.held_result_lifetime.store(10, Ordering::SeqCst);
+        control.next_class_lifetime.store(8, Ordering::SeqCst);
+        *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true, control.clone())?);
+        let short = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let holder = agent.with_token(short.clone())?;
+        let runs = || control.query_runs.load(Ordering::SeqCst);
+        let held = api.send(&post_at(
+            &holder,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        let original_runs = runs();
+        let proposal_token = challenge(&held)?;
+        control.advance_on_approval.store(9, Ordering::SeqCst);
+        control.next_proposal_lifetime.store(120, Ordering::SeqCst);
+        let expired = approve(&agent, &ps_tls, &proposal_token, &short, &control)?;
+        if expired.status().as_u16() != 400 {
+            return Err(format!("expected recorded expiry, got {}", expired.status()).into());
+        }
+        control.clock_offset.fetch_add(5, Ordering::SeqCst);
+        let refreshed = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let refreshed_holder = agent.with_token(refreshed.clone())?;
+        let before = runs();
+        let again = api.send(&post_at(
+            &refreshed_holder,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        t.release_fresh_runs_delta = runs() - before;
+        let again_token = challenge(&again)?;
+        let consents_before = control.consents.lock().unwrap().len();
+        let approved = approve(&agent, &ps_tls, &again_token, &refreshed, &control)?;
+        t.release_fresh_consents_delta = control.consents.lock().unwrap().len() - consents_before;
+        let grant = member(&approved, "auth_token").ok_or("fresh approval refused")?;
+        let completing = agent.with_token(grant)?;
+        let location = again.headers()["location"].to_str()?.to_owned();
+        let mut poll = get(&location)?;
+        completing.sign(&mut poll, control.now())?;
+        let released = api.send(&poll)?;
+        t.release_fresh_body_is_new = query_run_seq(&released) != Some(original_runs)
+            && query_run_seq(&released).is_some();
+    }
+
+    if case == Some(AdmissionCase::ApprovalExpiry) {
+        // 1. 401 retry: class token expires during PS approval (`expired_presented_token`),
+        //    Agent refreshes top-down and resubmits, PS applies the recorded approval once.
+        *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, false, control.clone())?);
+        control.next_class_lifetime.store(5, Ordering::SeqCst);
+        let short_class =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let short_holder = agent.with_token(short_class.clone())?;
+        let challenged_1 = api.send(&post_at(
+            &short_holder,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        let proposal_token_1 = challenge(&challenged_1)?;
+        agent.verify_r3_proposal_challenge(
+            &proposal_token_1,
+            RECORDS,
+            PS,
+            &short_class,
+            &trust,
+            control.now(),
+        )?;
+        control.advance_on_approval.store(6, Ordering::SeqCst);
+        control.next_proposal_lifetime.store(20, Ordering::SeqCst);
+        let expired_response =
+            approve(&agent, &ps_tls, &proposal_token_1, &short_class, &control)?;
+        t.expired_presented_status = expired_response.status().as_u16();
+        t.expired_presented_error = member(&expired_response, "error").unwrap_or_default();
+
+        // Top-down refresh: fresh class token at current time.
+        let refreshed_class =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let refreshed_holder = agent.with_token(refreshed_class.clone())?;
+
+        // Negative control: a different record (r-2) does not match the recorded r-1 approval.
+        let other_challenged = api.send(&post_at(
+            &refreshed_holder,
+            &format!("{RECORDS}/records/delete"),
+            R2,
+            control.now(),
+        )?)?;
+        let other_proposal_token = challenge(&other_challenged)?;
+        t.substituted_replacement_ps_status = approve(
+            &agent,
+            &ps_tls,
+            &other_proposal_token,
+            &refreshed_class,
+            &control,
+        )?
+        .status()
+        .as_u16();
+
+        // Resubmit the r-1 call; the PS applies the recorded approval without calling consent again.
+        let challenged_2 = api.send(&post_at(
+            &refreshed_holder,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        let proposal_token_2 = challenge(&challenged_2)?;
+        let proposal_2 = agent.verify_r3_proposal_challenge(
+            &proposal_token_2,
+            RECORDS,
+            PS,
+            &refreshed_class,
+            &trust,
+            control.now(),
+        )?;
+        let consents_before = control.consents.lock().unwrap().len();
+        let replacement_approved = approve(
+            &agent,
+            &ps_tls,
+            &proposal_token_2,
+            &refreshed_class,
+            &control,
+        )?;
+        t.replacement_approval_status = replacement_approved.status().as_u16();
+        t.replacement_consents_delta = control.consents.lock().unwrap().len() - consents_before;
+        let replacement_token =
+            member(&replacement_approved, "auth_token").ok_or("replacement approval refused")?;
+        agent.verify_r3_per_call_delivery(
+            &replacement_token,
+            RECORDS,
+            &proposal_2,
+            &refreshed_class,
+            &registry,
+            &trust,
+            control.now(),
+        )?;
+        let replacement_completing = agent.with_token(replacement_token)?;
+        let retry_first = api.send(&post_at(
+            &replacement_completing,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        t.replacement_retry_status = retry_first.status().as_u16();
+        let retry_replay = api.send(&post_at(
+            &replacement_completing,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        t.replacement_replay_status = retry_replay.status().as_u16();
+        t.replacement_replay_matches = retry_replay.body() == retry_first.body();
+
+        // Negative control: the recorded approval is single-use; a new r-1 challenge prompts consent again.
+        let challenged_3 = api.send(&post_at(
+            &refreshed_holder,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        let proposal_token_3 = challenge(&challenged_3)?;
+        let consents_before_second = control.consents.lock().unwrap().len();
+        let _ = approve(
+            &agent,
+            &ps_tls,
+            &proposal_token_3,
+            &refreshed_class,
+            &control,
+        )?;
+        t.consumed_approval_reprompted =
+            control.consents.lock().unwrap().len() == consents_before_second + 1;
+
+        // Negative control: an expired per-call Auth token is refused before policy, claim or replay.
+        control.clock_offset.fetch_add(25, Ordering::SeqCst);
+        let expired_retry = api.send(&post_at(
+            &replacement_completing,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            control.now(),
+        )?)?;
+        t.expired_per_call_status = expired_retry.status().as_u16();
+        t.expired_per_call_error = expired_retry
+            .headers()
+            .get("signature-error")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+
+        // 2. 202 release-gating: class token expires during release approval,
+        //    original pending URL is refused, re-requested call applies recorded
+        //    release approval once, and an expired approval/token releases nothing.
+        *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, true, control.clone())?);
+        control.next_class_lifetime.store(5, Ordering::SeqCst);
+        let short_release_class =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let short_release_holder = agent.with_token(short_release_class.clone())?;
+        let runs = || control.query_runs.load(Ordering::SeqCst);
+        let old_held = api.send(&post_at(
+            &short_release_holder,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        // The held r-1 response is this computation, whose sequence is `original_runs`.
+        let original_runs = runs();
+        let old_location = old_held.headers()["location"].to_str()?.to_owned();
+        let old_release_token = challenge(&old_held)?;
+        agent.verify_r3_proposal_challenge(
+            &old_release_token,
+            RECORDS,
+            PS,
+            &short_release_class,
+            &trust,
+            control.now(),
+        )?;
+        control.advance_on_approval.store(6, Ordering::SeqCst);
+        control.next_proposal_lifetime.store(20, Ordering::SeqCst);
+        let release_expired = approve(
+            &agent,
+            &ps_tls,
+            &old_release_token,
+            &short_release_class,
+            &control,
+        )?;
+        t.release_expired_presented_status = release_expired.status().as_u16();
+        t.release_expired_presented_error =
+            member(&release_expired, "error").unwrap_or_default();
+
+        let refreshed_release_class =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let refreshed_release_holder = agent.with_token(refreshed_release_class.clone())?;
+
+        // Negative control: polling the original pending URL with the expired or refreshed class token.
+        let mut poll_old_expired = get(&old_location)?;
+        short_release_holder.sign(&mut poll_old_expired, control.now())?;
+        t.release_old_pending_expired_class_status =
+            api.send(&poll_old_expired)?.status().as_u16();
+        let mut poll_old_refreshed = get(&old_location)?;
+        refreshed_release_holder.sign(&mut poll_old_refreshed, control.now())?;
+        t.release_old_pending_refreshed_class_status =
+            api.send(&poll_old_refreshed)?.status().as_u16();
+
+        // Negative control: changed parameters while the r-1 response is held are a
+        // fresh challenge that runs once; release consent refuses r-2.
+        let changed_before = runs();
+        let changed = api.send(&post_at(
+            &refreshed_release_holder,
+            &format!("{RECORDS}/records/query"),
+            R2,
+            control.now(),
+        )?)?;
+        t.release_changed_params_runs_delta = runs() - changed_before;
+        let changed_token = challenge(&changed)?;
+        t.release_changed_params_ps_status = approve(
+            &agent,
+            &ps_tls,
+            &changed_token,
+            &refreshed_release_class,
+            &control,
+        )?
+        .status()
+        .as_u16();
+
+        // Re-request the held query with the refreshed class token: the held
+        // response is proposed again without running the query; PS reuses
+        // the recorded release approval.
+        let replacement_before = runs();
+        let new_held = api.send(&post_at(
+            &refreshed_release_holder,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        t.release_runs_at_replacement_challenge = runs() - replacement_before;
+        let new_location = new_held.headers()["location"].to_str()?.to_owned();
+        let new_release_token = challenge(&new_held)?;
+        let new_release_proposal = agent.verify_r3_proposal_challenge(
+            &new_release_token,
+            RECORDS,
+            PS,
+            &refreshed_release_class,
+            &trust,
+            control.now(),
+        )?;
+        // Negative control: the class token at the new pending URL before approval.
+        let mut poll_new_early = get(&new_location)?;
+        refreshed_release_holder.sign(&mut poll_new_early, control.now())?;
+        t.release_poll_before_approval_status = api.send(&poll_new_early)?.status().as_u16();
+        let release_consents_before = control.consents.lock().unwrap().len();
+        let release_replacement = approve(
+            &agent,
+            &ps_tls,
+            &new_release_token,
+            &refreshed_release_class,
+            &control,
+        )?;
+        t.release_replacement_approval_status = release_replacement.status().as_u16();
+        t.release_replacement_consents_delta =
+            control.consents.lock().unwrap().len() - release_consents_before;
+        let release_replacement_grant = member(&release_replacement, "auth_token")
+            .ok_or("release replacement approval refused")?;
+        agent.verify_r3_per_call_delivery(
+            &release_replacement_grant,
+            RECORDS,
+            &new_release_proposal,
+            &refreshed_release_class,
+            &registry,
+            &trust,
+            control.now(),
+        )?;
+        let release_completing = agent.with_token(release_replacement_grant)?;
+        let mut poll_old_with_new = get(&old_location)?;
+        release_completing.sign(&mut poll_old_with_new, control.now())?;
+        t.release_old_pending_with_replacement_status =
+            api.send(&poll_old_with_new)?.status().as_u16();
+
+        let runs_before_poll = control.query_runs.load(Ordering::SeqCst);
+        let mut poll_new = get(&new_location)?;
+        release_completing.sign(&mut poll_new, control.now())?;
+        let release_first = api.send(&poll_new)?;
+        t.release_replacement_status = release_first.status().as_u16();
+        let mut poll_new_again = get(&new_location)?;
+        release_completing.sign(&mut poll_new_again, control.now())?;
+        let release_replay = api.send(&poll_new_again)?;
+        t.release_replacement_replay_status = release_replay.status().as_u16();
+        t.release_replacement_replay_matches = release_replay.body() == release_first.body();
+        t.release_runs_after_completion =
+            control.query_runs.load(Ordering::SeqCst) - runs_before_poll;
+        t.release_replacement_body_matches_original =
+            query_run_seq(&release_first) == Some(original_runs);
+        t.release_runs_since_original_challenge =
+            runs() - original_runs - t.release_changed_params_runs_delta;
+
+        // Negative control: after the release per-call Auth token expires, polling is 401 expired_jwt.
+        control.clock_offset.fetch_add(25, Ordering::SeqCst);
+        let mut poll_expired = get(&new_location)?;
+        release_completing.sign(&mut poll_expired, control.now())?;
+        let expired_poll_response = api.send(&poll_expired)?;
+        t.release_expired_token_status = expired_poll_response.status().as_u16();
+        t.release_expired_token_error = expired_poll_response
+            .headers()
+            .get("signature-error")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+
+        // Negative control: a recorded approval whose own lifetime expires before replacement
+        // is evicted and does not silently authorize disclosure without calling consent again.
+        control.next_class_lifetime.store(5, Ordering::SeqCst);
+        let short_class_3 =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let short_holder_3 = agent.with_token(short_class_3.clone())?;
+        let held_3 = api.send(&post_at(
+            &short_holder_3,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        let token_3 = challenge(&held_3)?;
+        control.advance_on_approval.store(6, Ordering::SeqCst);
+        control.next_proposal_lifetime.store(10, Ordering::SeqCst);
+        let _ = approve(&agent, &ps_tls, &token_3, &short_class_3, &control)?;
+        // Advance past the recorded approval's 10-second lifetime before submitting replacement.
+        control.clock_offset.fetch_add(15, Ordering::SeqCst);
+        let fresh_class_3 =
+            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let fresh_holder_3 = agent.with_token(fresh_class_3.clone())?;
+        let reuse_before = runs();
+        let held_4 = api.send(&post_at(
+            &fresh_holder_3,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        // The held response outlives the recorded approval and is reused.
+        t.release_expired_approval_reuse_runs_delta = runs() - reuse_before;
+        let token_4 = challenge(&held_4)?;
+        let before_expired_recorded = control.consents.lock().unwrap().len();
+        let _ = approve(&agent, &ps_tls, &token_4, &fresh_class_3, &control)?;
+        t.expired_recorded_approval_reprompted =
+            control.consents.lock().unwrap().len() == before_expired_recorded + 1;
+
+        // Negative control: past the held response's horizon a re-request is a
+        // fresh challenge that runs once, and release consent is asked again.
+        control.clock_offset.fetch_add(301, Ordering::SeqCst);
+        let expired_held_before = runs();
+        let held_5 = api.send(&post_at(
+            &fresh_holder_3,
+            &format!("{RECORDS}/records/query"),
+            R1,
+            control.now(),
+        )?)?;
+        t.release_expired_held_runs_delta = runs() - expired_held_before;
+        let token_5 = challenge(&held_5)?;
+        let before_expired_held = control.consents.lock().unwrap().len();
+        let _ = approve(&agent, &ps_tls, &token_5, &fresh_class_3, &control)?;
+        t.release_expired_held_reprompted =
+            control.consents.lock().unwrap().len() == before_expired_held + 1;
+    }
+
     let release_case = matches!(
         case,
         Some(AdmissionCase::ReleaseRevocation | AdmissionCase::ReleaseClaimRevocation)
@@ -1373,7 +2116,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             now(),
         )?;
         let grant = member(
-            &approve(&agent, &ps_tls, &proposal_token, &class)?,
+            &approve(&agent, &ps_tls, &proposal_token, &class, &control)?,
             "auth_token",
         )
         .ok_or("revocation-control approval refused")?;
@@ -1461,4 +2204,107 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     t.audit_records = audit.0.lock().map_err(|_| "audit lock poisoned")?.len();
     let _ = fs::remove_dir_all(&root);
     Ok(t)
+}
+
+#[cfg(test)]
+fn custody_record(uri: &str, pending: &str, body: &[u8]) -> R3ProposalRecord {
+    R3ProposalRecord {
+        reference: Reference::new(uri, digest(uri.as_bytes())).unwrap(),
+        exact_json: b"{}".to_vec(),
+        person_server: "https://ps.example".into(),
+        auth_token_issuer: "https://ps.example".into(),
+        resource_token_jti: pending.into(),
+        resource_token: "token".into(),
+        class_reference: Reference::new("https://records.example/r3/c.1", digest(b"class")).unwrap(),
+        presented_jti: "ps-1".into(),
+        subject: "subject".into(),
+        agent_jkt: "jkt".into(),
+        tenant: None,
+        account: None,
+        scope: None,
+        issued_at: 1_000,
+        expires_at: 1_005,
+        held: Some(R3HeldRequest {
+            pending_id: pending.into(),
+            method: "POST".into(),
+            uri: "https://records.example/records/query".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }),
+        released: Some(R3CallResult {
+            status: 200,
+            content_type: None,
+            body: body.to_vec(),
+        }),
+        release_until: Some(1_300),
+        supersedes: None,
+    }
+}
+
+#[cfg(test)]
+fn custody_store(name: &str) -> (PathBuf, FileCalls) {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-r3-supersede-{name}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let calls = FileCalls(root.clone(), Mutex::new(()), Arc::new(AdmissionControl::default()));
+    (root, calls)
+}
+
+#[test]
+fn supersede_keeps_the_prior_when_the_tombstone_cannot_be_written() {
+    let (root, calls) = custody_store("fail");
+    let prior = custody_record("https://records.example/r3/p.prior", "pend-prior", b"run-1");
+    let successor = custody_record("https://records.example/r3/p.next", "pend-next", b"run-1");
+    calls.commit(&prior).unwrap();
+    calls.2.fail_supersede_tombstone.store(true, Ordering::SeqCst);
+    assert!(calls.supersede(prior.reference.uri(), &successor, 1_100).is_err());
+    assert!(!calls.claim_path(prior.reference.uri()).exists());
+    assert!(!calls.record_path(successor.reference.uri()).exists());
+    let held = calls.held_releases("jkt", "subject", 1_100).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].reference.uri(), prior.reference.uri());
+    assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    // The same retry then retires the original without recomputing its bytes.
+    assert!(calls.supersede(prior.reference.uri(), &successor, 1_100).is_ok());
+    let held = calls.held_releases("jkt", "subject", 1_100).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].reference.uri(), successor.reference.uri());
+    assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn concurrent_supersede_leaves_one_successor_and_the_original_bytes() {
+    let (root, calls) = custody_store("race");
+    let prior = custody_record("https://records.example/r3/p.prior", "pend-prior", b"run-1");
+    calls.commit(&prior).unwrap();
+    let store = Arc::new(calls);
+    let mut handles = Vec::new();
+    for name in ["a", "b"] {
+        let store = store.clone();
+        let prior_uri = prior.reference.uri().to_owned();
+        let successor = custody_record(
+            &format!("https://records.example/r3/p.{name}"),
+            &format!("pend-{name}"),
+            b"run-1",
+        );
+        handles.push(thread::spawn(move || {
+            store.supersede(&prior_uri, &successor, 1_100)
+        }));
+    }
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|r| r.is_err()).count(), 1);
+    assert!(store.claim_path(prior.reference.uri()).exists());
+    let held = store.held_releases("jkt", "subject", 1_100).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    assert_ne!(held[0].reference.uri(), prior.reference.uri());
+    let _ = fs::remove_dir_all(root);
 }

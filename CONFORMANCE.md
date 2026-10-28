@@ -206,6 +206,18 @@ The release profile is202-only and unmetered. The host must enforce the callback
 side-effect-free contract; durable crash recovery and budget composition remain
 unqualified.
 
+`R3PerCallConfig::held_result_lifetime` is host policy, in seconds. It is not
+extended when a refreshed class token re-requests the call, and it is not a
+draft promise. The resource reuses the held bytes only while `release_until`
+is still ahead, the prior proposal token has expired, and the new class token
+has a different `jti`. A still-live challenge is not retired by a same-token
+duplicate or by another call under that token. After `release_until`, a
+matching call may run again. Draft `70d67375` has no invocation id and does
+not carry a digest of the result, so a Person Server recorded approval that
+is still live can release those new bytes when the proposal document is
+unchanged. `fresh_bytes_can_be_released_under_a_still_live_recorded_approval`
+keeps that visible. It is not a stronger consent binding.
+
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
 fetching, and definition adapters for MCP, OpenAPI, AsyncAPI, gRPC descriptor

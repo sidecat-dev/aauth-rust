@@ -18,6 +18,11 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 pub struct TlsServer {
     host: &'static str,
     address: SocketAddr,
+    #[allow(
+        dead_code,
+        reason = "Shared TLS helper; used by cross-language interoperability runner."
+    )]
+    cert_pem: String,
     client: Arc<ClientConfig>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -145,6 +150,7 @@ impl TlsServer {
         handler: impl Fn(Request<Vec<u8>>) -> Response<Vec<u8>> + Send + 'static,
     ) -> Result<Self> {
         let certified = rcgen::generate_simple_self_signed(vec![host.into()])?;
+        let cert_pem = certified.cert.pem();
         let cert = certified.cert.der().clone();
         let key = PrivatePkcs8KeyDer::from(certified.key_pair.serialize_der());
         let config = Arc::new(
@@ -184,10 +190,79 @@ impl TlsServer {
         Ok(Self {
             host,
             address,
+            cert_pem,
             client,
             stop,
             worker: Some(worker),
         })
+    }
+    #[allow(
+        dead_code,
+        reason = "Shared TLS helper; used by cross-language interoperability runner."
+    )]
+    pub fn address(&self) -> SocketAddr {
+        self.address
+    }
+    #[allow(
+        dead_code,
+        reason = "Shared TLS helper; used by cross-language interoperability runner."
+    )]
+    pub fn cert_pem(&self) -> &str {
+        &self.cert_pem
+    }
+    #[allow(
+        dead_code,
+        reason = "Shared TLS helper; used by cross-language interoperability runner."
+    )]
+    pub fn send_external(
+        address: SocketAddr,
+        host: &'static str,
+        cert_der: &[u8],
+        request: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>> {
+        if request.uri().scheme_str() != Some("https")
+            || request.uri().authority().map(|a| a.as_str()) != Some(host)
+        {
+            return Err("example egress admission refused target".into());
+        }
+        let mut roots = RootCertStore::empty();
+        roots.add(rustls::pki_types::CertificateDer::from(cert_der.to_vec()))?;
+        let config = Arc::new(client_config(roots)?);
+        let conn = rustls::ClientConnection::new(config, ServerName::try_from(host)?)?;
+        let mut stream = StreamOwned::new(conn, socket(address)?);
+        write!(
+            stream,
+            "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            request.method(),
+            request
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/"),
+            host,
+            request.body().len()
+        )?;
+        for (name, value) in request.headers() {
+            if name == "host" || name == "content-length" || name == "connection" {
+                continue;
+            }
+            write!(stream, "{}: {}\r\n", name, value.to_str()?)?;
+        }
+        stream.write_all(b"\r\n")?;
+        stream.write_all(request.body())?;
+        stream.flush()?;
+        let (bytes, end) = read_head(&mut stream)?;
+        let mut headers = [httparse::EMPTY_HEADER; 64];
+        let mut parsed = httparse::Response::new(&mut headers);
+        if !parsed.parse(&bytes)?.is_complete() {
+            return Err("incomplete HTTP response".into());
+        }
+        let body = read_body(&mut stream, &bytes, end, parsed.headers)?;
+        let mut builder = Response::builder().status(parsed.code.ok_or("missing status")?);
+        for h in parsed.headers {
+            builder = builder.header(h.name, h.value)
+        }
+        Ok(builder.body(body)?)
     }
     fn send_using(
         &self,

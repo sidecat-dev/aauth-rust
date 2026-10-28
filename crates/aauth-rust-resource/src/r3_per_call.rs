@@ -16,6 +16,10 @@
 //! proposal then carries `result` and a release `display`, and the computed
 //! response is committed with the record. Completion releases that stored
 //! response once to the first exact per-call token; the host executes nothing.
+//! A re-requested held call (for example after the presented class token
+//! expired during approval) is proposed again from that custody: the stored
+//! proposal bytes and response move to the new challenge, the prior record is
+//! retired, and the call does not run again.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -35,6 +39,9 @@ use crate::ps_authorization::{
 };
 
 const PERSON_DOCUMENT: &str = "aauth-person.json";
+/// Ceiling on a proposal Resource token's lifetime, and the horizon of a held
+/// release-gated response from the challenge that computed it.
+const PROPOSAL_LIFETIME: i64 = 300;
 
 /// Host extraction of one call's concrete parameter values.
 ///
@@ -157,6 +164,15 @@ pub struct R3ProposalRecord {
     /// Release gating: the response computed before approval, present exactly
     /// when the proposal carries `result`. Confidential until released.
     pub released: Option<R3CallResult>,
+    /// Release gating: the instant from which the held `released` response may
+    /// no longer be proposed or released. Set once, when the response is
+    /// computed, to `issued_at` plus the resource's `held_result_lifetime`,
+    /// and inherited unchanged by every replacement. `Some` exactly when
+    /// `released` is. This is resource policy, not a protocol claim.
+    pub release_until: Option<i64>,
+    /// URI of the unclaimed held release this record retired, when it was
+    /// issued for a re-requested call. Audit lineage only.
+    pub supersedes: Option<String>,
 }
 
 /// The exact Auth token claiming one proposal.
@@ -213,6 +229,11 @@ pub enum R3Claim {
 /// result only under the current fence and returns what is stored. Any error
 /// other than `Conflict` may have taken effect; the Resource then executes
 /// nothing. A volatile map does not satisfy this contract across restart.
+///
+/// Release gating adds `held_releases`, which lists the held responses a
+/// re-requested call may be answered from, and `supersede`, which retires one
+/// of them and creates its successor in one step. A retired record is never
+/// claimed again: every later `claim` on it is [`R3Claim::DifferentToken`].
 pub trait R3CallStore: Send + Sync {
     /// Create the record before its Resource token becomes observable.
     ///
@@ -245,6 +266,35 @@ pub trait R3CallStore: Send + Sync {
         fence: &str,
         result: &R3CallResult,
     ) -> Result<R3CallResult, R3StoreError>;
+    /// Release-gated records held for `agent_jkt` and `subject` that are
+    /// unclaimed, not superseded, and whose `release_until` is after `now`.
+    /// Omitting a record only causes a fresh computation; a claimed or
+    /// superseded record returned here is refused by `supersede`.
+    ///
+    /// # Errors
+    /// Returns [`R3StoreError::Unavailable`] when storage cannot answer.
+    fn held_releases(
+        &self,
+        agent_jkt: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<Vec<R3ProposalRecord>, R3StoreError>;
+    /// Atomically retire the unclaimed held release at `prior_uri`, so that
+    /// every later `claim` on it returns [`R3Claim::DifferentToken`], and
+    /// create `record` as `commit` does.
+    ///
+    /// # Errors
+    /// [`R3StoreError::Conflict`], with nothing changed, when the prior record
+    /// is absent, holds no release, is claimed, superseded or past its
+    /// `release_until` at `now`, or when `record` conflicts as for `commit`.
+    /// Any other error may have taken effect; the Resource then releases
+    /// nothing for this challenge.
+    fn supersede(
+        &self,
+        prior_uri: &str,
+        record: &R3ProposalRecord,
+        now: i64,
+    ) -> Result<(), R3StoreError>;
 }
 
 /// Host configuration for per-call proposals.
@@ -261,6 +311,11 @@ pub struct R3PerCallConfig {
     /// Execute side-effect-free calls before approval and seek release
     /// instead. Requires `hold`; `None` always seeks execution approval.
     pub release: Option<BoxedR3Release>,
+    /// How long, in seconds, a held release result may be proposed again or
+    /// released. Resource policy, chosen by the host. It is not extended when
+    /// a refreshed class token re-requests the call, and it is not a promise
+    /// of the R3 draft. Zero refuses reuse immediately.
+    pub held_result_lifetime: i64,
 }
 
 /// One per-call completion, carried on the [`R3Grant`] the host receives.
@@ -272,6 +327,9 @@ pub(super) struct R3Completion {
     pub(super) held: Option<Request<Vec<u8>>>,
     /// Release gating: retained and answered at claim; never reaches the host.
     pub(super) released: Option<R3CallResult>,
+    /// Held-result horizon copied from the proposal record. Completion refuses
+    /// at this instant even when the per-call Auth token is still unexpired.
+    pub(super) release_until: Option<i64>,
 }
 
 fn proposal_uri(
@@ -348,6 +406,71 @@ fn rebuild(held: &R3HeldRequest) -> Result<Request<Vec<u8>>, ()> {
         builder = builder.header(name.as_str(), value.as_slice());
     }
     builder.body(held.body.clone()).map_err(|_| ())
+}
+
+/// The lineage of a re-requested call, from its class token and class record.
+struct CallerLineage<'a> {
+    person_server: &'a str,
+    auth_token_issuer: &'a str,
+    subject: &'a str,
+    tenant: Option<&'a str>,
+    agent_jkt: &'a str,
+    account: Option<&'a str>,
+    scope: Option<&'a str>,
+    /// Class document digest. A refreshed class token names a new class URI
+    /// for the same document, so the URI is not compared.
+    class_digest: &'a str,
+    /// `jti` of the class Auth token presented on this call.
+    presented_jti: &'a str,
+}
+
+/// Whether `prior` is a held release this caller may be answered from at
+/// `now`: a computed, held response within its horizon, issued for the same
+/// Person Server, issuer, subject, tenant, holder, account, scope and class
+/// document. The proposal token must already be expired, and the presented
+/// class token must be a different `jti`, so a live challenge is not retired
+/// by a same-token duplicate or a second call under that token. The stored
+/// proposal is compared separately. After the proposal token has expired, a
+/// new class token plus the same operation is not distinguishable on the wire
+/// from a fresh intentional call.
+fn held_release_matches(prior: &R3ProposalRecord, caller: &CallerLineage<'_>, now: i64) -> bool {
+    prior.released.is_some()
+        && prior.held.is_some()
+        && prior.release_until.is_some_and(|until| now < until)
+        && prior.expires_at <= now
+        && prior.presented_jti != caller.presented_jti
+        && prior.person_server == caller.person_server
+        && prior.auth_token_issuer == caller.auth_token_issuer
+        && prior.subject == caller.subject
+        && prior.tenant.as_deref() == caller.tenant
+        && prior.agent_jkt == caller.agent_jkt
+        && prior.account.as_deref() == caller.account
+        && prior.scope.as_deref() == caller.scope
+        && prior.class_reference.digest() == caller.class_digest
+}
+
+/// Whether a held release's stored proposal names exactly this call: the same
+/// operation, parameters completion would accept, and the token's account.
+fn held_proposal_matches(
+    proposal: &Proposal,
+    operation: &Operation,
+    presented: &BTreeMap<String, PresentedParameter>,
+    account: Option<&str>,
+) -> bool {
+    matches!(proposal.operation().equal(operation), Ok(true))
+        && matches!(proposal.parameters().matches(presented), Ok(true))
+        && validate_proposal_account(proposal, account).is_ok()
+}
+
+/// What one challenge publishes: a fresh proposal, or a held release proposed
+/// again for a re-requested call.
+struct Publication {
+    exact: Vec<u8>,
+    expires_at: i64,
+    released: Option<R3CallResult>,
+    release_until: Option<i64>,
+    /// The unclaimed held release this challenge retires.
+    supersedes: Option<String>,
 }
 
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
@@ -430,6 +553,62 @@ where
         let Ok(presented) = (per_call.present)(request, operation) else {
             return AuthDecision::InternalError;
         };
+        let Ok(agent_jkt) = c.cnf.jwk.thumbprint() else {
+            return AuthDecision::InternalError;
+        };
+        // Release gating: a re-requested call whose response is already held
+        // is proposed again from custody and never runs again, so the approval
+        // covers the bytes that exist. Uncertainty answers nothing; it never
+        // falls back to running the call.
+        if per_call.hold && per_call.release.is_some() {
+            let Ok(held) = per_call.calls.held_releases(&agent_jkt, &c.sub, now) else {
+                return AuthDecision::InternalError;
+            };
+            let caller = CallerLineage {
+                person_server: &c.ps,
+                auth_token_issuer: &c.iss,
+                subject: &c.sub,
+                tenant: c.tenant.as_deref(),
+                agent_jkt: &agent_jkt,
+                account: c.account.as_deref(),
+                scope: c.scope.as_deref(),
+                class_digest: class_reference.digest(),
+                presented_jti: &c.jti,
+            };
+            for prior in held {
+                if !held_release_matches(&prior, &caller, now) {
+                    continue;
+                }
+                let Ok(proposal) = self.retained_proposal(profile, &prior, prior.reference.uri())
+                else {
+                    return AuthDecision::InternalError;
+                };
+                if !held_proposal_matches(&proposal, operation, &presented, c.account.as_deref()) {
+                    continue;
+                }
+                let Some(release_until) = prior.release_until else {
+                    return AuthDecision::InternalError;
+                };
+                let publication = Publication {
+                    expires_at: now.saturating_add(PROPOSAL_LIFETIME).min(c.exp),
+                    supersedes: Some(prior.reference.uri().to_owned()),
+                    exact: prior.exact_json,
+                    released: prior.released,
+                    release_until: Some(release_until),
+                };
+                return self.publish_proposal(
+                    profile,
+                    per_call,
+                    token,
+                    class_reference,
+                    request,
+                    &agent_jkt,
+                    now,
+                    challenge_jti,
+                    publication,
+                );
+            }
+        }
         let Ok(description) = (per_call.describe)(operation, &presented, c.account.as_deref())
         else {
             return AuthDecision::InternalError;
@@ -465,13 +644,50 @@ where
         let Ok(exact) = serde_json::to_vec(&proposal) else {
             return AuthDecision::InternalError;
         };
-        let Ok(agent_jkt) = c.cnf.jwk.thumbprint() else {
-            return AuthDecision::InternalError;
+        // The held response's horizon starts here and is never extended.
+        // It is the host retention policy, not the proposal-token lifetime.
+        let horizon = now.saturating_add(per_call.held_result_lifetime.max(0));
+        let publication = Publication {
+            exact,
+            expires_at: now.saturating_add(PROPOSAL_LIFETIME).min(c.exp),
+            release_until: release.is_some().then_some(horizon),
+            released: release.map(|release| snapshot(&release.response)),
+            supersedes: None,
         };
-        let expires_at = now.saturating_add(300).min(c.exp);
-        if expires_at <= now {
-            return forbidden;
+        self.publish_proposal(
+            profile,
+            per_call,
+            token,
+            class_reference,
+            request,
+            &agent_jkt,
+            now,
+            challenge_jti,
+            publication,
+        )
+    }
+
+    /// Mint, commit and release one proposal challenge. A publication that
+    /// supersedes a held release retires it in the same store step.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_proposal(
+        &self,
+        profile: &R3Profile,
+        per_call: &R3PerCallConfig,
+        token: &VerifiedAuthToken,
+        class_reference: &Reference,
+        request: &Request<Vec<u8>>,
+        agent_jkt: &str,
+        now: i64,
+        challenge_jti: &str,
+        publication: Publication,
+    ) -> AuthDecision<O::Context> {
+        if publication.expires_at <= now {
+            return AuthDecision::Forbidden {
+                budget_header: None,
+            };
         }
+        let c = token.claims();
         let claims = ResourceClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-resource.json".into(),
@@ -480,9 +696,9 @@ where
             sub: c.sub.clone(),
             jti: challenge_jti.into(),
             presented_jti: c.jti.clone(),
-            agent_jkt: agent_jkt.clone(),
+            agent_jkt: agent_jkt.to_owned(),
             iat: now,
-            exp: expires_at,
+            exp: publication.expires_at,
             scope: c.scope.clone(),
             account: c.account.clone(),
             login_hint: None,
@@ -493,7 +709,7 @@ where
         };
         let uri = proposal_uri(
             &self.document_origin(),
-            &digest(&exact),
+            &digest(&publication.exact),
             &claims.ps,
             &claims.aud,
             &claims.jti,
@@ -504,14 +720,14 @@ where
             &self.config.kid,
             &claims,
             &uri,
-            &exact,
+            &publication.exact,
         ) else {
             return AuthDecision::InternalError;
         };
         let held = per_call.hold.then(|| held_request(request, challenge_jti));
         let record = R3ProposalRecord {
             reference,
-            exact_json: exact,
+            exact_json: publication.exact,
             person_server: claims.ps.clone(),
             auth_token_issuer: claims.aud.clone(),
             resource_token_jti: claims.jti.clone(),
@@ -519,18 +735,25 @@ where
             class_reference: class_reference.clone(),
             presented_jti: claims.presented_jti.clone(),
             subject: claims.sub.clone(),
-            agent_jkt,
+            agent_jkt: claims.agent_jkt.clone(),
             tenant: claims.tenant.clone(),
             account: claims.account.clone(),
             scope: claims.scope.clone(),
             issued_at: claims.iat,
             expires_at: claims.exp,
             held,
-            released: release.map(|release| snapshot(&release.response)),
+            released: publication.released,
+            release_until: publication.release_until,
+            supersedes: publication.supersedes,
         };
         // Committed before the challenge is observable; any failure withholds it
-        // and discards a computed result unreleased.
-        if per_call.calls.commit(&record).is_err() {
+        // and discards a computed result unreleased. A successor retires its
+        // prior in the same store step; a failure there never recomputes.
+        let committed = match record.supersedes.as_deref() {
+            Some(prior) => per_call.calls.supersede(prior, &record, now),
+            None => per_call.calls.commit(&record),
+        };
+        if committed.is_err() {
             return AuthDecision::InternalError;
         }
         if per_call.hold {
@@ -573,9 +796,11 @@ where
             .registry
             .parse_referenced_proposal(&record.reference, &record.exact_json)
             .map_err(|_| ())?;
-        // `result` exactly when a computed response is held for a 202 release.
+        // `result` exactly when a computed response is held for a 202 release,
+        // and a held response always carries its horizon.
         if proposal.result().is_some() != record.released.is_some()
             || (record.released.is_some() && record.held.is_none())
+            || record.release_until.is_some() != record.released.is_some()
         {
             return Err(());
         }
@@ -653,6 +878,11 @@ where
             Ok(None) => return Err(forbidden()),
             Err(_) => return Err(AuthDecision::InternalError),
         };
+        // The held-result horizon is resource policy. It refuses completion
+        // even when the per-call Auth token's own `exp` is still in the future.
+        if record.release_until.is_some_and(|until| now >= until) {
+            return Err(forbidden());
+        }
         let proposal = self
             .retained_proposal(profile, &record, record.reference.uri())
             .map_err(|()| AuthDecision::InternalError)?;
@@ -720,6 +950,7 @@ where
                 fence: None,
                 held,
                 released: record.released.clone(),
+                release_until: record.release_until,
             }),
         })
     }
@@ -756,6 +987,13 @@ where
         else {
             return Err(AuthDecision::InternalError);
         };
+        if completion.token.retain_until <= now
+            || completion.release_until.is_some_and(|until| now >= until)
+        {
+            return Err(AuthDecision::Forbidden {
+                budget_header: None,
+            });
+        }
         let outcome = match per_call
             .calls
             .claim(&completion.uri, &completion.token, now)
@@ -805,5 +1043,202 @@ impl R3Grant {
     /// The original held request under `202`, which is what the host executes.
     pub fn held_request(&self) -> Option<&Request<Vec<u8>>> {
         self.completion.as_ref()?.held.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aauth_rust_r3::{McpCodec, Parameter};
+
+    const CLASS: &[u8] = b"class document";
+
+    fn operation(tool: &str) -> Operation {
+        let vocabulary = McpCodec::vocabulary().unwrap();
+        Operation::new(&vocabulary, format!(r#"{{"tool":"{tool}"}}"#).as_bytes()).unwrap()
+    }
+
+    fn presented(record: &str) -> BTreeMap<String, PresentedParameter> {
+        BTreeMap::from([(
+            "record".to_owned(),
+            PresentedParameter::inline(format!(r#""{record}""#).as_bytes()).unwrap(),
+        )])
+    }
+
+    fn stored_proposal(record: &str, account: Option<&str>) -> Proposal {
+        let parameters = Parameters::new([(
+            "record".to_owned(),
+            Parameter::inline(format!(r#""{record}""#).as_bytes()).unwrap(),
+        )])
+        .unwrap();
+        let result = ProposalResult::new(br#"{"records":1}"#).unwrap();
+        Proposal::new(
+            &operation("records.query"),
+            &parameters,
+            ProposalOptions {
+                account,
+                result: Some(&result),
+                display: None,
+            },
+        )
+        .unwrap()
+    }
+
+    fn held_release() -> R3ProposalRecord {
+        R3ProposalRecord {
+            reference: Reference::new("https://records.example/r3/p.prior", digest(b"proposal"))
+                .unwrap(),
+            exact_json: b"{}".to_vec(),
+            person_server: "https://ps.example".into(),
+            auth_token_issuer: "https://ps.example".into(),
+            resource_token_jti: "rid-1".into(),
+            resource_token: "proposal-token".into(),
+            class_reference: Reference::new("https://records.example/r3/c.short", digest(CLASS))
+                .unwrap(),
+            presented_jti: "ps-1".into(),
+            subject: "subject".into(),
+            agent_jkt: "jkt".into(),
+            tenant: Some("tenant".into()),
+            account: Some("account".into()),
+            scope: Some("records.read".into()),
+            issued_at: 1_000,
+            expires_at: 1_005,
+            held: Some(R3HeldRequest {
+                pending_id: "rid-1".into(),
+                method: "POST".into(),
+                uri: "https://records.example/records/query".into(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            }),
+            released: Some(R3CallResult {
+                status: 200,
+                content_type: None,
+                body: b"run-1".to_vec(),
+            }),
+            release_until: Some(1_300),
+            supersedes: None,
+        }
+    }
+
+    fn caller(class_digest: &str) -> CallerLineage<'_> {
+        CallerLineage {
+            person_server: "https://ps.example",
+            auth_token_issuer: "https://ps.example",
+            subject: "subject",
+            tenant: Some("tenant"),
+            agent_jkt: "jkt",
+            account: Some("account"),
+            scope: Some("records.read"),
+            class_digest,
+            presented_jti: "ps-2",
+        }
+    }
+
+    #[test]
+    fn held_release_matches_only_its_own_lineage_within_its_horizon() {
+        let prior = held_release();
+        let class = digest(CLASS);
+        // The proposal token expired with the short class token (1_005); the
+        // held response is still within its own horizon, and the caller presents
+        // a different class-token jti.
+        assert!(held_release_matches(&prior, &caller(&class), 1_006));
+        assert!(held_release_matches(&prior, &caller(&class), 1_299));
+        // A live proposal token is not retired, even for the same descriptor.
+        let mut live = prior.clone();
+        live.expires_at = 2_000;
+        assert!(!held_release_matches(&live, &caller(&class), 1_006));
+        // The same class token is not a replacement refresh.
+        let mut same_token = caller(&class);
+        same_token.presented_jti = "ps-1";
+        assert!(!held_release_matches(&prior, &same_token, 1_006));
+        // Expired held result: the horizon is exclusive.
+        assert!(!held_release_matches(&prior, &caller(&class), 1_300));
+        assert!(!held_release_matches(&prior, &caller(&class), 1_301));
+        // Different holder, subject, tenant, account, scope, entitlement or
+        // class document digest.
+        let other_class = digest(b"another class document");
+        let negatives = [
+            CallerLineage {
+                agent_jkt: "other-jkt",
+                ..caller(&class)
+            },
+            CallerLineage {
+                subject: "other-subject",
+                ..caller(&class)
+            },
+            CallerLineage {
+                tenant: None,
+                ..caller(&class)
+            },
+            CallerLineage {
+                tenant: Some("other-tenant"),
+                ..caller(&class)
+            },
+            CallerLineage {
+                account: None,
+                ..caller(&class)
+            },
+            CallerLineage {
+                account: Some("other-account"),
+                ..caller(&class)
+            },
+            CallerLineage {
+                scope: None,
+                ..caller(&class)
+            },
+            CallerLineage {
+                scope: Some("records.read records.write"),
+                ..caller(&class)
+            },
+            CallerLineage {
+                person_server: "https://other-ps.example",
+                ..caller(&class)
+            },
+            CallerLineage {
+                auth_token_issuer: "https://other-ps.example",
+                ..caller(&class)
+            },
+            caller(&other_class),
+        ];
+        for negative in &negatives {
+            assert!(!held_release_matches(&prior, negative, 1_006));
+        }
+        // Only a computed, held response with its horizon qualifies.
+        for record in [
+            R3ProposalRecord {
+                released: None,
+                ..held_release()
+            },
+            R3ProposalRecord {
+                held: None,
+                ..held_release()
+            },
+            R3ProposalRecord {
+                release_until: None,
+                ..held_release()
+            },
+        ] {
+            assert!(!held_release_matches(&record, &caller(&class), 1_006));
+        }
+    }
+
+    #[test]
+    fn held_proposal_matches_only_the_same_operation_parameters_and_account() {
+        let query = operation("records.query");
+        let stored = stored_proposal("r-1", Some("account"));
+        assert!(held_proposal_matches(&stored, &query, &presented("r-1"), Some("account")));
+        // Changed parameters.
+        assert!(!held_proposal_matches(&stored, &query, &presented("r-2"), Some("account")));
+        assert!(!held_proposal_matches(&stored, &query, &BTreeMap::new(), Some("account")));
+        // Another operation.
+        assert!(!held_proposal_matches(
+            &stored,
+            &operation("records.delete"),
+            &presented("r-1"),
+            Some("account")
+        ));
+        // Account presence and value.
+        assert!(!held_proposal_matches(&stored, &query, &presented("r-1"), None));
+        assert!(!held_proposal_matches(&stored, &query, &presented("r-1"), Some("other-account")));
     }
 }
