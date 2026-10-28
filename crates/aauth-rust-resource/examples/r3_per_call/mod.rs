@@ -2238,6 +2238,29 @@ fn custody_record(uri: &str, pending: &str, body: &[u8]) -> R3ProposalRecord {
     }
 }
 
+#[test]
+fn reopen_reads_the_same_held_release_from_the_directory() {
+    let (root, calls) = custody_store("reopen");
+    let prior = custody_record(
+        "https://records.example/r3/p.reopen",
+        "pend-reopen",
+        b"run-1",
+    );
+    calls.commit(&prior).unwrap();
+    drop(calls);
+    let reopened = FileCalls(
+        root.clone(),
+        Mutex::new(()),
+        Arc::new(AdmissionControl::default()),
+    );
+    let loaded = reopened.load(prior.reference.uri()).unwrap().unwrap();
+    assert_eq!(loaded.released.as_ref().unwrap().body, b"run-1");
+    let held = reopened.held_releases("jkt", "subject", 1_100).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    let _ = fs::remove_dir_all(root);
+}
+
 #[cfg(test)]
 fn custody_store(name: &str) -> (PathBuf, FileCalls) {
     let root = std::env::temp_dir().join(format!(

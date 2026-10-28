@@ -203,8 +203,13 @@ revocation during claim preserves the consumed claim while withholding the
 result. The plain-Core control likewise refuses a token revoked during host
 policy, refuses its replay before another policy call, and admits a fresh token.
 The release profile is202-only and unmetered. The host must enforce the callback's
-side-effect-free contract; durable crash recovery and budget composition remain
-unqualified.
+side-effect-free contract. Budget composition remains unqualified.
+
+The example file store writes each proposal record, then synchronizes the
+directory on Unix. `reopen_reads_the_same_held_release_from_the_directory`
+drops that store value and opens another on the same directory; the held bytes
+are still there. That is not an operating-system restart, power loss, or a
+generic `R3CallStore` adapter. Those remain unqualified.
 
 `R3PerCallConfig::held_result_lifetime` is host policy, in seconds. It is not
 extended when a refreshed class token re-requests the call, and it is not a
