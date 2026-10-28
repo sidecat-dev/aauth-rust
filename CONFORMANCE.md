@@ -208,10 +208,24 @@ unqualified.
 
 The separate [R3 library](crates/aauth-rust-r3/README.md) now includes seven
 operation codecs, artifact/proposal validation, signed claims, bounded artifact
-fetching and MCP/OpenAPI/AsyncAPI definition adapters. Actual library consumers
-and Go/Rust exchanges have exercised those paths. This does not qualify role
-endpoints, discovery, consent, complete definition coverage or the normative
-R3 table. Application-specific formats remain application-owned.
+fetching, and definition adapters for MCP, OpenAPI, AsyncAPI, gRPC descriptor
+sets, WSDL 1.1, and OData CSDL 4.0. GraphQL introspection still supplies no
+operation identity. gRPC does not compile `.proto` text or dial reflection.
+OData metadata does not prove HTTP methods. Resource and Person Server R3
+paths already accept any registered snapshot; they do not grow a second
+vocabulary switch. A source test builds each new snapshot with that parser,
+asks the Resource to authorize both derived operations, and has the Person
+Server grant one of them. The Resource then admits that operation and refuses
+the other. The same permit and refusal also cross a loopback TLS HTTP/1.1
+client and server for each parser. Actual library consumers and Go/Rust
+exchanges have exercised the earlier MCP, OpenAPI, and AsyncAPI paths. The
+gRPC descriptor, self-contained WSDL 1.1, and OData CSDL 4.0 adapters
+and their Resource/Person Server snapshot integration passed the Linux
+workspace checks and loopback TLS permit/refusal journeys at `918cc366`.
+This evidence covers the tested definition profiles; complete schema coverage
+and cross-platform qualification are not claimed. This does not
+qualify role endpoints, discovery, consent, or the normative R3 table.
+Application-specific formats remain application-owned.
 
 ## One-level parent-mediated sub-agents
 

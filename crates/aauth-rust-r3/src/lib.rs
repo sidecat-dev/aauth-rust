@@ -4,9 +4,11 @@
 //! per-call proposals, operation access hints, authoritative definitions, and
 //! the R3 claims of Resource and Auth tokens. A host registers one codec per
 //! vocabulary; codecs for the seven standard vocabularies are included.
-//! Definition parsers derive MCP, OpenAPI and AsyncAPI operations. GraphQL
-//! introspection is refused because a schema alone supplies no operation
-//! identity; WSDL, OData and gRPC definitions are not parsed yet. A signed
+//! Definition parsers derive MCP, OpenAPI, AsyncAPI, gRPC descriptor, WSDL,
+//! and OData CSDL operations. OData metadata does not prove HTTP methods.
+//! GraphQL introspection is refused because a schema alone supplies no
+//! operation identity. gRPC refuses hosted `.proto` text and live reflection.
+//! A signed
 //! artifact fetcher uses a trusted host HTTPS adapter. This crate does not
 //! fetch a definition, decide policy, execute a call, or bind a token to a request.
 #![deny(missing_docs)]
@@ -24,11 +26,13 @@ mod error;
 mod fetch;
 mod grant;
 mod graphql_definition;
+mod grpc_definition;
 mod hints;
 mod issuance;
 mod json_schema;
 mod jsonvalue;
 mod mcp_definition;
+mod odata_definition;
 mod openapi_definition;
 mod proposal;
 mod reference;
@@ -36,6 +40,7 @@ mod standard;
 mod token;
 mod uri;
 mod vocabulary;
+mod wsdl_definition;
 
 pub use annotation::AnnotationEncoding;
 pub use artifact::{ArtifactKind, ReferencedArtifact};
@@ -59,9 +64,14 @@ pub use fetch::{
 };
 pub use grant::{Authorization, Grant};
 pub use graphql_definition::GraphQlIntrospectionSource;
+pub use grpc_definition::{
+    DescriptorSetSource, GrpcDefinitionSource, GrpcSourceKind, HostedProtoTextSource,
+    ServerReflectionSource,
+};
 pub use hints::{AccessMode, ExpectedAccess, OperationHints};
 pub use issuance::{IssuanceError, IssuanceRecord, IssuanceStore};
 pub use mcp_definition::{ToolsListPage, ToolsListSnapshot};
+pub use odata_definition::ODataMetadataSource;
 pub use openapi_definition::OpenApiDocumentSource;
 pub use proposal::{
     Parameter, ParameterDigest, Parameters, PresentedParameter, Proposal, ProposalDisplay,
@@ -80,6 +90,7 @@ pub use token::{
 };
 pub use uri::VocabularyUri;
 pub use vocabulary::{Codec, GrantedOperations, Operation, OperationSet, Registry, Vocabulary};
+pub use wsdl_definition::WsdlDocumentSource;
 
 #[cfg(test)]
 mod artifact_tests;
