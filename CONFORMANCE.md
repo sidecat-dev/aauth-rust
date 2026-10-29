@@ -239,6 +239,11 @@ without a commit. The same grant is then admitted in full: `cost=500` and
 answers `403 access_denied`. No audit row is written and the account book
 stays empty. The next offer still signs 500 under a cap of 800. Host3
 `aauth-wc07-completion-deny01` passed that refusal at `3b6883b`.
+`class_grant_outside_the_document_writes_no_audit_and_reserves_nothing`
+answers `500 server_error` when consent names operations the fetched
+document does not contain. No audit row is written and the account book
+stays empty. The next offer still signs 500 under a cap of 800. That
+refusal has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
