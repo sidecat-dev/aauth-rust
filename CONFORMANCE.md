@@ -227,8 +227,8 @@ and the next offer still signs 500 under a cap of 800. Host3
 `reserved_class_call_settles_below_the_hold` reserves the admitted maximum
 on a class call, then commits 200 of that hold. The field shows `cost=200`
 and `remaining=300`. A later call for 200 is admitted. A call for the full
-bound is `insufficient-budget` and does not run the tool. That settlement
-has not been run on Host3.
+bound is `insufficient-budget` and does not run the tool. Host3
+`aauth-wc07-completion-settle01` passed that settlement at `a9351fa`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
