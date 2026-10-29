@@ -39,6 +39,9 @@ mod r3_class;
 #[path = "r3_call_directory.rs"]
 mod r3_call_directory;
 pub use r3_call_directory::DirectoryCallStore;
+#[path = "r3_document_directory.rs"]
+mod r3_document_directory;
+pub use r3_document_directory::DirectoryDocumentStore;
 pub use r3_class::{
     BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, BoxedR3Release,
     R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,

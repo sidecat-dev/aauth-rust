@@ -459,6 +459,23 @@ reported invocation `adc137b154ce43c8b21e607839370ab4`. After the unit
 was collected, `systemctl show` reported `Result=success` and
 `ExecMainStatus=0`, and `InvocationID` was empty.
 
+`DirectoryDocumentStore` is the public class-document custody. `commit`
+writes the whole record to a temporary file, synchronizes it, and renames
+it. An exact repeat is accepted. A different record at the same URI is
+`Conflict` and leaves the stored bytes unchanged. An interrupted write
+returns before the rename, leaves the final name absent, and a retry can
+commit. A torn current file is `Unavailable`, not a missing document and
+not a recovered previous document. Documents are create-only. There is no
+previous file. `reopen_after_process_exit_loads_the_same_document` commits
+in the parent and loads that subject and body in the child. The child pid
+is not the parent pid.
+`directory_document_store_admits_the_class_after_process_exit` runs this
+store through the Resource. The first process issues one class approval
+and admits `/op/permit`. A second process opens the same directory,
+presents the same Auth token, and is admitted again. The child pid is not
+the parent pid. This is a process exit. It is not power loss. The example
+`FileDocuments` store stays private to the example.
+
 `r3-per-call-interop` pins `query-runs=2` and
 `proposal-err=invalid_resource_token`. The second query run is the
 release-retry challenge while the prior proposal token is still live.

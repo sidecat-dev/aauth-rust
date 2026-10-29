@@ -17,7 +17,7 @@ pub use ps_authorization::{
     R3DocumentRecord, R3DocumentStore, R3Grant, R3HostError, R3StoreError, R3Vocabulary,
 };
 pub use ps_authorization::{
-    BoxedR3Describe, BoxedR3Present, BoxedR3Release, DirectoryCallStore, R3CallDescription,
+    BoxedR3Describe, BoxedR3Present, BoxedR3Release, DirectoryCallStore, DirectoryDocumentStore, R3CallDescription,
     R3CallResult, R3CallStore,
     R3CallToken, R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord, R3Release,
 };
