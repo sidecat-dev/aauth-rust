@@ -1902,6 +1902,107 @@ fn dropping_a_class_hold_releases_the_grant() {
 }
 
 #[test]
+fn denied_class_consent_writes_no_audit_and_reserves_nothing() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let phase = Arc::new(AtomicUsize::new(0));
+    let denials = Arc::new(AtomicUsize::new(0));
+    let audits = Arc::new(AtomicUsize::new(0));
+    let policy_phase = Arc::clone(&phase);
+    let policy_denials = Arc::clone(&denials);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                if policy_phase.load(Ordering::SeqCst) == 0 {
+                    policy_denials.fetch_add(1, Ordering::SeqCst);
+                    return Err(PolicyError::Denied);
+                }
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(CountAudit(Arc::clone(&audits))),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let denied = exchange_budget_response(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-deny",
+    );
+    assert_eq!(denied.status(), 403, "{}", String::from_utf8_lossy(denied.body()));
+    assert_eq!(member(&denied, "error").as_deref(), Some("access_denied"));
+    assert!(member(&denied, "auth_token").is_none());
+    assert_eq!(denials.load(Ordering::SeqCst), 1);
+    assert_eq!(audits.load(Ordering::SeqCst), 0);
+    assert_eq!(ps.budget_accounted(), Some(0));
+    phase.store(1, Ordering::SeqCst);
+    let released = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-after-deny",
+    );
+    let amount = aauth_rust_core::AuthToken::parse(&released)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(amount, Some(500));
+    assert_eq!(audits.load(Ordering::SeqCst), 1);
+    assert_eq!(ps.budget_accounted(), Some(500));
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
@@ -2676,6 +2777,17 @@ fn signed_call_at(path: &str, token: &str, now: i64) -> Request<Vec<u8>> {
     )
     .unwrap();
     request
+}
+
+struct CountAudit(Arc<AtomicUsize>);
+impl aauth_rust_r3::IssuanceStore for CountAudit {
+    fn commit(
+        &self,
+        _: &aauth_rust_r3::IssuanceRecord,
+    ) -> Result<(), aauth_rust_r3::IssuanceError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 struct GatedAudit(Mutex<bool>);
