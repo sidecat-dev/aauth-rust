@@ -296,8 +296,8 @@ presentation returns that response. The store is process memory. Host3
 forbidden and does not receive the retained response. The original token
 still replays it. Host3 `aauth-wc07-completion-other01` passed that
 distinction at `6007318`. A completion that does not retain its result
-answers `500` on the next presentation. That unfinished call has not been
-run on Host3.
+answers `500` on the next presentation. Host3 `aauth-wc07-completion-unfinished01`
+passed that unfinished call at `22eeed4`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
