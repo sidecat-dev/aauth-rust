@@ -232,11 +232,12 @@ as_unreachable` and no Auth token is released. A proposal is presented with
 the person token, consented with proposal consent, and relayed the same way.
 Core consent is not used. The returned Auth token matches those proposal
 bytes. Declined proposal consent is `403` and does not call the access
-server. A token for a different proposal is refused. With deferred
-custody enabled, an access-server `202` or `402` for that class document or
-proposal is `500 server_error`. Consent and the access-server call still
-happen. The continuation store is not written, and the response has no Auth
-token. That refusal has not been run on Host3. A class Resource token may carry a budget offer: the PS verifies
+server. A token for a different proposal is refused. Host3
+`aauth-wc07-completion-federated02` passed the same qualification at
+`e60dbd5`, including deferred custody. An access-server `202` for the class
+document and `402` for the proposal are `500 server_error`. Consent and the
+access-server call still happen. The continuation store is not written, and
+the response has no Auth token. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against
