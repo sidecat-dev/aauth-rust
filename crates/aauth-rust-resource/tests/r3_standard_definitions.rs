@@ -1425,6 +1425,78 @@ fn later_class_grant_is_narrowed_to_the_remaining_cap() {
 }
 
 #[test]
+fn class_budget_grant_stops_at_period_end() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(
+        IssuerPolicy::capped(
+            2_000_000,
+            vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+        )
+        .until(NOW + 120),
+    )
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-period");
+    let claims = aauth_rust_core::AuthToken::parse(&auth)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    assert_eq!(claims.exp, NOW + 120, "period_end caps a 600-second decision");
+    assert_eq!(
+        claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        Some(500)
+    );
+}
+
+#[test]
 fn budgets_before_r3_still_exchange_and_admit() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, calls, _) = resource_for(&profile, true);
