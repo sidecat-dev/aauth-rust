@@ -298,6 +298,11 @@ still replays it. Host3 `aauth-wc07-completion-other01` passed that
 distinction at `6007318`. A completion that does not retain its result
 answers `500` on the next presentation. Host3 `aauth-wc07-completion-unfinished01`
 passed that unfinished call at `22eeed4`.
+`a_held_per_call_is_accepted_and_completes_only_at_its_pending_url`
+answers `202` and stores the held call. The same approval on the mapped
+route is forbidden. Completion at the pending URL retains the response,
+and the next presentation there returns it. That hold has not been run on
+Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed

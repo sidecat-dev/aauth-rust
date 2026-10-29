@@ -1174,8 +1174,13 @@ impl R3CallStore for SingleUse {
     fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
         Ok(self.records.lock().unwrap().get(uri).cloned())
     }
-    fn load_pending(&self, _: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
-        Ok(None)
+    fn load_pending(&self, id: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self.records.lock().unwrap().values().find(|record| {
+            record
+                .held
+                .as_ref()
+                .is_some_and(|held| held.pending_id == id)
+        }).cloned())
     }
     fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
         if self.load(uri)?.is_none() {
@@ -3598,6 +3603,205 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
     ) {
         AuthDecision::InternalError => {}
         other => panic!("second presentation of an unretained call: {other:?}"),
+    }
+}
+
+#[test]
+fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
+    let profile = odata_profile();
+    let documents = Arc::new(Documents::default());
+    let calls = Arc::new(SingleUse {
+        records: Mutex::new(BTreeMap::new()),
+        calls: Mutex::new(BTreeMap::new()),
+    });
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let permit_for_map = permit.clone();
+    let per_call_for_map = per_call.clone();
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok(match request.uri().path() {
+            "/op/permit" => Some(permit_for_map.clone()),
+            "/op/refuse" => Some(per_call_for_map.clone()),
+            _ => None,
+        })
+    });
+    let resource = Arc::new(
+        PsAuthorizationResource::new(
+            PsAuthorizationConfig {
+                issuer: RESOURCE.into(),
+                signed_origin: RESOURCE.into(),
+                kid: "resource-1".into(),
+                signing_key: SigningKey::from_seed([4; 32]),
+                scopes: vec!["records.read".into()],
+            },
+            keys(),
+            Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
+                as BoxedAuthAdmissionPolicy<String>,
+        )
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(R3Config {
+            registry: standard_registry().unwrap(),
+            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
+                .unwrap(),
+            vocabularies: vec![R3Vocabulary {
+                definition: profile.snapshot.clone(),
+                display: None,
+            }],
+            documents: documents.clone(),
+            operation_for_request: mapper,
+            require_core_scope: false,
+        })
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: calls.clone(),
+            hold: true,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap(),
+    );
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(SplitPolicy {
+            proposals: Arc::new(AtomicUsize::new(0)),
+            vocabulary: profile.vocabulary.clone(),
+            granted: permit,
+            per_call,
+        }),
+        audit: Arc::new(Audit),
+    })
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [
+                    serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                    serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+                ],
+            }
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-class-held")
+        .into_response();
+    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    let class_resource = member(&issued, "resource_token").expect("class resource token");
+    let class_exchange = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": class_resource, "presented_token": person }),
+    ));
+    let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
+    let held = resource
+        .authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-hold")
+        .into_response();
+    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    let requirement = held
+        .headers()
+        .get("aauth-requirement")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let challenge = requirement
+        .split_once("resource-token=\"")
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .to_owned();
+    let location = held.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.ends_with("/r3/pending/challenge-hold"), "{location}");
+    assert!(
+        calls.records.lock().unwrap().values().any(|record| record.held.is_some()),
+        "the held call is stored"
+    );
+    let approved = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": challenge, "presented_token": class_auth }),
+    ));
+    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
+    match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "not-pending") {
+        AuthDecision::Forbidden { .. } => {}
+        other => panic!("held call on the mapped route: {other:?}"),
+    }
+    let grant = match resource.authorize(
+        &signed_call("/r3/pending/challenge-hold", &per_call_auth),
+        NOW,
+        "pending-1",
+    ) {
+        AuthDecision::Granted(admitted) => {
+            let grant = admitted.r3_grant().expect("held completion").clone();
+            assert!(grant.is_per_call());
+            assert!(grant.held_request().is_some());
+            grant
+        }
+        other => panic!("pending completion: {other:?}"),
+    };
+    let stored = resource.r3_retain(
+        &grant,
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/plain")
+            .body(b"held".to_vec())
+            .unwrap(),
+    );
+    assert_eq!(stored.body(), b"held");
+    match resource.authorize(
+        &signed_call("/r3/pending/challenge-hold", &per_call_auth),
+        NOW,
+        "pending-2",
+    ) {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"held"),
+        other => panic!("held replay: {other:?}"),
     }
 }
 
