@@ -225,9 +225,12 @@ restart.
 for 600 seconds and the Auth token stops at `period_end`. A class document
 with federation enabled is fetched and consented, then the exact tokens are
 relayed to the access server. The returned Auth token must name that
-document. A proposal is consented, then relayed the same way. The returned
-Auth token must match those proposal bytes. Neither relay has been run on
-Host3. A class Resource token may carry a budget offer: the PS verifies
+document. A changed subject, reference, or issuer is refused and no Auth
+token is released. A proposal is presented with the person token, consented
+with proposal consent, and relayed the same way. Core consent is not used.
+The returned Auth token must match those proposal bytes. Declined proposal
+consent does not call the access server. A token for a different proposal
+is refused. Neither relay has been run on Host3. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against

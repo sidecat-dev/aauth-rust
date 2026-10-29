@@ -14,7 +14,9 @@
 //! R3 audit record and the exact issuance commit before release.
 //! A class document may carry a budget offer when budgets are enabled. The
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
-//! Missions, sub-agents, call chaining and AS federation are refused.
+//! Missions, sub-agents, and call chaining are refused. With federation enabled,
+//! a class document or a person-presented proposal is consented and the exact
+//! tokens are relayed to the access server.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
@@ -97,8 +99,9 @@ pub struct R3ProposalRequest<'a> {
     /// reached [`R3Policy::authorize_release`].
     pub proposal: &'a Proposal,
     /// The presented class Auth token, verified; the proposal operation is in
-    /// its `r3_per_call`.
-    pub class: &'a VerifiedR3AuthToken,
+    /// its `r3_per_call`. Absent when federation presents a person token and
+    /// the access server, not this Person Server, signs the per-call token.
+    pub class: Option<&'a VerifiedR3AuthToken>,
 }
 
 /// Host approval of one concrete call. Nothing is approved by default.
@@ -529,6 +532,36 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 }
                 validate_proposal_account(proposal, r.account.as_deref())
                     .map_err(|_| Failure::parameter("invalid_resource_token"))?;
+                if self.federation.is_some() && presented.kind == TokenKind::Person {
+                    let request = R3ProposalRequest {
+                        core: &context,
+                        reference: &reference,
+                        proposal,
+                        class: None,
+                    };
+                    let decision = if release {
+                        r3.policy.authorize_release(&request)
+                    } else {
+                        r3.policy.authorize_proposal(&request)
+                    }
+                    .map_err(Failure::policy)?;
+                    if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
+                        return Err(Failure::internal());
+                    }
+                    return self.federate_r3_proposal(
+                        &agent,
+                        &PreparedAuthorization {
+                            resource,
+                            presented,
+                            retained,
+                            context,
+                            binding_context,
+                            offer,
+                        },
+                        &reference,
+                        &exact,
+                    );
+                }
                 // The presented token is the class Auth token this PS issued; its
                 // retained lineage was verified above. Its R3 claims come from its
                 // signed payload, and the operation must be one it left per call.
@@ -584,7 +617,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         core: &context,
                         reference: &reference,
                         proposal,
-                        class: &class,
+                        class: Some(&class),
                     };
                     let decision = if release {
                         r3.policy.authorize_release(&request)
