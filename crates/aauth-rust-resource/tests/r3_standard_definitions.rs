@@ -1614,6 +1614,109 @@ fn failed_r3_audit_does_not_reserve_the_budget_cap() {
 }
 
 #[test]
+fn reserved_class_call_settles_below_the_hold() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    let (resource, calls, _) = resource_with(&profile, true, false, documents.clone());
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-settle",
+    );
+    let held = match resource.authorize_reserved(&signed_call("/op/permit", &auth), NOW, "hold-1") {
+        AuthDecision::Held(held) => held,
+        other => panic!("reserve: {other:?}"),
+    };
+    assert_eq!(held.admitted(), "receipt");
+    assert!(held.r3_grant().is_some(), "the hold keeps the class grant");
+    assert_eq!(held.admitted_maximum(), 500);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let streamed = resource
+        .budget_stream_header(held.reservation())
+        .expect("reserved header");
+    assert!(streamed.contains("reserved=500"), "{streamed}");
+    assert!(streamed.contains("remaining=0"), "{streamed}");
+    let settled = resource
+        .budget_commit(held.reservation(), 200, NOW)
+        .expect("settle below the hold");
+    assert!(settled.contains("cost=200"), "{settled}");
+    assert!(settled.contains("remaining=300"), "{settled}");
+    drop(held);
+    match resource.authorize(
+        &signed_call_cost("/op/permit", &auth, 200),
+        NOW,
+        "after-settle",
+    ) {
+        AuthDecision::Granted(admitted) => assert_eq!(admitted.admitted(), "receipt"),
+        other => panic!("room after settle: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "over-remaining") {
+        AuthDecision::AuthTokenRequired { budget_reason, .. } => {
+            assert_eq!(budget_reason.as_deref(), Some("insufficient-budget"));
+        }
+        other => panic!("over remaining: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "the refusal does not run the tool");
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
@@ -2357,6 +2460,22 @@ fn parsers_admit_and_refuse_over_real_tls() {
 
 fn signed_call(path: &str, token: &str) -> Request<Vec<u8>> {
     signed_call_at(path, token, NOW)
+}
+
+fn signed_call_cost(path: &str, token: &str, cost: i64) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .uri(format!("{RESOURCE}{path}"))
+        .header("aauth-max-cost", cost.to_string())
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut request,
+        &SigningKey::from_seed([2; 32]),
+        KeyMaterial::Jwt(token.into()),
+        NOW,
+    )
+    .unwrap();
+    request
 }
 
 fn signed_call_at(path: &str, token: &str, now: i64) -> Request<Vec<u8>> {

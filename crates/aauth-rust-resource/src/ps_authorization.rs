@@ -162,6 +162,7 @@ pub struct HeldAdmission<T = ()> {
     reservation: Reservation,
     admitted_maximum: i64,
     gate: Arc<BudgetGate>,
+    r3: Option<R3Grant>,
 }
 impl<T: std::fmt::Debug> std::fmt::Debug for HeldAdmission<T> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -171,6 +172,7 @@ impl<T: std::fmt::Debug> std::fmt::Debug for HeldAdmission<T> {
             .field("admitted", &self.admitted)
             .field("reservation", &self.reservation)
             .field("admitted_maximum", &self.admitted_maximum)
+            .field("r3", &self.r3)
             .finish()
     }
 }
@@ -195,6 +197,10 @@ impl<T> HeldAdmission<T> {
     /// Maximum the host may serve. The reservation covers this figure.
     pub fn admitted_maximum(&self) -> i64 {
         self.admitted_maximum
+    }
+    /// Class grant that admitted a mapped R3 route. `None` on a Core route.
+    pub fn r3_grant(&self) -> Option<&R3Grant> {
+        self.r3.as_ref()
     }
 }
 
@@ -1241,12 +1247,15 @@ where
                         }
                         Ok(AuthDecision::Observed(admitted))
                     }
-                    // Budgets do not compose with R3. Dropping a revoked hold
-                    // releases its reservation.
-                    AuthDecision::Held(admitted) => {
+                    // A class grant stays on the hold. The host commits a cost at
+                    // or below the admitted maximum. Dropping the hold releases
+                    // an uncommitted reservation.
+                    AuthDecision::Held(mut admitted) => {
                         match self.post_callback_admission(r3, &admitted.token, now) {
-                            Ok(None) => Ok(AuthDecision::Held(admitted)),
-                            Ok(Some(_)) => Ok(AuthDecision::InternalError),
+                            Ok(claimed) => {
+                                admitted.r3 = claimed;
+                                Ok(AuthDecision::Held(admitted))
+                            }
                             Err(decision) => Ok(decision),
                         }
                     }
@@ -1538,6 +1547,7 @@ where
                         reservation,
                         admitted_maximum: maximum,
                         gate: Arc::clone(gate),
+                        r3: None,
                     }))),
                     Err(Deny) => {
                         gate.release(&reservation);

@@ -224,6 +224,11 @@ restart. `failed_r3_audit_does_not_reserve_the_budget_cap` withholds the
 Auth token when the R3 audit commit fails. The account book stays empty,
 and the next offer still signs 500 under a cap of 800. Host3
 `aauth-wc07-completion-audit01` passed that refusal at `a9cd876`.
+`reserved_class_call_settles_below_the_hold` reserves the admitted maximum
+on a class call, then commits 200 of that hold. The field shows `cost=200`
+and `remaining=300`. A later call for 200 is admitted. A call for the full
+bound is `insufficient-budget` and does not run the tool. That settlement
+has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
