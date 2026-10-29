@@ -222,8 +222,8 @@ not run the tool. `class_cap_is_free_again_after_the_grant_expires` signs
 reservation is the Person Server account book, not an operating-system
 restart. `failed_r3_audit_does_not_reserve_the_budget_cap` withholds the
 Auth token when the R3 audit commit fails. The account book stays empty,
-and the next offer still signs 500 under a cap of 800. That refusal has not
-been run on Host3.
+and the next offer still signs 500 under a cap of 800. Host3
+`aauth-wc07-completion-audit01` passed that refusal at `a9cd876`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
