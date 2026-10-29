@@ -392,6 +392,21 @@ fn resource_with_ledger(
     (Arc::new(resource), calls, documents)
 }
 
+struct ClockedFetch {
+    resource: Arc<Resource>,
+    clock: Arc<AtomicI64>,
+}
+impl FetchTransport for ClockedFetch {
+    fn send(&self, request: Request<Vec<u8>>, _: Instant) -> std::io::Result<FetchResponse> {
+        let now = self.clock.load(Ordering::SeqCst);
+        let (parts, body) = self.resource.r3_document(&request, now).into_parts();
+        Ok(Response::from_parts(
+            parts,
+            Box::new(Buffered(body, 0)) as Box<dyn FetchBody>,
+        ))
+    }
+}
+
 struct InProcess(Arc<Resource>);
 struct Buffered(Vec<u8>, usize);
 impl FetchBody for Buffered {
@@ -492,6 +507,17 @@ fn post(agent: &Agent, uri: &str, body: Value) -> Request<Vec<u8>> {
         .body(serde_json::to_vec(&body).unwrap())
         .unwrap();
     agent.sign(&mut request, NOW).unwrap();
+    request
+}
+
+fn post_at(agent: &Agent, uri: &str, body: Value, now: i64) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&body).unwrap())
+        .unwrap();
+    agent.sign(&mut request, now).unwrap();
     request
 }
 
@@ -1240,6 +1266,193 @@ impl R3CallStore for SingleUse {
     }
     fn supersede(&self, _: &str, _: &R3ProposalRecord, _: i64) -> Result<(), R3StoreError> {
         Err(R3StoreError::Conflict)
+    }
+}
+
+/// Process-memory proposals. A superseded release is a tombstone: later
+/// claims are `DifferentToken`, and the record stays in the map.
+struct ReleaseRecords {
+    by_uri: BTreeMap<String, R3ProposalRecord>,
+    order: Vec<String>,
+}
+enum ReleaseBound {
+    Live {
+        token: R3CallToken,
+        fence: String,
+        result: Option<R3CallResult>,
+    },
+    Superseded,
+}
+struct ReleaseBook {
+    records: Mutex<ReleaseRecords>,
+    calls: Mutex<BTreeMap<String, ReleaseBound>>,
+}
+impl ReleaseBook {
+    fn new() -> Self {
+        Self {
+            records: Mutex::new(ReleaseRecords {
+                by_uri: BTreeMap::new(),
+                order: Vec::new(),
+            }),
+            calls: Mutex::new(BTreeMap::new()),
+        }
+    }
+    fn pending_taken(records: &ReleaseRecords, id: &str) -> bool {
+        records.by_uri.values().any(|record| {
+            record
+                .held
+                .as_ref()
+                .is_some_and(|held| held.pending_id == id)
+        })
+    }
+    fn superseded(&self, uri: &str) -> bool {
+        matches!(
+            self.calls.lock().unwrap().get(uri),
+            Some(ReleaseBound::Superseded)
+        )
+    }
+}
+impl R3CallStore for ReleaseBook {
+    fn commit(&self, record: &R3ProposalRecord) -> Result<(), R3StoreError> {
+        let mut records = self.records.lock().unwrap();
+        let uri = record.reference.uri().to_owned();
+        if records.by_uri.contains_key(&uri) {
+            return Err(R3StoreError::Conflict);
+        }
+        if let Some(held) = &record.held {
+            if Self::pending_taken(&records, &held.pending_id) {
+                return Err(R3StoreError::Conflict);
+            }
+        }
+        records.order.push(uri.clone());
+        records.by_uri.insert(uri, record.clone());
+        Ok(())
+    }
+    fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self.records.lock().unwrap().by_uri.get(uri).cloned())
+    }
+    fn load_pending(&self, id: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .by_uri
+            .values()
+            .find(|record| {
+                record
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.pending_id == id)
+            })
+            .cloned())
+    }
+    fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
+        let record = self.records.lock().unwrap().by_uri.get(uri).cloned();
+        let Some(record) = record else {
+            return Err(R3StoreError::Unavailable(R3HostError::new("missing proposal")));
+        };
+        if record.release_until.is_some_and(|until| now >= until) {
+            return Ok(R3Claim::Expired);
+        }
+        let mut calls = self.calls.lock().unwrap();
+        match calls.get(uri) {
+            Some(ReleaseBound::Superseded) => Ok(R3Claim::DifferentToken),
+            Some(ReleaseBound::Live { token: bound, result, .. }) => {
+                if bound.compact_sha256 != token.compact_sha256 || bound.jti != token.jti {
+                    return Ok(R3Claim::DifferentToken);
+                }
+                if now >= bound.retain_until {
+                    return Ok(R3Claim::Expired);
+                }
+                Ok(match result.clone() {
+                    Some(result) => R3Claim::Replay(result),
+                    None => R3Claim::Unfinished,
+                })
+            }
+            None => {
+                if now >= token.retain_until {
+                    return Ok(R3Claim::Expired);
+                }
+                calls.insert(
+                    uri.to_owned(),
+                    ReleaseBound::Live {
+                        token: token.clone(),
+                        fence: format!("fence-{uri}"),
+                        result: None,
+                    },
+                );
+                Ok(R3Claim::Execute {
+                    fence: format!("fence-{uri}"),
+                })
+            }
+        }
+    }
+    fn retain(
+        &self,
+        uri: &str,
+        fence: &str,
+        result: &R3CallResult,
+    ) -> Result<R3CallResult, R3StoreError> {
+        let mut calls = self.calls.lock().unwrap();
+        let Some(ReleaseBound::Live { fence: bound, result: slot, .. }) = calls.get_mut(uri) else {
+            return Err(R3StoreError::Conflict);
+        };
+        if bound != fence || slot.is_some() {
+            return Err(R3StoreError::Conflict);
+        }
+        *slot = Some(result.clone());
+        Ok(result.clone())
+    }
+    fn held_releases(
+        &self,
+        agent_jkt: &str,
+        subject: &str,
+        now: i64,
+    ) -> Result<Vec<R3ProposalRecord>, R3StoreError> {
+        let records = self.records.lock().unwrap();
+        let calls = self.calls.lock().unwrap();
+        let mut held = Vec::new();
+        for uri in &records.order {
+            let Some(record) = records.by_uri.get(uri) else {
+                continue;
+            };
+            if record.released.is_some()
+                && record.agent_jkt == agent_jkt
+                && record.subject == subject
+                && record.release_until.is_some_and(|until| now < until)
+                && !calls.contains_key(uri)
+            {
+                held.push(record.clone());
+            }
+        }
+        Ok(held)
+    }
+    fn supersede(
+        &self,
+        prior_uri: &str,
+        record: &R3ProposalRecord,
+        now: i64,
+    ) -> Result<(), R3StoreError> {
+        let mut records = self.records.lock().unwrap();
+        let mut calls = self.calls.lock().unwrap();
+        let Some(prior) = records.by_uri.get(prior_uri) else {
+            return Err(R3StoreError::Conflict);
+        };
+        let successor = record.reference.uri().to_owned();
+        if prior.released.is_none()
+            || prior.release_until.is_none_or(|until| now >= until)
+            || calls.contains_key(prior_uri)
+            || records.by_uri.contains_key(&successor)
+            || record.held.as_ref().is_some_and(|held| {
+                Self::pending_taken(&records, &held.pending_id)
+            })
+        {
+            return Err(R3StoreError::Conflict);
+        }
+        records.order.push(successor.clone());
+        records.by_uri.insert(successor, record.clone());
+        calls.insert(prior_uri.to_owned(), ReleaseBound::Superseded);
+        Ok(())
     }
 }
 
@@ -4011,6 +4224,330 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
         other => panic!("second release: {other:?}"),
     }
     assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
+    let profile = odata_profile();
+    let documents = Arc::new(Documents::default());
+    let calls = Arc::new(ReleaseBook::new());
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let ran = Arc::new(AtomicUsize::new(0));
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let executions = Arc::clone(&ran);
+    let release: aauth_rust_resource::BoxedR3Release = Box::new(
+        move |_: &Request<Vec<u8>>, _: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            let n = executions.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Some(aauth_rust_resource::R3Release {
+                result: aauth_rust_r3::ProposalResult::new(b"{}").unwrap(),
+                display: aauth_rust_r3::ProposalDisplay::new(
+                    &aauth_rust_r3::Display::new("The call already ran", None, None, None).unwrap(),
+                    None,
+                )
+                .unwrap(),
+                response: Response::builder()
+                    .status(200)
+                    .header("content-type", "text/plain")
+                    .body(format!("released-{n}").into_bytes())
+                    .unwrap(),
+            }))
+        },
+    );
+    let permit_for_map = permit.clone();
+    let per_call_for_map = per_call.clone();
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok(match request.uri().path() {
+            "/op/permit" => Some(permit_for_map.clone()),
+            "/op/refuse" => Some(per_call_for_map.clone()),
+            _ => None,
+        })
+    });
+    let resource = Arc::new(
+        PsAuthorizationResource::new(
+            PsAuthorizationConfig {
+                issuer: RESOURCE.into(),
+                signed_origin: RESOURCE.into(),
+                kid: "resource-1".into(),
+                signing_key: SigningKey::from_seed([4; 32]),
+                scopes: vec!["records.read".into()],
+            },
+            keys(),
+            Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
+                as BoxedAuthAdmissionPolicy<String>,
+        )
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(R3Config {
+            registry: standard_registry().unwrap(),
+            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
+                .unwrap(),
+            vocabularies: vec![R3Vocabulary {
+                definition: profile.snapshot.clone(),
+                display: None,
+            }],
+            documents: documents.clone(),
+            operation_for_request: mapper,
+            require_core_scope: false,
+        })
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: calls.clone(),
+            hold: true,
+            release: Some(release),
+            held_result_lifetime: 900,
+        })
+        .unwrap(),
+    );
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let ps_clock = Arc::clone(&clock);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(move || ps_clock.load(Ordering::SeqCst)) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(ClockedFetch {
+            resource: resource.clone(),
+            clock: Arc::clone(&clock),
+        }),
+        limits: FetchLimits::default(),
+        policy: Box::new(SplitPolicy {
+            proposals: Arc::new(AtomicUsize::new(0)),
+            vocabulary: profile.vocabulary.clone(),
+            granted: permit,
+            per_call,
+        }),
+        audit: Arc::new(Audit),
+    })
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let class_body = json!({
+        "r3_operations": {
+            "vocabulary": profile.vocabulary.uri().as_str(),
+            "operations": [
+                serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+            ],
+        }
+    });
+    let issued = resource
+        .authorize_endpoint(
+            &post(&presented, &format!("{RESOURCE}/authorize"), class_body.clone()),
+            NOW,
+            "rt-class-rerequest",
+        )
+        .into_response();
+    let class_resource = member(&issued, "resource_token").expect("class resource token");
+    let class_exchange = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": class_resource, "presented_token": person }),
+    ));
+    let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
+    let first = resource
+        .authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-first")
+        .into_response();
+    assert_eq!(first.status(), 202, "{}", String::from_utf8_lossy(first.body()));
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    let first_requirement = first
+        .headers()
+        .get("aauth-requirement")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let first_challenge = first_requirement
+        .split_once("resource-token=\"")
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .to_owned();
+    let approved = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": first_challenge, "presented_token": class_auth }),
+    ));
+    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    let first_auth = member(&approved, "auth_token").expect("first per-call token");
+    let later = NOW + 300;
+    clock.store(later, Ordering::SeqCst);
+    let same = resource
+        .authorize(
+            &signed_call_at("/op/refuse", &class_auth, later),
+            later,
+            "challenge-same",
+        )
+        .into_response();
+    assert_eq!(same.status(), 202, "{}", String::from_utf8_lossy(same.body()));
+    assert_eq!(ran.load(Ordering::SeqCst), 2, "the same class token computes again");
+    let first_record = calls
+        .load_pending("challenge-first")
+        .unwrap()
+        .expect("first record");
+    assert!(!calls.superseded(first_record.reference.uri()));
+    let same_requirement = same
+        .headers()
+        .get("aauth-requirement")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let same_challenge = same_requirement
+        .split_once("resource-token=\"")
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .to_owned();
+    let reissued = resource
+        .authorize_endpoint(
+            &post_at(
+                &presented,
+                &format!("{RESOURCE}/authorize"),
+                class_body,
+                later,
+            ),
+            later,
+            "rt-class-refresh",
+        )
+        .into_response();
+    assert_eq!(reissued.status(), 200, "{}", String::from_utf8_lossy(reissued.body()));
+    let next_resource = member(&reissued, "resource_token").expect("refreshed class resource token");
+    let next_exchange = ps.handle(&post_at(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": next_resource, "presented_token": person }),
+        later,
+    ));
+    assert_eq!(next_exchange.status(), 200, "{}", String::from_utf8_lossy(next_exchange.body()));
+    let next_auth = member(&next_exchange, "auth_token").expect("refreshed class auth token");
+    let first_jti = aauth_rust_core::AuthToken::parse(&class_auth)
+        .unwrap()
+        .unverified_claims()
+        .jti
+        .clone();
+    let next_jti = aauth_rust_core::AuthToken::parse(&next_auth)
+        .unwrap()
+        .unverified_claims()
+        .jti
+        .clone();
+    assert_ne!(first_jti, next_jti);
+    let reused = resource
+        .authorize(
+            &signed_call_at("/op/refuse", &next_auth, later),
+            later,
+            "challenge-next",
+        )
+        .into_response();
+    assert_eq!(reused.status(), 202, "{}", String::from_utf8_lossy(reused.body()));
+    assert_eq!(ran.load(Ordering::SeqCst), 2, "the re-request does not run the call");
+    assert!(calls.superseded(first_record.reference.uri()));
+    let successor = calls
+        .load_pending("challenge-next")
+        .unwrap()
+        .expect("successor");
+    assert_eq!(successor.supersedes.as_deref(), Some(first_record.reference.uri()));
+    assert_eq!(successor.released.as_ref().unwrap().body, b"released-1");
+    let same_record = calls
+        .load_pending("challenge-same")
+        .unwrap()
+        .expect("same-token record");
+    assert!(same_record.supersedes.is_none());
+    assert!(!calls.superseded(same_record.reference.uri()));
+    assert_eq!(same_record.released.as_ref().unwrap().body, b"released-2");
+    match resource.authorize(
+        &signed_call_at("/r3/pending/challenge-first", &first_auth, later),
+        later,
+        "retired",
+    ) {
+        AuthDecision::Forbidden { .. } => {}
+        other => panic!("retired completion: {other:?}"),
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+    let next_requirement = reused
+        .headers()
+        .get("aauth-requirement")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let next_challenge = next_requirement
+        .split_once("resource-token=\"")
+        .unwrap()
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .to_owned();
+    let next_approved = ps.handle(&post_at(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": next_challenge, "presented_token": next_auth }),
+        later,
+    ));
+    assert_eq!(next_approved.status(), 200, "{}", String::from_utf8_lossy(next_approved.body()));
+    let successor_auth = member(&next_approved, "auth_token").expect("successor per-call token");
+    match resource.authorize(
+        &signed_call_at("/r3/pending/challenge-next", &successor_auth, later),
+        later,
+        "successor",
+    ) {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"released-1"),
+        other => panic!("successor: {other:?}"),
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
+    let same_approved = ps.handle(&post_at(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": same_challenge, "presented_token": class_auth }),
+        later,
+    ));
+    assert_eq!(same_approved.status(), 200, "{}", String::from_utf8_lossy(same_approved.body()));
+    let same_auth = member(&same_approved, "auth_token").expect("same-token per-call token");
+    match resource.authorize(
+        &signed_call_at("/r3/pending/challenge-same", &same_auth, later),
+        later,
+        "same-completion",
+    ) {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"released-2"),
+        other => panic!("same-token completion: {other:?}"),
+    }
+    assert_eq!(ran.load(Ordering::SeqCst), 2);
 }
 
 #[test]
