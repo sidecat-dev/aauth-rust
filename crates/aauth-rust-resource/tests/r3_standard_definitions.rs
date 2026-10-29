@@ -1568,7 +1568,7 @@ fn class_grant_signs_zero_when_the_cap_is_spent() {
     assert_eq!(amount(&second), Some(0));
     match resource.authorize(&signed_call("/op/permit", &second), NOW, "zero-grant") {
         AuthDecision::AuthTokenRequired { budget_reason, .. } => {
-            assert_eq!(budget_reason.as_deref(), Some("insufficient-budget"));
+            assert_eq!(budget_reason.as_deref(), Some("budget-exhausted"));
         }
         other => panic!("zero grant: {other:?}"),
     }
