@@ -15,8 +15,9 @@
 //!
 //! Host responsibilities shown here, not provided by the libraries:
 //! - Resource custody: `FileDocuments` and `FileCalls` in one per-run
-//!   directory. Recomposing the Resource from that directory stands in for a
-//!   process restart; durability is the host filesystem's.
+//!   directory. A later process can open those files after the writer exits.
+//!   Dropping the store in this process is not that restart. Durability is
+//!   the host filesystem's. A crash during the write is not covered.
 //! - PS issuance store, R3 audit log and consent: process memory and a fixed
 //!   demonstration decision. They are volatile; there is no consent UI.
 //! - PS egress admission and HTTPS transport: one admitted origin and prefix.
@@ -2308,6 +2309,106 @@ fn reopen_reads_the_same_class_document_from_the_directory() {
         .unwrap();
     assert_eq!(loaded, record);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+#[ignore = "subprocess entry; the parent supplies AAUTH_R3_REOPEN_DIR"]
+fn reopen_after_process_exit_worker() {
+    let root = PathBuf::from(std::env::var_os("AAUTH_R3_REOPEN_DIR").expect("reopen directory"));
+    let calls = FileCalls(
+        root.clone(),
+        Mutex::new(()),
+        Arc::new(AdmissionControl::default()),
+    );
+    calls
+        .commit(&custody_record(
+            "https://records.example/r3/p.exit",
+            "pend-exit",
+            b"run-1",
+        ))
+        .unwrap();
+    FileDocuments(root, Mutex::new(()))
+        .commit(&exit_class_record())
+        .unwrap();
+    println!("WROTE {}", std::process::id());
+}
+
+#[test]
+fn reopen_after_process_exit_reads_held_release_and_class_document() {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-r3-process-exit-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "journey::reopen_after_process_exit_worker",
+            "--nocapture",
+        ])
+        .env("AAUTH_R3_REOPEN_DIR", &root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = String::from_utf8_lossy(&output.stdout);
+    let child_pid: u32 = written
+        .lines()
+        .find_map(|line| line.strip_prefix("WROTE "))
+        .and_then(|pid| pid.trim().parse().ok())
+        .expect("child pid");
+    assert_ne!(child_pid, std::process::id());
+    let calls = FileCalls(
+        root.clone(),
+        Mutex::new(()),
+        Arc::new(AdmissionControl::default()),
+    );
+    let loaded = calls
+        .load("https://records.example/r3/p.exit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.released.as_ref().unwrap().body, b"run-1");
+    let held = calls.held_releases("jkt", "subject", 1_100).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    let class = FileDocuments(root.clone(), Mutex::new(()))
+        .load("https://records.example/r3/c.exit")
+        .unwrap()
+        .unwrap();
+    assert_eq!(class, exit_class_record());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(test)]
+fn exit_class_record() -> R3DocumentRecord {
+    let exact = br#"{"tool":"records.read"}"#.to_vec();
+    let uri = "https://records.example/r3/c.exit";
+    R3DocumentRecord {
+        reference: Reference::new(uri, digest(&exact)).unwrap(),
+        exact_json: exact,
+        person_server: "https://ps.example".into(),
+        auth_token_issuer: "https://ps.example".into(),
+        auth_token_issuer_document: "aauth-person.json".into(),
+        resource_token_jti: "rt-exit".into(),
+        resource_token: "token".into(),
+        presented_jti: "ps-1".into(),
+        subject: "subject".into(),
+        agent_jkt: "jkt".into(),
+        tenant: None,
+        account: None,
+        scope: None,
+        issued_at: 1_000,
+        expires_at: 1_600,
+    }
 }
 
 #[cfg(test)]

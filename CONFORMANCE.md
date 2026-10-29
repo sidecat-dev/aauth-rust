@@ -370,9 +370,18 @@ directory on Unix. Class documents in that store synchronize the directory
 the same way. `reopen_reads_the_same_held_release_from_the_directory` drops
 the proposal store and opens another on the same directory; the held bytes
 are still there. `reopen_reads_the_same_class_document_from_the_directory`
-does that for the class document. Neither is an operating-system restart,
-power loss, or a generic `R3CallStore` adapter. Those remain unqualified.
-The budget ledger remains process memory.
+does that for the class document. Those two drops are the same process.
+`reopen_after_process_exit_reads_held_release_and_class_document` starts a
+second process. That process writes the held release and the class document,
+synchronizes the directory, and exits. The parent opens the same directory
+and reads both records. The child pid is not the parent pid. This is a
+process exit. It is not power loss, not a crash during the write, and not a
+generic `R3CallStore` adapter. The budget ledger remains process memory and
+is not in that directory. Mission context and an access server added to
+class R3 stay refused: `per_call_and_unsupported_compositions_are_refused_explicitly`
+rejects both at configuration, and mission context added afterwards is `500`
+with no resource token. That refusal has not been run on Host3 as its own
+batch. The process-exit reopen has not been run on Host3.
 `fresh_resource_spends_the_same_grant_again` spends the grant, then the same
 Resource answers `budget-exhausted`. A second Resource on the same class
 documents, with a new ledger, admits that still-live token again. That is
