@@ -217,7 +217,10 @@ exchanges and admits the combined grant.
 of 800, then signs the next offer for that subject and resource as 300.
 `class_grant_signs_zero_when_the_cap_is_spent` signs 500 under a cap of 500.
 The next offer signs as 0. The Resource answers `budget-exhausted` and does
-not run the tool.
+not run the tool. `class_cap_is_free_again_after_the_grant_expires` signs
+500 for 50 seconds. At that expiry the same offer signs as 500 again. The
+reservation is the Person Server account book, not an operating-system
+restart.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Federation together with R3 stays
 refused. A class Resource token may carry a budget offer: the PS verifies

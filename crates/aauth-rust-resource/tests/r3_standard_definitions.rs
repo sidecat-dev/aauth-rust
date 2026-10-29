@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicI64, AtomicUsize, Ordering},
 };
 use std::time::Instant;
 
@@ -1573,6 +1573,92 @@ fn class_grant_signs_zero_when_the_cap_is_spent() {
         other => panic!("zero grant: {other:?}"),
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0, "a zero grant does not run the tool");
+}
+
+#[test]
+fn class_cap_is_free_again_after_the_grant_expires() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps_clock = clock.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(move || ps_clock.load(Ordering::SeqCst)) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 50,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(
+        IssuerPolicy::capped(
+            500,
+            vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+        )
+        .until(NOW + 600),
+    )
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let first = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-settle-1");
+    let first_claims = aauth_rust_core::AuthToken::parse(&first)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    assert_eq!(
+        first_claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        Some(500)
+    );
+    assert_eq!(first_claims.exp, NOW + 50);
+    clock.store(first_claims.exp, Ordering::SeqCst);
+    let second = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-settle-2");
+    let second_claims = aauth_rust_core::AuthToken::parse(&second)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    assert_eq!(
+        second_claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        Some(500),
+        "the cap is free once the first grant reaches exp"
+    );
+    assert_eq!(second_claims.exp, NOW + 100);
 }
 
 #[test]
