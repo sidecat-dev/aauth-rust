@@ -446,6 +446,19 @@ opens the same directory, presents the same Auth token, and receives
 `Replayed` with that body. The child pid is not the parent pid. This is
 a process exit. It is not power loss.
 
+Host3 `aauth-wc07-completion-product01` ran that product replay in one
+unit at `a7fe681d1d0d088595de293a2a9d55b1ef6b91b5`. Receipt START
+`2026-10-29T22:40:32.541308313+00:00`, log mtime
+`2026-10-29T22:40:46.797966968+00:00`. The resource test binary was
+rebuilt. `directory_call_store_replays_the_product_after_process_exit`
+passed 1 and failed 0, with 39 filtered. The directory call store passed
+4, ignored the worker entry, and failed 0. `r3-per-call-interop` against
+Go `3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2`
+and `proposal-err=invalid_resource_token` stay visible. systemd-run
+reported invocation `adc137b154ce43c8b21e607839370ab4`. After the unit
+was collected, `systemctl show` reported `Result=success` and
+`ExecMainStatus=0`, and `InvocationID` was empty.
+
 `r3-per-call-interop` pins `query-runs=2` and
 `proposal-err=invalid_resource_token`. The second query run is the
 release-retry challenge while the prior proposal token is still live.
