@@ -1497,6 +1497,85 @@ fn class_budget_grant_stops_at_period_end() {
 }
 
 #[test]
+fn class_grant_signs_zero_when_the_cap_is_spent() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, calls, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        500,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let first = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-zero-1");
+    let second = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-zero-2");
+    let amount = |token: &str| {
+        aauth_rust_core::AuthToken::parse(token)
+            .unwrap()
+            .unverified_claims()
+            .extra
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(Value::as_i64)
+    };
+    assert_eq!(amount(&first), Some(500));
+    assert_eq!(amount(&second), Some(0));
+    match resource.authorize(&signed_call("/op/permit", &second), NOW, "zero-grant") {
+        AuthDecision::AuthTokenRequired { budget_reason, .. } => {
+            assert_eq!(budget_reason.as_deref(), Some("insufficient-budget"));
+        }
+        other => panic!("zero grant: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "a zero grant does not run the tool");
+}
+
+#[test]
 fn budgets_before_r3_still_exchange_and_admit() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, calls, _) = resource_for(&profile, true);
