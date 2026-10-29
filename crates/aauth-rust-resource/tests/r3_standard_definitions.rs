@@ -1152,29 +1152,27 @@ fn shared_budget_ledger_continues_after_recomposition() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+struct BoundCall {
+    token: R3CallToken,
+    fence: String,
+    result: Option<R3CallResult>,
+}
 struct SingleUse {
-    record: Mutex<Option<R3ProposalRecord>>,
-    bound: Mutex<Option<R3CallToken>>,
-    fence: Mutex<Option<String>>,
-    result: Mutex<Option<R3CallResult>>,
+    records: Mutex<BTreeMap<String, R3ProposalRecord>>,
+    calls: Mutex<BTreeMap<String, BoundCall>>,
 }
 impl R3CallStore for SingleUse {
     fn commit(&self, record: &R3ProposalRecord) -> Result<(), R3StoreError> {
-        let mut slot = self.record.lock().unwrap();
-        if slot.is_some() {
+        let mut records = self.records.lock().unwrap();
+        let uri = record.reference.uri().to_owned();
+        if records.contains_key(&uri) {
             return Err(R3StoreError::Conflict);
         }
-        *slot = Some(record.clone());
+        records.insert(uri, record.clone());
         Ok(())
     }
     fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
-        Ok(self
-            .record
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|record| record.reference.uri() == uri)
-            .cloned())
+        Ok(self.records.lock().unwrap().get(uri).cloned())
     }
     fn load_pending(&self, _: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
         Ok(None)
@@ -1186,40 +1184,45 @@ impl R3CallStore for SingleUse {
         if now >= token.retain_until {
             return Ok(R3Claim::Expired);
         }
-        let mut bound = self.bound.lock().unwrap();
-        if bound.is_none() {
-            *bound = Some(token.clone());
-            *self.fence.lock().unwrap() = Some("fence-1".into());
+        let mut calls = self.calls.lock().unwrap();
+        let Some(bound) = calls.get_mut(uri) else {
+            calls.insert(
+                uri.to_owned(),
+                BoundCall {
+                    token: token.clone(),
+                    fence: format!("fence-{uri}"),
+                    result: None,
+                },
+            );
             return Ok(R3Claim::Execute {
-                fence: "fence-1".into(),
+                fence: format!("fence-{uri}"),
             });
-        }
-        let bound = bound.as_ref().unwrap();
-        if bound.compact_sha256 != token.compact_sha256 || bound.jti != token.jti {
+        };
+        if bound.token.compact_sha256 != token.compact_sha256 || bound.token.jti != token.jti {
             return Ok(R3Claim::DifferentToken);
         }
-        if now >= bound.retain_until {
+        if now >= bound.token.retain_until {
             return Ok(R3Claim::Expired);
         }
-        Ok(match self.result.lock().unwrap().clone() {
+        Ok(match bound.result.clone() {
             Some(result) => R3Claim::Replay(result),
             None => R3Claim::Unfinished,
         })
     }
     fn retain(
         &self,
-        _: &str,
+        uri: &str,
         fence: &str,
         result: &R3CallResult,
     ) -> Result<R3CallResult, R3StoreError> {
-        if self.fence.lock().unwrap().as_deref() != Some(fence) {
+        let mut calls = self.calls.lock().unwrap();
+        let Some(bound) = calls.get_mut(uri) else {
+            return Err(R3StoreError::Conflict);
+        };
+        if bound.fence != fence || bound.result.is_some() {
             return Err(R3StoreError::Conflict);
         }
-        let mut stored = self.result.lock().unwrap();
-        if stored.is_some() {
-            return Err(R3StoreError::Conflict);
-        }
-        *stored = Some(result.clone());
+        bound.result = Some(result.clone());
         Ok(result.clone())
     }
     fn held_releases(
@@ -3367,10 +3370,8 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
     let profile = odata_profile();
     let documents = Arc::new(Documents::default());
     let calls = Arc::new(SingleUse {
-        record: Mutex::new(None),
-        bound: Mutex::new(None),
-        fence: Mutex::new(None),
-        result: Mutex::new(None),
+        records: Mutex::new(BTreeMap::new()),
+        calls: Mutex::new(BTreeMap::new()),
     });
     let permit = operation(&profile, profile.operations[0]);
     let per_call = operation(&profile, profile.operations[1]);
@@ -3537,10 +3538,12 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
         other => panic!("replay: {other:?}"),
     }
     let record = calls
-        .record
+        .records
         .lock()
         .unwrap()
-        .clone()
+        .values()
+        .next()
+        .cloned()
         .expect("stored proposal");
     let mut other_claims = aauth_rust_core::AuthToken::parse(&per_call_auth)
         .unwrap()
@@ -3564,6 +3567,37 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
     match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-3") {
         AuthDecision::Replayed(response) => assert_eq!(response.body(), b"ran"),
         other => panic!("original token still replays: {other:?}"),
+    }
+    let unfinished = match resource.authorize(
+        &signed_call("/op/refuse", &class_auth),
+        NOW,
+        "challenge-unfinished",
+    ) {
+        AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
+        other => panic!("second challenge: {other:?}"),
+    };
+    let approved = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": unfinished, "presented_token": class_auth }),
+    ));
+    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    let unfinished_auth = member(&approved, "auth_token").expect("unfinished auth token");
+    match resource.authorize(
+        &signed_call("/op/refuse", &unfinished_auth),
+        NOW,
+        "unfinished-1",
+    ) {
+        AuthDecision::Granted(admitted) => assert!(admitted.r3_grant().unwrap().is_per_call()),
+        other => panic!("unretained completion: {other:?}"),
+    }
+    match resource.authorize(
+        &signed_call("/op/refuse", &unfinished_auth),
+        NOW,
+        "unfinished-2",
+    ) {
+        AuthDecision::InternalError => {}
+        other => panic!("second presentation of an unretained call: {other:?}"),
     }
 }
 
