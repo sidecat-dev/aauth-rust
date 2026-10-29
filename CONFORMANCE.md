@@ -232,7 +232,9 @@ bound is `insufficient-budget` and does not run the tool. Host3
 `concurrent_class_calls_spend_the_grant_once` admits one of two simultaneous
 class calls against one grant. The other is `budget-exhausted` and does not
 run the tool. Host3 `aauth-wc07-completion-race01` passed that race at
-`9ae8de8`.
+`9ae8de8`. `dropping_a_class_hold_releases_the_grant` drops that hold
+without a commit. The same grant is then admitted in full: `cost=500` and
+`remaining=0`. That release has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
