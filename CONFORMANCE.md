@@ -216,7 +216,12 @@ budget offer: the PS verifies it with the combined R3 budget verifier, narrows
 the offer, and signs that grant on the Auth token. `budget_consumed` on that
 Resource token is `invalid_budget`. A per-call proposal together with a budget
 offer is `invalid_resource_token`. An R3-only token is unchanged when budgets
-are also enabled.
+are also enabled. `combined_budget_auth_expires_and_a_later_grant_revokes`
+presents that Auth token at its `exp` and receives `expired_jwt` with no
+second effect. A later Auth token for the same class is admitted, and a
+Person Server revocation of its `jti` is `revoked_jwt` before another effect.
+The revocation ledger is process memory. That run is not an operating-system
+restart.
 
 The example file store writes each proposal record, then synchronizes the
 directory on Unix. `reopen_reads_the_same_held_release_from_the_directory`
