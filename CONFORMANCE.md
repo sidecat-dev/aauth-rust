@@ -294,7 +294,8 @@ approves one proposal, retains the response `ran`, and the second
 presentation returns that response. The store is process memory. Host3
 `aauth-wc07-completion-replay01` passed that replay at `7ae1c32`. A different Auth token for that same proposal is
 forbidden and does not receive the retained response. The original token
-still replays it. That distinction has not been run on Host3.
+still replays it. Host3 `aauth-wc07-completion-other01` passed that
+distinction at `6007318`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
