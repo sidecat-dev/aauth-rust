@@ -15,7 +15,7 @@ use aauth_rust_jose::strict_json;
 use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionRegistry, Display, Document, DocumentOptions, Operation,
     OperationAccess, OperationSet, Reference, Registry, VocabularyUri, digest,
-    validate_document_account, verify_auth_token_claims,
+    validate_document_account, verify_auth_token_claims, verify_budget_auth_token,
 };
 use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
 use http::{Request, Response, StatusCode};
@@ -732,15 +732,16 @@ where
                 .map(Some);
         }
         let verified = if carries_r3(&claims.extra) {
-            // Reads every R3 member from the signed payload bytes.
-            Some(
+            // A budget grant is a separate companion. The plain verifier refuses it.
+            let verified = if claims.extra.contains_key("budget") {
+                verify_budget_auth_token(&profile.registry, token.compact(), &self.keys, now)
+                    .map(|(verified, _grant)| verified)
+            } else {
                 verify_auth_token_claims(&profile.registry, token.compact(), &self.keys, now)
-                    .map_err(|_| {
-                        AuthDecision::SignatureFailure(SignatureFailure::Token(
-                            TokenError::InvalidJwt,
-                        ))
-                    })?,
-            )
+            };
+            Some(verified.map_err(|_| {
+                AuthDecision::SignatureFailure(SignatureFailure::Token(TokenError::InvalidJwt))
+            })?)
         } else {
             None
         };

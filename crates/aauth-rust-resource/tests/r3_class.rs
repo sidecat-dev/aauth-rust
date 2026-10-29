@@ -1133,6 +1133,31 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
     assert_eq!(offer.amount(), 500);
     assert_eq!(offer.unit(), "USD");
     assert_eq!(offer.decimals(), 2);
+    let record = store.records.lock().unwrap()[_verified.reference().uri()].clone();
+    let registry = standard_registry().unwrap();
+    let document = registry
+        .parse_referenced_document(&record.reference, &record.exact_json)
+        .unwrap();
+    let vocabulary = McpCodec::vocabulary().unwrap();
+    let granted = GrantedOperations::new(&vocabulary, &[mcp("records.read")]).unwrap();
+    let class_grant = aauth_rust_r3::Grant::new(&granted, &document).unwrap();
+    let budget = aauth_rust_budgets::Budget::new(500, "USD", 2).unwrap();
+    let token = aauth_rust_r3::mint_budget_auth_token(
+        &registry,
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &auth_claims(None),
+        &record.reference,
+        &record.exact_json,
+        &class_grant,
+        &budget,
+    )
+    .unwrap();
+    resource
+        .authorize(&call("/mcp/records.read", &token, 2), NOW, "unused")
+        .into_result()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

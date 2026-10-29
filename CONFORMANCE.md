@@ -208,7 +208,8 @@ side-effect-free contract.
 The Resource accepts R3 and budgets together, in either order. `/authorize`
 with `r3_operations` and a `budget` object issues one class Resource token
 carrying that narrowed offer. `r3_and_budgets_issue_a_combined_resource_token`
-pins the token. A `budget` object without budgets enabled is `invalid_budget`.
+pins the token and admits one protected call under an Auth token that carries
+the same grant. A `budget` object without budgets enabled is `invalid_budget`.
 The Person Server refuses `with_r3` when budgets are already enabled. Calling
 `with_budgets` after R3 is accepted. A class Resource token may then carry a
 budget offer: the PS verifies it with the combined R3 budget verifier, narrows
