@@ -281,9 +281,10 @@ documents, with a new ledger, admits that still-live token again. That is
 not an operating-system restart. `with_budget_ledger` accepts a ledger the
 host already holds. `shared_budget_ledger_continues_after_recomposition`
 spends the grant, then another Resource given that same ledger answers
-`budget-exhausted` and does not run the tool. The ledger remains process
-memory. Sharing it is not an operating-system restart. That recomposition
-has not been run on Host3.
+`budget-exhausted` and does not run the tool. Host3
+`aauth-wc07-completion-shared01` passed that recomposition at `3246e68`.
+The ledger remains process memory. Sharing it is not an operating-system
+restart.
 
 `R3PerCallConfig::held_result_lifetime` is host policy, in seconds. It is not
 extended when a refreshed class token re-requests the call, and it is not a
