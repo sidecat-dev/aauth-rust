@@ -222,15 +222,17 @@ not run the tool. `class_cap_is_free_again_after_the_grant_expires` signs
 reservation is the Person Server account book, not an operating-system
 restart.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
-for 600 seconds and the Auth token stops at `period_end`. A class document
-with federation enabled is fetched and consented, then the exact tokens are
-relayed to the access server. The returned Auth token must name that
-document. A changed subject, reference, or issuer is refused and no Auth
-token is released. A proposal is presented with the person token, consented
-with proposal consent, and relayed the same way. Core consent is not used.
-The returned Auth token must match those proposal bytes. Declined proposal
-consent does not call the access server. A token for a different proposal
-is refused. Neither relay has been run on Host3. A class Resource token may carry a budget offer: the PS verifies
+for 600 seconds and the Auth token stops at `period_end`. Host3
+`aauth-wc07-completion-federated01` passed
+`federated_class_and_proposal_keep_original_tokens_and_reject_changed_authority`
+at `4949605`. A class document with federation enabled is fetched and
+consented, then the exact tokens are relayed. The returned Auth token names
+that document. A changed subject, reference, or issuer is `502
+as_unreachable` and no Auth token is released. A proposal is presented with
+the person token, consented with proposal consent, and relayed the same way.
+Core consent is not used. The returned Auth token matches those proposal
+bytes. Declined proposal consent is `403` and does not call the access
+server. A token for a different proposal is refused. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against
