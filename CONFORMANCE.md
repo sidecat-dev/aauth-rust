@@ -306,7 +306,8 @@ and the next presentation there returns it. Host3
 `release_gating_runs_once_before_approval_and_replays_the_held_response`
 runs the call while issuing the `202`. Approval releases the stored
 response and does not run the call again. The next presentation returns
-that response. That release has not been run on Host3.
+that response. Host3 `aauth-wc07-completion-release01` passed that
+release at `367f2f6`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
