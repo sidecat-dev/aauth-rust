@@ -315,8 +315,10 @@ computes again and does not retire the first record. A new class token,
 with a different `jti`, reuses the first held bytes and retires that record.
 The original per-call token is forbidden at its pending URL. The successor
 returns the first bytes. The same-token challenge still returns its own
-bytes. The store is process memory. That re-request has not been run on
-Host3.
+bytes. The store is process memory. Host3
+`aauth-wc07-completion-rerequest01` passed that re-request at `b4303d0`.
+Receipt START `2026-10-29T20:35:11.200055+00:00`, log mtime
+`2026-10-29T20:35:12.567456178Z`, exit 0: 1 passed, 0 failed, 35 filtered.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
