@@ -237,6 +237,10 @@ are still there. `reopen_reads_the_same_class_document_from_the_directory`
 does that for the class document. Neither is an operating-system restart,
 power loss, or a generic `R3CallStore` adapter. Those remain unqualified.
 The budget ledger remains process memory.
+`fresh_resource_spends_the_same_grant_again` spends the grant, then the same
+Resource answers `budget-exhausted`. A second Resource on the same class
+documents, with a new ledger, admits that still-live token again. That is
+not an operating-system restart.
 
 `R3PerCallConfig::held_result_lifetime` is host policy, in seconds. It is not
 extended when a refreshed class token re-requests the call, and it is not a

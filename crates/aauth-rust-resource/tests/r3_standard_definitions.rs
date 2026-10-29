@@ -271,13 +271,14 @@ fn resource_for(
     profile: &Profile,
     meter: bool,
 ) -> (Arc<Resource>, Arc<AtomicUsize>, Arc<Documents>) {
-    resource_with(profile, meter, false)
+    resource_with(profile, meter, false, Arc::new(Documents::default()))
 }
 
 fn resource_with(
     profile: &Profile,
     meter: bool,
     revocation: bool,
+    documents: Arc<Documents>,
 ) -> (Arc<Resource>, Arc<AtomicUsize>, Arc<Documents>) {
     let permit = operation(profile, profile.operations[0]);
     let refuse = operation(profile, profile.operations[1]);
@@ -298,7 +299,6 @@ fn resource_with(
             },
         ) as BoxedAuthAdmissionPolicy<String>
     };
-    let documents = Arc::new(Documents::default());
     let resource = PsAuthorizationResource::new(
             PsAuthorizationConfig {
                 issuer: RESOURCE.into(),
@@ -910,6 +910,97 @@ fn per_call_with_a_budget_offer_is_refused() {
 }
 
 #[test]
+fn fresh_resource_spends_the_same_grant_again() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    let (resource, calls, _) = resource_with(&profile, true, false, documents.clone());
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-ledger-restart",
+    );
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "admit-ledger") {
+        AuthDecision::Granted(admitted) => assert_eq!(admitted.admitted(), "receipt"),
+        other => panic!("first admission: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "again-ledger") {
+        AuthDecision::AuthTokenRequired { budget_reason, .. } => {
+            assert_eq!(budget_reason.as_deref(), Some("budget-exhausted"));
+        }
+        other => panic!("spent ledger: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the spent ledger does not run the tool");
+    let (restarted, restarted_calls, _) = resource_with(&profile, true, false, documents);
+    match restarted.authorize(&signed_call("/op/permit", &auth), NOW, "restarted-ledger") {
+        AuthDecision::Granted(admitted) => {
+            assert_eq!(admitted.admitted(), "receipt");
+            let header = admitted.budget_header().expect("metered admission");
+            assert!(header.contains("remaining=0"), "{header}");
+        }
+        other => panic!("fresh ledger: {other:?}"),
+    }
+    assert_eq!(restarted_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn budgets_before_r3_still_exchange_and_admit() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, calls, _) = resource_for(&profile, true);
@@ -993,7 +1084,12 @@ fn budgets_before_r3_still_exchange_and_admit() {
 #[test]
 fn combined_budget_auth_expires_and_a_later_grant_revokes() {
     let profile = profiles().into_iter().next().expect("one parser profile");
-    let (resource, calls, _) = resource_with(&profile, true, true);
+    let (resource, calls, _) = resource_with(
+        &profile,
+        true,
+        true,
+        Arc::new(Documents::default()),
+    );
     let signer = agent();
     let ids = AtomicUsize::new(0);
     let permit = operation(&profile, profile.operations[0]);
