@@ -220,7 +220,10 @@ The next offer signs as 0. The Resource answers `budget-exhausted` and does
 not run the tool. `class_cap_is_free_again_after_the_grant_expires` signs
 500 for 50 seconds. At that expiry the same offer signs as 500 again. The
 reservation is the Person Server account book, not an operating-system
-restart.
+restart. `failed_r3_audit_does_not_reserve_the_budget_cap` withholds the
+Auth token when the R3 audit commit fails. The account book stays empty,
+and the next offer still signs 500 under a cap of 800. That refusal has not
+been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed

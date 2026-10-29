@@ -752,20 +752,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             tenant: r.tenant.clone(),
             extra: std::collections::BTreeMap::new(),
         };
-        if let Some(budget) = &granted_budget
-            && let Some(state) = &self.budgets
-        {
-            state
-                .accounts
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .insert_owned(
-                    claims.jti.clone(),
-                    budget.amount(),
-                    expires_at,
-                    budget_owner(&claims.sub, &claims.aud),
-                );
-        }
         let compact = mint(&claims)?;
         let record = self.record(
             &compact,
@@ -816,6 +802,22 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.inputs_current(&agent, &resource, &presented, released_at)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
+        }
+        // Reserve only after the token will be released. An audit or issuance
+        // failure withholds the token and must not occupy the cap.
+        if let Some(budget) = &granted_budget
+            && let Some(state) = &self.budgets
+        {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert_owned(
+                    claims.jti.clone(),
+                    budget.amount(),
+                    expires_at,
+                    budget_owner(&claims.sub, &claims.aud),
+                );
         }
         Ok(token_response(
             "auth_token",

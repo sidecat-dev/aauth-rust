@@ -1524,6 +1524,96 @@ fn later_class_grant_is_narrowed_to_the_remaining_cap() {
 }
 
 #[test]
+fn failed_r3_audit_does_not_reserve_the_budget_cap() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let audit = Arc::new(GatedAudit(Mutex::new(true)));
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: audit.clone(),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let withheld = exchange_budget_response(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-audit-fail",
+    );
+    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
+    assert!(member(&withheld, "auth_token").is_none());
+    assert_eq!(ps.budget_accounted(), Some(0));
+    *audit.0.lock().unwrap() = false;
+    let released = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-audit-ok",
+    );
+    let amount = aauth_rust_core::AuthToken::parse(&released)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(amount, Some(500));
+    assert_eq!(ps.budget_accounted(), Some(500));
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
@@ -2076,6 +2166,19 @@ fn exchange_budget_auth(
     person: &str,
     resource_jti: &str,
 ) -> String {
+    let exchanged = exchange_budget_response(resource, ps, presented, signer, person, resource_jti);
+    assert_eq!(exchanged.status(), 200, "{resource_jti}");
+    member(&exchanged, "auth_token").expect("auth token")
+}
+
+fn exchange_budget_response(
+    resource: &Resource,
+    ps: &PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>,
+    presented: &Agent,
+    signer: &Agent,
+    person: &str,
+    resource_jti: &str,
+) -> Response<Vec<u8>> {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let authorize = post(
         presented,
@@ -2093,13 +2196,11 @@ fn exchange_budget_auth(
         .into_response();
     assert_eq!(issued.status(), 200, "{resource_jti}");
     let resource_token = member(&issued, "resource_token").expect("resource token");
-    let exchanged = ps.handle(&post(
+    ps.handle(&post(
         signer,
         &format!("{PS}/token"),
         json!({ "resource_token": resource_token, "presented_token": person }),
-    ));
-    assert_eq!(exchanged.status(), 200, "{resource_jti}");
-    member(&exchanged, "auth_token").expect("auth token")
+    ))
 }
 
 fn ps_revocation(jti: &str, exp: i64) -> Request<Vec<u8>> {
@@ -2271,6 +2372,21 @@ fn signed_call_at(path: &str, token: &str, now: i64) -> Request<Vec<u8>> {
     )
     .unwrap();
     request
+}
+
+struct GatedAudit(Mutex<bool>);
+impl aauth_rust_r3::IssuanceStore for GatedAudit {
+    fn commit(
+        &self,
+        _: &aauth_rust_r3::IssuanceRecord,
+    ) -> Result<(), aauth_rust_r3::IssuanceError> {
+        if *self.0.lock().unwrap() {
+            return Err(aauth_rust_r3::IssuanceError::Store(Box::new(
+                std::io::Error::other("audit unavailable"),
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
