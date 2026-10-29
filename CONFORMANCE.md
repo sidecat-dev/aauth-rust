@@ -215,8 +215,9 @@ The Person Server accepts `with_budgets` and `with_r3` in either order.
 exchanges and admits the combined grant. Federation together with R3 stays
 refused. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
-grant on the Auth token. `budget_consumed` on that
-Resource token is `invalid_budget`. A per-call proposal together with a budget
+grant on the Auth token. A well-formed `budget_consumed` on that
+Resource token is `invalid_resource_token`: Go does not resolve it against
+a retained grant. A malformed record is `invalid_budget`. A per-call proposal together with a budget
 offer is `invalid_resource_token`. An R3-only token is unchanged when budgets
 are also enabled. `combined_budget_auth_expires_and_a_later_grant_revokes`
 presents that Auth token at its `exp` and receives `expired_jwt` with no

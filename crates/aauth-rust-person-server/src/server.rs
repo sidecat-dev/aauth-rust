@@ -780,10 +780,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 None => Vec::new(),
             };
             // A class token may carry a budget offer only when this PS meters.
-            // `budget_consumed` stays refused: Go requires retained-grant resolution.
+            // A well-formed consumption record is not resolved. Go answers
+            // `invalid_resource_token` until retained-grant resolution exists.
+            // A malformed record is a budget claim error.
             let offer = if self.budgets.is_some() {
                 if core.contains_key("budget_consumed") {
-                    return Err(Failure::parameter("invalid_budget"));
+                    return Err(match parse_resource_claims(&core, &r.presented_jti) {
+                        Ok(parsed) if parsed.consumed.is_some() => {
+                            Failure::parameter("invalid_resource_token")
+                        }
+                        _ => Failure::parameter("invalid_budget"),
+                    });
                 }
                 self.admit_resource_budget(&core, &r.presented_jti)?
             } else if extra_blocks(&core, false, false) {

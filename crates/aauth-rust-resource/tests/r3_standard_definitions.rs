@@ -666,6 +666,56 @@ fn class_resource_token_with_budget_offer_is_authorized() {
         budget,
         json!({"amount": 500, "unit": "USD", "decimals": 6})
     );
+    let record = aauth_rust_budgets::ConsumptionRecord::new(claims.presented_jti.clone(), 1)
+        .expect("consumption record");
+    let (with_record, _) = mint_budget_resource_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &claims,
+        stored.reference.uri(),
+        &stored.exact_json,
+        &offer,
+        Some(&record),
+    )
+    .expect("combined token with a consumption record");
+    let unresolved = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": with_record, "presented_token": person }),
+    ));
+    assert_eq!(unresolved.status(), 400, "well-formed consumption record");
+    assert_eq!(
+        member(&unresolved, "error").as_deref(),
+        Some("invalid_resource_token")
+    );
+    let mut malformed = ResourceToken::parse(&resource_token)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    malformed.extra.insert(
+        "budget".into(),
+        json!({"amount": 500, "unit": "USD", "decimals": 6}),
+    );
+    malformed
+        .extra
+        .insert("budget_consumed".into(), json!("nope"));
+    let bad = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &malformed,
+    )
+    .expect("resource token with a malformed consumption record");
+    let malformed_response = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": bad, "presented_token": person }),
+    ));
+    assert_eq!(malformed_response.status(), 400, "malformed consumption record");
+    assert_eq!(
+        member(&malformed_response, "error").as_deref(),
+        Some("invalid_budget")
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0, "issuance does not run the tool");
 }
 

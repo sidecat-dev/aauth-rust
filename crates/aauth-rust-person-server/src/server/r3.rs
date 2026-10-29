@@ -375,9 +375,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 verified_at,
             )
             .map_err(|_| Failure::parameter("invalid_resource_token"))?;
-            // Go refuses a consumption record here: resolving it needs the retained grant.
+            // Go refuses a consumption record here. The HTTP code is
+            // `invalid_resource_token`: this is not a claim-parse error.
             if consumed.is_some() {
-                return Err(Failure::parameter("invalid_budget"));
+                return Err(Failure::parameter("invalid_resource_token"));
             }
             verified.reference().clone()
         } else {
