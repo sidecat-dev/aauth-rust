@@ -816,6 +816,100 @@ fn resource_issued_budget_token_is_exchanged_and_admitted() {
 }
 
 #[test]
+fn per_call_with_a_budget_offer_is_refused() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, calls, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: Some(
+                        GrantedOperations::new(&vocabulary, std::slice::from_ref(&per_call))
+                            .unwrap(),
+                    ),
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [
+                    serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                    serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+                ],
+            },
+            "budget": {"amount": 500, "unit": "USD", "decimals": 2}
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-per-call-budget")
+        .into_response();
+    assert_eq!(issued.status(), 200, "resource still issues the combined token");
+    let resource_token = member(&issued, "resource_token").expect("resource token");
+    let exchanged = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": resource_token, "presented_token": person }),
+    ));
+    assert_eq!(exchanged.status(), 400);
+    assert_eq!(
+        member(&exchanged, "error").as_deref(),
+        Some("invalid_resource_token")
+    );
+    assert!(member(&exchanged, "auth_token").is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "refusal does not run the tool");
+}
+
+#[test]
 fn budgets_before_r3_still_exchange_and_admit() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, calls, _) = resource_for(&profile, true);

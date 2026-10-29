@@ -432,7 +432,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
                     return Err(Failure::internal());
                 }
-                // A grant wider than the exact document is a host error: nothing is issued.
+                // The class-R3 budget profile has no `r3_per_call` claim.
+                // Leaving an operation per call while an offer is present
+                // cannot be signed, so nothing is issued.
                 if decision.per_call.is_some() && granted_budget.is_some() {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
@@ -495,6 +497,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     mint,
                 )
             } else if let Some(proposal) = artifact.proposal() {
+                // A proposal plus a budget offer is the same unsigned composition.
+                // Do not record approval or mint a per-call token that drops the offer.
+                if granted_budget.is_some() {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
                 // Release gating executed before approval: release consent, never
                 // execution consent. A person cannot be told it already ran
                 // without a display.
