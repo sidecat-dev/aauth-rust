@@ -476,6 +476,19 @@ presents the same Auth token, and is admitted again. The child pid is not
 the parent pid. This is a process exit. It is not power loss. The example
 `FileDocuments` store stays private to the example.
 
+Host3 `aauth-wc07-completion-document01` ran that class admission in one
+unit at `2d55b0cd531778b9013921c4cadd553321e1f6cb`. Receipt START
+`2026-10-29T22:54:06.378681479+00:00`, log mtime
+`2026-10-29T22:54:26.393846723+00:00`. The resource library was rebuilt.
+`directory_document_store_admits_the_class_after_process_exit` passed 1
+and failed 0, with 41 filtered. The directory document store passed 4,
+ignored the worker entry, and failed 0. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. systemd-run reported
+invocation `2a11a83491dd42c7876129e6f173e99f`. After the unit was
+collected, `systemctl show` reported `Result=success` and
+`ExecMainStatus=0`, and `InvocationID` was empty.
+
 `r3-per-call-interop` pins `query-runs=2` and
 `proposal-err=invalid_resource_token`. The second query run is the
 release-retry challenge while the prior proposal token is still live.
