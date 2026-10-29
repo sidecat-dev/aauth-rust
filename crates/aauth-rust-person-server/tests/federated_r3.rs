@@ -5,14 +5,15 @@
 
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::continuation::{ContinuationStore, MemoryContinuations, Snapshot, StoreError};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, Confirmation, ResourceClaims, TokenError,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
-    AuthorizationRequest, BoxedClock, BoxedPolicy, BoxedTokenIds, Config, Grant, MemoryStore,
-    Person, PersonRequest, PersonServer, Policy, PolicyError, R3AuthorizationRequest, R3Decision,
-    R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
+    AuthorizationRequest, BoxedClock, BoxedPolicy, BoxedTokenIds, Config, DeferredConfig, Grant,
+    MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError, R3AuthorizationRequest,
+    R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
 };
 use aauth_rust_r3::{
     FetchBody, FetchLimits, FetchResponse, FetchTransport, IssuanceError, IssuanceRecord,
@@ -98,6 +99,7 @@ struct Relay {
     bad_reference: Mutex<String>,
     bad_issuer: Mutex<String>,
     bad_proposal: Mutex<String>,
+    hold: Arc<Mutex<Option<u16>>>,
 }
 #[derive(Clone, Copy)]
 enum Mode {
@@ -133,6 +135,13 @@ impl aauth_rust_person_server::Federation for Relay {
             "original presented token"
         );
         assert_eq!(body["agent_token"], agent, "original agent token");
+        if let Some(status) = *self.hold.lock().unwrap() {
+            return Ok(Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(br#"{"invoice":"private-invoice"}"#.to_vec())
+                .unwrap());
+        }
         let token = match *self.mode.lock().unwrap() {
             Mode::Class => self.good_class.lock().unwrap().clone(),
             Mode::Proposal => self.good_proposal.lock().unwrap().clone(),
@@ -414,6 +423,7 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
 
     let relay_original = Arc::new(Mutex::new(None));
     let relay_mode = Arc::new(Mutex::new(Mode::Class));
+    let relay_hold = Arc::new(Mutex::new(None));
     let relay = Relay {
         order: order.clone(),
         original: relay_original.clone(),
@@ -424,7 +434,9 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
         bad_reference: Mutex::new(bad_reference),
         bad_issuer: Mutex::new(bad_issuer),
         bad_proposal: Mutex::new(bad_proposal),
+        hold: relay_hold.clone(),
     };
+    let continuation_inserts = Arc::new(AtomicUsize::new(0));
     let consent = Consent {
         order: order.clone(),
         core: AtomicUsize::new(0),
@@ -443,6 +455,11 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
     )
     .unwrap()
     .with_federation(relay)
+    .with_deferred(DeferredConfig::new(CountStore {
+        inner: MemoryContinuations::new(4),
+        inserts: continuation_inserts.clone(),
+    }))
+    .unwrap()
     .with_r3(R3IssuerConfig {
         registry: registry.clone(),
         egress: Box::new(|_: &str, _: Instant| Ok(())),
@@ -647,6 +664,55 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
             .get("auth_token")
             .is_none()
     );
+
+    let refused = |status: u16, mode: Mode, resource_token: &str| {
+        order.lock().unwrap().clear();
+        *relay_hold.lock().unwrap() = Some(status);
+        let response = exchange(mode, resource_token);
+        let body = String::from_utf8_lossy(response.body()).into_owned();
+        assert_eq!(response.status(), 500, "{body}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
+            "server_error"
+        );
+        assert!(
+            serde_json::from_slice::<Value>(response.body())
+                .unwrap()
+                .get("auth_token")
+                .is_none()
+        );
+        assert!(!body.contains("private-invoice"));
+        assert_eq!(continuation_inserts.load(Ordering::SeqCst), 0);
+        response
+    };
+    refused(202, Mode::Class, &class_token);
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        ["fetch", "document-consent", "access"]
+    );
+    refused(402, Mode::Proposal, &proposal_token);
+    assert_eq!(
+        order.lock().unwrap().as_slice(),
+        ["fetch", "proposal-consent", "access"]
+    );
+    assert_eq!(consent.core.load(Ordering::SeqCst), 0);
+}
+
+struct CountStore {
+    inner: MemoryContinuations,
+    inserts: Arc<AtomicUsize>,
+}
+impl ContinuationStore for CountStore {
+    fn insert(&self, id: &str, value: Value) -> Result<(), StoreError> {
+        self.inserts.fetch_add(1, Ordering::SeqCst);
+        self.inner.insert(id, value)
+    }
+    fn load(&self, id: &str) -> Result<Option<Snapshot>, StoreError> {
+        self.inner.load(id)
+    }
+    fn replace(&self, id: &str, revision: u64, value: Option<Value>) -> Result<bool, StoreError> {
+        self.inner.replace(id, revision, value)
+    }
 }
 
 struct ConsentGate(Arc<Consent>);

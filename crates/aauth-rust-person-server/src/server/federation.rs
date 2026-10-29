@@ -71,13 +71,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::parameter("invalid_presented_token"));
         }
         if core_consent {
-        self.policy.consent(context).map_err(|error| {
-            Failure::policy(error).with_federation(FederationFailure {
-                access_server: r.aud.clone(),
-                status: None,
-                reason: Reason::ConsentRefused(error),
-            })
-        })?;
+            self.policy.consent(context).map_err(|error| {
+                Failure::policy(error).with_federation(FederationFailure {
+                    access_server: r.aud.clone(),
+                    status: None,
+                    reason: Reason::ConsentRefused(error),
+                })
+            })?;
         }
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
@@ -146,6 +146,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if self.deferred.is_some()
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
+            // Go keeps deferred custody for a missionless Core grant. An R3
+            // class or proposal is refused after the access server answers and
+            // is not written to the continuation store.
+            if relay.is_some() {
+                return Err(Failure::internal());
+            }
             return self.defer_federation(
                 &response,
                 agent,
