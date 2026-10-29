@@ -1104,8 +1104,8 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
         .with_budgets(
             units.clone(),
             "https://resource.example/usage",
-            1_000,
-            1_000,
+            500,
+            500,
         )
         .unwrap();
     let also = core_resource(&calls)
