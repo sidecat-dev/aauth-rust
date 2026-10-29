@@ -454,6 +454,18 @@ documents only, and a proposal resource token is `400`
 `budget_consumed` on a class Resource token remains
 `invalid_resource_token` and is not applied.
 
+Host3 `aauth-wc07-completion-align01` ran that batch in one unit at
+`f552df6a62de3cdb12efd4fd9af958c4f5413083`. Receipt START
+`2026-10-29T22:15:54.303157140+00:00`, log mtime
+`2026-10-29T22:16:21.762515300+00:00`. The budgeted deferred tests passed
+2 and failed 0. The directory call store passed 4, ignored the worker
+entry, and failed 0. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. systemd-run reported
+invocation `d7d988646e1b47d7b992be6d340f83f6`. After the unit was
+collected, `systemctl show` reported `Result=success` and
+`ExecMainStatus=0`, and `InvocationID` was empty.
+
 `fresh_resource_spends_the_same_grant_again` spends the grant, then the same
 Resource answers `budget-exhausted`. A second Resource on the same class
 documents, with a new ledger, admits that still-live token again. That is
