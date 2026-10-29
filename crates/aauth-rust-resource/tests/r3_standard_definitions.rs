@@ -283,7 +283,7 @@ fn resource_with(
     revocation: bool,
     documents: Arc<Documents>,
 ) -> (Arc<Resource>, Arc<AtomicUsize>, Arc<Documents>) {
-    resource_with_ledger(profile, meter, revocation, documents, None)
+    resource_with_ledger(profile, meter, revocation, documents, None, None)
 }
 
 fn resource_with_ledger(
@@ -292,6 +292,7 @@ fn resource_with_ledger(
     revocation: bool,
     documents: Arc<Documents>,
     ledger: Option<Arc<Mutex<aauth_rust_budgets::Ledger>>>,
+    deny_first: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> (Arc<Resource>, Arc<AtomicUsize>, Arc<Documents>) {
     let permit = operation(profile, profile.operations[0]);
     let refuse = operation(profile, profile.operations[1]);
@@ -307,6 +308,12 @@ fn resource_with_ledger(
         let calls = calls.clone();
         Box::new(
             move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| -> Result<String, Deny> {
+                if deny_first
+                    .as_ref()
+                    .is_some_and(|flag| flag.swap(false, Ordering::SeqCst))
+                {
+                    return Err(Deny);
+                }
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok("receipt".into())
             },
@@ -1104,7 +1111,7 @@ fn shared_budget_ledger_continues_after_recomposition() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     let ledger = resource.budget_ledger().expect("metered ledger");
     let (continued, continued_calls, _) =
-        resource_with_ledger(&profile, true, false, documents, Some(ledger));
+        resource_with_ledger(&profile, true, false, documents, Some(ledger), None);
     match continued.authorize(&signed_call("/op/permit", &auth), NOW, "continued-ledger") {
         AuthDecision::AuthTokenRequired { budget_reason, .. } => {
             assert_eq!(budget_reason.as_deref(), Some("budget-exhausted"));
@@ -2284,6 +2291,90 @@ fn exchange_core_budget_response<S: aauth_rust_person_server::Store, P: Policy>(
         &format!("{PS}/token"),
         json!({ "resource_token": resource_token, "presented_token": person }),
     ))
+}
+
+#[test]
+fn denied_class_call_releases_the_budget_hold() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    let deny = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (resource, calls, _) =
+        resource_with_ledger(&profile, true, false, documents.clone(), None, Some(Arc::clone(&deny)));
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-deny-call",
+    );
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "denied-call") {
+        AuthDecision::Forbidden { .. } => {}
+        other => panic!("denied call: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "denial does not run the tool");
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "after-denial") {
+        AuthDecision::Granted(admitted) => {
+            let header = admitted.budget_header().expect("committed field");
+            assert!(header.contains("cost=500"), "{header}");
+            assert!(header.contains("remaining=0"), "{header}");
+        }
+        other => panic!("grant after denial: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
