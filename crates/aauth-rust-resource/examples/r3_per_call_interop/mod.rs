@@ -321,7 +321,13 @@ impl R3DocumentStore for FileDocuments {
         .to_string()
         .into_bytes();
         match write_new(&path, &bytes).map_err(unavailable)? {
-            true => Ok(()),
+            true => {
+                #[cfg(unix)]
+                fs::File::open(&self.0)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(unavailable)?;
+                Ok(())
+            }
             false if fs::read(&path).map_err(unavailable)? == bytes => Ok(()),
             false => Err(R3StoreError::Conflict),
         }

@@ -227,10 +227,13 @@ The revocation ledger is process memory. That run is not an operating-system
 restart.
 
 The example file store writes each proposal record, then synchronizes the
-directory on Unix. `reopen_reads_the_same_held_release_from_the_directory`
-drops that store value and opens another on the same directory; the held bytes
-are still there. That is not an operating-system restart, power loss, or a
-generic `R3CallStore` adapter. Those remain unqualified.
+directory on Unix. Class documents in that store synchronize the directory
+the same way. `reopen_reads_the_same_held_release_from_the_directory` drops
+the proposal store and opens another on the same directory; the held bytes
+are still there. `reopen_reads_the_same_class_document_from_the_directory`
+does that for the class document. Neither is an operating-system restart,
+power loss, or a generic `R3CallStore` adapter. Those remain unqualified.
+The budget ledger remains process memory.
 
 `R3PerCallConfig::held_result_lifetime` is host policy, in seconds. It is not
 extended when a refreshed class token re-requests the call, and it is not a

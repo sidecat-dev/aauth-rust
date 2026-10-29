@@ -428,7 +428,15 @@ impl R3DocumentStore for FileDocuments {
         .to_string()
         .into_bytes();
         match write_new(&path, &bytes).map_err(unavailable)? {
-            true => Ok(()),
+            true => {
+                // Same directory sync as a proposal record. A new file is not
+                // durable until its directory entry is.
+                #[cfg(unix)]
+                fs::File::open(&self.0)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(unavailable)?;
+                Ok(())
+            }
             false if fs::read(&path).map_err(unavailable)? == bytes => Ok(()),
             false => Err(R3StoreError::Conflict),
         }
@@ -2258,6 +2266,47 @@ fn reopen_reads_the_same_held_release_from_the_directory() {
     let held = reopened.held_releases("jkt", "subject", 1_100).unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn reopen_reads_the_same_class_document_from_the_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-r3-class-reopen-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let exact = br#"{"tool":"records.read"}"#.to_vec();
+    let uri = "https://records.example/r3/c.reopen";
+    let record = R3DocumentRecord {
+        reference: Reference::new(uri, digest(&exact)).unwrap(),
+        exact_json: exact,
+        person_server: "https://ps.example".into(),
+        auth_token_issuer: "https://ps.example".into(),
+        auth_token_issuer_document: "aauth-person.json".into(),
+        resource_token_jti: "rt-reopen".into(),
+        resource_token: "token".into(),
+        presented_jti: "ps-1".into(),
+        subject: "subject".into(),
+        agent_jkt: "jkt".into(),
+        tenant: None,
+        account: None,
+        scope: None,
+        issued_at: 1_000,
+        expires_at: 1_600,
+    };
+    FileDocuments(root.clone(), Mutex::new(()))
+        .commit(&record)
+        .unwrap();
+    let loaded = FileDocuments(root.clone(), Mutex::new(()))
+        .load(uri)
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, record);
     let _ = fs::remove_dir_all(root);
 }
 
