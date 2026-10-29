@@ -252,8 +252,8 @@ The next class offer signs 300 under a cap of 800. Host3
 `aauth-wc07-completion-core01` passed that composition at `183d921`.
 `denied_class_call_releases_the_budget_hold` refuses the protected class
 call and does not run the tool. The hold is released. The same grant is
-then admitted in full: `cost=500` and `remaining=0`. That release has not
-been run on Host3.
+then admitted in full: `cost=500` and `remaining=0`. Host3
+`aauth-wc07-completion-calldeny01` passed that release at `6f64216`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
