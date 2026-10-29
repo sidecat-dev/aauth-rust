@@ -379,7 +379,7 @@ where
     /// mission composition this profile does not implement. Calling
     /// [`Self::with_mission_context`] afterwards makes every request a `500`.
     pub fn with_r3(mut self, config: R3Config) -> Result<Self, PsConfigurationError> {
-        if self.access_server.is_some() || self.budgets.is_some() || self.mission_context {
+        if self.access_server.is_some() || self.mission_context {
             return Err(PsConfigurationError::InvalidR3Profile);
         }
         self.r3 = Some(Box::new(R3Profile::new(config)?));
@@ -388,8 +388,7 @@ where
 
     /// A composition added after [`Self::with_r3`] that this profile refuses.
     pub(super) fn r3_composition_refused(&self) -> bool {
-        self.r3.is_some()
-            && (self.mission_context || self.budgets.is_some() || self.access_server.is_some())
+        self.r3.is_some() && (self.mission_context || self.access_server.is_some())
     }
 
     pub(super) fn r3_metadata(&self) -> Option<Value> {
@@ -541,6 +540,7 @@ where
         profile: &R3Profile,
         claims: &ResourceClaims,
         operations: &OperationSet,
+        offer: Option<&aauth_rust_budgets::Budget>,
     ) -> Result<String, Issue> {
         let vocabulary = profile
             .vocabularies
@@ -567,15 +567,30 @@ where
             &claims.aud,
             &claims.jti,
         );
-        let (compact, reference) = aauth_rust_r3::mint_resource_token(
-            &profile.registry,
-            &self.config.signing_key,
-            &self.config.kid,
-            claims,
-            &uri,
-            &exact,
-        )
-        .map_err(|_| Issue::Host)?;
+        let (compact, reference) = if let Some(offer) = offer {
+            let (compact, reference) = aauth_rust_r3::mint_budget_resource_token(
+                &profile.registry,
+                &self.config.signing_key,
+                &self.config.kid,
+                claims,
+                &uri,
+                &exact,
+                offer,
+                None,
+            )
+            .map_err(|_| Issue::Host)?;
+            (compact, reference)
+        } else {
+            aauth_rust_r3::mint_resource_token(
+                &profile.registry,
+                &self.config.signing_key,
+                &self.config.kid,
+                claims,
+                &uri,
+                &exact,
+            )
+            .map_err(|_| Issue::Host)?
+        };
         let record = R3DocumentRecord {
             reference,
             exact_json: exact,
@@ -600,6 +615,26 @@ where
             .commit(&record)
             .map_err(|_| Issue::Retention)?;
         Ok(compact)
+    }
+
+    /// A `budget` object on `/authorize` becomes the resource-token offer when
+    /// budgets are enabled. No object leaves the class token unchanged.
+    fn r3_budget_offer(
+        &self,
+        request: &Request<Vec<u8>>,
+    ) -> Result<Option<aauth_rust_budgets::Budget>, ProactiveDecision> {
+        let value = strict_json(request.body()).map_err(|_| ProactiveDecision::InvalidRequest)?;
+        let Some(budget) = value.get("budget") else {
+            return Ok(None);
+        };
+        let Some(gate) = &self.budgets else {
+            return Err(ProactiveDecision::InvalidBudget);
+        };
+        let requested = aauth_rust_budgets::parse_budget(budget)
+            .map_err(|_| ProactiveDecision::InvalidBudget)?;
+        gate.offer(Some(&requested))
+            .map(Some)
+            .map_err(|_| ProactiveDecision::InvalidBudget)
     }
 
     /// `/authorize` with `r3_operations`. `None` continues the Core request unchanged.
@@ -628,7 +663,11 @@ where
         } else {
             None
         };
-        Some(match self.issue_r3(profile, &claims, &operations) {
+        let offer = match self.r3_budget_offer(request) {
+            Ok(offer) => offer,
+            Err(decision) => return Some(decision),
+        };
+        Some(match self.issue_r3(profile, &claims, &operations, offer.as_ref()) {
             Ok(resource_token) => ProactiveDecision::ResourceToken { resource_token },
             Err(Issue::Host) => ProactiveDecision::InternalError,
             Err(Issue::Retention) => ProactiveDecision::RetentionFailed,
@@ -655,7 +694,7 @@ where
         claims.scope = profile
             .require_core_scope
             .then(|| self.config.scopes.join(" "));
-        Some(match self.issue_r3(profile, &claims, &operations) {
+        Some(match self.issue_r3(profile, &claims, &operations, None) {
             Ok(resource_token) => AuthDecision::AuthTokenRequired {
                 resource_token,
                 budget_reason: None,

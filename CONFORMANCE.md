@@ -205,9 +205,10 @@ policy, refuses its replay before another policy call, and admits a fresh token.
 The release profile is202-only and unmetered. The host must enforce the callback's
 side-effect-free contract.
 
-R3 and budgets do not compose. On the Resource, `with_r3` after `with_budgets`
-returns `InvalidR3Profile`, and `with_budgets` after `with_r3` returns
-`InvalidBudgetProfile`. `r3_and_budgets_refuse_either_order` pins both orders.
+The Resource accepts R3 and budgets together, in either order. `/authorize`
+with `r3_operations` and a `budget` object issues one class Resource token
+carrying that narrowed offer. `r3_and_budgets_issue_a_combined_resource_token`
+pins the token. A `budget` object without budgets enabled is `invalid_budget`.
 The Person Server refuses `with_r3` when budgets are already enabled. Calling
 `with_budgets` after R3 is accepted. A class Resource token may then carry a
 budget offer: the PS verifies it with the combined R3 budget verifier, narrows

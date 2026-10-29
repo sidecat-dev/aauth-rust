@@ -11,7 +11,7 @@ use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_r3::{
     AuthoritativeSnapshot, Authorization, DefinitionRegistry, Display as R3Display,
     GrantedOperations, McpCodec, Operation, OperationSet, ToolsListPage, ToolsListSnapshot, digest,
-    standard_registry, verify_resource_token,
+    standard_registry, verify_budget_resource_token, verify_resource_token,
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3OperationMapper, Deny, ProactiveDecision,
@@ -1096,28 +1096,43 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
 }
 
 #[test]
-fn r3_and_budgets_refuse_either_order() {
+fn r3_and_budgets_issue_a_combined_resource_token() {
     let store = Arc::new(VolatileTestStore::default());
     let calls = Arc::new(AtomicUsize::new(0));
     let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
-    let after_r3 = resource(&store, &calls, false).with_budgets(
-        units.clone(),
-        "https://resource.example/usage",
-        1_000,
-        1_000,
-    );
-    assert!(matches!(
-        after_r3,
-        Err(PsConfigurationError::InvalidBudgetProfile)
-    ));
-    let after_budgets = core_resource(&calls)
+    let resource = resource(&store, &calls, false)
+        .with_budgets(
+            units.clone(),
+            "https://resource.example/usage",
+            1_000,
+            1_000,
+        )
+        .unwrap();
+    let also = core_resource(&calls)
         .with_budgets(units, "https://resource.example/usage", 1_000, 1_000)
         .unwrap()
         .with_r3(r3_config(&store, false));
-    assert!(matches!(
-        after_budgets,
-        Err(PsConfigurationError::InvalidR3Profile)
-    ));
+    assert!(also.is_ok());
+    let response = resource
+        .authorize_endpoint(
+            &authorize(json!({
+                "r3_operations": operations(&["records.read"]),
+                "budget": {"amount": 500, "unit": "USD", "decimals": 2}
+            })),
+            NOW,
+            "rt-budget",
+        )
+        .into_response();
+    assert_eq!(response.status(), 200);
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    let compact = body["resource_token"].as_str().unwrap();
+    assert!(verify_resource_token(compact, &keys(), NOW).is_err());
+    let (_verified, offer, consumed) =
+        verify_budget_resource_token(compact, &keys(), NOW).unwrap();
+    assert!(consumed.is_none());
+    assert_eq!(offer.amount(), 500);
+    assert_eq!(offer.unit(), "USD");
+    assert_eq!(offer.decimals(), 2);
 }
 
 #[test]

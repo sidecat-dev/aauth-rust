@@ -733,10 +733,6 @@ where
         default_bound: i64,
         default_offer: i64,
     ) -> Result<Self, PsConfigurationError> {
-        // The combined R3 and Budgets profile is not implemented here.
-        if self.r3.is_some() {
-            return Err(PsConfigurationError::InvalidBudgetProfile);
-        }
         metered_access_mode("auth-token")
             .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
         let usage_endpoint = usage_endpoint.into();
