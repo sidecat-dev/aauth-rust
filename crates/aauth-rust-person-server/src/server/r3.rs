@@ -209,12 +209,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// The PS signs each document fetch as itself under `aauth-person.json`.
     /// A Resource token without R3 claims keeps Core issuance unchanged.
+    /// Budgets may already be enabled. A class token then carries a budget
+    /// offer through the same verifier as `with_budgets` after R3.
     ///
     /// # Errors
-    /// [`ConfigurationError`] for an empty registry, or when federation or
-    /// budgets are already enabled: those compositions are not implemented.
+    /// [`ConfigurationError`] for an empty registry, or when federation is
+    /// already enabled. Federation with R3 is not implemented.
     pub fn with_r3(mut self, config: R3IssuerConfig) -> Result<Self, ConfigurationError> {
-        if config.registry.is_empty() || self.federation.is_some() || self.budgets.is_some() {
+        if config.registry.is_empty() || self.federation.is_some() {
             return Err(ConfigurationError);
         }
         self.r3 = Some(Box::new(config));
