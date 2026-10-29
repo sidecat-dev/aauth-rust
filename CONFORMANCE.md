@@ -263,6 +263,11 @@ server_error` when the class document store fails. No resource token is
 released, the store stays empty, and the account book stays empty. The next
 offer still signs 500. Host3 `aauth-wc07-completion-docfail01` passed that
 withholding at `f27ce72`.
+`class_audit_survives_when_issuance_commit_fails` writes the class audit
+and then the issuance store fails. The Auth token is withheld and the
+account book stays empty. The next offer still signs 500, and a second
+audit row is written. Host3 `aauth-wc07-completion-issuance01` passed that
+split at `7d03878`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
