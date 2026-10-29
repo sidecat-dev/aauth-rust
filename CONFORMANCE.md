@@ -278,6 +278,12 @@ past the resource token after the class audit is written. The exchange is
 `400 expired_resource_token`. The account book stays empty, and the next
 offer still signs 500. Host3 `aauth-wc07-completion-expire01` passed that
 expiry at `710ec56`.
+`well_formed_budget_consumption_is_not_resolved_and_reserves_nothing` refuses
+a class token whose consumption record names the presented token. The
+exchange is `400 invalid_resource_token`. A record whose `jti` does not
+match is `400 invalid_budget`. No audit row is written and the account book
+stays empty. The next offer still signs 500. Retained-grant resolution is
+still unspecified. That refusal has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed

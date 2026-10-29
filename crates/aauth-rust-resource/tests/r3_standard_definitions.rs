@@ -2952,6 +2952,159 @@ fn class_grant_that_expires_before_release_reserves_nothing() {
 }
 
 #[test]
+fn well_formed_budget_consumption_is_not_resolved_and_reserves_nothing() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let audits = Arc::new(AtomicUsize::new(0));
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(CountAudit(Arc::clone(&audits))),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let person_jti = aauth_rust_core::PersonToken::parse(&person)
+        .unwrap()
+        .unverified_claims()
+        .jti
+        .clone();
+    let presented = signer.with_token(person.clone()).unwrap();
+    let agent_jkt = SigningKey::from_seed([2; 32])
+        .public_jwk()
+        .thumbprint()
+        .unwrap();
+    let mut base = aauth_rust_core::ResourceClaims {
+        iss: RESOURCE.into(),
+        dwk: "aauth-resource.json".into(),
+        aud: PS.into(),
+        ps: PS.into(),
+        sub: "directed-person".into(),
+        jti: "rt-consumed".into(),
+        presented_jti: person_jti.clone(),
+        agent_jkt,
+        iat: NOW,
+        exp: NOW + 300,
+        scope: None,
+        account: None,
+        login_hint: None,
+        nbf: None,
+        tenant: None,
+        mission_s256: None,
+        extra: BTreeMap::new(),
+    };
+    base.extra.insert(
+        "r3_uri".into(),
+        json!("https://resource.example/r3/c.consumed"),
+    );
+    base.extra
+        .insert("r3_s256".into(), json!(aauth_rust_r3::digest(b"class")));
+    base.extra.insert(
+        "budget".into(),
+        json!({"amount": 500, "unit": "USD", "decimals": 2}),
+    );
+    let mut well_formed = base.clone();
+    well_formed.extra.insert(
+        "budget_consumed".into(),
+        json!({"jti": person_jti, "consumed": 100}),
+    );
+    let mut malformed = base.clone();
+    malformed.jti = "rt-consumed-bad".into();
+    malformed.extra.insert(
+        "budget_consumed".into(),
+        json!({"jti": "other-person", "consumed": 100}),
+    );
+    let mint = |claims: &aauth_rust_core::ResourceClaims| {
+        aauth_rust_core::mint_resource_token(
+            &SigningKey::from_seed([4; 32]),
+            "resource-1",
+            claims,
+        )
+        .unwrap()
+    };
+    let exchange = |token: String| {
+        ps.handle(&post(
+            &signer,
+            &format!("{PS}/token"),
+            json!({ "resource_token": token, "presented_token": person }),
+        ))
+    };
+    let unresolved = exchange(mint(&well_formed));
+    assert_eq!(unresolved.status(), 400, "{}", String::from_utf8_lossy(unresolved.body()));
+    assert_eq!(
+        member(&unresolved, "error").as_deref(),
+        Some("invalid_resource_token")
+    );
+    assert!(member(&unresolved, "auth_token").is_none());
+    let broken = exchange(mint(&malformed));
+    assert_eq!(broken.status(), 400, "{}", String::from_utf8_lossy(broken.body()));
+    assert_eq!(member(&broken, "error").as_deref(), Some("invalid_budget"));
+    assert_eq!(audits.load(Ordering::SeqCst), 0);
+    assert_eq!(ps.budget_accounted(), Some(0));
+    let released = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-after-consumed",
+    );
+    let amount = aauth_rust_core::AuthToken::parse(&released)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(amount, Some(500));
+    assert_eq!(ps.budget_accounted(), Some(500));
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
