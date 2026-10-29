@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::budget_gate::{BudgetGate, metadata_units, problem};
 use crate::{Decision, Deny, PolicyOutcome, SignatureFailure};
 use aauth_rust_budgets::{
-    Budget, BudgetHeader, ChargeError, ConsumptionRecord, KeyRole, MAX_AMOUNT, Reservation,
+    Budget, BudgetHeader, ChargeError, ConsumptionRecord, KeyRole, Ledger, MAX_AMOUNT, Reservation,
     UnitDeclaration, answer_usage, metered_access_mode, parse_budget, parse_usage_query,
     read_granted, sender_field, sign_usage_response, validate_endpoint_url,
 };
@@ -727,11 +727,36 @@ where
     /// Returns [`PsConfigurationError::InvalidBudgetProfile`] when the endpoint
     /// is not HTTPS, a bound is outside the carrier, or the units cannot form an offer.
     pub fn with_budgets(
+        self,
+        units: Vec<UnitDeclaration>,
+        usage_endpoint: impl Into<String>,
+        default_bound: i64,
+        default_offer: i64,
+    ) -> Result<Self, PsConfigurationError> {
+        self.with_budget_ledger(
+            units,
+            usage_endpoint,
+            default_bound,
+            default_offer,
+            Arc::new(Mutex::new(Ledger::new())),
+        )
+    }
+    /// Meter with a host-supplied ledger.
+    ///
+    /// Two Resources that receive the same ledger continue one spend. A
+    /// Resource that does not receive it starts empty. The ledger is process
+    /// memory. Sharing it is not an operating-system restart.
+    ///
+    /// # Errors
+    /// Returns [`PsConfigurationError::InvalidBudgetProfile`] when the endpoint
+    /// is not HTTPS, a bound is outside the carrier, or the units cannot form an offer.
+    pub fn with_budget_ledger(
         mut self,
         units: Vec<UnitDeclaration>,
         usage_endpoint: impl Into<String>,
         default_bound: i64,
         default_offer: i64,
+        ledger: Arc<Mutex<Ledger>>,
     ) -> Result<Self, PsConfigurationError> {
         metered_access_mode("auth-token")
             .map_err(|_| PsConfigurationError::InvalidBudgetProfile)?;
@@ -759,9 +784,15 @@ where
             default_bound,
             default_offer,
             omit_required: AtomicBool::new(self.omit_required),
-            ledger: Mutex::new(aauth_rust_budgets::Ledger::new()),
+            ledger,
         }));
         Ok(self)
+    }
+    /// The ledger this Resource meters, when budgets are enabled.
+    ///
+    /// The host can pass it to [`Self::with_budget_ledger`] on another Resource.
+    pub fn budget_ledger(&self) -> Option<Arc<Mutex<Ledger>>> {
+        self.budgets.as_ref().map(|gate| Arc::clone(&gate.ledger))
     }
     /// Omit `required` on an `insufficient-budget` refusal.
     ///

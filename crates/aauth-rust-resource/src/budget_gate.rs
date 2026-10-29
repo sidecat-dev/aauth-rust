@@ -1,8 +1,10 @@
 //! Opt-in budget metering for one resource. The ledger lives behind a mutex so
-//! concurrent requests on one process cannot both spend the last unit.
+//! concurrent requests on one process cannot both spend the last unit. A host
+//! may hand the same ledger to another Resource; that continues the spend.
+//! The ledger is process memory.
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use aauth_rust_budgets::{
     Budget, BudgetHeader, ChargeError, ConsumptionRecord, Error, Ledger, Reservation, TokenAccount,
@@ -18,7 +20,7 @@ pub(super) struct BudgetGate {
     pub(super) default_bound: i64,
     pub(super) default_offer: i64,
     pub(super) omit_required: AtomicBool,
-    pub(super) ledger: Mutex<Ledger>,
+    pub(super) ledger: Arc<Mutex<Ledger>>,
 }
 
 impl BudgetGate {
