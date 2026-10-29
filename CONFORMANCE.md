@@ -248,8 +248,8 @@ stays empty. The next offer still signs 500 under a cap of 800. Host3
 issues a core budget token while class R3 is enabled. That exchange does not
 call class consent. A failed issuance commit withholds the token and leaves
 the account book empty. The retry signs 500 and carries no R3 reference.
-The next class offer signs 300 under a cap of 800. That composition has not
-been run on Host3.
+The next class offer signs 300 under a cap of 800. Host3
+`aauth-wc07-completion-core01` passed that composition at `183d921`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
