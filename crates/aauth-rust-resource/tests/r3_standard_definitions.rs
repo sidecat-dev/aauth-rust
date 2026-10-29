@@ -1152,10 +1152,29 @@ fn shared_budget_ledger_continues_after_recomposition() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-struct OneCall(Mutex<Option<R3ProposalRecord>>);
+struct OneCall {
+    record: Mutex<Option<R3ProposalRecord>>,
+    fail_commit: std::sync::atomic::AtomicBool,
+}
+impl OneCall {
+    fn new() -> Self {
+        Self {
+            record: Mutex::new(None),
+            fail_commit: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
 impl R3CallStore for OneCall {
     fn commit(&self, record: &R3ProposalRecord) -> Result<(), R3StoreError> {
-        let mut slot = self.0.lock().unwrap();
+        if self
+            .fail_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(R3StoreError::Unavailable(R3HostError::new(
+                "proposal store unavailable",
+            )));
+        }
+        let mut slot = self.record.lock().unwrap();
         if slot.is_some() {
             return Err(R3StoreError::Conflict);
         }
@@ -1164,7 +1183,7 @@ impl R3CallStore for OneCall {
     }
     fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
         Ok(self
-            .0
+            .record
             .lock()
             .unwrap()
             .as_ref()
@@ -1242,7 +1261,7 @@ fn proposal_artifact_uri(exact: &[u8], jti: &str) -> String {
 fn proposal_with_a_budget_offer_is_refused_before_approval() {
     let profile = odata_profile();
     let documents = Arc::new(Documents::default());
-    let calls = Arc::new(OneCall(Mutex::new(None)));
+    let calls = Arc::new(OneCall::new());
     let proposals = Arc::new(AtomicUsize::new(0));
     let permit = operation(&profile, profile.operations[0]);
     let per_call = operation(&profile, profile.operations[1]);
@@ -3102,6 +3121,162 @@ fn well_formed_budget_consumption_is_not_resolved_and_reserves_nothing() {
         .and_then(Value::as_i64);
     assert_eq!(amount, Some(500));
     assert_eq!(ps.budget_accounted(), Some(500));
+}
+
+#[test]
+fn failed_proposal_commit_withholds_the_challenge() {
+    let profile = odata_profile();
+    let documents = Arc::new(Documents::default());
+    let calls = Arc::new(OneCall::new());
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let permit_for_map = permit.clone();
+    let per_call_for_map = per_call.clone();
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok(match request.uri().path() {
+            "/op/permit" => Some(permit_for_map.clone()),
+            "/op/refuse" => Some(per_call_for_map.clone()),
+            _ => None,
+        })
+    });
+    let effects = Arc::new(AtomicUsize::new(0));
+    let admission = {
+        let effects = effects.clone();
+        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok("receipt".to_owned())
+        }) as BoxedAuthAdmissionPolicy<String>
+    };
+    let resource = Arc::new(
+        PsAuthorizationResource::new(
+            PsAuthorizationConfig {
+                issuer: RESOURCE.into(),
+                signed_origin: RESOURCE.into(),
+                kid: "resource-1".into(),
+                signing_key: SigningKey::from_seed([4; 32]),
+                scopes: vec!["records.read".into()],
+            },
+            keys(),
+            admission,
+        )
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(R3Config {
+            registry: standard_registry().unwrap(),
+            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
+                .unwrap(),
+            vocabularies: vec![R3Vocabulary {
+                definition: profile.snapshot.clone(),
+                display: None,
+            }],
+            documents: documents.clone(),
+            operation_for_request: mapper,
+            require_core_scope: false,
+        })
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: calls.clone(),
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap(),
+    );
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(SplitPolicy {
+            proposals: Arc::new(AtomicUsize::new(0)),
+            vocabulary: profile.vocabulary.clone(),
+            granted: permit.clone(),
+            per_call: per_call.clone(),
+        }),
+        audit: Arc::new(Audit),
+    })
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [
+                    serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                    serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+                ],
+            }
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-class-before-proposal")
+        .into_response();
+    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    let class_resource = member(&issued, "resource_token").expect("class resource token");
+    let class_exchange = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": class_resource, "presented_token": person }),
+    ));
+    assert_eq!(class_exchange.status(), 200, "{}", String::from_utf8_lossy(class_exchange.body()));
+    let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
+    calls
+        .fail_commit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-fail") {
+        AuthDecision::InternalError => {}
+        other => panic!("failed proposal commit: {other:?}"),
+    }
+    assert!(calls.record.lock().unwrap().is_none());
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-ok") {
+        AuthDecision::AuthTokenRequired { resource_token, .. } => {
+            assert!(resource_token.contains('.'));
+        }
+        other => panic!("recovered proposal commit: {other:?}"),
+    }
+    assert!(calls.record.lock().unwrap().is_some());
+    assert_eq!(effects.load(Ordering::SeqCst), 0, "the challenge does not run the call");
 }
 
 #[test]

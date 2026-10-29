@@ -285,6 +285,10 @@ match is `400 invalid_budget`. No audit row is written and the account book
 stays empty. The next offer still signs 500. Retained-grant resolution is
 still unspecified. Host3 `aauth-wc07-completion-consumed01` passed that
 refusal at `e49947d`.
+`failed_proposal_commit_withholds_the_challenge` answers `500` when the
+proposal store fails. No challenge token is released and the call does not
+run. The next challenge is released and the store keeps that record. That
+withholding has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
