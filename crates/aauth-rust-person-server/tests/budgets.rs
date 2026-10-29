@@ -2,7 +2,7 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_budgets::{IssuerPolicy, UnitDeclaration, parse_budget};
-use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse};
+use aauth_rust_core::continuation::MemoryContinuations;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, AuthToken, Confirmation, ResourceClaims, TokenError,
     mint_auth_token, mint_resource_token,
@@ -10,7 +10,7 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
     AuthorizationRequest, Config, DeferredConfig, Federation, FederationError, FederationFailure,
-    FederationInput, Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError,
+    Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError,
     Store,
 };
 use http::{Method, Request, Response};
@@ -864,8 +864,8 @@ enum Script {
 
 struct Scripted {
     script: Script,
-    posts: AtomicUsize,
-    sent: Mutex<Vec<i64>>,
+    posts: Arc<AtomicUsize>,
+    sent: Arc<Mutex<Vec<i64>>>,
 }
 
 impl Federation for Scripted {
@@ -977,7 +977,9 @@ fn a_decimals_mismatch_on_the_resource_token_is_rejected() {
 }
 
 #[test]
-fn a_deferred_delivery_is_checked_against_the_budget_that_was_sent() {
+fn a_budgeted_deferred_continuation_is_not_stored() {
+    let posts = Arc::new(AtomicUsize::new(0));
+    let sent = Arc::new(Mutex::new(Vec::new()));
     let server = PersonServer::new(
         Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
         Keys,
@@ -989,8 +991,8 @@ fn a_deferred_delivery_is_checked_against_the_budget_that_was_sent() {
     .unwrap()
     .with_federation(Scripted {
         script: Script::Shrink,
-        posts: AtomicUsize::new(0),
-        sent: Mutex::new(Vec::new()),
+        posts: posts.clone(),
+        sent: sent.clone(),
     })
     .with_budgets(IssuerPolicy::capped(3_000_000, dollars()))
     .unwrap()
@@ -1009,11 +1011,16 @@ fn a_deferred_delivery_is_checked_against_the_budget_that_was_sent() {
     );
     assert_eq!(
         first.status(),
-        202,
+        500,
         "{}",
         String::from_utf8_lossy(first.body())
     );
-    let pending = PendingResponse::parse(&format!("{PS}/token"), &first).unwrap();
+    let first_body: Value = serde_json::from_slice(first.body()).unwrap();
+    assert_eq!(first_body["error"], "server_error");
+    assert!(first_body.get("auth_token").is_none());
+    assert_eq!(server.budget_accounted(), Some(0));
+    assert_eq!(posts.load(Ordering::SeqCst), 1);
+    assert_eq!(sent.lock().unwrap().as_slice(), [2_000_000]);
     let second_person = issued_person(&server, 1000);
     let second = post_json(
         &server,
@@ -1038,22 +1045,7 @@ fn a_deferred_delivery_is_checked_against_the_budget_that_was_sent() {
         .unwrap();
     assert_eq!(second_token.claims().extra["budget"]["amount"], 2_000_000);
     assert_eq!(server.budget_accounted(), Some(2_000_000));
-    let advanced = server
-        .advance_federation(&pending.location, FederationInput::Poll)
-        .unwrap();
-    assert_eq!(
-        advanced.status(),
-        200,
-        "{}",
-        String::from_utf8_lossy(advanced.body())
-    );
-    let advanced_body: Value = serde_json::from_slice(advanced.body()).unwrap();
-    let completed = AuthToken::parse(advanced_body["auth_token"].as_str().unwrap())
-        .unwrap()
-        .verify(&Keys, 1000)
-        .unwrap();
-    assert_eq!(completed.claims().extra["budget"]["amount"], 2_000_000);
-    assert_eq!(server.budget_accounted(), Some(4_000_000));
+    assert_eq!(posts.load(Ordering::SeqCst), 2);
 }
 
 struct FlexLifetime(AtomicI64);
@@ -1078,11 +1070,13 @@ impl Policy for FlexLifetime {
 }
 
 #[test]
-fn a_deferred_delivery_above_the_sent_budget_is_refused_after_the_room_grows() {
+fn a_budgeted_deferred_continuation_does_not_reserve_the_cap() {
     let now = Arc::new(AtomicI64::new(1000));
     let clock_now = Arc::clone(&now);
     let ids = Arc::new(AtomicUsize::new(0));
     let clock_ids = Arc::clone(&ids);
+    let posts = Arc::new(AtomicUsize::new(0));
+    let sent = Arc::new(Mutex::new(Vec::new()));
     let server = PersonServer::new(
         Config::new(PS, "ps", SigningKey::from_seed([3; 32])),
         Keys,
@@ -1094,8 +1088,8 @@ fn a_deferred_delivery_above_the_sent_budget_is_refused_after_the_room_grows() {
     .unwrap()
     .with_federation(Scripted {
         script: Script::Grow,
-        posts: AtomicUsize::new(0),
-        sent: Mutex::new(Vec::new()),
+        posts: posts.clone(),
+        sent: sent.clone(),
     })
     .with_budgets(IssuerPolicy::capped(5_000_000, dollars()))
     .unwrap()
@@ -1124,7 +1118,7 @@ fn a_deferred_delivery_above_the_sent_budget_is_refused_after_the_room_grows() {
         &server,
         "/token",
         json!({
-            "resource_token": resource_offer(&deferred_person, "grow-wait", 4_000_000),
+            "resource_token": resource_offer(&deferred_person, "grow-wait", 2_000_000),
             "presented_token": deferred_person,
             "capabilities": ["budget"]
         }),
@@ -1132,22 +1126,15 @@ fn a_deferred_delivery_above_the_sent_budget_is_refused_after_the_room_grows() {
     );
     assert_eq!(
         deferred.status(),
-        202,
+        500,
         "{}",
         String::from_utf8_lossy(deferred.body())
     );
-    let pending = PendingResponse::parse(&format!("{PS}/token"), &deferred).unwrap();
-    now.store(1101, Ordering::SeqCst);
-    let advanced = server
-        .advance_federation(&pending.location, FederationInput::Poll)
-        .unwrap();
-    assert_eq!(
-        advanced.status(),
-        502,
-        "{}",
-        String::from_utf8_lossy(advanced.body())
-    );
-    let body: Value = serde_json::from_slice(advanced.body()).unwrap();
-    assert_eq!(body["error"], "as_unreachable");
+    let body: Value = serde_json::from_slice(deferred.body()).unwrap();
+    assert_eq!(body["error"], "server_error");
+    assert!(body.get("auth_token").is_none());
     assert_eq!(server.budget_accounted(), Some(3_000_000));
+    assert_eq!(posts.load(Ordering::SeqCst), 2);
+    assert_eq!(sent.lock().unwrap().as_slice(), [3_000_000, 2_000_000]);
+    let _ = now;
 }

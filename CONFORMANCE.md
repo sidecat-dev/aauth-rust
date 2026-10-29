@@ -54,7 +54,7 @@ executable scenes; those tests are outside the workspace test total.
 | Durable file creation / record shape | Parent directory synchronized after file/schema initialization; sync failure refuses open; bare filenames use current directory. Both stores reject malformed Agent identities, parent ties and Person/Auth lineage without leaking state; durable decoder refuses malformed rows | `aauth-rust-person-server-redb/src/open_tests.rs` (2 Unix tests), shared store contract/validation and backend row tests; Linux syscall witness |
 | Resource PS authorization / Agent response verification | Person is identity, never authorization; signed Resource challenge; intended PS/audience/key/presented-token ties; Auth route scopes before typed policy; `authorize_for` checks the Person Server (`iss` on Person, `ps` on Auth) together with `sub`, `account` and `tenant`; a verified mismatch is `403` `access_denied` with no `Signature-Error`, and `login_hint` or an empty subject is not authorization. `sub` is a required string; Agent verifies challenge and delivery context; specific wrong-audience diagnostics with pinned invalid_jwt wire code; named captured policy types | `aauth-rust-resource/tests/ps_authorization.rs` |
 | Requirement extraction | RFC 9651 dictionary and combined field lines; immediate Agent/Person/Auth requirements; exact decoded resource-token; ignore extensions; refuse malformed or unsupported requirements; omit credentials from Debug. `reason=budget-exhausted` and `reason=insufficient-budget` stay parameters. `requirement=budget-exhausted` is unsatisfiable | `aauth-rust-agent/tests/requirements.rs` (7 tests), used by the three-party TLS scene |
-| Opt-in budgets | Budget object, narrowing, resource offer, PS and AS issuance, per-token reserve/commit/release, refusal without draw-down, consumption replacement, usage response. The host's `default_bound` is the maximum cost. `AAuth-Max-Cost` may only lower it, and a client figure of zero is not a free admission. A delivered budget is checked against the parameter the person server sent, including a deferred poll. A mismatch is `502` `as_unreachable` and is not recorded. The ledger key is `(iss, jti)`. A later grant that disagrees with the token already opened for that pair is `500` and carries no `AAuth-Budget`. A person server narrows a later grant so outstanding allocations for that subject at that resource stay within its cap. `IssuerPolicy::omit_above` omits the four-party parameter when the offer amount is above that limit. Three-party issuance still narrows and counts the grant. A usage response sends `Cache-Control: no-store`. A decimals mismatch against cached units is `400` `invalid_budget` and is not rescaled. An access-server parameter below the cap is issued at that amount. Subagent person and auth requests declare `budget` in `capabilities` and send `AAuth-Capabilities: budget`. A host-supplied `justification` is copied onto the auth request. A step-up offers the declared scale and carries `budget_consumed` only when that scale matches the locked grant. `authorize_reserved` reserves without committing. `authorize_observed` does not meter. `into_response` on either is `500` and does not commit. An insufficient refusal can omit `required`. `IssuerPolicy::until` ends the issued auth token at that Unix second. The cap counts outstanding allocations. Default servers still reject `budget`. No metadata fetch. A consent description is plain text from `description_text` (HTML-escaped, not rendered as Markdown), kept separate from the formatted amount. The draft's sanitize-before-rendering rule is met by that plain text. Not the whole budgets draft | `aauth-rust-budgets/tests/profile.rs` (16), access-server `budgets.rs` (5), person-server `budgets.rs` (7), resource `budgets.rs` (11) |
+| Opt-in budgets | Budget object, narrowing, resource offer, PS and AS issuance, per-token reserve/commit/release, refusal without draw-down, consumption replacement, usage response. The host's `default_bound` is the maximum cost. `AAuth-Max-Cost` may only lower it, and a client figure of zero is not a free admission. A delivered budget on a retained continuation is checked against the parameter the person server sent. A mismatch is `502` `as_unreachable` and is not recorded. A budget offer is not retained when the access server answers `202` or `402`: the response is `500` `server_error`, no continuation is written, and the account book does not take the grant. Go `3f7fc54b8ea1e310148c922b1d09e64bd6e24739` refuses that continuation the same way after consent and the access-server call. The ledger key is `(iss, jti)`. A later grant that disagrees with the token already opened for that pair is `500` and carries no `AAuth-Budget`. A person server narrows a later grant so outstanding allocations for that subject at that resource stay within its cap. `IssuerPolicy::omit_above` omits the four-party parameter when the offer amount is above that limit. Three-party issuance still narrows and counts the grant. A usage response sends `Cache-Control: no-store`. A decimals mismatch against cached units is `400` `invalid_budget` and is not rescaled. An access-server parameter below the cap is issued at that amount. Subagent person and auth requests declare `budget` in `capabilities` and send `AAuth-Capabilities: budget`. A host-supplied `justification` is copied onto the auth request. A step-up offers the declared scale and carries `budget_consumed` only when that scale matches the locked grant. `authorize_reserved` reserves without committing. `authorize_observed` does not meter. `into_response` on either is `500` and does not commit. An insufficient refusal can omit `required`. `IssuerPolicy::until` ends the issued auth token at that Unix second. The cap counts outstanding allocations. Default servers still reject `budget`. No metadata fetch. A consent description is plain text from `description_text` (HTML-escaped, not rendered as Markdown), kept separate from the formatted amount. The draft's sanitize-before-rendering rule is met by that plain text. Not the whole budgets draft | `aauth-rust-budgets/tests/profile.rs` (16), access-server `budgets.rs` (5), person-server `budgets.rs` (7), resource `budgets.rs` (11) |
 | Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint base cases (7, including omitted presented_token), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (2 tests: immediate and deferred, including exact forwarded bytes and problem codes) |
 | Federated retained namespace | AS issuer/JTI identifies the credential; explicit PS namespace owns binding/directed identity; exact presented ancestry, conflicts/revocation and reopen | Updated public storetest and persistence contract, MemoryStore and RedbStore |
 | Immediate call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; original binding revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
@@ -343,9 +343,16 @@ invalid_resource_token` after the fetch and before consent. A document fetch
 that answers `401`, or a fetch transport failure, is `500 server_error` and
 does not consent. Host3 `aauth-wc07-completion-federated03` passed that
 qualification at `b2d9f1f`. A
-deferred continuation that carries a budget offer stays retained. The later
-poll checks the delivered budget against the amount sent. Go refuses to
-store that continuation. A class Resource token may carry a budget offer: the PS verifies
+deferred continuation that carries a budget offer is not stored. When the
+access server answers `202` or `402` and the resource token carries a budget
+offer, the person server returns `500` `server_error`. Consent and the
+access-server call still happen. The continuation store is not written, the
+account book does not take the grant, and the response has no Auth token.
+Go `3f7fc54b8ea1e310148c922b1d09e64bd6e24739` refuses that continuation the
+same way. A continuation that was already stored still checks a later
+delivery against the amount sent. A mismatch is `502` `as_unreachable` and
+is not recorded. A missionless Core grant with no budget offer still defers.
+A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against
@@ -413,6 +420,39 @@ entry, and failed 0. `r3-per-call-interop` against Go
 `3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
 `proposal-err=invalid_resource_token` stay visible. `systemctl show`
 reported `Result=success` and `ExecMainStatus=0`.
+
+`DirectoryCallStore` is a public `R3CallStore`. Each proposal and each claim
+is written to its own file, synchronized, and renamed into place. The
+previous complete file is kept beside a replacement. A torn current file is
+not a new claim: a valid previous file is the record, and a torn file with
+no previous file is unavailable. `reopen_after_process_exit_does_not_execute_again`
+starts a second process. That process commits one proposal, claims it, and
+exits. The parent opens the same directory. The next claim is `Unfinished`,
+not `Execute`. The child pid is not the parent pid.
+`interrupted_claim_write_is_not_adopted` stops the first claim before the
+rename. The claim file is absent, and the retry may `Execute`.
+`interrupted_retain_keeps_the_unfinished_claim` stops the result write
+before the rename. The bound claim stays unfinished, and a later retain
+under the same fence stores the result. `torn_claim_keeps_the_bound_claim`
+retains one result, then truncates the current claim file. Reopen reads the
+previous complete claim. That claim is `Unfinished`, not a second
+`Execute`, and the torn bytes are not the retained result. This is a
+process exit and an interrupted write. It is not power loss. The example
+`FileCalls` store stays private to the example.
+
+`r3-per-call-interop` pins `query-runs=2` and
+`proposal-err=invalid_resource_token`. The second query run is the
+release-retry challenge while the prior proposal token is still live.
+Draft `70d67375` has no invocation id and no result digest, so that pin
+stays. It is separate from
+`fresh_bytes_can_be_released_under_a_still_live_recorded_approval`.
+The proposal status is Go `DirectR3Config` at
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739`: direct R3 supports class
+documents only, and a proposal resource token is `400`
+`invalid_resource_token`. That refusal is not the unspecified
+`budget_consumed` retained-grant resolution. A well-formed
+`budget_consumed` on a class Resource token remains
+`invalid_resource_token` and is not applied.
 
 `fresh_resource_spends_the_same_grant_again` spends the grant, then the same
 Resource answers `budget-exhausted`. A second Resource on the same class

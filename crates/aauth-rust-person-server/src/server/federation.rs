@@ -147,9 +147,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
             // Go keeps deferred custody for a missionless Core grant. An R3
-            // class or proposal is refused after the access server answers and
-            // is not written to the continuation store.
-            if relay.is_some() {
+            // class or proposal, and a resource token that carries a budget
+            // offer, are refused after the access server answers and are not
+            // written to the continuation store.
+            if relay.is_some() || prepared.offer.is_some() {
                 return Err(Failure::internal());
             }
             return self.defer_federation(
