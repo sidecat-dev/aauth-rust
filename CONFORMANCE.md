@@ -283,7 +283,8 @@ a class token whose consumption record names the presented token. The
 exchange is `400 invalid_resource_token`. A record whose `jti` does not
 match is `400 invalid_budget`. No audit row is written and the account book
 stays empty. The next offer still signs 500. Retained-grant resolution is
-still unspecified. That refusal has not been run on Host3.
+still unspecified. Host3 `aauth-wc07-completion-consumed01` passed that
+refusal at `e49947d`.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
