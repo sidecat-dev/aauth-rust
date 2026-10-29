@@ -288,11 +288,9 @@ impl R3Profile {
         if !object.contains_key("r3_operations") {
             return Ok(None);
         }
-        // Account binding is not this profile. A budget object is accepted
-        // only when budgets are enabled; otherwise it is refused here.
-        if object.contains_key("account")
-            || (object.contains_key("budget") && self.budgets.is_none())
-        {
+        // Account binding is not this profile. A budget object is judged by
+        // the caller, which refuses it when budgets are not enabled.
+        if object.contains_key("account") {
             return Err(());
         }
         let members: BTreeMap<String, Box<RawValue>> =
