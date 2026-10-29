@@ -771,7 +771,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let mut core = r.extra.clone();
             core.remove("r3_uri");
             core.remove("r3_s256");
-            if extra_blocks(&core, false, false) || r.mission_s256.is_some() {
+            if r.mission_s256.is_some() {
                 return Err(Failure::parameter("invalid_resource_token"));
             }
             let scopes = match r.scope.as_deref() {
@@ -779,7 +779,19 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,
                 None => Vec::new(),
             };
-            (None, scopes)
+            // A class token may carry a budget offer only when this PS meters.
+            // `budget_consumed` stays refused: Go requires retained-grant resolution.
+            let offer = if self.budgets.is_some() {
+                if core.contains_key("budget_consumed") {
+                    return Err(Failure::parameter("invalid_budget"));
+                }
+                self.admit_resource_budget(&core, &r.presented_jti)?
+            } else if extra_blocks(&core, false, false) {
+                return Err(Failure::parameter("invalid_resource_token"));
+            } else {
+                None
+            };
+            (offer, scopes)
         } else {
             let offer = self.admit_resource_budget(&r.extra, &r.presented_jti)?;
             let scopes = parse_scopes(

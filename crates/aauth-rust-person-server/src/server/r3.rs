@@ -12,13 +12,16 @@
 //! `result` (release gating) is release consent and goes only through
 //! [`R3Policy::authorize_release`]; the token shape is the same. Either way the
 //! R3 audit record and the exact issuance commit before release.
-//! Budgets, missions, sub-agents, call chaining and AS federation are refused.
+//! A class document may carry a budget offer when budgets are enabled. The
+//! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
+//! Missions, sub-agents, call chaining and AS federation are refused.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
     FetchTransport, GrantedOperations, IssuanceRecord, IssuanceStore, OperationAccess, Proposal,
     Reference, Registry, VerifiedR3AuthToken, VocabularyUri, mint_auth_token as mint_r3_auth_token,
-    mint_direct_auth_token, mint_per_call_auth_token, validate_document_account,
+    mint_budget_auth_token, mint_direct_auth_token, mint_per_call_auth_token,
+    validate_document_account, verify_budget_resource_token,
     validate_proposal_account, verify_auth_token_claims, verify_resource_token,
 };
 use std::sync::Arc;
@@ -353,9 +356,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if upstream.is_some() || parameters.get("subagent_token").is_some() {
             return Err(Failure::parameter("invalid_request"));
         }
-        if self.budgets.is_some() {
-            return Err(Failure::internal());
-        }
         let resource_compact = required_string(&parameters, "resource_token")?.to_owned();
         let presented_compact = required_string(&parameters, "presented_token")?.to_owned();
         let PreparedAuthorization {
@@ -364,12 +364,28 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             retained,
             context,
             binding_context,
-            offer: _,
+            offer,
         } = self.prepare_authorization_with(&agent, parameters, verified_at, None, true)?;
-        let verified = verify_resource_token(&resource_compact, &self.resolver(), verified_at)
+        let reference = if offer.is_some() {
+            let (verified, _offer, consumed) = verify_budget_resource_token(
+                &resource_compact,
+                &self.resolver(),
+                verified_at,
+            )
             .map_err(|_| Failure::parameter("invalid_resource_token"))?;
+            // Go refuses a consumption record here: resolving it needs the retained grant.
+            if consumed.is_some() {
+                return Err(Failure::parameter("invalid_budget"));
+            }
+            verified.reference().clone()
+        } else {
+            verify_resource_token(&resource_compact, &self.resolver(), verified_at)
+                .map_err(|_| Failure::parameter("invalid_resource_token"))?
+                .reference()
+                .clone()
+        };
         let r = resource.claims();
-        let reference = verified.reference().clone();
+        let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss, false)?;
 
         // Literal r3_uri, PS role signature, exact digest, then classification.
         let signed_at = (self.clock)();
@@ -414,12 +430,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return Err(Failure::internal());
                 }
                 // A grant wider than the exact document is a host error: nothing is issued.
+                if decision.per_call.is_some() && granted_budget.is_some() {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
                 let mint: TokenMint<'_> = match &decision.per_call {
                     None => {
                         let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
                             .map_err(|_| Failure::internal())?;
                         let (reference, exact) = (reference.clone(), exact.clone());
+                        let budget_grant = granted_budget.clone();
                         Box::new(move |claims: &AuthClaims| {
+                            if let Some(budget_grant) = &budget_grant {
+                                return mint_budget_auth_token(
+                                    &r3.registry,
+                                    &self.config.signing_key,
+                                    &self.config.kid,
+                                    claims,
+                                    &reference,
+                                    &exact,
+                                    &grant,
+                                    budget_grant,
+                                )
+                                .map_err(|_| Failure::internal());
+                            }
                             mint_direct_auth_token(
                                 &r3.registry,
                                 &self.config.signing_key,
@@ -612,6 +645,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(cap) = approval_expires_at {
             expires_at = expires_at.min(cap);
         }
+        if let Some(end) = self
+            .budgets
+            .as_ref()
+            .and_then(|state| state.policy.period_end)
+        {
+            expires_at = expires_at.min(end);
+        }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
             dwk: "aauth-person.json".into(),
@@ -631,6 +671,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             tenant: r.tenant.clone(),
             extra: std::collections::BTreeMap::new(),
         };
+        if let Some(budget) = &granted_budget
+            && let Some(state) = &self.budgets
+        {
+            state
+                .accounts
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert_owned(
+                    claims.jti.clone(),
+                    budget.amount(),
+                    expires_at,
+                    budget_owner(&claims.sub, &claims.aud),
+                );
+        }
         let compact = mint(&claims)?;
         let record = self.record(
             &compact,

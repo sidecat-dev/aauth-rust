@@ -209,9 +209,12 @@ R3 and budgets do not compose. On the Resource, `with_r3` after `with_budgets`
 returns `InvalidR3Profile`, and `with_budgets` after `with_r3` returns
 `InvalidBudgetProfile`. `r3_and_budgets_refuse_either_order` pins both orders.
 The Person Server refuses `with_r3` when budgets are already enabled. Calling
-`with_budgets` after R3 is still accepted at configuration; a later R3
-authorization then returns an internal failure. That order is not a supported
-composition.
+`with_budgets` after R3 is accepted. A class Resource token may then carry a
+budget offer: the PS verifies it with the combined R3 budget verifier, narrows
+the offer, and signs that grant on the Auth token. `budget_consumed` on that
+Resource token is `invalid_budget`. A per-call proposal together with a budget
+offer is `invalid_resource_token`. An R3-only token is unchanged when budgets
+are also enabled.
 
 The example file store writes each proposal record, then synchronizes the
 directory on Unix. `reopen_reads_the_same_held_release_from_the_directory`
