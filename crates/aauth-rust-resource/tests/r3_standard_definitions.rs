@@ -3536,6 +3536,35 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
         }
         other => panic!("replay: {other:?}"),
     }
+    let record = calls
+        .record
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stored proposal");
+    let mut other_claims = aauth_rust_core::AuthToken::parse(&per_call_auth)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    other_claims.jti = "other-completion".into();
+    other_claims.extra.clear();
+    let other = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &other_claims,
+        &record.reference,
+        &record.exact_json,
+    )
+    .expect("different completion token");
+    match resource.authorize(&signed_call("/op/refuse", &other), NOW, "run-other") {
+        AuthDecision::Forbidden { .. } => {}
+        other => panic!("different token: {other:?}"),
+    }
+    match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-3") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"ran"),
+        other => panic!("original token still replays: {other:?}"),
+    }
 }
 
 #[test]
