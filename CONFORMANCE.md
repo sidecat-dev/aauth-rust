@@ -268,6 +268,10 @@ and then the issuance store fails. The Auth token is withheld and the
 account book stays empty. The next offer still signs 500, and a second
 audit row is written. Host3 `aauth-wc07-completion-issuance01` passed that
 split at `7d03878`.
+`revocation_after_issuance_withholds_the_class_token_without_reserving`
+revokes the resource token after the class audit is written. The exchange
+is `400 revoked_resource_token`. The account book stays empty, and the next
+offer still signs 500. That withholding has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
