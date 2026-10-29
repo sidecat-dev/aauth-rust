@@ -214,8 +214,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// # Errors
     /// [`ConfigurationError`] for an empty registry. Federation may already be
-    /// enabled. A class document is fetched and consented here, then the exact
-    /// tokens are relayed to the access server. A proposal is not relayed yet.
+    /// enabled. A class document or a proposal is fetched and consented here,
+    /// then the exact tokens are relayed to the access server.
     pub fn with_r3(mut self, config: R3IssuerConfig) -> Result<Self, ConfigurationError> {
         if config.registry.is_empty() {
             return Err(ConfigurationError);
@@ -515,11 +515,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     mint,
                 )
             } else if let Some(proposal) = artifact.proposal() {
-                // A federated proposal must be relayed after its own consent.
-                // Do not sign it on this Person Server.
-                if self.federation.is_some() {
-                    return Err(Failure::internal());
-                }
                 // A proposal plus a budget offer is the same unsigned composition.
                 // Do not record approval or mint a per-call token that drops the offer.
                 if granted_budget.is_some() {
@@ -548,7 +543,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 )
                 .map_err(|_| Failure::parameter("invalid_presented_token"))?;
                 let c = class.claims();
-                if c.iss != self.config.issuer || c.dwk != "aauth-person.json" || c.ps != r.ps {
+                let class_issuer_ok = if self.federation.is_some() {
+                    c.iss == r.aud && c.dwk == "aauth-access.json" && c.ps == self.config.issuer
+                } else {
+                    c.iss == self.config.issuer && c.dwk == "aauth-person.json" && c.ps == r.ps
+                };
+                if !class_issuer_ok {
                     return Err(Failure::parameter("invalid_presented_token"));
                 }
                 if !matches!(
@@ -635,6 +635,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     }
                     (decision, None)
                 };
+                if self.federation.is_some() {
+                    return self.federate_r3_proposal(
+                        &agent,
+                        &PreparedAuthorization {
+                            resource,
+                            presented,
+                            retained,
+                            context,
+                            binding_context,
+                            offer,
+                        },
+                        &reference,
+                        &exact,
+                    );
+                }
                 let (reference, exact) = (reference.clone(), exact.clone());
                 let mint: TokenMint<'_> = Box::new(move |claims: &AuthClaims| {
                     mint_per_call_auth_token(

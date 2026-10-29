@@ -2,6 +2,11 @@ use super::*;
 use crate::{FederationFailure, FederationFailureReason as Reason};
 use aauth_rust_signature_key::{MAX_BODY_BYTES, sign_request};
 
+pub(super) enum RelayR3<'a> {
+    Document(&'a aauth_rust_r3::Reference, &'a aauth_rust_r3::Document),
+    Proposal(&'a aauth_rust_r3::Reference, &'a [u8]),
+}
+
 impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
     PersonServer<K, S, P, C, I>
 {
@@ -22,7 +27,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         reference: &aauth_rust_r3::Reference,
         document: &aauth_rust_r3::Document,
     ) -> Result<Response<Vec<u8>>, Failure> {
-        self.federate_with(agent, prepared, false, Some((reference, document)))
+        self.federate_with(
+            agent,
+            prepared,
+            false,
+            Some(RelayR3::Document(reference, document)),
+        )
+    }
+
+    /// Relay after proposal consent. The access server's Auth token must match
+    /// the fetched proposal bytes.
+    pub(super) fn federate_r3_proposal(
+        &self,
+        agent: &VerifiedAgentToken,
+        prepared: &PreparedAuthorization,
+        reference: &aauth_rust_r3::Reference,
+        exact_proposal: &[u8],
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        self.federate_with(
+            agent,
+            prepared,
+            false,
+            Some(RelayR3::Proposal(reference, exact_proposal)),
+        )
     }
 
     fn federate_with(
@@ -30,7 +57,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
         core_consent: bool,
-        r3_document: Option<(&aauth_rust_r3::Reference, &aauth_rust_r3::Document)>,
+        relay: Option<RelayR3<'_>>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -97,7 +124,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
-        self.accept_federation(response, agent, prepared, &endpoint, sent, r3_document)
+        self.accept_federation(response, agent, prepared, &endpoint, sent, relay)
     }
     pub(super) fn accept_federation(
         &self,
@@ -106,7 +133,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: &PreparedAuthorization,
         endpoint: &str,
         sent: Option<Budget>,
-        r3_document: Option<(&aauth_rust_r3::Reference, &aauth_rust_r3::Document)>,
+        relay: Option<RelayR3<'_>>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -239,7 +266,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(|error| failed(Reason::TokenVerification(error)))?;
         let c = token.claims();
         let scope_text = c.scope.as_deref().unwrap_or("");
-        let granted = if scope_text.is_empty() && r3_document.is_some() {
+        let granted = if scope_text.is_empty() && relay.is_some() {
             Vec::new()
         } else {
             parse_scopes(scope_text).ok_or_else(|| failed(Reason::InvalidGrant))?
@@ -253,7 +280,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.tenant != r.tenant
             || c.account != r.account
             || c.mission_s256 != r.mission_s256
-            || extra_blocks(&c.extra, self.budgets.is_some(), false, r3_document.is_some())
+            || extra_blocks(&c.extra, self.budgets.is_some(), false, relay.is_some())
             || c.exp > agent.claims().exp
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
@@ -262,24 +289,39 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(failed(Reason::InvalidGrant));
         }
-        if let Some((reference, document)) = r3_document {
+        if let Some(relay) = relay {
             let registry = &self.r3.as_ref().ok_or_else(Failure::internal)?.registry;
-            let verified = aauth_rust_r3::verify_auth_token_claims(
-                registry,
-                compact,
-                &self.resolver(),
-                current,
-            )
-            .map_err(|_| failed(Reason::InvalidGrant))?;
-            if verified.reference() != reference {
-                return Err(failed(Reason::InvalidGrant));
+            match relay {
+                RelayR3::Document(reference, document) => {
+                    let verified = aauth_rust_r3::verify_auth_token_claims(
+                        registry,
+                        compact,
+                        &self.resolver(),
+                        current,
+                    )
+                    .map_err(|_| failed(Reason::InvalidGrant))?;
+                    if verified.reference() != reference {
+                        return Err(failed(Reason::InvalidGrant));
+                    }
+                    aauth_rust_r3::Authorization::new(
+                        &verified.operations().granted_operations(),
+                        &verified.operations().per_call_operations(),
+                        document,
+                    )
+                    .map_err(|_| failed(Reason::InvalidGrant))?;
+                }
+                RelayR3::Proposal(reference, exact_proposal) => {
+                    aauth_rust_r3::verify_per_call_auth_token(
+                        registry,
+                        compact,
+                        &self.resolver(),
+                        current,
+                        reference,
+                        exact_proposal,
+                    )
+                    .map_err(|_| failed(Reason::InvalidGrant))?;
+                }
             }
-            aauth_rust_r3::Authorization::new(
-                &verified.operations().granted_operations(),
-                &verified.operations().per_call_operations(),
-                document,
-            )
-            .map_err(|_| failed(Reason::InvalidGrant))?;
         }
         let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
         if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {
