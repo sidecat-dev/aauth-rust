@@ -243,7 +243,8 @@ token, and an Auth token with no R3 claims are `502 as_unreachable`. A
 fetched document whose bytes do not match the reference is `400
 invalid_resource_token` after the fetch and before consent. A document fetch
 that answers `401`, or a fetch transport failure, is `500 server_error` and
-does not consent. Those additional refusals have not been run on Host3. A
+does not consent. Host3 `aauth-wc07-completion-federated03` passed that
+qualification at `b2d9f1f`. A
 deferred continuation that carries a budget offer stays retained. The later
 poll checks the delivered budget against the amount sent. Go refuses to
 store that continuation. A class Resource token may carry a budget offer: the PS verifies
