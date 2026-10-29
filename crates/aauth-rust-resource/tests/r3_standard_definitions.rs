@@ -16,7 +16,7 @@
 //! tests already on this base.
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
-use aauth_rust_budgets::{Budget, IssuerPolicy, UnitDeclaration};
+use aauth_rust_budgets::{Budget, ChargeError, IssuerPolicy, Ledger, Refusal, UnitDeclaration};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, Confirmation, ResourceToken, TokenError, TrustedIssuerKeys,
     VerifiedAuthToken,
@@ -49,7 +49,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicI64, AtomicUsize, Ordering},
 };
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[path = "../examples/support/tls.rs"]
 mod parser_tls;
@@ -1088,6 +1088,150 @@ fn fresh_resource_spends_the_same_grant_again() {
     }
     assert_eq!(restarted_calls.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+#[ignore = "subprocess entry; the parent supplies AAUTH_BUDGET_LEDGER_DIR"]
+fn durable_budget_ledger_worker() {
+    let root = std::path::PathBuf::from(
+        std::env::var_os("AAUTH_BUDGET_LEDGER_DIR").expect("budget directory"),
+    );
+    let mut ledger = Ledger::open_directory(&root).unwrap();
+    let ids = ledger.token_ids();
+    assert_eq!(ids.len(), 1, "the resource published one grant");
+    let (iss, jti) = &ids[0];
+    assert!(matches!(
+        ledger.reserve(iss, jti, 1),
+        Err(ChargeError::Refused(Refusal::Exhausted { remaining: 0, .. }))
+    ));
+    println!("WROTE {}", std::process::id());
+}
+
+#[test]
+fn durable_budget_ledger_reopens_spent_after_process_exit() {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-resource-budget-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|stamp| stamp.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    let ledger = Arc::new(Mutex::new(Ledger::open_directory(&root).unwrap()));
+    let (resource, calls, _) = resource_with_ledger(
+        &profile,
+        true,
+        false,
+        documents.clone(),
+        Some(Arc::clone(&ledger)),
+        None,
+        None,
+    );
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-durable-ledger",
+    );
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "admit-durable") {
+        AuthDecision::Granted(admitted) => assert_eq!(admitted.admitted(), "receipt"),
+        other => panic!("first admission: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(resource);
+    drop(ledger);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "durable_budget_ledger_worker",
+            "--nocapture",
+        ])
+        .env("AAUTH_BUDGET_LEDGER_DIR", &root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = String::from_utf8_lossy(&output.stdout);
+    let child_pid: u32 = written
+        .lines()
+        .find_map(|line| line.strip_prefix("WROTE "))
+        .and_then(|pid| pid.trim().parse().ok())
+        .expect("child pid");
+    assert_ne!(child_pid, std::process::id());
+    let ledger = Arc::new(Mutex::new(Ledger::open_directory(&root).unwrap()));
+    let (restarted, restarted_calls, _) =
+        resource_with_ledger(&profile, true, false, documents, Some(ledger), None, None);
+    match restarted.authorize(&signed_call("/op/permit", &auth), NOW, "reopened-durable") {
+        AuthDecision::AuthTokenRequired { budget_reason, .. } => {
+            assert_eq!(budget_reason.as_deref(), Some("budget-exhausted"));
+        }
+        other => panic!("reopened ledger: {other:?}"),
+    }
+    assert_eq!(restarted_calls.load(Ordering::SeqCst), 0);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

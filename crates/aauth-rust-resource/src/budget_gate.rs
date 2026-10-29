@@ -1,7 +1,9 @@
 //! Opt-in budget metering for one resource. The ledger lives behind a mutex so
 //! concurrent requests on one process cannot both spend the last unit. A host
 //! may hand the same ledger to another Resource; that continues the spend.
-//! The ledger is process memory.
+//! [`aauth_rust_budgets::Ledger::new`] is process memory.
+//! [`aauth_rust_budgets::Ledger::open_directory`] keeps the same meter in a
+//! host directory. A later process opens that directory and continues the spend.
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};

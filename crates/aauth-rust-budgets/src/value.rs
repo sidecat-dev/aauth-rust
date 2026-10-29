@@ -35,6 +35,9 @@ pub enum Error {
     /// Metering mode is not `auth-token`.
     #[error("budgets require access_mode auth-token")]
     AccessMode,
+    /// The host ledger file could not be read or replaced. The wire is unchanged.
+    #[error("budget ledger file is unavailable")]
+    Unavailable,
 }
 
 /// One non-negative budget amount in a resource-selected unit and scale.

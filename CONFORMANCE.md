@@ -385,6 +385,26 @@ in one unit at `86b466e`. Receipt START `2026-10-29T21:19:21.976993+00:00`,
 log mtime `2026-10-29T21:19:29.356935+00:00`. The reopen filter passed 3,
 ignored the worker entry, and failed 0. The composition refusal passed 1
 and failed 0. `systemctl show` reported `Result=success`.
+
+`Ledger::open_directory` writes the Resource budget meter to a host directory.
+Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
+`prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
+The previous complete file is kept as `ledger.json.prev`. A partial
+`ledger.json.tmp` is not the spend. A second process that opens the directory
+continues that spend. `reopen_after_process_exit_keeps_the_spent_grant` is
+that process exit: the child spends the grant and exits, and the parent reads
+`budget-exhausted`. `interrupted_write_keeps_the_last_complete_grant` stops
+before the rename and also truncates the current file. Reopen reads the last
+complete snapshot and does not apply the torn spend.
+`durable_budget_ledger_reopens_spent_after_process_exit` admits one call
+through the Resource. A second process opens that directory and cannot reserve
+another unit. A new Resource given the reopened meter and the same class
+documents answers `budget-exhausted` and does not run the tool.
+`interrupted_replace_keeps_the_previous_claim_bytes` stops a claim replace
+before the rename, then recovers the previous complete claim after the current
+file is truncated. This is not power loss. A ledger that was not opened on a
+directory is still process memory.
+
 `fresh_resource_spends_the_same_grant_again` spends the grant, then the same
 Resource answers `budget-exhausted`. A second Resource on the same class
 documents, with a new ledger, admits that still-live token again. That is

@@ -17,7 +17,9 @@
 //! - Resource custody: `FileDocuments` and `FileCalls` in one per-run
 //!   directory. A later process can open those files after the writer exits.
 //!   Dropping the store in this process is not that restart. Durability is
-//!   the host filesystem's. A crash during the write is not covered.
+//!   the host filesystem's. A new file is published only after its bytes are
+//!   synchronized and renamed into place. An interrupted replace keeps the
+//!   previous complete file. This is not power loss.
 //! - PS issuance store, R3 audit log and consent: process memory and a fixed
 //!   demonstration decision. They are volatile; there is no consent UI.
 //! - PS egress admission and HTTPS transport: one admitted origin and prefix.
@@ -367,18 +369,35 @@ fn mcp(tool: &str) -> std::result::Result<Operation, R3HostError> {
 
 // ---- Resource custody: exact class documents and per-call proposals -------
 
+#[cfg(test)]
+static INTERRUPT_WRITE: AtomicBool = AtomicBool::new(false);
+
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
-    match fs::OpenOptions::new()
+    if path.exists() {
+        return Ok(false);
+    }
+    let pending = path.with_extension("tmp");
+    let _ = fs::remove_file(&pending);
+    let mut file = match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(path)
+        .open(&pending)
     {
-        Ok(mut file) => {
-            file.write_all(bytes)?;
-            file.sync_all()?;
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if interrupt_write(bytes, &mut file)? {
+        return Err(io::Error::other("interrupted write"));
+    }
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    match fs::rename(&pending, path) {
+        Ok(()) => {
+            sync_parent(path)?;
             Ok(true)
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) if path.exists() => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -386,10 +405,60 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let pending = path.with_extension("tmp");
     {
         let mut file = fs::File::create(&pending)?;
+        if interrupt_write(bytes, &mut file)? {
+            return Err(io::Error::other("interrupted write"));
+        }
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    fs::rename(&pending, path)
+    if path.is_file() {
+        let previous = path.with_extension("prev");
+        fs::copy(path, &previous)?;
+        fs::File::open(&previous)?.sync_all()?;
+    }
+    fs::rename(&pending, path)?;
+    sync_parent(path)
+}
+fn interrupt_write(bytes: &[u8], file: &mut fs::File) -> io::Result<bool> {
+    #[cfg(test)]
+    if INTERRUPT_WRITE.swap(false, Ordering::SeqCst) {
+        let torn = if bytes.is_empty() { bytes } else { &bytes[..1] };
+        file.write_all(torn)?;
+        file.sync_all()?;
+        return Ok(true);
+    }
+    let _ = (bytes, file);
+    Ok(false)
+}
+fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    let _ = path;
+    Ok(())
+}
+/// Read a published record. A torn current file yields the previous complete
+/// file when one exists. A temporary file is not a record.
+fn read_record(path: &Path) -> io::Result<Vec<u8>> {
+    match fs::read(path) {
+        Ok(bytes) if serde_json::from_slice::<Value>(&bytes).is_ok() => Ok(bytes),
+        Ok(_) => previous_record(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(error),
+        Err(error) => Err(error),
+    }
+}
+fn previous_record(path: &Path) -> io::Result<Vec<u8>> {
+    match fs::read(path.with_extension("prev")) {
+        Ok(bytes) if serde_json::from_slice::<Value>(&bytes).is_ok() => Ok(bytes),
+        Ok(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "torn record")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(io::Error::new(io::ErrorKind::InvalidData, "torn record"))
+        }
+        Err(error) => Err(error),
+    }
 }
 fn unavailable(error: impl ToString) -> R3StoreError {
     R3StoreError::Unavailable(R3HostError::new(error.to_string()))
@@ -438,13 +507,13 @@ impl R3DocumentStore for FileDocuments {
                     .map_err(unavailable)?;
                 Ok(())
             }
-            false if fs::read(&path).map_err(unavailable)? == bytes => Ok(()),
+            false if read_record(&path).map_err(unavailable)? == bytes => Ok(()),
             false => Err(R3StoreError::Conflict),
         }
     }
     fn load(&self, uri: &str) -> std::result::Result<Option<R3DocumentRecord>, R3StoreError> {
         let path = self.0.join(format!("c-{}.json", digest(uri.as_bytes())));
-        let bytes = match fs::read(path) {
+        let bytes = match read_record(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(unavailable(error)),
@@ -586,7 +655,7 @@ impl R3CallStore for FileCalls {
         self.create(r)
     }
     fn load(&self, uri: &str) -> std::result::Result<Option<R3ProposalRecord>, R3StoreError> {
-        match fs::read(self.record_path(uri)) {
+        match read_record(&self.record_path(uri)) {
             Ok(bytes) => {
                 let record = Self::decode(&bytes).map_err(unavailable)?;
                 if record.reference.uri() != uri {
@@ -629,7 +698,7 @@ impl R3CallStore for FileCalls {
             }
         }
         let path = self.claim_path(uri);
-        match fs::read(&path) {
+        match read_record(&path) {
             Ok(bytes) => {
                 let v: Value = serde_json::from_slice(&bytes).map_err(unavailable)?;
                 if v["compact_sha256"].as_str() != Some(token.compact_sha256.as_str()) {
@@ -688,7 +757,7 @@ impl R3CallStore for FileCalls {
     ) -> std::result::Result<R3CallResult, R3StoreError> {
         let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
         let path = self.claim_path(uri);
-        let bytes = fs::read(&path).map_err(unavailable)?;
+        let bytes = read_record(&path).map_err(unavailable)?;
         let mut v: Value = serde_json::from_slice(&bytes).map_err(unavailable)?;
         if v["fence"].as_str() != Some(fence) || !v["result"].is_null() {
             return Err(R3StoreError::Conflict);
@@ -714,7 +783,7 @@ impl R3CallStore for FileCalls {
             if !name.starts_with("p-") || !name.ends_with(".json") {
                 continue;
             }
-            let bytes = fs::read(self.0.join(name)).map_err(unavailable)?;
+            let bytes = read_record(&self.0.join(name)).map_err(unavailable)?;
             let record = Self::decode(&bytes).map_err(unavailable)?;
             // Unclaimed and not superseded: both bind the claim file.
             if record.released.is_some()
@@ -2476,5 +2545,38 @@ fn concurrent_supersede_leaves_one_successor_and_the_original_bytes() {
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
     assert_ne!(held[0].reference.uri(), prior.reference.uri());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn interrupted_replace_keeps_the_previous_claim_bytes() {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-r3-interrupt-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let path = root.join("claim-test.json");
+    let first = br#"{"result":null}"#;
+    let second = br#"{"result":{"status":200}}"#;
+    assert!(write_new(&path, first).unwrap());
+    INTERRUPT_WRITE.store(true, Ordering::SeqCst);
+    assert!(replace(&path, second).is_err());
+    assert_eq!(fs::read(&path).unwrap(), first);
+    assert!(path.with_extension("tmp").is_file());
+    assert!(!path.with_extension("prev").is_file());
+    replace(&path, second).unwrap();
+    assert_eq!(read_record(&path).unwrap(), second);
+    fs::write(&path, b"{").unwrap();
+    assert_eq!(read_record(&path).unwrap(), first);
+    let fresh = root.join("claim-new.json");
+    INTERRUPT_WRITE.store(true, Ordering::SeqCst);
+    assert!(write_new(&fresh, second).is_err());
+    assert!(!fresh.exists());
+    assert!(write_new(&fresh, second).unwrap());
+    assert_eq!(read_record(&fresh).unwrap(), second);
     let _ = fs::remove_dir_all(root);
 }

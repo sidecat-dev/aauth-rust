@@ -750,8 +750,11 @@ where
     /// Meter with a host-supplied ledger.
     ///
     /// Two Resources that receive the same ledger continue one spend. A
-    /// Resource that does not receive it starts empty. The ledger is process
-    /// memory. Sharing it is not an operating-system restart.
+    /// Resource that does not receive it starts empty. A ledger from
+    /// [`aauth_rust_budgets::Ledger::new`] is process memory. Sharing that
+    /// object is not an operating-system restart. A ledger from
+    /// [`aauth_rust_budgets::Ledger::open_directory`] writes the meter to a
+    /// directory. A later process that opens the directory continues the spend.
     ///
     /// # Errors
     /// Returns [`PsConfigurationError::InvalidBudgetProfile`] when the endpoint
