@@ -403,7 +403,16 @@ documents answers `budget-exhausted` and does not run the tool.
 `interrupted_replace_keeps_the_previous_claim_bytes` stops a claim replace
 before the rename, then recovers the previous complete claim after the current
 file is truncated. This is not power loss. A ledger that was not opened on a
-directory is still process memory.
+directory is still process memory. Host3 `aauth-wc07-completion-ledger01`
+ran that batch in one unit at `6bf78dca91c57f74396308cfea5320a9525ce07a`.
+Receipt START `2026-10-29T21:45:04.454951949+00:00`, log mtime
+`2026-10-29T21:45:41.231686+00:00`. The durable budget tests passed 2,
+ignored the worker entry, and failed 0. The interrupted claim replace
+passed 1 and failed 0. The Resource reopen passed 1, ignored the worker
+entry, and failed 0. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. `systemctl show`
+reported `Result=success` and `ExecMainStatus=0`.
 
 `fresh_resource_spends_the_same_grant_again` spends the grant, then the same
 Resource answers `budget-exhausted`. A second Resource on the same class
