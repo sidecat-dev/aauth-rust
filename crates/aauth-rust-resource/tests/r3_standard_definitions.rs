@@ -397,6 +397,23 @@ impl FetchTransport for TlsFetch {
     }
 }
 
+struct CoreGrant;
+impl Policy for CoreGrant {
+    fn bind_person(&self, _: &PersonRequest) -> Result<Person, PolicyError> {
+        Ok(Person {
+            id: "person-1".into(),
+            subject: "directed-person".into(),
+            tenant: None,
+        })
+    }
+    fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+        Ok(Grant {
+            scopes: request.scopes.clone(),
+            lifetime: 600,
+        })
+    }
+}
+
 struct HostPolicy;
 impl Policy for HostPolicy {
     fn bind_person(&self, _: &PersonRequest) -> Result<Person, PolicyError> {
@@ -2122,6 +2139,154 @@ fn class_grant_outside_the_document_writes_no_audit_and_reserves_nothing() {
 }
 
 #[test]
+fn core_budget_with_r3_enabled_skips_the_class_path_and_a_failed_commit_reserves_nothing() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let r3_calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&r3_calls);
+    let fail_commit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        GatedStore {
+            inner: MemoryStore::default(),
+            fail_commit: Arc::clone(&fail_commit),
+        },
+        CoreGrant,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    fail_commit.store(true, std::sync::atomic::Ordering::SeqCst);
+    let withheld = exchange_core_budget_response(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-core-fail",
+    );
+    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
+    assert!(member(&withheld, "auth_token").is_none());
+    assert_eq!(ps.budget_accounted(), Some(0));
+    assert_eq!(r3_calls.load(Ordering::SeqCst), 0);
+    let released = exchange_core_budget_response(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-core-ok",
+    );
+    assert_eq!(released.status(), 200, "{}", String::from_utf8_lossy(released.body()));
+    let auth = member(&released, "auth_token").expect("core auth token");
+    let extra = aauth_rust_core::AuthToken::parse(&auth)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .clone();
+    assert!(extra.get("r3_uri").is_none());
+    assert_eq!(
+        extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        Some(500)
+    );
+    assert_eq!(ps.budget_accounted(), Some(500));
+    assert_eq!(r3_calls.load(Ordering::SeqCst), 0);
+    let class = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-after-core",
+    );
+    let class_amount = aauth_rust_core::AuthToken::parse(&class)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(class_amount, Some(300));
+    assert_eq!(r3_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ps.budget_accounted(), Some(800));
+}
+
+fn exchange_core_budget_response<S: aauth_rust_person_server::Store, P: Policy>(
+    resource: &Resource,
+    ps: &PersonServer<Keys, S, P, BoxedClock, BoxedTokenIds>,
+    presented: &Agent,
+    signer: &Agent,
+    person: &str,
+    resource_jti: &str,
+) -> Response<Vec<u8>> {
+    let authorize = post(
+        presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "scope": "records.read",
+            "budget": {"amount": 500, "unit": "USD", "decimals": 2}
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, resource_jti)
+        .into_response();
+    assert_eq!(issued.status(), 200, "{resource_jti}");
+    let resource_token = member(&issued, "resource_token").expect("resource token");
+    ps.handle(&post(
+        signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": resource_token, "presented_token": person }),
+    ))
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
@@ -2666,9 +2831,9 @@ fn combined_budget_auth_expires_and_a_later_grant_revokes() {
     );
 }
 
-fn exchange_budget_auth(
+fn exchange_budget_auth<S: aauth_rust_person_server::Store, P: Policy>(
     resource: &Resource,
-    ps: &PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>,
+    ps: &PersonServer<Keys, S, P, BoxedClock, BoxedTokenIds>,
     presented: &Agent,
     signer: &Agent,
     person: &str,
@@ -2679,9 +2844,9 @@ fn exchange_budget_auth(
     member(&exchanged, "auth_token").expect("auth token")
 }
 
-fn exchange_budget_response(
+fn exchange_budget_response<S: aauth_rust_person_server::Store, P: Policy>(
     resource: &Resource,
-    ps: &PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>,
+    ps: &PersonServer<Keys, S, P, BoxedClock, BoxedTokenIds>,
     presented: &Agent,
     signer: &Agent,
     person: &str,
@@ -2896,6 +3061,48 @@ fn signed_call_at(path: &str, token: &str, now: i64) -> Request<Vec<u8>> {
     )
     .unwrap();
     request
+}
+
+struct GatedStore {
+    inner: MemoryStore,
+    fail_commit: Arc<std::sync::atomic::AtomicBool>,
+}
+impl aauth_rust_person_server::Store for GatedStore {
+    fn binding(
+        &self,
+        issuer: &str,
+        agent: &aauth_rust_person_server::AgentIdentity,
+    ) -> Result<Option<aauth_rust_person_server::Binding>, aauth_rust_person_server::StoreError>
+    {
+        self.inner.binding(issuer, agent)
+    }
+    fn token(
+        &self,
+        reference: &aauth_rust_person_server::TokenReference,
+    ) -> Result<Option<aauth_rust_person_server::TokenRecord>, aauth_rust_person_server::StoreError>
+    {
+        self.inner.token(reference)
+    }
+    fn commit(
+        &self,
+        record: aauth_rust_person_server::TokenRecord,
+        establish_binding: bool,
+    ) -> Result<(), aauth_rust_person_server::StoreError> {
+        if self
+            .fail_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(aauth_rust_person_server::StoreError::Unavailable);
+        }
+        self.inner.commit(record, establish_binding)
+    }
+    fn revoke_binding(
+        &self,
+        issuer: &str,
+        agent: &aauth_rust_person_server::AgentIdentity,
+    ) -> Result<(), aauth_rust_person_server::StoreError> {
+        self.inner.revoke_binding(issuer, agent)
+    }
 }
 
 struct CountAudit(Arc<AtomicUsize>);

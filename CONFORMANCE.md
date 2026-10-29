@@ -244,6 +244,12 @@ answers `500 server_error` when consent names operations the fetched
 document does not contain. No audit row is written and the account book
 stays empty. The next offer still signs 500 under a cap of 800. Host3
 `aauth-wc07-completion-outside01` passed that refusal at `6fa4997`.
+`core_budget_with_r3_enabled_skips_the_class_path_and_a_failed_commit_reserves_nothing`
+issues a core budget token while class R3 is enabled. That exchange does not
+call class consent. A failed issuance commit withholds the token and leaves
+the account book empty. The retry signs 500 and carries no R3 reference.
+The next class offer signs 300 under a cap of 800. That composition has not
+been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
