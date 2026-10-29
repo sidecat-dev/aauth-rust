@@ -1717,6 +1717,107 @@ fn reserved_class_call_settles_below_the_hold() {
 }
 
 #[test]
+fn concurrent_class_calls_spend_the_grant_once() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    let (resource, calls, _) = resource_with(&profile, true, false, documents.clone());
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let auth = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-concurrent",
+    );
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for index in 0..2 {
+        let resource = Arc::clone(&resource);
+        let auth = auth.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            resource.authorize(
+                &signed_call("/op/permit", &auth),
+                NOW,
+                &format!("race-{index}"),
+            )
+        }));
+    }
+    let mut granted = 0;
+    let mut exhausted = 0;
+    for handle in handles {
+        match handle.join().expect("call thread") {
+            AuthDecision::Granted(admitted) => {
+                assert_eq!(admitted.admitted(), "receipt");
+                granted += 1;
+            }
+            AuthDecision::AuthTokenRequired { budget_reason, .. } => {
+                assert_eq!(budget_reason.as_deref(), Some("budget-exhausted"));
+                exhausted += 1;
+            }
+            other => panic!("concurrent call: {other:?}"),
+        }
+    }
+    assert_eq!(granted, 1);
+    assert_eq!(exhausted, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "one call runs the tool");
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
