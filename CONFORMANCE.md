@@ -233,8 +233,10 @@ the class token carries a budget offer. The exchange is `invalid_resource_token`
 and no Auth token is issued.
 `proposal_with_a_budget_offer_is_refused_before_approval` fetches that proposal.
 Without a budget the Person Server records one approval. The same artifact
-with a budget offer is `invalid_resource_token` and does not record another. An R3-only token is unchanged when budgets
-are also enabled. `combined_budget_auth_expires_and_a_later_grant_revokes`
+with a budget offer is `invalid_resource_token` and does not record another.
+`r3_only_class_token_is_unchanged_when_budgets_are_enabled` issues a class
+token with no budget. The Auth token has no budget claim, and the Resource
+admits the call. `combined_budget_auth_expires_and_a_later_grant_revokes`
 presents that Auth token at its `exp` and receives `expired_jwt` with no
 second effect. A later Auth token for the same class is admitted, and a
 Person Server revocation of its `jti` is `revoked_jwt` before another effect.
