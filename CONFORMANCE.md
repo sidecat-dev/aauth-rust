@@ -303,6 +303,10 @@ answers `202` and stores the held call. The same approval on the mapped
 route is forbidden. Completion at the pending URL retains the response,
 and the next presentation there returns it. Host3
 `aauth-wc07-completion-hold01` passed that hold at `cbbd53d`.
+`release_gating_runs_once_before_approval_and_replays_the_held_response`
+runs the call while issuing the `202`. Approval releases the stored
+response and does not run the call again. The next presentation returns
+that response. That release has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
