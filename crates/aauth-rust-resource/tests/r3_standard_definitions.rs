@@ -2844,6 +2844,114 @@ fn resource_revocation(jti: &str, exp: i64) -> Request<Vec<u8>> {
 }
 
 #[test]
+fn class_grant_that_expires_before_release_reserves_nothing() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, _, _) = resource_for(&profile, true);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let audits = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::new(AtomicI64::new(NOW));
+    let once = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let hook_clock = Arc::clone(&clock);
+    let hook_once = Arc::clone(&once);
+    let hook = Arc::new(Mutex::new(Some(Arc::new(move || {
+        if hook_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            hook_clock.store(NOW + 301, Ordering::SeqCst);
+        }
+    }) as Arc<dyn Fn() + Send + Sync>)));
+    let ps_clock = Arc::clone(&clock);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(move || ps_clock.load(Ordering::SeqCst)) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(HookAudit {
+            audits: Arc::clone(&audits),
+            hook,
+        }),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let withheld = exchange_budget_response(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-expired-before-release",
+    );
+    assert_eq!(withheld.status(), 400, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        member(&withheld, "error").as_deref(),
+        Some("expired_resource_token")
+    );
+    assert!(member(&withheld, "auth_token").is_none());
+    assert_eq!(audits.load(Ordering::SeqCst), 1);
+    assert_eq!(ps.budget_accounted(), Some(0));
+    clock.store(NOW, Ordering::SeqCst);
+    let released = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-after-expiry",
+    );
+    let amount = aauth_rust_core::AuthToken::parse(&released)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(amount, Some(500));
+    assert_eq!(audits.load(Ordering::SeqCst), 2);
+    assert_eq!(ps.budget_accounted(), Some(500));
+}
+
+#[test]
 fn class_budget_grant_stops_at_period_end() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
