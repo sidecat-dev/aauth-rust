@@ -212,7 +212,9 @@ pins the token and admits one protected call under an Auth token that carries
 the same grant. A `budget` object without budgets enabled is `invalid_budget`.
 The Person Server accepts `with_budgets` and `with_r3` in either order.
 `budgets_before_r3_still_exchange_and_admit` enables budgets first, then
-exchanges and admits the combined grant. Federation together with R3 stays
+exchanges and admits the combined grant.
+`later_class_grant_is_narrowed_to_the_remaining_cap` signs 500 under a cap
+of 800, then signs the next offer for that subject and resource as 300. Federation together with R3 stays
 refused. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
