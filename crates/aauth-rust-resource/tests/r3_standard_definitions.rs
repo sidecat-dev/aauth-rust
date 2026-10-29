@@ -25,18 +25,21 @@ use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
     AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Grant, MemoryStore, Person,
     PersonRequest, PersonServer, Policy, PolicyError, R3AuthorizationRequest, R3Decision,
-    R3IssuerConfig,
+    R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
 };
 use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionErrorKind, DefinitionRegistration, DefinitionRegistry,
     FetchBody, FetchLimits, FetchResponse, FetchTransport, GrantedOperations, GrpcCodec,
     GrpcDefinitionSource, ODataCodec, ODataMetadataSource, Operation, Vocabulary, WsdlCodec,
-    WsdlDocumentSource, mint_budget_resource_token, standard_registry,
+    Parameters, PresentedParameter, Proposal, ProposalOptions, Reference,
+    WsdlDocumentSource, digest,
+    mint_budget_resource_token, mint_proposal_resource_token, standard_registry,
 };
 use aauth_rust_resource::{
-    AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3OperationMapper, Deny, PsAuthorizationConfig,
-    PsAuthorizationResource, R3Config, R3DocumentRecord, R3DocumentStore, R3StoreError,
-    R3Vocabulary,
+    AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
+    BoxedR3Present, Deny, PsAuthorizationConfig, PsAuthorizationResource, R3CallResult,
+    R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore, R3HostError,
+    R3PerCallConfig, R3ProposalRecord, R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -998,6 +1001,355 @@ fn fresh_resource_spends_the_same_grant_again() {
     }
     assert_eq!(restarted_calls.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+struct OneCall(Mutex<Option<R3ProposalRecord>>);
+impl R3CallStore for OneCall {
+    fn commit(&self, record: &R3ProposalRecord) -> Result<(), R3StoreError> {
+        let mut slot = self.0.lock().unwrap();
+        if slot.is_some() {
+            return Err(R3StoreError::Conflict);
+        }
+        *slot = Some(record.clone());
+        Ok(())
+    }
+    fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|record| record.reference.uri() == uri)
+            .cloned())
+    }
+    fn load_pending(&self, _: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(None)
+    }
+    fn claim(&self, _: &str, _: &R3CallToken, _: i64) -> Result<R3Claim, R3StoreError> {
+        Err(R3StoreError::Unavailable(R3HostError::new("unused")))
+    }
+    fn retain(&self, _: &str, _: &str, _: &R3CallResult) -> Result<R3CallResult, R3StoreError> {
+        Err(R3StoreError::Unavailable(R3HostError::new("unused")))
+    }
+    fn held_releases(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<Vec<R3ProposalRecord>, R3StoreError> {
+        Ok(Vec::new())
+    }
+    fn supersede(&self, _: &str, _: &R3ProposalRecord, _: i64) -> Result<(), R3StoreError> {
+        Err(R3StoreError::Conflict)
+    }
+}
+
+struct SplitPolicy {
+    proposals: Arc<AtomicUsize>,
+    vocabulary: Vocabulary,
+    granted: Operation,
+    per_call: Operation,
+}
+impl R3Policy for SplitPolicy {
+    fn authorize_document(
+        &self,
+        _: &R3AuthorizationRequest<'_>,
+    ) -> Result<R3Decision, PolicyError> {
+        Ok(R3Decision {
+            granted: GrantedOperations::new(&self.vocabulary, std::slice::from_ref(&self.granted))
+                .unwrap(),
+            per_call: Some(
+                GrantedOperations::new(&self.vocabulary, std::slice::from_ref(&self.per_call))
+                    .unwrap(),
+            ),
+            scopes: Vec::new(),
+            lifetime: 600,
+        })
+    }
+    fn authorize_proposal(
+        &self,
+        _: &R3ProposalRequest<'_>,
+    ) -> Result<R3ProposalDecision, PolicyError> {
+        self.proposals.fetch_add(1, Ordering::SeqCst);
+        Ok(R3ProposalDecision {
+            scopes: Vec::new(),
+            lifetime: 600,
+        })
+    }
+}
+
+fn proposal_artifact_uri(exact: &[u8], jti: &str) -> String {
+    let entitlement = serde_json::to_vec(&json!(["aauth-r3-entitlement-v1", PS, PS])).unwrap();
+    let lineage = format!("aauth-r3-proposal-v1\0{jti}");
+    format!(
+        "{RESOURCE}/r3/p.{}.{}.{}",
+        digest(exact),
+        digest(&entitlement),
+        digest(lineage.as_bytes())
+    )
+}
+
+#[test]
+fn proposal_with_a_budget_offer_is_refused_before_approval() {
+    let profile = odata_profile();
+    let documents = Arc::new(Documents::default());
+    let calls = Arc::new(OneCall(Mutex::new(None)));
+    let proposals = Arc::new(AtomicUsize::new(0));
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let present: BoxedR3Present = Box::new(|_: &Request<Vec<u8>>, _: &Operation| {
+        Err(R3HostError::new("unused"))
+    });
+    let describe: BoxedR3Describe =
+        Box::new(|_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Err(R3HostError::new("unused"))
+        });
+    let permit_for_map = permit.clone();
+    let per_call_for_map = per_call.clone();
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok(match request.uri().path() {
+            "/op/permit" => Some(permit_for_map.clone()),
+            "/op/refuse" => Some(per_call_for_map.clone()),
+            _ => None,
+        })
+    });
+    let effects = Arc::new(AtomicUsize::new(0));
+    let admission = {
+        let effects = effects.clone();
+        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok("receipt".to_owned())
+        }) as BoxedAuthAdmissionPolicy<String>
+    };
+    let resource = Arc::new(
+        PsAuthorizationResource::new(
+            PsAuthorizationConfig {
+                issuer: RESOURCE.into(),
+                signed_origin: RESOURCE.into(),
+                kid: "resource-1".into(),
+                signing_key: SigningKey::from_seed([4; 32]),
+                scopes: vec!["records.read".into()],
+            },
+            keys(),
+            admission,
+        )
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(R3Config {
+            registry: standard_registry().unwrap(),
+            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
+                .unwrap(),
+            vocabularies: vec![R3Vocabulary {
+                definition: profile.snapshot.clone(),
+                display: None,
+            }],
+            documents: documents.clone(),
+            operation_for_request: mapper,
+            require_core_scope: false,
+        })
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: calls.clone(),
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap()
+        .with_budgets(
+            vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+            "https://resource.example/usage",
+            500,
+            500,
+        )
+        .unwrap(),
+    );
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(SplitPolicy {
+            proposals: proposals.clone(),
+            vocabulary: profile.vocabulary.clone(),
+            granted: permit.clone(),
+            per_call: per_call.clone(),
+        }),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [
+                    serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                    serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+                ],
+            }
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-class-for-proposal")
+        .into_response();
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
+    let class_resource = member(&issued, "resource_token").expect("class resource token");
+    let class_exchange = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": class_resource, "presented_token": person }),
+    ));
+    assert_eq!(
+        class_exchange.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(class_exchange.body())
+    );
+    let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
+    let class_jti = aauth_rust_core::AuthToken::parse(&class_auth)
+        .unwrap()
+        .unverified_claims()
+        .jti
+        .clone();
+    let parameters = Parameters::new(std::iter::empty()).expect("empty parameters");
+    let proposal = Proposal::new(&per_call, &parameters, ProposalOptions::default()).unwrap();
+    let exact = serde_json::to_vec(&proposal).unwrap();
+    let jti = "rt-proposal";
+    let uri = proposal_artifact_uri(&exact, jti);
+    let mut claims = ResourceToken::parse(&class_resource)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    claims.jti = jti.into();
+    claims.presented_jti = class_jti;
+    claims.iat = NOW;
+    claims.exp = NOW + 300;
+    claims.extra.clear();
+    claims.scope = None;
+    let (plain, reference) = mint_proposal_resource_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &claims,
+        &uri,
+        &exact,
+    )
+    .expect("proposal resource token");
+    calls
+        .commit(&R3ProposalRecord {
+            reference: reference.clone(),
+            exact_json: exact.clone(),
+            person_server: PS.into(),
+            auth_token_issuer: PS.into(),
+            resource_token_jti: jti.into(),
+            resource_token: plain.clone(),
+            class_reference: Reference::new(
+                "https://resource.example/r3/c.class",
+                digest(b"class"),
+            )
+            .unwrap(),
+            presented_jti: claims.presented_jti.clone(),
+            subject: claims.sub.clone(),
+            agent_jkt: claims.agent_jkt.clone(),
+            tenant: claims.tenant.clone(),
+            account: claims.account.clone(),
+            scope: None,
+            issued_at: claims.iat,
+            expires_at: claims.exp,
+            held: None,
+            released: None,
+            release_until: None,
+            supersedes: None,
+        })
+        .unwrap();
+    let approved = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": plain, "presented_token": class_auth }),
+    ));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
+    assert_eq!(proposals.load(Ordering::SeqCst), 1, "the plain proposal is approved");
+    claims.extra.insert(
+        "budget".into(),
+        json!({"amount": 500, "unit": "USD", "decimals": 2}),
+    );
+    claims.extra.insert("r3_uri".into(), json!(uri));
+    claims
+        .extra
+        .insert("r3_s256".into(), json!(reference.digest()));
+    let with_budget = aauth_rust_core::mint_resource_token(
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &claims,
+    )
+    .expect("proposal token with a budget offer");
+    let refused = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": with_budget, "presented_token": class_auth }),
+    ));
+    assert_eq!(
+        refused.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(refused.body())
+    );
+    assert_eq!(
+        member(&refused, "error").as_deref(),
+        Some("invalid_resource_token")
+    );
+    assert!(member(&refused, "auth_token").is_none());
+    assert_eq!(
+        proposals.load(Ordering::SeqCst),
+        1,
+        "the budget offer does not record another approval"
+    );
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
 }
 
 #[test]

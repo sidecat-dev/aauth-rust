@@ -220,8 +220,10 @@ Resource token is `invalid_resource_token`: Go does not resolve it against
 a retained grant. A malformed record is `invalid_budget`.
 `per_call_with_a_budget_offer_is_refused` leaves one operation per call while
 the class token carries a budget offer. The exchange is `invalid_resource_token`
-and no Auth token is issued. A proposal artifact that carries a budget offer
-is the same refusal. An R3-only token is unchanged when budgets
+and no Auth token is issued.
+`proposal_with_a_budget_offer_is_refused_before_approval` fetches that proposal.
+Without a budget the Person Server records one approval. The same artifact
+with a budget offer is `invalid_resource_token` and does not record another. An R3-only token is unchanged when budgets
 are also enabled. `combined_budget_auth_expires_and_a_later_grant_revokes`
 presents that Auth token at its `exp` and receives `expired_jwt` with no
 second effect. A later Auth token for the same class is admitted, and a
