@@ -237,7 +237,16 @@ server. A token for a different proposal is refused. Host3
 `e60dbd5`, including deferred custody. An access-server `202` for the class
 document and `402` for the proposal are `500 server_error`. Consent and the
 access-server call still happen. The continuation store is not written, and
-the response has no Auth token. A class Resource token may carry a budget offer: the PS verifies
+the response has no Auth token. A changed tenant, account, or confirmation
+key, a granted operation other than the proposal, a per-call member on that
+token, and an Auth token with no R3 claims are `502 as_unreachable`. A
+fetched document whose bytes do not match the reference is `400
+invalid_resource_token` after the fetch and before consent. A document fetch
+that answers `401`, or a fetch transport failure, is `500 server_error` and
+does not consent. Those additional refusals have not been run on Host3. A
+deferred continuation that carries a budget offer stays retained. The later
+poll checks the delivered budget against the amount sent. Go refuses to
+store that continuation. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against

@@ -69,20 +69,29 @@ impl FetchBody for Body {
 struct Documents {
     artifacts: Arc<Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
     order: Arc<Mutex<Vec<&'static str>>>,
+    status: Arc<Mutex<u16>>,
+    fail: Arc<Mutex<bool>>,
 }
 impl FetchTransport for Documents {
     fn send(&self, request: Request<Vec<u8>>, _: Instant) -> io::Result<FetchResponse> {
         self.order.lock().unwrap().push("fetch");
+        if *self.fail.lock().unwrap() {
+            return Err(io::Error::other("resource transport unavailable"));
+        }
+        let status = *self.status.lock().unwrap();
         let uri = request.uri().to_string();
-        let bytes = self
-            .artifacts
-            .lock()
-            .unwrap()
-            .get(&uri)
-            .cloned()
-            .ok_or_else(|| io::Error::other(format!("unexpected fetch {uri}")))?;
+        let bytes = if status == 200 {
+            self.artifacts
+                .lock()
+                .unwrap()
+                .get(&uri)
+                .cloned()
+                .ok_or_else(|| io::Error::other(format!("unexpected fetch {uri}")))?
+        } else {
+            Vec::new()
+        };
         Ok(Response::builder()
-            .status(200)
+            .status(status)
             .header("content-type", "application/json; charset=utf-8")
             .body(Box::new(Body { bytes, offset: 0 }) as Box<dyn FetchBody>)
             .unwrap())
@@ -99,6 +108,12 @@ struct Relay {
     bad_reference: Mutex<String>,
     bad_issuer: Mutex<String>,
     bad_proposal: Mutex<String>,
+    bad_tenant: Mutex<String>,
+    bad_account: Mutex<String>,
+    bad_key: Mutex<String>,
+    bad_operation: Mutex<String>,
+    continued_per_call: Mutex<String>,
+    core_only: Mutex<String>,
     hold: Arc<Mutex<Option<u16>>>,
 }
 #[derive(Clone, Copy)]
@@ -109,6 +124,12 @@ enum Mode {
     BadReference,
     BadIssuer,
     BadProposal,
+    BadTenant,
+    BadAccount,
+    BadKey,
+    BadOperation,
+    ContinuedPerCall,
+    CoreOnly,
 }
 impl aauth_rust_person_server::Federation for Relay {
     fn endpoint(&self, issuer: &str) -> Result<String, aauth_rust_person_server::FederationError> {
@@ -149,6 +170,12 @@ impl aauth_rust_person_server::Federation for Relay {
             Mode::BadReference => self.bad_reference.lock().unwrap().clone(),
             Mode::BadIssuer => self.bad_issuer.lock().unwrap().clone(),
             Mode::BadProposal => self.bad_proposal.lock().unwrap().clone(),
+            Mode::BadTenant => self.bad_tenant.lock().unwrap().clone(),
+            Mode::BadAccount => self.bad_account.lock().unwrap().clone(),
+            Mode::BadKey => self.bad_key.lock().unwrap().clone(),
+            Mode::BadOperation => self.bad_operation.lock().unwrap().clone(),
+            Mode::ContinuedPerCall => self.continued_per_call.lock().unwrap().clone(),
+            Mode::CoreOnly => self.core_only.lock().unwrap().clone(),
         };
         Ok(Response::builder()
             .status(200)
@@ -251,6 +278,28 @@ fn agent() -> Agent {
     Agent::new(key, token).unwrap()
 }
 
+fn raw_proposal_auth(
+    holder: &Agent,
+    jti: &str,
+    reference: &aauth_rust_r3::Reference,
+    granted: &Value,
+    per_call: Option<&Value>,
+    edit: impl FnOnce(&mut AuthClaims),
+) -> String {
+    let mut claims = auth_base(holder, jti);
+    claims.scope = None;
+    claims.extra.insert("r3_uri".into(), json!(reference.uri()));
+    claims
+        .extra
+        .insert("r3_s256".into(), json!(reference.digest()));
+    claims.extra.insert("r3_granted".into(), granted.clone());
+    if let Some(per_call) = per_call {
+        claims.extra.insert("r3_per_call".into(), per_call.clone());
+    }
+    edit(&mut claims);
+    aauth_rust_core::mint_auth_token(&SigningKey::from_seed([7; 32]), "as-key", &claims).unwrap()
+}
+
 fn auth_base(holder: &Agent, jti: &str) -> AuthClaims {
     AuthClaims {
         iss: ACCESS.into(),
@@ -282,9 +331,13 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
         CLASS_URI.to_owned(),
         CLASS.to_vec(),
     )])));
+    let fetch_status = Arc::new(Mutex::new(200_u16));
+    let fetch_fail = Arc::new(Mutex::new(false));
     let documents = Documents {
         artifacts: artifacts.clone(),
         order: order.clone(),
+        status: fetch_status.clone(),
+        fail: fetch_fail.clone(),
     };
     let document = registry.parse_document(CLASS).unwrap();
     let read = registry.parse_grant(READ, &document).unwrap();
@@ -411,6 +464,61 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
         aauth_rust_r3::digest(&delete_bytes),
     )
     .unwrap();
+    let read_ops = serde_json::to_value(read.granted_operations()).unwrap();
+    let delete_ops = serde_json::to_value(delete_grant.granted_operations()).unwrap();
+    let mut empty_ops = read_ops.clone();
+    empty_ops["operations"] = json!([]);
+    let bad_tenant = raw_proposal_auth(
+        &holder,
+        "changed-tenant",
+        &proposal_reference,
+        &read_ops,
+        None,
+        |claims| claims.tenant = Some("other-tenant".into()),
+    );
+    let bad_account = raw_proposal_auth(
+        &holder,
+        "changed-account",
+        &proposal_reference,
+        &read_ops,
+        None,
+        |claims| claims.account = Some("other-account".into()),
+    );
+    let other_key = SigningKey::from_seed([9; 32]);
+    let bad_key = raw_proposal_auth(
+        &holder,
+        "changed-key",
+        &proposal_reference,
+        &read_ops,
+        None,
+        |claims| {
+            claims.cnf = Confirmation {
+                jwk: other_key.public_jwk(),
+            };
+        },
+    );
+    let bad_operation = raw_proposal_auth(
+        &holder,
+        "changed-operation",
+        &proposal_reference,
+        &delete_ops,
+        None,
+        |_| {},
+    );
+    let continued_per_call = raw_proposal_auth(
+        &holder,
+        "continued-per-call",
+        &proposal_reference,
+        &read_ops,
+        Some(&empty_ops),
+        |_| {},
+    );
+    let core_only = aauth_rust_core::mint_auth_token(
+        &SigningKey::from_seed([7; 32]),
+        "as-key",
+        &auth_base(&holder, "core-only"),
+    )
+    .unwrap();
     let bad_proposal = mint_per_call_auth_token(
         &registry,
         &SigningKey::from_seed([7; 32]),
@@ -434,6 +542,12 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
         bad_reference: Mutex::new(bad_reference),
         bad_issuer: Mutex::new(bad_issuer),
         bad_proposal: Mutex::new(bad_proposal),
+        bad_tenant: Mutex::new(bad_tenant),
+        bad_account: Mutex::new(bad_account),
+        bad_key: Mutex::new(bad_key),
+        bad_operation: Mutex::new(bad_operation),
+        continued_per_call: Mutex::new(continued_per_call),
+        core_only: Mutex::new(core_only),
         hold: relay_hold.clone(),
     };
     let continuation_inserts = Arc::new(AtomicUsize::new(0));
@@ -664,6 +778,89 @@ fn federated_class_and_proposal_keep_original_tokens_and_reject_changed_authorit
             .get("auth_token")
             .is_none()
     );
+
+    let as_refused = |mode: Mode, resource_token: &str| {
+        let response = exchange(mode, resource_token);
+        let body = String::from_utf8_lossy(response.body()).into_owned();
+        assert_eq!(response.status(), 502, "{body}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
+            "as_unreachable"
+        );
+        assert!(
+            serde_json::from_slice::<Value>(response.body())
+                .unwrap()
+                .get("auth_token")
+                .is_none()
+        );
+    };
+    as_refused(Mode::BadTenant, &proposal_token);
+    as_refused(Mode::BadAccount, &proposal_token);
+    as_refused(Mode::BadKey, &proposal_token);
+    as_refused(Mode::BadOperation, &proposal_token);
+    as_refused(Mode::ContinuedPerCall, &proposal_token);
+    as_refused(Mode::CoreOnly, &class_token);
+
+    let documents_before_fetch = consent.documents.load(Ordering::SeqCst);
+    let proposals_before_fetch = consent.proposals.load(Ordering::SeqCst);
+    order.lock().unwrap().clear();
+    artifacts.lock().unwrap().insert(
+        CLASS_URI.to_owned(),
+        CLASS.iter().copied().chain(std::iter::once(b' ')).collect(),
+    );
+    let mismatched_hash = exchange(Mode::Class, &class_token);
+    assert_eq!(
+        mismatched_hash.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(mismatched_hash.body())
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(mismatched_hash.body()).unwrap()["error"],
+        "invalid_resource_token"
+    );
+    assert_eq!(order.lock().unwrap().as_slice(), ["fetch"]);
+    artifacts
+        .lock()
+        .unwrap()
+        .insert(CLASS_URI.to_owned(), CLASS.to_vec());
+
+    order.lock().unwrap().clear();
+    *fetch_status.lock().unwrap() = 401;
+    let unauthorized_fetch = exchange(Mode::Class, &class_token);
+    assert_eq!(
+        unauthorized_fetch.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(unauthorized_fetch.body())
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(unauthorized_fetch.body()).unwrap()["error"],
+        "server_error"
+    );
+    assert_eq!(order.lock().unwrap().as_slice(), ["fetch"]);
+    *fetch_status.lock().unwrap() = 200;
+
+    order.lock().unwrap().clear();
+    *fetch_fail.lock().unwrap() = true;
+    let unavailable_fetch = exchange(Mode::Class, &class_token);
+    assert_eq!(
+        unavailable_fetch.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(unavailable_fetch.body())
+    );
+    assert_eq!(order.lock().unwrap().as_slice(), ["fetch"]);
+    *fetch_fail.lock().unwrap() = false;
+    assert_eq!(
+        consent.documents.load(Ordering::SeqCst),
+        documents_before_fetch
+    );
+    assert_eq!(
+        consent.proposals.load(Ordering::SeqCst),
+        proposals_before_fetch
+    );
+    assert_eq!(consent.core.load(Ordering::SeqCst), 0);
 
     let refused = |status: u16, mode: Mode, resource_token: &str| {
         order.lock().unwrap().clear();
