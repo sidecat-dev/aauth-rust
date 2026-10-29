@@ -16,8 +16,10 @@
 //! tests already on this base.
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_budgets::{Budget, IssuerPolicy, UnitDeclaration};
 use aauth_rust_core::{
-    AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
+    AgentClaims, AgentKeyResolver, Confirmation, ResourceToken, TokenError, TrustedIssuerKeys,
+    VerifiedAuthToken,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
@@ -29,7 +31,7 @@ use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionErrorKind, DefinitionRegistration, DefinitionRegistry,
     FetchBody, FetchLimits, FetchResponse, FetchTransport, GrantedOperations, GrpcCodec,
     GrpcDefinitionSource, ODataCodec, ODataMetadataSource, Operation, Vocabulary, WsdlCodec,
-    WsdlDocumentSource, standard_registry,
+    WsdlDocumentSource, mint_budget_resource_token, standard_registry,
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3OperationMapper, Deny, PsAuthorizationConfig,
@@ -265,7 +267,9 @@ fn operation(profile: &Profile, raw: &str) -> Operation {
     Operation::new(&profile.vocabulary, raw.as_bytes()).expect(raw)
 }
 
-fn resource_for(profile: &Profile) -> (Arc<Resource>, Arc<AtomicUsize>) {
+fn resource_for(
+    profile: &Profile,
+) -> (Arc<Resource>, Arc<AtomicUsize>, Arc<Documents>) {
     let permit = operation(profile, profile.operations[0]);
     let refuse = operation(profile, profile.operations[1]);
     let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
@@ -285,6 +289,7 @@ fn resource_for(profile: &Profile) -> (Arc<Resource>, Arc<AtomicUsize>) {
             },
         ) as BoxedAuthAdmissionPolicy<String>
     };
+    let documents = Arc::new(Documents::default());
     let resource = Arc::new(
         PsAuthorizationResource::new(
             PsAuthorizationConfig {
@@ -307,13 +312,13 @@ fn resource_for(profile: &Profile) -> (Arc<Resource>, Arc<AtomicUsize>) {
                 definition: profile.snapshot.clone(),
                 display: None,
             }],
-            documents: Arc::new(Documents::default()),
+            documents: documents.clone(),
             operation_for_request: mapper,
             require_core_scope: false,
         })
         .unwrap(),
     );
-    (resource, calls)
+    (resource, calls, documents)
 }
 
 struct InProcess(Arc<Resource>);
@@ -413,7 +418,7 @@ fn member(response: &Response<Vec<u8>>, name: &str) -> Option<String> {
 #[test]
 fn parsers_feed_existing_resource_and_person_server_paths() {
     for profile in profiles() {
-        let (resource, calls) = resource_for(&profile);
+        let (resource, calls, _) = resource_for(&profile);
         let agent = agent();
         let ids = AtomicUsize::new(0);
         let permit = operation(&profile, profile.operations[0]);
@@ -508,9 +513,142 @@ fn parsers_feed_existing_resource_and_person_server_paths() {
 }
 
 #[test]
+fn class_resource_token_with_budget_offer_is_authorized() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let (resource, calls, documents) = resource_for(&profile);
+    let agent = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 6, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &agent,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = agent.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({ "r3_operations": {
+            "vocabulary": profile.vocabulary.uri().as_str(),
+            "operations": [serde_json::from_str::<Value>(profile.operations[0]).unwrap()],
+        } }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-budget")
+        .into_response();
+    assert_eq!(issued.status(), 200);
+    let resource_token = member(&issued, "resource_token").expect("resource token");
+    let plain = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": resource_token, "presented_token": person }),
+    ));
+    assert_eq!(plain.status(), 200, "r3-only with budgets enabled");
+    let plain_auth = member(&plain, "auth_token").expect("r3-only auth token");
+    assert!(
+        aauth_rust_core::AuthToken::parse(&plain_auth)
+            .unwrap()
+            .unverified_claims()
+            .extra
+            .get("budget")
+            .is_none()
+    );
+
+    let stored = documents
+        .0
+        .lock()
+        .unwrap()
+        .values()
+        .next()
+        .expect("stored class document")
+        .clone();
+    let mut claims = ResourceToken::parse(&resource_token)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    claims.extra.remove("r3_uri");
+    claims.extra.remove("r3_s256");
+    let offer = Budget::new(500, "USD", 6).unwrap();
+    let (combined, _) = mint_budget_resource_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &claims,
+        stored.reference.uri(),
+        &stored.exact_json,
+        &offer,
+        None,
+    )
+    .expect("combined resource token");
+    let exchanged = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": combined, "presented_token": person }),
+    ));
+    assert_eq!(exchanged.status(), 200, "class token with budget offer");
+    let auth = member(&exchanged, "auth_token").expect("budget auth token");
+    let budget = aauth_rust_core::AuthToken::parse(&auth)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .cloned()
+        .expect("signed budget grant");
+    assert_eq!(
+        budget,
+        json!({"amount": 500, "unit": "USD", "decimals": 6})
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "issuance does not run the tool");
+}
+
+#[test]
 fn parsers_admit_and_refuse_over_real_tls() {
     for profile in profiles() {
-        let (resource, calls) = resource_for(&profile);
+        let (resource, calls, _) = resource_for(&profile);
         let api = resource.clone();
         let resource_tls = Arc::new(
             parser_tls::TlsServer::start("resource.example", move |request| {
