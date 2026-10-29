@@ -439,6 +439,12 @@ previous complete claim. That claim is `Unfinished`, not a second
 `Execute`, and the torn bytes are not the retained result. This is a
 process exit and an interrupted write. It is not power loss. The example
 `FileCalls` store stays private to the example.
+`directory_call_store_replays_the_product_after_process_exit` runs this
+store through the Resource. The first process issues one per-call
+approval, executes the call once, and retains the body. A second process
+opens the same directory, presents the same Auth token, and receives
+`Replayed` with that body. The child pid is not the parent pid. This is
+a process exit. It is not power loss.
 
 `r3-per-call-interop` pins `query-runs=2` and
 `proposal-err=invalid_resource_token`. The second query run is the

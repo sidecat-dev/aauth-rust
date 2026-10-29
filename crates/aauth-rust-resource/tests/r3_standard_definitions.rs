@@ -37,7 +37,7 @@ use aauth_rust_r3::{
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
-    BoxedR3Present, Deny, PsAuthorizationConfig, PsAuthorizationResource, R3CallResult,
+    BoxedR3Present, Deny, DirectoryCallStore, PsAuthorizationConfig, PsAuthorizationResource, R3CallResult,
     R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore, R3HostError,
     R3PerCallConfig, R3ProposalRecord, R3StoreError, R3Vocabulary,
 };
@@ -5727,4 +5727,226 @@ fn kind(
         Err(err) => err.kind(),
         Ok(_) => panic!("expected a definition refusal"),
     }
+}
+
+fn resource_on_call_directory(calls: Arc<dyn R3CallStore>) -> Arc<Resource> {
+    let profile = odata_profile();
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok(match request.uri().path() {
+            "/op/permit" => Some(permit.clone()),
+            "/op/refuse" => Some(per_call.clone()),
+            _ => None,
+        })
+    });
+    Arc::new(
+        PsAuthorizationResource::new(
+            PsAuthorizationConfig {
+                issuer: RESOURCE.into(),
+                signed_origin: RESOURCE.into(),
+                kid: "resource-1".into(),
+                signing_key: SigningKey::from_seed([4; 32]),
+                scopes: vec!["records.read".into()],
+            },
+            keys(),
+            Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
+                as BoxedAuthAdmissionPolicy<String>,
+        )
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(R3Config {
+            registry: standard_registry().unwrap(),
+            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
+                .unwrap(),
+            vocabularies: vec![R3Vocabulary {
+                definition: profile.snapshot,
+                display: None,
+            }],
+            documents: Arc::new(Documents::default()),
+            operation_for_request: mapper,
+            require_core_scope: false,
+        })
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls,
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "subprocess entry; the parent supplies AAUTH_CALL_DIR and AAUTH_PER_CALL_AUTH"]
+fn directory_call_replays_after_process_exit_worker() {
+    let root = std::path::PathBuf::from(std::env::var_os("AAUTH_CALL_DIR").expect("call directory"));
+    let token = std::env::var("AAUTH_PER_CALL_AUTH").expect("per-call auth token");
+    let calls = Arc::new(DirectoryCallStore::open(&root).unwrap());
+    let resource = resource_on_call_directory(calls);
+    match resource.authorize(&signed_call("/op/refuse", &token), NOW, "replay-child") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"ran"),
+        other => panic!("reopened product replay: {other:?}"),
+    }
+    println!("WROTE {}", std::process::id());
+}
+
+#[test]
+fn directory_call_store_replays_the_product_after_process_exit() {
+    let root = std::env::temp_dir().join(format!(
+        "aauth-product-call-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|stamp| stamp.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let profile = odata_profile();
+    let calls = Arc::new(DirectoryCallStore::open(&root).unwrap());
+    let resource = resource_on_call_directory(calls);
+    let permit = operation(&profile, profile.operations[0]);
+    let per_call = operation(&profile, profile.operations[1]);
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let approvals = Arc::new(AtomicUsize::new(0));
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: std::time::Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(SplitPolicy {
+            proposals: approvals.clone(),
+            vocabulary: profile.vocabulary.clone(),
+            granted: permit,
+            per_call,
+        }),
+        audit: Arc::new(Audit),
+    })
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [
+                    serde_json::from_str::<Value>(profile.operations[0]).unwrap(),
+                    serde_json::from_str::<Value>(profile.operations[1]).unwrap(),
+                ],
+            }
+        }),
+    );
+    let issued = resource
+        .authorize_endpoint(&authorize, NOW, "rt-directory-product")
+        .into_response();
+    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    let class_resource = member(&issued, "resource_token").expect("class resource token");
+    let class_exchange = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": class_resource, "presented_token": person }),
+    ));
+    assert_eq!(
+        class_exchange.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(class_exchange.body())
+    );
+    let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
+    let challenge = match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-dir")
+    {
+        AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
+        other => panic!("proposal challenge: {other:?}"),
+    };
+    let approved = ps.handle(&post(
+        &signer,
+        &format!("{PS}/token"),
+        json!({ "resource_token": challenge, "presented_token": class_auth }),
+    ));
+    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(approvals.load(Ordering::SeqCst), 1);
+    let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
+    let grant = match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-dir")
+    {
+        AuthDecision::Granted(admitted) => admitted.r3_grant().expect("per-call grant").clone(),
+        other => panic!("first completion: {other:?}"),
+    };
+    let stored = resource.r3_retain(
+        &grant,
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/plain")
+            .body(b"ran".to_vec())
+            .unwrap(),
+    );
+    assert_eq!(stored.body(), b"ran");
+    match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-dir-replay") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"ran"),
+        other => panic!("same-process replay: {other:?}"),
+    }
+    drop(resource);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "directory_call_replays_after_process_exit_worker",
+            "--nocapture",
+        ])
+        .env("AAUTH_CALL_DIR", &root)
+        .env("AAUTH_PER_CALL_AUTH", &per_call_auth)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let written = String::from_utf8_lossy(&output.stdout);
+    let child_pid: u32 = written
+        .lines()
+        .find_map(|line| line.strip_prefix("WROTE "))
+        .and_then(|pid| pid.trim().parse().ok())
+        .expect("child pid");
+    assert_ne!(child_pid, std::process::id());
+    let _ = std::fs::remove_dir_all(root);
 }
