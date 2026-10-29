@@ -10,6 +10,28 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        self.federate_with(agent, prepared, true, None)
+    }
+
+    /// Relay after R3 document consent. Core consent is not called again.
+    /// The access server's Auth token must name the fetched class document.
+    pub(super) fn federate_r3(
+        &self,
+        agent: &VerifiedAgentToken,
+        prepared: &PreparedAuthorization,
+        reference: &aauth_rust_r3::Reference,
+        document: &aauth_rust_r3::Document,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        self.federate_with(agent, prepared, false, Some((reference, document)))
+    }
+
+    fn federate_with(
+        &self,
+        agent: &VerifiedAgentToken,
+        prepared: &PreparedAuthorization,
+        core_consent: bool,
+        r3_document: Option<(&aauth_rust_r3::Reference, &aauth_rust_r3::Document)>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
             presented,
@@ -21,6 +43,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if presented.kind == TokenKind::Auth && presented.issuer != r.aud {
             return Err(Failure::parameter("invalid_presented_token"));
         }
+        if core_consent {
         self.policy.consent(context).map_err(|error| {
             Failure::policy(error).with_federation(FederationFailure {
                 access_server: r.aud.clone(),
@@ -28,6 +51,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 reason: Reason::ConsentRefused(error),
             })
         })?;
+        }
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
         self.subagent_current(agent, context.subagent.as_ref(), now)?;
@@ -73,7 +97,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
-        self.accept_federation(response, agent, prepared, &endpoint, sent)
+        self.accept_federation(response, agent, prepared, &endpoint, sent, r3_document)
     }
     pub(super) fn accept_federation(
         &self,
@@ -82,6 +106,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: &PreparedAuthorization,
         endpoint: &str,
         sent: Option<Budget>,
+        r3_document: Option<(&aauth_rust_r3::Reference, &aauth_rust_r3::Document)>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -213,8 +238,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .and_then(|t| t.verify(&self.resolver(), current))
             .map_err(|error| failed(Reason::TokenVerification(error)))?;
         let c = token.claims();
-        let granted = parse_scopes(c.scope.as_deref().unwrap_or(""))
-            .ok_or_else(|| failed(Reason::InvalidGrant))?;
+        let scope_text = c.scope.as_deref().unwrap_or("");
+        let granted = if scope_text.is_empty() && r3_document.is_some() {
+            Vec::new()
+        } else {
+            parse_scopes(scope_text).ok_or_else(|| failed(Reason::InvalidGrant))?
+        };
         if c.iss != r.aud
             || c.dwk != "aauth-access.json"
             || c.aud != r.iss
@@ -224,7 +253,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.tenant != r.tenant
             || c.account != r.account
             || c.mission_s256 != r.mission_s256
-            || extra_blocks(&c.extra, self.budgets.is_some(), false)
+            || extra_blocks(&c.extra, self.budgets.is_some(), false, r3_document.is_some())
             || c.exp > agent.claims().exp
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
@@ -232,6 +261,25 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
             return Err(failed(Reason::InvalidGrant));
+        }
+        if let Some((reference, document)) = r3_document {
+            let registry = &self.r3.as_ref().ok_or_else(Failure::internal)?.registry;
+            let verified = aauth_rust_r3::verify_auth_token_claims(
+                registry,
+                compact,
+                &self.resolver(),
+                current,
+            )
+            .map_err(|_| failed(Reason::InvalidGrant))?;
+            if verified.reference() != reference {
+                return Err(failed(Reason::InvalidGrant));
+            }
+            aauth_rust_r3::Authorization::new(
+                &verified.operations().granted_operations(),
+                &verified.operations().per_call_operations(),
+                document,
+            )
+            .map_err(|_| failed(Reason::InvalidGrant))?;
         }
         let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
         if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {

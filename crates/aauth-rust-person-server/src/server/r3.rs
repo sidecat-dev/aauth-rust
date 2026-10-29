@@ -213,10 +213,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// offer through the same verifier as `with_budgets` after R3.
     ///
     /// # Errors
-    /// [`ConfigurationError`] for an empty registry, or when federation is
-    /// already enabled. Federation with R3 is not implemented.
+    /// [`ConfigurationError`] for an empty registry. Federation may already be
+    /// enabled. A class document is fetched and consented here, then the exact
+    /// tokens are relayed to the access server. A proposal is not relayed yet.
     pub fn with_r3(mut self, config: R3IssuerConfig) -> Result<Self, ConfigurationError> {
-        if config.registry.is_empty() || self.federation.is_some() {
+        if config.registry.is_empty() {
             return Err(ConfigurationError);
         }
         self.r3 = Some(Box::new(config));
@@ -438,6 +439,23 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 if decision.per_call.is_some() && granted_budget.is_some() {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
+                // Go consents on the fetched class document, then relays the
+                // exact tokens. The access server signs the Auth token.
+                if self.federation.is_some() {
+                    return self.federate_r3(
+                        &agent,
+                        &PreparedAuthorization {
+                            resource,
+                            presented,
+                            retained,
+                            context,
+                            binding_context,
+                            offer,
+                        },
+                        &reference,
+                        document,
+                    );
+                }
                 let mint: TokenMint<'_> = match &decision.per_call {
                     None => {
                         let grant = aauth_rust_r3::Grant::new(&decision.granted, document)
@@ -497,6 +515,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     mint,
                 )
             } else if let Some(proposal) = artifact.proposal() {
+                // A federated proposal must be relayed after its own consent.
+                // Do not sign it on this Person Server.
+                if self.federation.is_some() {
+                    return Err(Failure::internal());
+                }
                 // A proposal plus a budget offer is the same unsigned composition.
                 // Do not record approval or mint a per-call token that drops the offer.
                 if granted_budget.is_some() {

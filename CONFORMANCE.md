@@ -222,8 +222,11 @@ not run the tool. `class_cap_is_free_again_after_the_grant_expires` signs
 reservation is the Person Server account book, not an operating-system
 restart.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
-for 600 seconds and the Auth token stops at `period_end`. Federation together with R3 stays
-refused. A class Resource token may carry a budget offer: the PS verifies
+for 600 seconds and the Auth token stops at `period_end`. A class document
+with federation enabled is fetched and consented, then the exact tokens are
+relayed to the access server. The returned Auth token must name that
+document. A federated proposal is not relayed and is not signed here. That
+relay has not been run on Host3. A class Resource token may carry a budget offer: the PS verifies
 it with the combined R3 budget verifier, narrows the offer, and signs that
 grant on the Auth token. A well-formed `budget_consumed` on that
 Resource token is `invalid_resource_token`: Go does not resolve it against

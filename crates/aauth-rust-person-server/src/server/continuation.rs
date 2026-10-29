@@ -410,6 +410,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     &prepared,
                     required_string(&value, "endpoint")?,
                     stored_sent_budget(&value)?,
+                    None,
                 )
             })();
             let held = d

@@ -39,7 +39,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return Err(super::revocation::revoked_parameter(parameter));
                 }
                 let c = token.claims();
-                if extra_blocks(&c.extra, false, false) {
+                if extra_blocks(&c.extra, false, false, false) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
                 }
                 Presented {
@@ -85,7 +85,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         core.remove(name);
                     }
                 }
-                if !valid_role || extra_blocks(&core, allow_budget, false) {
+                if !valid_role || extra_blocks(&core, allow_budget, false, false) {
                     return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
                 }
                 if allow_budget && let Some(budget) = c.extra.get("budget") {

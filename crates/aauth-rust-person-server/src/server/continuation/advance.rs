@@ -270,6 +270,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 &prepared,
                 endpoint,
                 stored_sent_budget(&value).map_err(|_| Failure::internal())?,
+                None,
             )
         })();
         let mut response = result.unwrap_or_else(Failure::response);

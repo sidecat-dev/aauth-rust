@@ -793,7 +793,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     });
                 }
                 self.admit_resource_budget(&core, &r.presented_jti)?
-            } else if extra_blocks(&core, false, false) {
+            } else if extra_blocks(&core, false, false, false) {
                 return Err(Failure::parameter("invalid_resource_token"));
             } else {
                 None
@@ -884,7 +884,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         upstream: Option<Upstream>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         // Unverified dispatch only: the R3 path verifies every claim it uses.
-        if self.r3.is_some() && self.federation.is_none() && r3::carries_reference(&parameters) {
+        if self.r3.is_some() && r3::carries_reference(&parameters) {
             return self.auth_r3(agent, parameters, verified_at, upstream);
         }
         let prepared =
@@ -1018,7 +1018,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         presented_jti: &str,
     ) -> Result<Option<Budget>, Failure> {
         let enabled = self.budgets.is_some();
-        if extra_blocks(extra, enabled, enabled) {
+        if extra_blocks(extra, enabled, enabled, false) {
             return Err(Failure::parameter("invalid_resource_token"));
         }
         if !enabled {
@@ -1185,9 +1185,11 @@ fn extra_blocks(
     extra: &std::collections::BTreeMap<String, Value>,
     allow_budget: bool,
     allow_consumed: bool,
+    allow_r3: bool,
 ) -> bool {
     extra.keys().any(|name| match name.as_str() {
-        "interaction" | "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" => true,
+        "interaction" => true,
+        "r3_uri" | "r3_s256" | "r3_granted" | "r3_per_call" => !allow_r3,
         "budget" => !allow_budget,
         "budget_consumed" => !allow_consumed,
         _ => false,
