@@ -247,10 +247,21 @@ fn keys() -> Keys {
 }
 
 #[derive(Default)]
-struct Documents(Mutex<BTreeMap<String, R3DocumentRecord>>);
+struct Documents {
+    records: Mutex<BTreeMap<String, R3DocumentRecord>>,
+    fail_commit: std::sync::atomic::AtomicBool,
+}
 impl R3DocumentStore for Documents {
     fn commit(&self, record: &R3DocumentRecord) -> Result<(), R3StoreError> {
-        let mut records = self.0.lock().unwrap();
+        if self
+            .fail_commit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(R3StoreError::Unavailable(R3HostError::new(
+                "document store unavailable",
+            )));
+        }
+        let mut records = self.records.lock().unwrap();
         match records.get(record.reference.uri()) {
             Some(existing) if existing != record => Err(R3StoreError::Conflict),
             _ => {
@@ -260,7 +271,7 @@ impl R3DocumentStore for Documents {
         }
     }
     fn load(&self, uri: &str) -> Result<Option<R3DocumentRecord>, R3StoreError> {
-        Ok(self.0.lock().unwrap().get(uri).cloned())
+        Ok(self.records.lock().unwrap().get(uri).cloned())
     }
 }
 
@@ -676,7 +687,7 @@ fn class_resource_token_with_budget_offer_is_authorized() {
     );
 
     let stored = documents
-        .0
+        .records
         .lock()
         .unwrap()
         .values()
@@ -2488,6 +2499,106 @@ fn revocation_during_a_class_call_does_not_draw_down_the_grant() {
     resource
         .budget_reserve(&token, 500)
         .expect("the revoked call released the hold");
+}
+
+#[test]
+fn failed_document_commit_withholds_the_budgeted_class_token() {
+    let profile = profiles().into_iter().next().expect("one parser profile");
+    let documents = Arc::new(Documents::default());
+    documents
+        .fail_commit
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (resource, _, _) = resource_with(&profile, true, false, documents.clone());
+    let signer = agent();
+    let ids = AtomicUsize::new(0);
+    let permit = operation(&profile, profile.operations[0]);
+    let vocabulary = profile.vocabulary.clone();
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        MemoryStore::default(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |_: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        800,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let person = member(
+        &ps.handle(&post(
+            &signer,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE }),
+        )),
+        "person_token",
+    )
+    .expect("person token");
+    let presented = signer.with_token(person.clone()).unwrap();
+    let authorize = post(
+        &presented,
+        &format!("{RESOURCE}/authorize"),
+        json!({
+            "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [serde_json::from_str::<Value>(profile.operations[0]).unwrap()],
+            },
+            "budget": {"amount": 500, "unit": "USD", "decimals": 2}
+        }),
+    );
+    let withheld = resource
+        .authorize_endpoint(&authorize, NOW, "rt-doc-fail")
+        .into_response();
+    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
+    assert!(member(&withheld, "resource_token").is_none());
+    assert!(documents.records.lock().unwrap().is_empty());
+    assert_eq!(ps.budget_accounted(), Some(0));
+    let released = exchange_budget_auth(
+        &resource,
+        &ps,
+        &presented,
+        &signer,
+        &person,
+        "rt-doc-ok",
+    );
+    let amount = aauth_rust_core::AuthToken::parse(&released)
+        .unwrap()
+        .unverified_claims()
+        .extra
+        .get("budget")
+        .and_then(|budget| budget.get("amount"))
+        .and_then(Value::as_i64);
+    assert_eq!(amount, Some(500));
+    assert!(!documents.records.lock().unwrap().is_empty());
+    assert_eq!(ps.budget_accounted(), Some(500));
 }
 
 #[test]

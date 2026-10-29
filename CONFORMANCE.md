@@ -258,6 +258,10 @@ then admitted in full: `cost=500` and `remaining=0`. Host3
 Auth token while the protected call is in host policy. The decision is
 revoked. The hold is released, so the full grant can still be reserved. Host3
 `aauth-wc07-completion-revokeduring01` passed that fence at `73f0ea2`.
+`failed_document_commit_withholds_the_budgeted_class_token` answers `500
+server_error` when the class document store fails. No resource token is
+released, the store stays empty, and the account book stays empty. The next
+offer still signs 500. That withholding has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
