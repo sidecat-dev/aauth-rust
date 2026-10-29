@@ -289,6 +289,10 @@ refusal at `e49947d`.
 proposal store fails. No challenge token is released and the call does not
 run. The next challenge is released and the store keeps that record. Host3
 `aauth-wc07-completion-proposal01` passed that withholding at `ab5545b`.
+`a_per_call_executes_once_and_the_replay_returns_the_retained_result`
+approves one proposal, retains the response `ran`, and the second
+presentation returns that response. The store is process memory. That
+replay has not been run on Host3.
 `class_budget_grant_stops_at_period_end` is host policy: the decision asks
 for 600 seconds and the Auth token stops at `period_end`. Host3
 `aauth-wc07-completion-federated01` passed
