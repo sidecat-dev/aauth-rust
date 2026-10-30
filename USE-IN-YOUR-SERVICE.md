@@ -253,6 +253,21 @@ it with the capabilities its Person Server returned at mission approval, and
 writes it on each signed request to a resource with `insert_into`. Person Server
 endpoints take the `capabilities` body parameter instead of the header.
 
+## Serve clients outside AAuth
+
+AAuth agents present the `jwt` scheme. A resource that also serves other signed
+clients may accept further Signature-Key schemes, and must then list all of them
+in `Accept-Signature-Scheme`. Call
+`AgentIdentityResource::with_further_schemes(&["hwk", "jwks_uri"])`. A request
+under `jwt` keeps the full verification and policy path. A request under a
+further scheme returns `Decision::OtherScheme(proof)`: target, coverage, content
+digest and signature time have been checked, but nothing is authenticated. Verify
+it with the method for `proof.key()`, for example `proof.verify(&jwk)` with the
+`hwk` key or `proof.verify_jwks(&resolver)`, then apply your own admission. If you
+convert that decision to a response unhandled, it is refused with `403`. Every
+`unsupported_scheme` refusal lists `jwt` first, then the further schemes in the
+order you gave them.
+
 ## Replay and application effects
 
 **Identical signed bytes can be accepted twice within the validity window.**

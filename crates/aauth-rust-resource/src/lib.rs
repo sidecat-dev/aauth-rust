@@ -32,22 +32,34 @@ pub use session::{SessionAdmit, SessionLedger};
 pub enum ConfigurationError {
     /// The published Resource issuer is not a canonical HTTPS DNS identifier.
     InvalidIssuer,
+    /// A further scheme is `jwt`, repeated, or not a Signature-Key scheme.
+    InvalidScheme,
 }
 impl ConfigurationError {
     /// Local configuration code; this is not a `Signature-Error` response code.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidIssuer => "invalid_configuration",
+            Self::InvalidIssuer | Self::InvalidScheme => "invalid_configuration",
         }
     }
 }
 impl std::fmt::Display for ConfigurationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "invalid Resource metadata issuer: configure a lowercase HTTPS DNS origin without port or path; use metadata_for(issuer) when the published identity differs from the request authority",
-        )
+        f.write_str(match self {
+            Self::InvalidIssuer => {
+                "invalid Resource metadata issuer: configure a lowercase HTTPS DNS origin without port or path; use metadata_for(issuer) when the published identity differs from the request authority"
+            }
+            Self::InvalidScheme => {
+                "invalid further scheme: name each of hwk, jkt-jwt, self-jwt, jwks, jwks_uri, x509 or cached once; jwt is always accepted"
+            }
+        })
     }
 }
+
+/// Signature-Key schemes a Resource may accept from clients outside AAuth.
+const FURTHER_SCHEMES: [&str; 7] = [
+    "hwk", "jkt-jwt", "self-jwt", "jwks", "jwks_uri", "x509", "cached",
+];
 impl std::error::Error for ConfigurationError {}
 
 #[derive(Debug)]
@@ -59,6 +71,9 @@ pub enum SignatureFailure {
     Token(TokenError),
     /// Missing coverage, with the complete request-specific component list.
     Input(Vec<&'static str>),
+    /// The selected Signature-Key scheme is not accepted. Lists every scheme
+    /// this Resource accepts, for `Accept-Signature-Scheme`.
+    UnsupportedScheme(Vec<&'static str>),
     /// Signature or token issuance is too far in the future; retains the verifier clock.
     ClockSkew {
         /// Verifier's trusted Unix seconds, used for the response Date header.
@@ -72,6 +87,7 @@ impl SignatureFailure {
             Self::Proof(error) => error.code(),
             Self::Token(error) => error.code(),
             Self::Input(_) => "invalid_input",
+            Self::UnsupportedScheme(_) => "unsupported_scheme",
             Self::ClockSkew { .. } => "clock_skew",
         }
     }
@@ -82,6 +98,7 @@ impl std::fmt::Display for SignatureFailure {
             Self::Proof(e) => e.fmt(f),
             Self::Token(e) => e.fmt(f),
             Self::ClockSkew { .. } => Error::ClockSkew.fmt(f),
+            Self::UnsupportedScheme(_) => Error::UnsupportedScheme.fmt(f),
             Self::Input(required) => {
                 write!(f, "signature coverage is incomplete: cover {required:?}")
             }
@@ -152,6 +169,17 @@ pub enum Decision<T = ()> {
     Forbidden,
     /// Proof and issuer token verified and host policy allowed the identity.
     Granted(Box<Authorized<T>>),
+    /// Signed by a client outside AAuth under a scheme from
+    /// [`AgentIdentityResource::with_further_schemes`].
+    ///
+    /// Nothing is authenticated yet. The target, coverage, content digest and
+    /// signature time were checked; the host now verifies the signature with
+    /// the method for [`PreparedRequest::key`], such as
+    /// [`PreparedRequest::verify`] with an `hwk` key or
+    /// [`PreparedRequest::verify_jwks`], and applies its own admission. The
+    /// AAuth policy never sees this request. Converting it to a response
+    /// without that work refuses it with `403`.
+    OtherScheme(Box<PreparedRequest>),
 }
 impl<T> Decision<T> {
     /// Extract caller and admitted context for an application handler, or an HTTP refusal.
@@ -184,7 +212,7 @@ impl<T> Decision<T> {
                     None,
                 );
             }
-            Self::Forbidden => {
+            Self::Forbidden | Self::OtherScheme(_) => {
                 *response.status_mut() = StatusCode::FORBIDDEN;
                 problem(&mut response, "about:blank", "Forbidden", 403, None);
             }
@@ -261,6 +289,12 @@ impl<T> Decision<T> {
                         .headers_mut()
                         .insert("accept-signature-scheme", "jwt".parse().unwrap());
                 }
+                if let SignatureFailure::UnsupportedScheme(accepted) = &failure {
+                    response.headers_mut().insert(
+                        "accept-signature-scheme",
+                        accepted.join(", ").parse().unwrap(),
+                    );
+                }
             }
         }
         response
@@ -307,6 +341,7 @@ pub struct AgentIdentityResource<K, P> {
     authority: String,
     path: Option<String>,
     display: MetadataDisplay,
+    further_schemes: Vec<&'static str>,
 }
 impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
 where
@@ -331,7 +366,45 @@ where
             authority: aauth_rust_signature_key::canonical_authority(&uri)?,
             path: Some(uri.path().to_owned()),
             display: MetadataDisplay::new(),
+            further_schemes: Vec::new(),
         })
+    }
+    /// Also serve clients outside AAuth that sign under `schemes`
+    /// (`draft-hardt-oauth-aauth-protocol`, Signature-Key Scheme Rejection).
+    ///
+    /// AAuth agents still present `jwt`, which keeps the full verification
+    /// and policy path. A request under one of `schemes` is returned as
+    /// [`Decision::OtherScheme`] for the host to verify. Every
+    /// `unsupported_scheme` refusal then lists `jwt` followed by `schemes`,
+    /// in this order, in `Accept-Signature-Scheme`, since that header states
+    /// what this Resource accepts from any caller. An unsigned request is
+    /// still answered with `requirement=agent-token`.
+    ///
+    /// # Errors
+    /// [`ConfigurationError::InvalidScheme`] for `jwt`, a repeated scheme, or
+    /// a name other than `hwk`, `jkt-jwt`, `self-jwt`, `jwks`, `jwks_uri`,
+    /// `x509` or `cached`.
+    pub fn with_further_schemes(mut self, schemes: &[&str]) -> Result<Self, ConfigurationError> {
+        let mut further = Vec::with_capacity(schemes.len());
+        for scheme in schemes {
+            let known = FURTHER_SCHEMES
+                .iter()
+                .copied()
+                .find(|known| known == scheme)
+                .ok_or(ConfigurationError::InvalidScheme)?;
+            if further.contains(&known) {
+                return Err(ConfigurationError::InvalidScheme);
+            }
+            further.push(known);
+        }
+        self.further_schemes = further;
+        Ok(self)
+    }
+    /// Every scheme this Resource accepts, `jwt` first.
+    fn accepted_schemes(&self) -> Vec<&'static str> {
+        std::iter::once("jwt")
+            .chain(self.further_schemes.iter().copied())
+            .collect()
     }
     /// Publish `name`, `description`, `logo_uri` and the other display
     /// members in [`Self::metadata`]. The checked values replace any earlier ones.
@@ -405,6 +478,7 @@ where
             authority: self.authority,
             path: self.path,
             display: self.display,
+            further_schemes: self.further_schemes,
         }
     }
     /// Check a buffered absolute HTTPS request at `now` in Unix seconds.
@@ -447,8 +521,13 @@ where
         {
             return Decision::AgentTokenRequired;
         }
-        let proof = match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"]) {
+        let accepted = self.accepted_schemes();
+        let proof = match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &accepted)
+        {
             Ok(v) => v,
+            Err(Error::UnsupportedScheme) => {
+                return Decision::SignatureFailure(SignatureFailure::UnsupportedScheme(accepted));
+            }
             Err(Error::ClockSkew) => {
                 return Decision::SignatureFailure(SignatureFailure::ClockSkew {
                     server_time: now,
@@ -461,8 +540,11 @@ where
             }
             Err(e) => return Decision::SignatureFailure(SignatureFailure::Proof(e)),
         };
+        if !matches!(proof.key(), KeyMaterial::Jwt(_)) {
+            return Decision::OtherScheme(Box::new(proof));
+        }
         let KeyMaterial::Jwt(compact) = proof.key() else {
-            return Decision::SignatureFailure(SignatureFailure::Proof(Error::UnsupportedScheme));
+            return Decision::SignatureFailure(SignatureFailure::UnsupportedScheme(accepted));
         };
         let token = match AgentToken::parse(compact).and_then(|t| t.verify(&self.keys, now)) {
             Ok(v) => v,

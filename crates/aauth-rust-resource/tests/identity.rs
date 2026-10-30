@@ -130,6 +130,57 @@ fn non_jwt_schemes_get_the_defined_aauth_scheme_rejection() {
 }
 
 #[test]
+fn a_resource_serving_other_clients_lists_every_scheme_it_accepts() {
+    let (agent, resource) = composition();
+    for refused in [&["jwt"][..], &["hwk", "hwk"][..], &["future"][..]] {
+        assert!(
+            composition().1.with_further_schemes(refused).is_err(),
+            "{refused:?}"
+        );
+    }
+    let resource = resource.with_further_schemes(&["hwk", "jwks_uri"]).unwrap();
+    let mut aauth = request();
+    agent.sign(&mut aauth, 1000).unwrap();
+    assert!(matches!(
+        resource.authorize(&aauth, 1000),
+        Decision::Granted(_)
+    ));
+
+    let key = SigningKey::from_seed([9; 32]);
+    let mut other = request();
+    sign_request(&mut other, &key, KeyMaterial::Hwk(key.public_jwk()), 1000).unwrap();
+    let Decision::OtherScheme(proof) = resource.authorize(&other, 1000) else {
+        panic!("an hwk client is served outside AAuth")
+    };
+    let KeyMaterial::Hwk(presented) = proof.key() else {
+        panic!("the selected key is the header web key")
+    };
+    proof.verify(presented).unwrap();
+    // Unverified, the decision is a refusal, never a grant.
+    assert_eq!(
+        resource.authorize(&other, 1000).into_response().status(),
+        403
+    );
+
+    other.headers_mut().insert(
+        "signature-key",
+        "sig=x509;x5u=\"https://keys.example/cert\";x5t=:AA:"
+            .parse()
+            .unwrap(),
+    );
+    let response = resource.authorize(&other, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    assert_eq!(
+        response.headers()["signature-error"],
+        "error=unsupported_scheme"
+    );
+    assert_eq!(
+        response.headers()["accept-signature-scheme"],
+        "jwt, hwk, jwks_uri"
+    );
+}
+
+#[test]
 fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
     use aauth_rust_core::TokenError;
     use aauth_rust_resource::SignatureFailure;
