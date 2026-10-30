@@ -554,6 +554,39 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. This is not a separate product-QA pass and
 not power loss.
 
+A POST of that held pending URL now returns 405, and a different pending id
+returns 410. Commit `07a29c19ac98850ce7f300c8a1505f8a649358af` (tree
+`1cd9f643b711086f1def7611ab346b976be6cb4b`) added those checks. Host3
+`aauth-wc07-completion-fedreject01` at that source did not compile: rustc
+E0502, because the pending-id borrow outlived `PollSession::accept`.
+Invocation `285c0b872c0c496792a5d6fa2fd8f0d0`. START
+`2026-10-30T03:57:42.902167282+00:00`. The log recorded `CARGO_RC 101` and no
+`FEDREJECT_DONE`. That unit is not a pass. Commit
+`4b9a4c7625052d7f99e68da481b27538b65ab9eb` (tree
+`0a614be684c0cd83bb8d30447f70b89009c976b4`) owns the pending id before accept.
+The POST is `405` `method_not_allowed` with `Allow: GET`. The GET of
+`not-this-held-call` is `410` `gone`. The same auth token then replays the
+retained body. The protected handler still ran once. `POST /records/r-1`
+stays the 401 completion. Budget stays unset. Host3
+`aauth-wc07-completion-fedreject02` ran at that source.
+`r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The held challenge is
+202, the immediate poll is refused, the wait is 5, the poll is 200, the
+replay is 200, and the replay body matches. The method is 405
+`method_not_allowed`, and the unknown pending id is 410 `gone`. The held
+protected handler ran once. The r-1 completion stayed 200 with one protected
+run. `query-runs=2` and `proposal-err=invalid_resource_token` stay visible.
+Reads stayed 2 and both deletes stayed `"r-1"`. The example required
+`Allow: GET`. The printed line does not show that header. Receipt START
+`2026-10-30T03:58:55.826651876+00:00`, log mtime
+`2026-10-30T03:59:08.711850436Z`. systemd-run invocation
+`5a19bca5696247f6b352b1c6304f159f`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDREJECT02_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. It does not record a different-token replay.
+This is not a separate product-QA pass and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
