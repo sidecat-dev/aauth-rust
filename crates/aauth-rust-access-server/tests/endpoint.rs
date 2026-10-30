@@ -245,6 +245,11 @@ fn verified_lineage_and_proof_precede_policy() {
         response.headers()["signature-error"],
         "error=invalid_signature"
     );
+    let problem: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(
+        problem["type"],
+        "urn:ietf:params:sig-error:invalid_signature"
+    );
     let mut r = request(good());
     *r.uri_mut() = "https://foreign.example/token".parse().unwrap();
     assert_eq!(server.handle(&r).status(), 401);

@@ -257,9 +257,15 @@ fn bad_proofs_targets_media_types_and_content_never_reach_binding_policy() {
     );
     let mut changed = good.clone();
     *changed.body_mut() = br#"{"resource":"https://attacker.example"}"#.to_vec();
+    let refused = server.handle(&changed);
     assert_eq!(
-        server.handle(&changed).headers()["signature-error"],
+        refused.headers()["signature-error"],
         "error=invalid_signature"
+    );
+    let problem: Value = serde_json::from_slice(refused.body()).unwrap();
+    assert_eq!(
+        problem["type"],
+        "urn:ietf:params:sig-error:invalid_signature"
     );
     let mut foreign = good.clone();
     *foreign.uri_mut() = "https://other.example/person".parse().unwrap();

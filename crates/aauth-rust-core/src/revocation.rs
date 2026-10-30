@@ -269,9 +269,18 @@ pub fn success_response(reports: &[DownstreamReport], report: bool) -> Response<
 }
 
 /// Problem body used by revocation errors. `retry_after` sets `Retry-After`.
+///
+/// A revocation endpoint answers `401` only for a signature failure, sent with
+/// `Signature-Error`, so a `401` body names `error` as the type
+/// `urn:ietf:params:sig-error:<error>`. Other statuses use `about:blank`.
 pub fn problem(status: StatusCode, error: &str, retry_after: Option<u64>) -> Response<Vec<u8>> {
+    let kind = if status == StatusCode::UNAUTHORIZED {
+        format!("urn:ietf:params:sig-error:{error}")
+    } else {
+        "about:blank".to_owned()
+    };
     let body = json!({
-        "type": "about:blank",
+        "type": kind,
         "title": status.canonical_reason().unwrap_or("Request refused"),
         "status": status.as_u16(),
         "error": error,

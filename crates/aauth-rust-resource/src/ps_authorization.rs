@@ -390,11 +390,7 @@ impl<T> AuthDecision<T> {
                 response
             }
             Self::Revoked { auth_token } => {
-                let mut response = refusal(StatusCode::UNAUTHORIZED, "revoked_jwt");
-                response.headers_mut().insert(
-                    "signature-error",
-                    "error=revoked_jwt".parse().expect("static signature error"),
-                );
+                let mut response = revoked_jwt();
                 if auth_token {
                     response.headers_mut().insert(
                         "aauth-requirement",
@@ -538,14 +534,7 @@ impl ProactiveDecision {
                 );
                 response
             }
-            Self::Revoked => {
-                let mut response = refusal(StatusCode::UNAUTHORIZED, "revoked_jwt");
-                response.headers_mut().insert(
-                    "signature-error",
-                    "error=revoked_jwt".parse().expect("static signature error"),
-                );
-                response
-            }
+            Self::Revoked => revoked_jwt(),
             Self::SignatureFailure(failure) => {
                 let mut response = Decision::<()>::SignatureFailure(failure).into_response();
                 response.headers_mut().remove("aauth-requirement");
@@ -603,7 +592,23 @@ fn requested_scope(
     Ok(scope.to_owned())
 }
 fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
-    let mut response = Response::new(json!({"type":"about:blank", "title":status.canonical_reason().unwrap_or("Request refused"), "status":status.as_u16(), "error":code}).to_string().into_bytes());
+    typed_refusal(status, code, "about:blank")
+}
+/// `401 revoked_jwt`. A body sent with `Signature-Error` names that error as its type.
+fn revoked_jwt() -> Response<Vec<u8>> {
+    let mut response = typed_refusal(
+        StatusCode::UNAUTHORIZED,
+        "revoked_jwt",
+        "urn:ietf:params:sig-error:revoked_jwt",
+    );
+    response.headers_mut().insert(
+        "signature-error",
+        "error=revoked_jwt".parse().expect("static signature error"),
+    );
+    response
+}
+fn typed_refusal(status: StatusCode, code: &str, kind: &str) -> Response<Vec<u8>> {
+    let mut response = Response::new(json!({"type":kind, "title":status.canonical_reason().unwrap_or("Request refused"), "status":status.as_u16(), "error":code}).to_string().into_bytes());
     *response.status_mut() = status;
     response
         .headers_mut()

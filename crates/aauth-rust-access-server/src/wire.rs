@@ -98,9 +98,15 @@ impl Failure {
         }
     }
     pub(crate) fn response(self) -> Response<Vec<u8>> {
+        // A body sent with Signature-Error names that error code as its type.
+        let kind = if self.signature.is_some() {
+            format!("urn:ietf:params:sig-error:{}", self.code)
+        } else {
+            "about:blank".into()
+        };
         let mut response = json_response(
             self.status,
-            json!({"type":"about:blank","title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code}),
+            json!({"type":kind,"title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code}),
         );
         response
             .headers_mut()

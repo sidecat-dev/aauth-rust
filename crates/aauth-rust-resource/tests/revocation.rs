@@ -346,6 +346,8 @@ fn core_revocation_completed_during_host_policy_refuses_admission_without_effect
     let response = decision.into_response();
     assert_eq!(response.status(), 401);
     assert_eq!(response.headers()["signature-error"], "error=revoked_jwt");
+    let problem: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(problem["type"], "urn:ietf:params:sig-error:revoked_jwt");
     assert_eq!(
         response.headers()["aauth-requirement"],
         "requirement=person-token"

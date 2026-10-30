@@ -132,7 +132,13 @@ impl Failure {
         self
     }
     pub(super) fn response(self) -> Response<Vec<u8>> {
-        let mut body = json!({"type":"about:blank","title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code});
+        // A body sent with Signature-Error names that error code as its type.
+        let kind = if self.signature.is_some() {
+            format!("urn:ietf:params:sig-error:{}", self.code)
+        } else {
+            "about:blank".into()
+        };
+        let mut body = json!({"type":kind,"title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code});
         if let Some(reason) = self.mission_reason {
             body["mission_status"] = json!("terminated");
             body["termination_reason"] = json!(reason);
