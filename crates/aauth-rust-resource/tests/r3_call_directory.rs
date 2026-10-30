@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aauth_rust_r3::{Reference, digest};
 use aauth_rust_resource::{
-    DirectoryCallStore, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3ProposalRecord,
-    R3StoreError,
+    DirectoryCallStore, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3PendingHeaders,
+    R3ProposalRecord, R3StoreError,
 };
 
 const URI: &str = "https://records.example/r3/p.bound";
@@ -63,6 +63,7 @@ fn ran() -> R3CallResult {
         status: 200,
         content_type: Some("text/plain".into()),
         body: b"ran".to_vec(),
+        pending: None,
     }
 }
 
@@ -195,5 +196,32 @@ fn torn_claim_keeps_the_bound_claim() {
         store.claim(URI, &token(), 10).unwrap(),
         R3Claim::Unfinished
     ));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_retained_pending_result_reopens_with_its_headers() {
+    let root = directory("pending");
+    let store = DirectoryCallStore::open(&root).unwrap();
+    let record = proposal(URI);
+    store.commit(&record).unwrap();
+    let fence = execute(&store, URI);
+    let pending = R3CallResult {
+        status: 202,
+        content_type: Some("application/json".into()),
+        body: br#"{"status":"pending"}"#.to_vec(),
+        pending: Some(R3PendingHeaders {
+            location: "/jobs/7".into(),
+            retry_after: "5".into(),
+            cache_control: vec!["private".into(), "no-store".into()],
+        }),
+    };
+    assert_eq!(store.retain(URI, &fence, &pending).unwrap(), pending);
+    drop(store);
+    let store = DirectoryCallStore::open(&root).unwrap();
+    match store.claim(URI, &token(), 10).unwrap() {
+        R3Claim::Replay(result) => assert_eq!(result, pending),
+        other => panic!("expected the retained pending result, got {other:?}"),
+    }
     let _ = fs::remove_dir_all(root);
 }

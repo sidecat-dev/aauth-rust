@@ -17,8 +17,8 @@ use aauth_rust_r3::{Reference, digest};
 use serde_json::{Value, json};
 
 use super::r3_class::{
-    R3CallResult, R3CallStore, R3CallToken, R3Claim, R3HeldRequest, R3HostError, R3ProposalRecord,
-    R3StoreError,
+    R3CallResult, R3CallStore, R3CallToken, R3Claim, R3HeldRequest, R3HostError, R3PendingHeaders,
+    R3ProposalRecord, R3StoreError,
 };
 
 /// Claim digest of a superseded release. It is not a token digest, so every
@@ -73,13 +73,7 @@ impl DirectoryCallStore {
                 "body": held.body,
             })
         });
-        let released = record.released.as_ref().map(|result| {
-            json!({
-                "status": result.status,
-                "content_type": result.content_type,
-                "body": result.body,
-            })
-        });
+        let released = record.released.as_ref().map(stored_call_result);
         let bytes = json!({
             "uri": record.reference.uri(),
             "digest": record.reference.digest(),
@@ -277,11 +271,7 @@ impl R3CallStore for DirectoryCallStore {
         if value["fence"].as_str() != Some(fence) || !value["result"].is_null() {
             return Err(R3StoreError::Conflict);
         }
-        value["result"] = json!({
-            "status": result.status,
-            "content_type": result.content_type,
-            "body": result.body,
-        });
+        value["result"] = stored_call_result(result);
         replace(&path, value.to_string().as_bytes(), &self.interrupt).map_err(unavailable)?;
         Ok(result.clone())
     }
@@ -372,12 +362,57 @@ fn reference(value: &Value) -> Result<Reference, R3StoreError> {
     Reference::new(text(value, "uri")?, text(value, "digest")?).map_err(unavailable)
 }
 
+fn stored_call_result(result: &R3CallResult) -> Value {
+    let mut value = json!({
+        "status": result.status,
+        "content_type": result.content_type,
+        "body": result.body,
+    });
+    if let Some(pending) = &result.pending {
+        value["pending"] = json!({
+            "location": pending.location,
+            "retry_after": pending.retry_after,
+            "cache_control": pending.cache_control,
+        });
+    }
+    value
+}
+
 fn call_result(value: &Value) -> Result<R3CallResult, R3StoreError> {
     Ok(R3CallResult {
         status: u16::try_from(number(value, "status")?).map_err(unavailable)?,
         content_type: optional(value, "content_type"),
         body: serde_json::from_value(value["body"].clone()).map_err(unavailable)?,
+        pending: pending_headers(value)?,
     })
+}
+
+fn pending_headers(value: &Value) -> Result<Option<R3PendingHeaders>, R3StoreError> {
+    match value.get("pending") {
+        None | Some(Value::Null) => Ok(None),
+        Some(pending) => {
+            let items = pending
+                .get("cache_control")
+                .and_then(Value::as_array)
+                .ok_or_else(|| unavailable("missing stored cache_control"))?;
+            let mut cache_control = Vec::new();
+            for item in items {
+                cache_control.push(
+                    item.as_str()
+                        .ok_or_else(|| unavailable("stored cache_control"))?
+                        .to_owned(),
+                );
+            }
+            if cache_control.is_empty() {
+                return Err(unavailable("stored cache_control"));
+            }
+            Ok(Some(R3PendingHeaders {
+                location: text(pending, "location")?,
+                retry_after: text(pending, "retry_after")?,
+                cache_control,
+            }))
+        }
+    }
 }
 
 fn text(value: &Value, name: &str) -> Result<String, R3StoreError> {

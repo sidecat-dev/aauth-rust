@@ -13,7 +13,12 @@
 //! holds that grant and has not retained a result, stays `202`. A second
 //! presentation of a `401` completion, while that grant is still held, is
 //! `503`. Dropping either grant without a retained result leaves the next
-//! presentation `500`.
+//! presentation `500`. An application `202` is retained and replayed only when
+//! it is one same-origin pending response: one `Location`, one decimal
+//! `Retry-After`, `Cache-Control` containing `no-store`, and one
+//! `application/json` body with a non-empty `status`. Any other `202` is
+//! stored as `500` `server_error`, and that stored refusal is what a later
+//! presentation replays.
 //!
 //! Approving Release Rather Than Execution: under `202` only, a host
 //! [`BoxedR3Release`] may run a side-effect-free call before approval. The
@@ -190,6 +195,17 @@ pub struct R3CallToken {
     pub retain_until: i64,
 }
 
+/// Location, `Retry-After`, and `Cache-Control` of one validated application `202`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct R3PendingHeaders {
+    /// The application's single `Location`, unchanged.
+    pub location: String,
+    /// The application's single decimal `Retry-After`.
+    pub retry_after: String,
+    /// `Cache-Control` values, in order. One of them contains `no-store`.
+    pub cache_control: Vec<String>,
+}
+
 /// Retained application result of the one execution a proposal authorized.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct R3CallResult {
@@ -199,6 +215,8 @@ pub struct R3CallResult {
     pub content_type: Option<String>,
     /// Exact response body.
     pub body: Vec<u8>,
+    /// Present only for a validated application `202`.
+    pub pending: Option<R3PendingHeaders>,
 }
 
 /// Outcome of claiming a proposal.
@@ -417,7 +435,196 @@ fn snapshot(response: &Response<Vec<u8>>) -> R3CallResult {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned),
         body: response.body().clone(),
+        pending: None,
     }
+}
+
+/// A protected `202` is stored as itself only when it can be polled as a
+/// nested deferred response. Anything else is the stored `500` refusal.
+fn prepare_retained(origin: &str, response: &Response<Vec<u8>>) -> R3CallResult {
+    if response.status() != StatusCode::ACCEPTED {
+        return snapshot(response);
+    }
+    match application_pending(origin, response) {
+        Some(pending) => {
+            let mut result = snapshot(response);
+            result.pending = Some(pending);
+            result
+        }
+        None => snapshot(&refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error")),
+    }
+}
+
+fn application_pending(origin: &str, response: &Response<Vec<u8>>) -> Option<R3PendingHeaders> {
+    let location = one_header(response, "location")?;
+    if !same_origin_location(origin, &location) {
+        return None;
+    }
+    let retry_after = one_header(response, "retry-after")?;
+    if !decimal_retry_after(&retry_after) {
+        return None;
+    }
+    let cache_control = cache_control_values(response)?;
+    let content_type = one_header(response, "content-type")?;
+    if !json_media_type(&content_type) || !json_status(response.body()) {
+        return None;
+    }
+    Some(R3PendingHeaders {
+        location,
+        retry_after,
+        cache_control,
+    })
+}
+
+fn one_header(response: &Response<Vec<u8>>, name: &str) -> Option<String> {
+    let mut values = response.headers().get_all(name).iter();
+    let first = values.next()?.to_str().ok()?;
+    if first.is_empty() || values.next().is_some() {
+        return None;
+    }
+    Some(first.to_owned())
+}
+
+fn cache_control_values(response: &Response<Vec<u8>>) -> Option<Vec<String>> {
+    let mut values = Vec::new();
+    for value in response.headers().get_all("cache-control") {
+        values.push(value.to_str().ok()?.to_owned());
+    }
+    if values.is_empty() || !values.iter().any(|value| has_no_store(value)) {
+        return None;
+    }
+    Some(values)
+}
+
+fn has_no_store(value: &str) -> bool {
+    value
+        .split(',')
+        .any(|directive| directive.trim().eq_ignore_ascii_case("no-store"))
+}
+
+fn decimal_retry_after(value: &str) -> bool {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match value.parse::<u64>() {
+        Ok(seconds) => seconds <= u64::try_from(i64::MAX / 1_000_000_000).unwrap_or(0),
+        Err(_) => false,
+    }
+}
+
+fn same_origin_location(origin: &str, location: &str) -> bool {
+    // `http::Uri` drops a fragment and reads `//host/path` as a path, so both
+    // are refused before parsing; a client would resolve `//host` elsewhere.
+    if location.contains('#') || location.starts_with("//") {
+        return false;
+    }
+    let Ok(base) = origin.parse::<http::Uri>() else {
+        return false;
+    };
+    let Ok(reference) = location.parse::<http::Uri>() else {
+        return false;
+    };
+    let (Some(base_scheme), Some(base_authority)) = (base.scheme(), base.authority()) else {
+        return false;
+    };
+    if authority_has_user(base_authority) || reference.authority().is_some_and(authority_has_user) {
+        return false;
+    }
+    // `scheme:opaque` has no authority. A relative reference borrows the Resource origin.
+    if reference.scheme().is_some() && reference.authority().is_none() {
+        return false;
+    }
+    let scheme = reference.scheme().unwrap_or(base_scheme);
+    let authority = reference.authority().unwrap_or(base_authority);
+    scheme == base_scheme && authority == base_authority
+}
+
+fn authority_has_user(authority: &http::uri::Authority) -> bool {
+    authority.as_str().contains('@')
+}
+
+fn json_media_type(value: &str) -> bool {
+    let value = value.trim();
+    let (media, parameters) = match value.split_once(';') {
+        Some((media, parameters)) => (media.trim(), parameters),
+        None => {
+            return value.eq_ignore_ascii_case("application/json") && media_type_tokens(value);
+        }
+    };
+    media.eq_ignore_ascii_case("application/json")
+        && media_type_tokens(media)
+        && parameters.split(';').all(media_parameter)
+}
+
+fn media_type_tokens(media: &str) -> bool {
+    let mut parts = media.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(type_name), Some(subtype), None) => is_rfc_token(type_name) && is_rfc_token(subtype),
+        _ => false,
+    }
+}
+
+fn media_parameter(parameter: &str) -> bool {
+    let Some((name, value)) = parameter.trim().split_once('=') else {
+        return false;
+    };
+    let value = value.trim();
+    if !is_rfc_token(name.trim()) {
+        return false;
+    }
+    if let Some(quoted) = value.strip_prefix('"') {
+        let Some(inner) = quoted.strip_suffix('"') else {
+            return false;
+        };
+        return !inner.contains(['"', '\\']);
+    }
+    is_rfc_token(value)
+}
+
+fn is_rfc_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'!'
+                    | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+                    | b'0'..=b'9'
+                    | b'A'..=b'Z'
+                    | b'a'..=b'z'
+            )
+        })
+}
+
+fn json_status(body: &[u8]) -> bool {
+    let Ok(value) = aauth_rust_jose::strict_json(body) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    if object
+        .keys()
+        .any(|key| key.eq_ignore_ascii_case("status") && key != "status")
+    {
+        return false;
+    }
+    object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| !status.is_empty())
 }
 
 fn restore(result: &R3CallResult) -> Response<Vec<u8>> {
@@ -429,7 +636,20 @@ fn restore(result: &R3CallResult) -> Response<Vec<u8>> {
     {
         response.headers_mut().insert("content-type", value);
     }
+    if let Some(pending) = &result.pending {
+        insert_header(&mut response, "location", &pending.location);
+        insert_header(&mut response, "retry-after", &pending.retry_after);
+        for value in &pending.cache_control {
+            insert_header(&mut response, "cache-control", value);
+        }
+    }
     response
+}
+
+fn insert_header(response: &mut Response<Vec<u8>>, name: &'static str, value: &str) {
+    if let Ok(parsed) = value.parse() {
+        response.headers_mut().append(name, parsed);
+    }
 }
 
 fn held_request(request: &Request<Vec<u8>>, pending_id: &str) -> R3HeldRequest {
@@ -555,6 +775,9 @@ where
     ///
     /// A class grant needs no retention and `response` is returned unchanged.
     /// A store failure returns `500`; the call is not run again for that token.
+    /// An application `202` is stored only when it is a same-origin pending
+    /// response. A malformed `202` is stored as the `500` `server_error`
+    /// refusal, and that refusal is what is replayed.
     pub fn r3_retain(&self, grant: &R3Grant, response: Response<Vec<u8>>) -> Response<Vec<u8>> {
         let Some(completion) = &grant.completion else {
             return response;
@@ -567,10 +790,12 @@ where
         ) else {
             return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
         };
-        let stored = match per_call
-            .calls
-            .retain(&completion.uri, fence, &snapshot(&response))
-        {
+        let origin = self.document_origin();
+        let stored = match per_call.calls.retain(
+            &completion.uri,
+            fence,
+            &prepare_retained(&origin, &response),
+        ) {
             Ok(stored) => restore(&stored),
             Err(_) => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
         };
@@ -1188,6 +1413,7 @@ mod tests {
                 status: 200,
                 content_type: None,
                 body: b"run-1".to_vec(),
+                pending: None,
             }),
             release_until: Some(1_300),
             supersedes: None,
@@ -1339,5 +1565,148 @@ mod tests {
             &presented("r-1"),
             Some("other-account")
         ));
+    }
+
+    const ORIGIN: &str = "https://resource.example:8443";
+    const PENDING_BODY: &[u8] = br#"{"status":"pending"}"#;
+    const PENDING: &[(&str, &str)] = &[
+        ("location", "/jobs/7"),
+        ("retry-after", "5"),
+        ("cache-control", "no-store"),
+        ("content-type", "application/json"),
+    ];
+
+    fn accepted(headers: &[(&str, &str)], body: &[u8]) -> Response<Vec<u8>> {
+        let mut response = Response::builder().status(202);
+        for (name, value) in headers {
+            response = response.header(*name, *value);
+        }
+        response.body(body.to_vec()).unwrap()
+    }
+
+    /// The pending headers with `name` replaced by `values`; no values removes it.
+    fn pending_with(name: &str, values: &[&'static str]) -> Vec<(&'static str, &'static str)> {
+        let mut headers: Vec<_> = PENDING
+            .iter()
+            .copied()
+            .filter(|(n, _)| *n != name)
+            .collect();
+        let name = PENDING.iter().find(|(n, _)| *n == name).unwrap().0;
+        headers.extend(values.iter().map(|value| (name, *value)));
+        headers
+    }
+
+    fn refused(result: &R3CallResult) -> bool {
+        let body: serde_json::Value = serde_json::from_slice(&result.body).unwrap();
+        result.status == 500 && result.pending.is_none() && body["error"] == "server_error"
+    }
+
+    #[test]
+    fn an_application_202_is_kept_only_as_a_same_origin_pending_response() {
+        let kept = prepare_retained(ORIGIN, &accepted(PENDING, PENDING_BODY));
+        assert_eq!(kept.status, 202);
+        assert_eq!(kept.content_type.as_deref(), Some("application/json"));
+        assert_eq!(kept.body, PENDING_BODY);
+        assert_eq!(
+            kept.pending,
+            Some(R3PendingHeaders {
+                location: "/jobs/7".into(),
+                retry_after: "5".into(),
+                cache_control: vec!["no-store".into()],
+            })
+        );
+        let replayed = restore(&kept);
+        assert_eq!(replayed.status(), 202);
+        assert_eq!(replayed.headers()["location"], "/jobs/7");
+        assert_eq!(replayed.headers()["retry-after"], "5");
+        assert_eq!(replayed.headers()["cache-control"], "no-store");
+        assert_eq!(replayed.headers()["content-type"], "application/json");
+        assert_eq!(replayed.body(), PENDING_BODY);
+
+        // A response that is not 202 is kept as it is.
+        let ran = Response::builder()
+            .status(200)
+            .body(b"ran".to_vec())
+            .unwrap();
+        assert_eq!(prepare_retained(ORIGIN, &ran).pending, None);
+        assert_eq!(prepare_retained(ORIGIN, &ran).body, b"ran");
+
+        for (name, values) in [
+            ("location", &["https://resource.example:8443/jobs/7"][..]),
+            ("location", &["/jobs/7?attempt=2"]),
+            ("retry-after", &["0"]),
+            ("retry-after", &["9223372036"]),
+            ("cache-control", &["private, No-Store"]),
+            ("cache-control", &["private", "no-store"]),
+            ("content-type", &["application/json; charset=utf-8"]),
+            ("content-type", &["Application/JSON"]),
+        ] {
+            let response = accepted(&pending_with(name, values), PENDING_BODY);
+            let kept = prepare_retained(ORIGIN, &response);
+            assert_eq!(kept.status, 202, "{name}: {values:?}");
+            if name == "cache-control" {
+                let replayed = restore(&kept);
+                let replayed: Vec<_> = replayed
+                    .headers()
+                    .get_all("cache-control")
+                    .iter()
+                    .map(|value| value.to_str().unwrap())
+                    .collect();
+                assert_eq!(replayed, values, "Cache-Control order");
+            }
+        }
+
+        for (name, values) in [
+            ("location", &[][..]),
+            ("location", &["/jobs/7", "/jobs/8"]),
+            ("location", &[""]),
+            ("location", &["https://elsewhere.example/jobs/7"]),
+            ("location", &["http://resource.example:8443/jobs/7"]),
+            ("location", &["https://resource.example/jobs/7"]),
+            ("location", &["//elsewhere.example/jobs/7"]),
+            ("location", &["//resource.example:8443/jobs/7"]),
+            ("location", &["/jobs/7#done"]),
+            ("location", &["https://user@resource.example:8443/jobs/7"]),
+            ("location", &["mailto:ops@resource.example"]),
+            ("retry-after", &[]),
+            ("retry-after", &["5", "6"]),
+            ("retry-after", &["soon"]),
+            ("retry-after", &["-1"]),
+            ("retry-after", &["1.5"]),
+            ("retry-after", &["9223372037"]),
+            ("retry-after", &["Fri, 30 Oct 2026 07:00:00 GMT"]),
+            ("cache-control", &[]),
+            ("cache-control", &["no-cache"]),
+            ("cache-control", &["no-store-later"]),
+            ("content-type", &[]),
+            ("content-type", &["application/json", "application/json"]),
+            ("content-type", &["text/plain"]),
+            ("content-type", &["application/problem+json"]),
+            ("content-type", &["application/json; charset"]),
+        ] {
+            let response = accepted(&pending_with(name, values), PENDING_BODY);
+            assert!(
+                refused(&prepare_retained(ORIGIN, &response)),
+                "{name}: {values:?}"
+            );
+        }
+
+        for body in [
+            &b""[..],
+            b"pending",
+            b"[]",
+            b"{}",
+            br#"{"status":""}"#,
+            br#"{"status":1}"#,
+            br#"{"status":null}"#,
+            br#"{"status":"pending","Status":"done"}"#,
+            br#"{"status":"pending","status":"done"}"#,
+        ] {
+            assert!(
+                refused(&prepare_retained(ORIGIN, &accepted(PENDING, body))),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 }

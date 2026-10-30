@@ -35,7 +35,8 @@ const ACCESS_DOCUMENT: &str = "aauth-access.json";
 mod per_call;
 pub use per_call::{
     BoxedR3Describe, BoxedR3Present, BoxedR3Release, R3CallDescription, R3CallResult, R3CallStore,
-    R3CallToken, R3Claim, R3HeldRequest, R3PerCallConfig, R3ProposalRecord, R3Release,
+    R3CallToken, R3Claim, R3HeldRequest, R3PendingHeaders, R3PerCallConfig, R3ProposalRecord,
+    R3Release,
 };
 
 /// A host adapter or store could not answer. Nothing is disclosed or admitted.

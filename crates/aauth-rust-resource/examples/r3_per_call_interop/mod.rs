@@ -60,8 +60,8 @@ use aauth_rust_r3::{
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthPolicy, BoxedR3Release, PsAuthorizationConfig, PsAuthorizationResource,
     R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,
-    R3DocumentStore, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord, R3Release,
-    R3StoreError, R3Vocabulary,
+    R3DocumentStore, R3HeldRequest, R3HostError, R3PendingHeaders, R3PerCallConfig,
+    R3ProposalRecord, R3Release, R3StoreError, R3Vocabulary,
 };
 use http::{Request, Response};
 use serde_json::{Value, json};
@@ -532,7 +532,44 @@ impl FileCalls {
             status: u16::try_from(number(v, "status")?)?,
             content_type: optional(v, "content_type"),
             body: serde_json::from_value(v["body"].clone())?,
+            pending: Self::pending_headers(v)?,
         })
+    }
+    fn pending_headers(v: &Value) -> Result<Option<R3PendingHeaders>> {
+        let Some(pending) = v.get("pending").filter(|value| !value.is_null()) else {
+            return Ok(None);
+        };
+        let items = pending
+            .get("cache_control")
+            .and_then(Value::as_array)
+            .ok_or("missing stored cache_control")?;
+        let mut cache_control = Vec::new();
+        for item in items {
+            cache_control.push(item.as_str().ok_or("stored cache_control")?.to_owned());
+        }
+        if cache_control.is_empty() {
+            return Err("stored cache_control".into());
+        }
+        Ok(Some(R3PendingHeaders {
+            location: text(pending, "location")?,
+            retry_after: text(pending, "retry_after")?,
+            cache_control,
+        }))
+    }
+    fn stored_result(result: &R3CallResult) -> Value {
+        let mut value = json!({
+            "status": result.status,
+            "content_type": result.content_type,
+            "body": result.body,
+        });
+        if let Some(pending) = &result.pending {
+            value["pending"] = json!({
+                "location": pending.location,
+                "retry_after": pending.retry_after,
+                "cache_control": pending.cache_control,
+            });
+        }
+        value
     }
     /// Create one record and its pending index. The caller holds the serial lock.
     fn create(&self, r: &R3ProposalRecord) -> std::result::Result<(), R3StoreError> {
@@ -540,10 +577,7 @@ impl FileCalls {
             json!({"pending_id": held.pending_id, "method": held.method, "uri": held.uri,
                    "headers": held.headers, "body": held.body})
         });
-        let released = r.released.as_ref().map(|result| {
-            json!({"status": result.status, "content_type": result.content_type,
-                   "body": result.body})
-        });
+        let released = r.released.as_ref().map(Self::stored_result);
         let bytes = json!({
             "uri": r.reference.uri(), "digest": r.reference.digest(), "exact_json": r.exact_json,
             "person_server": r.person_server, "auth_token_issuer": r.auth_token_issuer,
@@ -682,8 +716,7 @@ impl R3CallStore for FileCalls {
         if v["fence"].as_str() != Some(fence) || !v["result"].is_null() {
             return Err(R3StoreError::Conflict);
         }
-        v["result"] = json!({"status": result.status, "content_type": result.content_type,
-                             "body": result.body});
+        v["result"] = Self::stored_result(result);
         replace(&path, v.to_string().as_bytes()).map_err(unavailable)?;
         Ok(result.clone())
     }

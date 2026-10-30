@@ -2122,3 +2122,157 @@ fn a_retry_while_the_grant_is_unretained_is_unavailable() {
         other => panic!("first result changed: {other:?}"),
     }
 }
+
+#[test]
+fn an_application_202_replays_with_its_pending_headers_or_as_server_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let resource = PsAuthorizationResource::new(config(), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-pending",
+    );
+    let class = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    let route = "/mcp/records.delete";
+    let completion = |challenge: &str, jti: &str| {
+        match resource.authorize(&call(route, &class, 2), NOW, challenge) {
+            AuthDecision::AuthTokenRequired { .. } => {}
+            other => panic!("challenge {challenge}: {other:?}"),
+        }
+        let stored = proposals
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| record.resource_token_jti == challenge)
+            .cloned()
+            .expect("stored proposal");
+        let mut claims = auth_claims(None);
+        claims.jti = jti.into();
+        let per_call = aauth_rust_r3::mint_per_call_auth_token(
+            &standard_registry().unwrap(),
+            &SigningKey::from_seed([3; 32]),
+            "ps-1",
+            &claims,
+            &stored.reference,
+            &stored.exact_json,
+        )
+        .expect("per-call auth token");
+        let grant = match resource.authorize(&call(route, &per_call, 2), NOW, jti) {
+            AuthDecision::Granted(admitted) => admitted.r3_grant().expect("completion").clone(),
+            other => panic!("completion {jti}: {other:?}"),
+        };
+        (per_call, grant)
+    };
+    let application_202 = |location: &str| {
+        Response::builder()
+            .status(202)
+            .header("location", location)
+            .header("retry-after", "5")
+            .header("cache-control", "private")
+            .header("cache-control", "no-store")
+            .header("content-type", "application/json")
+            .body(br#"{"status":"pending"}"#.to_vec())
+            .unwrap()
+    };
+    let pending_headers = |response: &Response<Vec<u8>>| {
+        let values = |name: &str| -> Vec<String> {
+            response
+                .headers()
+                .get_all(name)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_owned())
+                .collect()
+        };
+        (
+            values("location"),
+            values("retry-after"),
+            values("cache-control"),
+            values("content-type"),
+        )
+    };
+    let expected = (
+        vec![format!("{ORIGIN}/jobs/7")],
+        vec!["5".to_owned()],
+        vec!["private".to_owned(), "no-store".to_owned()],
+        vec!["application/json".to_owned()],
+    );
+
+    let (per_call, grant) = completion("challenge-pending", "per-call-pending");
+    let retained = resource.r3_retain(&grant, application_202(&format!("{ORIGIN}/jobs/7")));
+    assert_eq!(
+        retained.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(retained.body())
+    );
+    assert_eq!(pending_headers(&retained), expected);
+    for nonce in ["replay-pending", "replay-pending-again"] {
+        match resource.authorize(&call(route, &per_call, 2), NOW, nonce) {
+            AuthDecision::Replayed(replay) => {
+                assert_eq!(replay.status(), 202);
+                assert_eq!(pending_headers(&replay), expected);
+                assert_eq!(replay.body(), br#"{"status":"pending"}"#);
+            }
+            other => panic!("replay of the pending result: {other:?}"),
+        }
+    }
+
+    let (cross, grant) = completion("challenge-cross", "per-call-cross");
+    let refused = resource.r3_retain(&grant, application_202("https://elsewhere.example/jobs/7"));
+    assert_eq!(
+        refused.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(refused.body())
+    );
+    assert!(refused.headers().get("location").is_none());
+    let refused_body: Value = serde_json::from_slice(refused.body()).unwrap();
+    assert_eq!(refused_body["error"], "server_error");
+    match resource.authorize(&call(route, &cross, 2), NOW, "replay-cross") {
+        AuthDecision::Replayed(replay) => {
+            assert_eq!(replay.status(), 500);
+            assert!(replay.headers().get("location").is_none());
+            assert!(replay.headers().get("retry-after").is_none());
+            assert_eq!(replay.body(), refused.body());
+        }
+        other => panic!("replay of the stored refusal: {other:?}"),
+    }
+    match resource.authorize(&call(route, &per_call, 2), NOW, "replay-pending-intact") {
+        AuthDecision::Replayed(replay) => assert_eq!(pending_headers(&replay), expected),
+        other => panic!("first pending result changed: {other:?}"),
+    }
+}
