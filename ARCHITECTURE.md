@@ -9,12 +9,12 @@ unimplemented role surfaces as empty Rust crates.
 | --- | --- | --- |
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
 | `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
-| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
-| `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes | Core, JOSE |
-| `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions; R3 `/authorize` preparation and class-grant verification | Core, Signature-Key, R3, JOSE |
+| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; Events subscribe and event tokens; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
+| `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes; opt-in Events subscribe tokens and inbox with a durable-store contract | Core, Signature-Key, JOSE |
+| `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions; R3 `/authorize` preparation and class-grant verification; Events subscription signing and event verification | Core, Signature-Key, R3, JOSE |
 | `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
-| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3 | Core, Signature-Key, Budgets, R3, JOSE |
+| `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3, opt-in Events registration and signed delivery | Core, Signature-Key, Budgets, R3, JOSE |
 | `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance, opt-in direct class R3 issuance | Core, Signature-Key, Budgets, R3, JOSE |
 | `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; verified call-chaining upstream tokens; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
@@ -22,8 +22,9 @@ unimplemented role surfaces as empty Rust crates.
 Normal role dependencies never import one another; Resource dev-dependencies
 compose the roles for tests and examples. Examples import the roles and compose
 them without a cross-role lifecycle abstraction. The storage adapter imports the
-PS role; the role never imports a database engine. Bootstrap, R3 and Events
-get boundaries as executing journeys require them. Budgets are the opt-in
+PS role; the role never imports a database engine. Bootstrap and R3 get
+boundaries as executing journeys require them. Events tokens live in Core and
+each role's Events behavior in its own crate. Budgets are the opt-in
 `aauth-rust-budgets` crate. Unsupported vocabularies and the full-R3 gap are
 recorded in CONFORMANCE.md.
 
@@ -141,7 +142,9 @@ Discovery snapshots live in Core because they implement the AAuth token
 profiles: an expected `dwk`, exact issuer identity and a host trust boundary.
 Signature-Key remains generic: it extracts key material and verifies a proof
 with the supplied key. The explicit `jwks_uri` scheme exposes unverified service references and
-requires host-admitted resolution. `self-jwt` remains unsupported. Core's minting helpers encode
+requires host-admitted resolution. `self-jwt` carries the Events delivery: the
+AP verifies the event token and the HTTP signature with the one Resource key
+its resolver returns. Core's minting helpers encode
 and sign claims; they do not authorize issuance. The AP, PS, AS and Resource roles
 own issuance policy, lifetime bounds and retained state where required.
 Core owns claim syntax and common verification, including

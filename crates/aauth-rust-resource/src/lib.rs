@@ -1,6 +1,8 @@
 //! Agent-identity and PS-authorization Resources. Verification precedes host policy.
+//! The [`events`] module adds AAuth Events subscription and delivery.
 #![deny(missing_docs)]
 mod budget_gate;
+pub mod events;
 mod held;
 mod ps_authorization;
 mod session;

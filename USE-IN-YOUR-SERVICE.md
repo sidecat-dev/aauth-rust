@@ -1513,3 +1513,125 @@ release. Custom stores must preserve atomic revisions, bounded records and
 role namespaces across restart, collect expiry and reconcile uncertain in-flight
 transitions. No automatic recovery repeats a POST, settlement or grant delivery.
 The ordinary PS issued-token store, including redb, remains a separate contract.
+
+## Subscribe to and deliver AAuth Events
+
+AAuth Events lets a Resource notify an Agent through the Agent's Agent
+Provider (AP), which acts as its inbox. The token types are in
+`aauth_rust_core::events`: `SubscribeToken` (`aa-subscribe+jwt`, AP-signed,
+carrying `sub`, `aud`, `cnf`, `eid`, `jti` and optional `max_uses`) and
+`EventToken` (`aa-event+jwt`, Resource-signed, carrying `aud`, `eid`, `jti` and
+`body_s256` exactly when there is a body, and never `cnf`). The roles use them as
+follows. No role performs network I/O; the host fetches, admits and sends.
+
+### Agent Provider
+
+`AgentProvider::with_event_endpoint("https://ap.example/events")` publishes
+`event_endpoint` in `metadata()`. Only a provider with one can build an
+`events::EventInbox`, so an AP that receives events through this library always
+publishes its endpoint.
+
+After the host decides an Agent may subscribe at a Resource, call
+`provider.issue_subscribe_token(&store, &SubscribeRequest { agent_token,
+resource, expires_at, max_uses, subscription_expires_at }, now)`. It
+authenticates the Agent's current Agent token with this provider's own key and
+copies its `sub` and `cnf.jwk`, so the subscribe token always names the Agent's
+current key. It draws `eid` and `jti` from the system random source, refuses an
+`expires_at` beyond the Agent token's `exp`, and retains the `Subscription` in
+the store before returning the token. A store failure releases no token.
+`expires_at` is how long the Resource may accept the token for registration;
+`subscription_expires_at` is the AP's own end for the subscription, if any.
+
+Route POSTs to the event endpoint to
+`inbox.receive(&request, now).into_response()`. The inbox requires the
+`self-jwt` scheme, a body signed with covered `Content-Digest` and
+`Content-Type`, and an event token that verifies (`typ`, `dwk`
+`aauth-resource.json`, no `cnf`, unexpired) with the same Resource key that
+verifies the HTTP signature. `body_s256` must match the body. The subscription
+for `eid` must exist and not have ended (`404` otherwise), the token's `iss` must
+be its Resource (`403`), and its `aud` its Agent (`401` `invalid_jwt`, checked
+before a use is counted). The store then atomically drops an `(iss, jti)` it
+already holds, refuses a subscription that has accepted `max_uses` events
+(`404`), or counts the event and records the exact token and body. Only then
+does the inbox answer `202`, with `{"remaining_uses": n}` when the subscription
+has `max_uses`. A store failure is `503` and nothing is recorded.
+
+`keys` resolves Resource keys for `aauth-resource.json`. A `TrustedIssuerKeys`
+snapshot serves Resources you configure. An AP that accepts events from
+Resources it has never seen supplies its own resolver, which applies egress
+admission (`admit_fetch`) before fetching their metadata and JWKS.
+
+`EventStore` is the durability contract: each successful write is durable
+before it returns, and `record` is one atomic step. `MemoryEventStore` is a
+volatile reference and does not survive the process; no durable adapter ships
+in this release. Delivery to the Agent is your transport: read
+`store.pending(agent)`, hand each `RecordedEvent`'s `event_token` and `body`
+bytes to the Agent unchanged, and `acknowledge` it once delivered.
+
+### Agent
+
+Record what each subscription is for before presenting its token:
+`EventSubscriptions::new(agent_identifier)` then
+`subscriptions.remember(&subscribe_token, context)`, which returns the `eid`.
+Sign the registration with `agent.sign_subscription(&mut request,
+&subscribe_token, now)`: the subscribe token is the `Signature-Key` JWT in place
+of the Agent token, and a token for another key is refused.
+
+When the AP delivers an event, call
+`subscriptions.receive(&event_token, &body, &resource_keys, now)`. It verifies
+the token (`typ`, `dwk`, the Resource key, `exp`), requires `aud` to equal the
+Agent identifier exactly, checks `body_s256` against the body, looks up the
+`eid`, requires `iss` to be the Resource that subscription named, and refuses an
+`(iss, jti)` already processed. Act only on an `Ok`; an expired token is an
+error because its response window has closed. `verify_event` performs the first
+three checks without local state. The processed set is in memory; keep it
+durably if the Agent must not act twice across restarts.
+
+### Resource
+
+Configure `events::EventsResource::new(EventsConfig { issuer, signed_origin,
+kid, signing_key, ticket_path, max_ticket_lifetime }, ap_keys, store)`. The
+issuer is each subscribe token's required `aud` and each event token's `iss`.
+Publish `jwks()` and name it as `jwks_uri` in the Resource's metadata: the AP
+discovers the delivery key from `{iss}/.well-known/aauth-resource.json`. `ap_keys`
+resolves Agent Provider keys for `aauth-agent.json`, as for Agent tokens.
+
+`register(&request, now, policy)` handles a public subscription endpoint. The
+subscribe token must verify with `typ` `aa-subscribe+jwt`, `dwk`
+`aauth-agent.json` and an unexpired `exp`; its `aud` must be this issuer; its
+`cnf.jwk` must verify the request signature; and its `eid` must be nonempty.
+Each failure is `401` with `Signature-Error`. Policy then sees the verified
+token and request and returns the context to keep (`403` on `Deny`). The store
+keeps `{agent_provider, eid, agent, max_uses}`; a repeated `(iss, eid)` is `409`.
+
+For a protected channel, issue a ticket from the authenticated interaction:
+`issue_ticket(&holder, context, lifetime, now)`, where `holder` is the
+`VerifiedPersonToken`, `VerifiedAuthToken` or `AuthAuthorized` the Resource
+verified on that request. The ticket records the RFC 7638 thumbprint of its
+`cnf.jwk`, lives at most `max_ticket_lifetime` seconds (at most an hour), and is
+retained before its URL `{signed_origin}{ticket_path}{id}` is returned. Route
+POSTs under `ticket_path` to `register_with_ticket`. It verifies the subscribe
+token as above, then requires the ticket to be unused and unexpired and the
+thumbprint of the token's `cnf.jwk` to equal the recorded one. The store
+consumes the ticket in the same step that registers the subscription. Every
+ticket failure is `403`. The binding is the key, not the `sub` the token names.
+
+To deliver, `prepare_event(agent_provider, eid, payload, expires_at, now)` mints
+the event token: the subscription's `eid` and Agent, a fresh `jti`, and
+`body_s256` when there is an `EventPayload`. Fetch
+`agent_provider_metadata_url(agent_provider)` after `admit_fetch`, then
+`delivery_request(&event, &metadata, now)` builds the POST to its current
+`event_endpoint`, signed under `self-jwt`; with a body the signature covers
+`content-digest` and `content-type`. Admit the endpoint with
+`admit_event_endpoint`, send it without following redirects, and pass the
+response to `delivery_outcome`. A `remaining_uses` of `0` or a `404` removes the
+subscription; the Agent must subscribe again. To retry, sign the same
+`PreparedEvent` again: its `jti` lets the AP drop a duplicate.
+
+Describe event channels with an AsyncAPI JSON document and publish it with
+`with_asyncapi(document)`. It must declare
+`components.securitySchemes.aauth_subscribe` as `subscribe_security_scheme()`
+returns (`type: http`, `scheme: aauth-subscribe`), or it is refused.
+`SubscriptionStore` has the same durability contract as `EventStore`;
+`MemorySubscriptionStore` is the volatile reference. AsyncAPI payload validation
+is not implemented.
