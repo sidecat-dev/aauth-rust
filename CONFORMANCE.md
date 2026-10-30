@@ -946,6 +946,30 @@ Each of the 22 rows names a test that passed in that run. Receipt START
 `2026-10-30T17:31:45.479144566+00:00`, END
 `2026-10-30T17:37:45.638537676+00:00`, `Result=success`, `ExecMainStatus=0`.
 
+Changes on 2026-10-30, after a review of the MUST-level rows against the
+pinned drafts:
+
+- A request missing `Signature-Key` is `invalid_signature`.
+- Interaction codes are emitted in upper case; the Resource accepts a code in
+  any case with the `I`, `L` and `O` aliases folded.
+- `read_call_outcome` decides from the `error` member, not the HTTP status.
+- Revocation pending URLs answer `410` once their final response has been
+  returned, at the Person Server and the Access Server.
+- Whenever `Signature-Error` is sent, the problem `type` is
+  `urn:ietf:params:sig-error:<code>`.
+- A mission's `expires_at` is checked at the permission, audit and interaction
+  endpoints and on mission update, completion and read.
+- `x509` verification checks revocation against CRLs the host supplies.
+  `verify_x509` takes the CRLs, and an empty list is refused.
+- Every response to a budgeted Auth token carries `AAuth-Budget`, including
+  refusals at the R3 gate and after host policy, revoked tokens, and `405` and
+  `410` at R3 pending URLs.
+- `/person` accepts an upstream Auth token issued by the Person Server's own
+  Access Server.
+
+Still open: upstream tokens that carry `mission_s256`, and `/token` with an
+upstream token issued by an Access Server. Both need four-party call chaining.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
