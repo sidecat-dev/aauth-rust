@@ -107,7 +107,7 @@ impl std::fmt::Display for PsConfigurationError {
                 "budget profile needs declared units, a finite bound, and an HTTPS usage endpoint"
             }
             Self::InvalidR3Profile => {
-                "R3 needs registered authoritative definitions and does not compose with missions"
+                "R3 needs registered authoritative definitions; missions compose only with direct class R3"
             }
         })
     }
@@ -785,6 +785,8 @@ where
     /// A PS Auth token carrying one reaches host policy instead of being refused
     /// as an unknown profile. Federated AS Auth remains missionless. The digest
     /// is not a grant: policy must still compare it with the mission it asked for.
+    /// With [`Self::with_r3`], a class document records the mission and admits
+    /// only an Auth token for it; per-call proposals stay missionless.
     pub fn with_mission_context(mut self) -> Self {
         self.mission_context = true;
         self

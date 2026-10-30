@@ -757,13 +757,14 @@ where
     ///
     /// # Errors
     /// [`PsConfigurationError::InvalidR3Profile`] when class R3 is not enabled,
-    /// or when `release` is set without `hold`: release gating holds the
-    /// invocation under `202`.
+    /// when `release` is set without `hold` (release gating holds the
+    /// invocation under `202`), or when mission context is enabled.
     pub fn with_r3_per_call(
         mut self,
         config: R3PerCallConfig,
     ) -> Result<Self, PsConfigurationError> {
-        if config.release.is_some() && !config.hold {
+        // Per-call proposals are missionless, as in Go's direct R3 profile.
+        if (config.release.is_some() && !config.hold) || self.mission_context {
             return Err(PsConfigurationError::InvalidR3Profile);
         }
         let Some(profile) = self.r3.as_mut() else {

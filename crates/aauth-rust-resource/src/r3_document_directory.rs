@@ -69,6 +69,7 @@ impl DirectoryDocumentStore {
             "scope": record.scope,
             "issued_at": record.issued_at,
             "expires_at": record.expires_at,
+            "mission_s256": record.mission_s256,
         })
         .to_string()
         .into_bytes()
@@ -92,6 +93,7 @@ impl DirectoryDocumentStore {
             scope: optional(&value, "scope"),
             issued_at: number(&value, "issued_at")?,
             expires_at: number(&value, "expires_at")?,
+            mission_s256: optional(&value, "mission_s256"),
         })
     }
 }

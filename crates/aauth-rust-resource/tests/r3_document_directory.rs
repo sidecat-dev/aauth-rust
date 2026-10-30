@@ -41,6 +41,7 @@ fn document(subject: &str) -> R3DocumentRecord {
         scope: None,
         issued_at: 1_000,
         expires_at: 2_000,
+        mission_s256: None,
     }
 }
 

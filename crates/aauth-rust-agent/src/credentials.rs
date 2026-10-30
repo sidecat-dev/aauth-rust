@@ -49,7 +49,7 @@ pub(crate) struct ParentContext {
     pub(crate) iat: i64,
     pub(crate) exp: i64,
     cnf: Jwk,
-    mission: Option<String>,
+    pub(crate) mission: Option<String>,
     tenant: Option<String>,
     /// Issuer of the presented credential itself. A Person token's issuer is
     /// `ps`. An Auth token's issuer is its own `iss`, which may be an Access

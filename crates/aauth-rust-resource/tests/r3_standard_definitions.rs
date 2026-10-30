@@ -23,9 +23,10 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
-    AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Grant, MemoryStore, Person,
-    PersonRequest, PersonServer, Policy, PolicyError, R3AuthorizationRequest, R3Decision,
-    R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
+    AgentIdentity, AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Grant, MemoryStore,
+    MissionRecord, MissionState, Person, PersonRequest, PersonServer, Policy, PolicyError,
+    R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision,
+    R3ProposalRequest,
 };
 use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionErrorKind, DefinitionRegistration, DefinitionRegistry,
@@ -6410,4 +6411,212 @@ fn directory_document_store_admits_the_class_after_process_exit() {
         .expect("child pid");
     assert_ne!(child_pid, std::process::id());
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// Unpadded base64url, for the approved mission's exact bytes.
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let word = chunk.iter().enumerate().fold(0u32, |word, (i, byte)| {
+            word | u32::from(*byte) << (16 - 8 * i)
+        });
+        for i in 0..=chunk.len() {
+            out.push(ALPHABET[(word >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+fn mission_resource(
+    profile: &Profile,
+    documents: Arc<Documents>,
+) -> (Arc<Resource>, Arc<AtomicUsize>) {
+    let permit = operation(profile, profile.operations[0]);
+    let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
+        Ok((request.uri().path() == "/op/permit").then(|| permit.clone()))
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let policy = Box::new(
+        move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| -> Result<String, Deny> {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok("receipt".into())
+        },
+    ) as BoxedAuthAdmissionPolicy<String>;
+    let resource = PsAuthorizationResource::new(
+        PsAuthorizationConfig {
+            issuer: RESOURCE.into(),
+            signed_origin: RESOURCE.into(),
+            kid: "resource-1".into(),
+            signing_key: SigningKey::from_seed([4; 32]),
+            scopes: vec!["records.read".into()],
+        },
+        keys(),
+        policy,
+    )
+    .unwrap()
+    .with_authorization_endpoint()
+    .with_mission_context()
+    .with_r3(R3Config {
+        registry: standard_registry().unwrap(),
+        definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration)).unwrap(),
+        vocabularies: vec![R3Vocabulary {
+            definition: profile.snapshot.clone(),
+            display: None,
+        }],
+        documents,
+        operation_for_request: mapper,
+        require_core_scope: false,
+    })
+    .unwrap();
+    (Arc::new(resource), calls)
+}
+
+#[test]
+fn a_mission_class_grant_names_the_mission_and_ends_with_it() {
+    let profile = odata_profile();
+    let (resource, calls) = mission_resource(&profile, Arc::new(Documents::default()));
+    let agent = agent();
+    let store = MemoryStore::default();
+    let owner = AgentIdentity {
+        issuer: AP.into(),
+        subject: "aauth:reader@ap.example".into(),
+    };
+    // Approved at NOW (2023-11-14T22:13:20Z); it ends 300 seconds later.
+    let bytes = br#"{"agent":"aauth:reader@ap.example","approved_at":"2023-11-14T22:13:20Z","expires_at":"2023-11-14T22:18:20Z","description":"Read records for one report"}"#;
+    let mission = MissionRecord {
+        person_server: PS.into(),
+        owner: owner.clone(),
+        person_id: "person-1".into(),
+        state: MissionState::Active,
+        document: aauth_rust_core::ApprovedMission::decode(&digest(bytes), &base64url(bytes))
+            .unwrap(),
+    };
+    assert_eq!(mission.document.expires_at(), Some(NOW + 300));
+    store.install_approved_mission(mission.clone()).unwrap();
+    let s256 = mission.document.s256().to_owned();
+    let ids = AtomicUsize::new(0);
+    let vocabulary = profile.vocabulary.clone();
+    let permit = operation(&profile, profile.operations[0]);
+    let ps = PersonServer::new(
+        Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
+        keys(),
+        store.clone(),
+        HostPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_r3(R3IssuerConfig {
+        registry: standard_registry().unwrap(),
+        egress: Box::new(|uri: &str, _: Instant| {
+            if uri.starts_with(&format!("{RESOURCE}/r3/c.")) {
+                Ok(())
+            } else {
+                Err(std::io::Error::other("egress refused"))
+            }
+        }),
+        transport: Box::new(InProcess(resource.clone())),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            move |request: &R3AuthorizationRequest<'_>| -> Result<R3Decision, PolicyError> {
+                // Policy sees the active mission it is granting under.
+                assert!(request.core.mission.is_some());
+                Ok(R3Decision {
+                    granted: GrantedOperations::new(&vocabulary, std::slice::from_ref(&permit))
+                        .unwrap(),
+                    per_call: None,
+                    scopes: Vec::new(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: Arc::new(Audit),
+    })
+    .unwrap();
+
+    let person = member(
+        &ps.handle(&post(
+            &agent,
+            &format!("{PS}/person"),
+            json!({ "resource": RESOURCE, "mission_s256": s256 }),
+        )),
+        "person_token",
+    )
+    .expect("mission person token");
+    let presented = agent.with_token(person.clone()).unwrap();
+    let class_request = || {
+        post(
+            &presented,
+            &format!("{RESOURCE}/authorize"),
+            json!({ "r3_operations": {
+                "vocabulary": profile.vocabulary.uri().as_str(),
+                "operations": [serde_json::from_str::<Value>(profile.operations[0]).unwrap()],
+            } }),
+        )
+    };
+    let issued = resource
+        .authorize_endpoint(&class_request(), NOW, "rt-mission")
+        .into_response();
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
+    let resource_token = member(&issued, "resource_token").expect("resource token");
+    let verified = aauth_rust_r3::verify_resource_token(&resource_token, &keys(), NOW).unwrap();
+    assert_eq!(
+        verified.claims().mission_s256.as_deref(),
+        Some(s256.as_str())
+    );
+
+    let exchanged = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": resource_token, "presented_token": person }),
+    ));
+    assert_eq!(
+        exchanged.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(exchanged.body())
+    );
+    let auth = member(&exchanged, "auth_token").expect("auth token");
+    let claims = aauth_rust_core::AuthToken::parse(&auth)
+        .unwrap()
+        .unverified_claims()
+        .clone();
+    assert_eq!(claims.mission_s256.as_deref(), Some(s256.as_str()));
+    assert_eq!(
+        claims.exp,
+        NOW + 300,
+        "the grant ends with the mission, not the 600-second decision"
+    );
+    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "unused") {
+        AuthDecision::Granted(admitted) => assert!(admitted.r3_grant().is_some()),
+        other => panic!("mission class grant: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A terminated mission issues nothing more under that mission.
+    store.terminate_mission(PS, &owner, &s256, "user").unwrap();
+    let issued = resource
+        .authorize_endpoint(&class_request(), NOW, "rt-mission-2")
+        .into_response();
+    assert_eq!(issued.status(), 200);
+    let resource_token = member(&issued, "resource_token").expect("resource token");
+    let refused = ps.handle(&post(
+        &agent,
+        &format!("{PS}/token"),
+        json!({ "resource_token": resource_token, "presented_token": person }),
+    ));
+    assert_ne!(
+        refused.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(refused.body())
+    );
+    assert!(member(&refused, "auth_token").is_none());
 }

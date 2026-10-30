@@ -14,9 +14,12 @@
 //! R3 audit record and the exact issuance commit before release.
 //! A class document may carry a budget offer when budgets are enabled. The
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
-//! Missions, sub-agents, and call chaining are refused. With federation enabled,
-//! a class document or a person-presented proposal is consented and the exact
-//! tokens are relayed to the access server.
+//! A Person token's approved mission composes with a direct class document:
+//! the grant ends no later than the mission and commits against the unchanged
+//! active mission. Missions with proposals or federation, sub-agents, and call
+//! chaining are refused. With federation enabled, a class document or a
+//! person-presented proposal is consented and the exact tokens are relayed to
+//! the access server.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
@@ -433,6 +436,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
                     return Err(Failure::internal());
                 }
+                // Per-call proposals are missionless, as in Go's direct R3. A
+                // mission grant that leaves operations per call is unusable.
+                if decision.per_call.is_some() && context.mission.is_some() {
+                    return Err(Failure::internal());
+                }
                 // The class-R3 budget profile has no `r3_per_call` claim.
                 // Leaving an operation per call while an offer is present
                 // cannot be signed, so nothing is issued.
@@ -515,6 +523,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     mint,
                 )
             } else if let Some(proposal) = artifact.proposal() {
+                if context.mission.is_some() {
+                    return Err(Failure::parameter("invalid_resource_token"));
+                }
                 // A proposal plus a budget offer is the same unsigned composition.
                 // Do not record approval or mint a per-call token that drops the offer.
                 if granted_budget.is_some() {
@@ -703,11 +714,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(Failure::parameter("invalid_resource_token"));
             };
 
+        let mission = context.mission.as_ref();
         let now = (self.clock)();
         // Fetch and policy may block; a revocation recorded meanwhile refuses
         // here. Known revocation precedes expiry, as at request verification.
         self.inputs_unrevoked(&agent, &resource, &presented, now)?;
         self.inputs_current(&agent, &resource, &presented, now)?;
+        self.recheck_mission(&agent, mission, now, binding_context)?;
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
@@ -722,6 +735,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .min(presented.exp);
         if let Some(cap) = approval_expires_at {
             expires_at = expires_at.min(cap);
+        }
+        if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
+            expires_at = expires_at.min(exp);
         }
         if let Some(end) = self
             .budgets
@@ -745,7 +761,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             scope: (!scopes.is_empty()).then(|| scopes.join(" ")),
             account: r.account.clone(),
             nbf: None,
-            mission_s256: None,
+            mission_s256: r.mission_s256.clone(),
             tenant: r.tenant.clone(),
             extra: std::collections::BTreeMap::new(),
         };
@@ -784,9 +800,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             parent_agent: None,
         };
         // Audit first: an audit row may outlive an unreleased token, but no
-        // token is released without one. Any failure withholds the token.
+        // token is released without one. Any failure withholds the token. A
+        // mission-bound token commits against the unchanged active mission.
         r3.audit.commit(&audit).map_err(|_| Failure::internal())?;
-        self.commit_issuance(record, false, None, binding_context)?;
+        self.commit_issuance(record, false, mission, binding_context)?;
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
@@ -797,6 +814,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         // Known revocation precedes expiry.
         self.inputs_unrevoked(&agent, &resource, &presented, released_at)?;
         self.inputs_current(&agent, &resource, &presented, released_at)?;
+        self.recheck_mission(&agent, mission, released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }

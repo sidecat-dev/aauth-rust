@@ -7,8 +7,10 @@
 //! operation, and supplies a durable immutable document store. Per-call
 //! proposals are opt-in through `with_r3_per_call`. A configured access server
 //! is the federated profile: its Auth tokens and document fetches use
-//! `aauth-access.json`, and the Resource token audience is that server. A
-//! mission composition is refused.
+//! `aauth-access.json`, and the Resource token audience is that server. With
+//! [`PsAuthorizationResource::with_mission_context`] on the direct path, a class
+//! document carries the Person token's mission and admits only an Auth token for
+//! that mission. Missions with an access server or per-call proposals are refused.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -134,6 +136,8 @@ pub struct R3DocumentRecord {
     pub issued_at: i64,
     /// `exp` of the Resource token.
     pub expires_at: i64,
+    /// `mission_s256` of the Resource token, when it carried one.
+    pub mission_s256: Option<String>,
 }
 
 /// A document record could not be committed or loaded.
@@ -385,20 +389,25 @@ where
     /// # Errors
     /// [`PsConfigurationError::InvalidR3Profile`] for an empty registry,
     /// definition set or vocabulary list, a snapshot from an unregistered
-    /// parser or registration, a repeated vocabulary, or a mission composition
-    /// this profile does not implement. Calling [`Self::with_mission_context`]
-    /// afterwards makes every request a `500`.
+    /// parser or registration, a repeated vocabulary, or mission context on a
+    /// Resource with an access server. A mission composition that this profile
+    /// does not implement, added afterwards, makes every request a `500`.
     pub fn with_r3(mut self, config: R3Config) -> Result<Self, PsConfigurationError> {
-        if self.mission_context {
+        if self.mission_context && self.access_server.is_some() {
             return Err(PsConfigurationError::InvalidR3Profile);
         }
         self.r3 = Some(Box::new(R3Profile::new(config)?));
         Ok(self)
     }
 
-    /// A mission composition added with R3. This profile refuses it.
+    /// Mission context with R3 is the direct class profile only. An access
+    /// server or per-call proposals in the same Resource refuse it.
     pub(super) fn r3_composition_refused(&self) -> bool {
-        self.r3.is_some() && self.mission_context
+        self.mission_context
+            && self
+                .r3
+                .as_ref()
+                .is_some_and(|profile| self.access_server.is_some() || profile.per_call.is_some())
     }
 
     /// Discovery document of the Auth-token issuer for this Resource's topology.
@@ -629,6 +638,7 @@ where
             scope: claims.scope.clone(),
             issued_at: claims.iat,
             expires_at: claims.exp,
+            mission_s256: claims.mission_s256.clone(),
         };
         // A conflict or an uncertain commit withholds the token. An uncertain
         // commit may leave a record whose URI was never released.
@@ -812,14 +822,15 @@ where
             .jwk
             .thumbprint()
             .map_err(|_| AuthDecision::InternalError)?;
-        // The grant belongs to the Person Server, subject, tenant and agent key
-        // the document was issued for, and to no other lineage.
+        // The grant belongs to the Person Server, subject, tenant, mission and
+        // agent key the document was issued for, and to no other lineage.
         if &record.reference != reference
             || record.person_server != claims.ps
             || record.auth_token_issuer != claims.iss
             || record.auth_token_issuer_document != claims.dwk
             || record.subject != claims.sub
             || record.tenant != claims.tenant
+            || record.mission_s256 != claims.mission_s256
             || record.agent_jkt != agent_jkt
         {
             return Err(forbidden());

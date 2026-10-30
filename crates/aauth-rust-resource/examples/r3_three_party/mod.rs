@@ -222,7 +222,7 @@ fn encode(r: &R3DocumentRecord) -> Vec<u8> {
         "resource_token_jti": r.resource_token_jti, "resource_token": r.resource_token,
         "presented_jti": r.presented_jti, "subject": r.subject, "agent_jkt": r.agent_jkt,
         "tenant": r.tenant, "account": r.account, "scope": r.scope,
-        "issued_at": r.issued_at, "expires_at": r.expires_at,
+        "issued_at": r.issued_at, "expires_at": r.expires_at, "mission_s256": r.mission_s256,
     })
     .to_string()
     .into_bytes()
@@ -257,6 +257,7 @@ fn decode(bytes: &[u8]) -> Result<R3DocumentRecord> {
         scope: optional("scope"),
         issued_at: number("issued_at")?,
         expires_at: number("expires_at")?,
+        mission_s256: optional("mission_s256"),
     })
 }
 impl R3DocumentStore for FileCustody {

@@ -493,7 +493,7 @@ impl R3DocumentStore for FileDocuments {
             "resource_token_jti": r.resource_token_jti, "resource_token": r.resource_token,
             "presented_jti": r.presented_jti, "subject": r.subject, "agent_jkt": r.agent_jkt,
             "tenant": r.tenant, "account": r.account, "scope": r.scope,
-            "issued_at": r.issued_at, "expires_at": r.expires_at,
+            "issued_at": r.issued_at, "expires_at": r.expires_at, "mission_s256": r.mission_s256,
         })
         .to_string()
         .into_bytes();
@@ -536,6 +536,7 @@ impl R3DocumentStore for FileDocuments {
                 scope: optional(&v, "scope"),
                 issued_at: number(&v, "issued_at")?,
                 expires_at: number(&v, "expires_at")?,
+                mission_s256: optional(&v, "mission_s256"),
             })
         };
         decode().map(Some).map_err(unavailable)
@@ -2394,6 +2395,7 @@ fn reopen_reads_the_same_class_document_from_the_directory() {
         scope: None,
         issued_at: 1_000,
         expires_at: 1_600,
+        mission_s256: None,
     };
     FileDocuments(root.clone(), Mutex::new(()))
         .commit(&record)
@@ -2503,6 +2505,7 @@ fn exit_class_record() -> R3DocumentRecord {
         scope: None,
         issued_at: 1_000,
         expires_at: 1_600,
+        mission_s256: None,
     }
 }
 

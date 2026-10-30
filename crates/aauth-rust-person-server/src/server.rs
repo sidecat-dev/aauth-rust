@@ -771,9 +771,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let mut core = r.extra.clone();
             core.remove("r3_uri");
             core.remove("r3_s256");
-            if r.mission_s256.is_some() {
-                return Err(Failure::parameter("invalid_resource_token"));
-            }
+            // A mission composes with direct class R3 only. Federation, chaining
+            // and sub-agents were refused above; proposals are refused after fetch.
             let scopes = match r.scope.as_deref() {
                 Some(scope) => parse_scopes(scope)
                     .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,

@@ -184,6 +184,9 @@ fn resource(
 }
 
 fn person() -> String {
+    person_on_mission(None)
+}
+fn person_on_mission(mission: Option<&str>) -> String {
     mint_person_token(
         &SigningKey::from_seed([3; 32]),
         "ps-1",
@@ -200,7 +203,7 @@ fn person() -> String {
             },
             nbf: None,
             tenant: Some("team".into()),
-            mission_s256: None,
+            mission_s256: mission.map(Into::into),
             extra: Default::default(),
         },
     )
@@ -231,6 +234,9 @@ fn authorize(body: Value) -> Request<Vec<u8>> {
     authorize_at(ORIGIN, body)
 }
 fn authorize_at(origin: &str, body: Value) -> Request<Vec<u8>> {
+    authorize_as(origin, person(), body)
+}
+fn authorize_as(origin: &str, person: String, body: Value) -> Request<Vec<u8>> {
     let mut request = Request::builder()
         .method("POST")
         .uri(format!("{origin}/authorize"))
@@ -240,7 +246,7 @@ fn authorize_at(origin: &str, body: Value) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person()),
+        KeyMaterial::Jwt(person),
         NOW,
     )
     .unwrap();
@@ -1052,11 +1058,29 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let missionful = core_resource(&calls)
-        .with_mission_context()
-        .with_r3(r3_config(&store, false));
+    // Missions compose only with direct class R3.
+    assert!(
+        core_resource(&calls)
+            .with_mission_context()
+            .with_r3(r3_config(&store, false))
+            .is_ok()
+    );
+    let federated =
+        PsAuthorizationResource::new_federated(config(), AS, federated_keys(), policy(&calls))
+            .unwrap()
+            .with_mission_context()
+            .with_r3(r3_config(&store, false));
     assert!(matches!(
-        missionful,
+        federated,
+        Err(PsConfigurationError::InvalidR3Profile)
+    ));
+    let per_call_mission = core_resource(&calls)
+        .with_mission_context()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(missionless_per_call());
+    assert!(matches!(
+        per_call_mission,
         Err(PsConfigurationError::InvalidR3Profile)
     ));
     let metered = self::resource(&store, &calls, false).with_budgets(
@@ -1085,8 +1109,11 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
         Err(PsConfigurationError::InvalidR3Profile)
     ));
 
-    // A mission composition added after R3 makes every R3-capable path a 500.
-    let late = self::resource(&store, &calls, false).with_mission_context();
+    // Mission context added after per-call proposals makes every R3-capable path a 500.
+    let late = self::resource(&store, &calls, false)
+        .with_r3_per_call(missionless_per_call())
+        .unwrap()
+        .with_mission_context();
     let response = late
         .authorize_endpoint(
             &authorize(json!({ "r3_operations": operations(&["records.read"]) })),
@@ -2430,4 +2457,90 @@ fn a_released_application_202_replays_with_its_pending_headers_or_as_server_erro
         assert_eq!(body["error"], "server_error");
     }
     assert_eq!(computed.load(Ordering::SeqCst), 2);
+}
+
+fn missionless_per_call() -> R3PerCallConfig {
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    R3PerCallConfig {
+        present,
+        describe,
+        calls: Arc::new(MemoryCalls::new()),
+        hold: false,
+        release: None,
+        held_result_lifetime: 300,
+    }
+}
+
+#[test]
+fn a_mission_class_document_admits_only_an_auth_token_for_that_mission() {
+    const MISSION: &str = "N1fWRFx_bLw1RcyTspTOoOuN1ct9hw7mEHZuGFMTmhw";
+    const OTHER: &str = "6rh4HpwC-a-8Yw6vPZ6KtVQBQ1qD09a0DG7Ol2QRoCk";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let resource = core_resource(&calls)
+        .with_mission_context()
+        .with_r3(r3_config(&store, false))
+        .unwrap();
+    let response = resource
+        .authorize_endpoint(
+            &authorize_as(
+                ORIGIN,
+                person_on_mission(Some(MISSION)),
+                json!({ "r3_operations": operations(&["records.read"]) }),
+            ),
+            NOW,
+            "rt-mission",
+        )
+        .into_response();
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    let verified =
+        verify_resource_token(body["resource_token"].as_str().unwrap(), &keys(), NOW).unwrap();
+    assert_eq!(verified.claims().mission_s256.as_deref(), Some(MISSION));
+    let record = store.records.lock().unwrap()[verified.reference().uri()].clone();
+    assert_eq!(record.mission_s256.as_deref(), Some(MISSION));
+
+    for (mission, admitted) in [(Some(MISSION), true), (None, false), (Some(OTHER), false)] {
+        let mut claims = auth_claims(None);
+        claims.mission_s256 = mission.map(Into::into);
+        let token = class_token(&record, &["records.read"], &[], &claims, 3, "ps-1");
+        let before = calls.load(Ordering::SeqCst);
+        let decision = resource.authorize(&call("/mcp/records.read", &token, 2), NOW, "unused");
+        if admitted {
+            decision
+                .into_result()
+                .expect("the mission's own Auth token");
+            assert_eq!(calls.load(Ordering::SeqCst), before + 1);
+        } else {
+            assert_eq!(decision.into_response().status(), 403, "{mission:?}");
+            assert_eq!(calls.load(Ordering::SeqCst), before, "{mission:?}");
+        }
+    }
+
+    // A missionless class document refuses a mission-bound Auth token.
+    let missionless = issue(&resource, &store, &["records.read"], "rt-missionless");
+    assert_eq!(missionless.mission_s256, None);
+    let mut claims = auth_claims(None);
+    claims.mission_s256 = Some(MISSION.into());
+    let token = class_token(&missionless, &["records.read"], &[], &claims, 3, "ps-1");
+    let before = calls.load(Ordering::SeqCst);
+    let refused = resource
+        .authorize(&call("/mcp/records.read", &token, 2), NOW, "unused")
+        .into_response();
+    assert_eq!(refused.status(), 403);
+    assert_eq!(calls.load(Ordering::SeqCst), before);
 }

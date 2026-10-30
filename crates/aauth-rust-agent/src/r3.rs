@@ -12,8 +12,8 @@
 //! server signs `aauth-person.json` on the direct path and `aauth-access.json`
 //! when it is an Access Server. The signed `dwk` selects the role, including
 //! when the Person Server and Access Server identifiers are the same. A
-//! per-call grant uses the class grant's `dwk`. Budgets and missions are not
-//! handled here.
+//! per-call grant uses the class grant's `dwk`. A mission is carried through
+//! unchanged and checked against the Person token; budgets are not handled here.
 use crate::Agent;
 use crate::credentials::{PresentedAuthRole, challenge_context, narrowed_scope, verify_parent};
 use aauth_rust_core::{AgentKeyResolver, AuthToken, TokenError, validate_server_identifier};
@@ -187,7 +187,8 @@ impl Agent {
     /// required to be `person_server`. It must carry the presented Person
     /// token's subject, tenant, mission and `jti`, bind this Agent's key, be
     /// issued inside that Person token's validity, carry no `interaction` or
-    /// `account`, and carry `scope` only within `requested_scope`. With no
+    /// `account`, and carry `scope` only within `requested_scope`. A
+    /// mission-bound token must also expire no later than that Person token. With no
     /// requested scope, any `scope` is refused. The document is not fetched:
     /// Agents are not entitled to read it.
     ///
@@ -223,9 +224,11 @@ impl Agent {
             &claims.aud,
         )
         .map_err(|_| R3AgentError::Context)?;
+        // A mission-bound Resource token never outlives its Person token.
         if parent.ps != person_server
             || claims.iat < parent.iat
             || claims.iat >= parent.exp
+            || (parent.mission.is_some() && claims.exp > parent.exp)
             || claims.account.is_some()
             || claims.extra.contains_key("interaction")
             || !narrowed_scope(claims.scope.as_deref(), requested_scope)

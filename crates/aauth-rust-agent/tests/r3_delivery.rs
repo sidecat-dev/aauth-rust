@@ -613,3 +613,91 @@ fn proposal_claims(
     claims.presented_jti = presented_jti.into();
     Ok(claims)
 }
+
+#[test]
+fn a_mission_resource_token_never_outlives_its_person_token() -> Result<(), TestError> {
+    const MISSION: &str = "N1fWRFx_bLw1RcyTspTOoOuN1ct9hw7mEHZuGFMTmhw";
+    let world = world()?;
+    let person_exp = NOW + 600;
+    let person = mint_person_token(
+        &world.person_key,
+        "ps-1",
+        &PersonClaims {
+            iss: PS.into(),
+            dwk: PERSON_DOCUMENT.into(),
+            aud: RESOURCE.into(),
+            sub: SUBJECT.into(),
+            jti: "person-1".into(),
+            iat: NOW,
+            exp: person_exp,
+            cnf: Confirmation {
+                jwk: world.holder.clone(),
+            },
+            nbf: None,
+            tenant: None,
+            mission_s256: Some(MISSION.into()),
+            extra: BTreeMap::new(),
+        },
+    )?;
+    let mission_resource_token = |exp: i64, mission: Option<&str>| -> Result<String, TestError> {
+        let mut claims = resource_claims(&world, PS, "resource-mission")?;
+        claims.exp = exp;
+        claims.mission_s256 = mission.map(Into::into);
+        Ok(mint_resource_token(
+            &world.registry,
+            &world.resource_key,
+            "resource-1",
+            &claims,
+            CLASS_URI,
+            CLASS,
+        )?
+        .0)
+    };
+    let verify = |compact: &str| {
+        world
+            .agent
+            .verify_r3_resource_token(compact, RESOURCE, PS, &person, None, &world.keys, NOW)
+    };
+    let within = verify(&mission_resource_token(person_exp, Some(MISSION))?)?;
+    assert_eq!(within.claims().mission_s256.as_deref(), Some(MISSION));
+    assert!(is_context(verify(&mission_resource_token(
+        person_exp + 1,
+        Some(MISSION)
+    )?)));
+    // The mission itself must match the Person token.
+    assert!(is_context(verify(&mission_resource_token(
+        person_exp, None
+    )?)));
+    // A missionless Person token keeps the general rule: the Resource token
+    // may outlive it, as long as it was issued inside its validity.
+    let short = mint_person_token(
+        &world.person_key,
+        "ps-1",
+        &PersonClaims {
+            iss: PS.into(),
+            dwk: PERSON_DOCUMENT.into(),
+            aud: RESOURCE.into(),
+            sub: SUBJECT.into(),
+            jti: "person-1".into(),
+            iat: NOW,
+            exp: NOW + 200,
+            cnf: Confirmation {
+                jwk: world.holder.clone(),
+            },
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            extra: BTreeMap::new(),
+        },
+    )?;
+    world.agent.verify_r3_resource_token(
+        &resource_token(&world, PS, "resource-missionless")?,
+        RESOURCE,
+        PS,
+        &short,
+        None,
+        &world.keys,
+        NOW,
+    )?;
+    Ok(())
+}
