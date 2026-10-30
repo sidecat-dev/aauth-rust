@@ -811,6 +811,53 @@ fn standard_codecs_reject_malformed_unknown_and_duplicate_members() {
     }
 }
 
+// gRPC Vocabulary: `method` is REQUIRED in every operation entry.
+#[test]
+fn grpc_entries_without_method_are_refused() {
+    let registry = registry();
+    let grpc = vocabulary(&registry, GRPC);
+    let method = r#"{"method":"calendar.CalendarService/CreateEvent"}"#;
+    for entry in [
+        "{}",
+        r#"{"service":"calendar.CalendarService"}"#,
+        r#"{"tool":"calendar.CalendarService/CreateEvent"}"#,
+        r#"{"Method":"calendar.CalendarService/CreateEvent"}"#,
+    ] {
+        let message = refused(Operation::new(&grpc, entry.as_bytes()));
+        let reason = if entry == "{}" {
+            r#"missing member "method""#
+        } else {
+            "unknown member"
+        };
+        assert!(message.contains(reason), "{entry}: {message}");
+        // Alone, or beside a valid entry, in every place an operation set appears.
+        for operations in [vec![entry], vec![method, entry]] {
+            let source = envelope(GRPC, &operations);
+            assert!(
+                registry.parse_operation_set(source.as_bytes()).is_err(),
+                "set accepted {source}"
+            );
+            assert!(
+                registry
+                    .parse_granted_operations(source.as_bytes())
+                    .is_err(),
+                "grant accepted {source}"
+            );
+            assert!(
+                registry.parse_document(source.as_bytes()).is_err(),
+                "document accepted {source}"
+            );
+        }
+    }
+    // The same entry with `method` is accepted.
+    assert!(Operation::new(&grpc, method.as_bytes()).is_ok());
+    assert!(
+        registry
+            .parse_operation_set(envelope(GRPC, &[method]).as_bytes())
+            .is_ok()
+    );
+}
+
 #[test]
 fn standard_codecs_accept_what_the_go_codecs_accept() -> Result<(), Error> {
     let registry = registry();
