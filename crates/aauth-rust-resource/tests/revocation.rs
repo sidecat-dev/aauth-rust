@@ -338,7 +338,13 @@ fn core_revocation_completed_during_host_policy_refuses_admission_without_effect
     let raced = auth("auth-raced", NOW, 2500);
     let decision = resource.authorize(&present(&raced, 2), NOW, "unused");
     assert!(
-        matches!(decision, AuthDecision::Revoked { auth_token: true }),
+        matches!(
+            decision,
+            AuthDecision::Revoked {
+                auth_token: true,
+                ..
+            }
+        ),
         "{decision:?}"
     );
     assert_eq!(*recorded.lock().unwrap(), [200]);
@@ -356,7 +362,13 @@ fn core_revocation_completed_during_host_policy_refuses_admission_without_effect
     // No replay: the same token is refused before policy and never admitted.
     let again = resource.authorize(&present(&raced, 2), NOW, "unused");
     assert!(
-        matches!(again, AuthDecision::Revoked { auth_token: true }),
+        matches!(
+            again,
+            AuthDecision::Revoked {
+                auth_token: true,
+                ..
+            }
+        ),
         "{again:?}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);

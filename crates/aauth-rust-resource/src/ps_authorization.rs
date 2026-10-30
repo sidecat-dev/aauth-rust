@@ -255,6 +255,8 @@ pub enum AuthDecision<T = ()> {
     Revoked {
         /// The refused credential was an auth token, so the requirement is a person token.
         auth_token: bool,
+        /// `AAuth-Budget` when the refused credential is an unexpired budgeted auth token.
+        budget_header: Option<String>,
     },
     /// Verified Person identity requires PS authorization before application use.
     AuthTokenRequired {
@@ -273,9 +275,15 @@ pub enum AuthDecision<T = ()> {
         budget_header: Option<String>,
     },
     /// Held-invocation polling accepts only GET.
-    MethodNotAllowed,
+    MethodNotAllowed {
+        /// `AAuth-Budget` when the request bore a budgeted auth token.
+        budget_header: Option<String>,
+    },
     /// The pending id is not a stored held invocation.
-    Gone,
+    Gone {
+        /// `AAuth-Budget` when the request bore a budgeted auth token.
+        budget_header: Option<String>,
+    },
     /// The host still holds this held grant and has not retained a result.
     /// The poll stays pending. The invocation does not run again.
     StillPending {
@@ -312,10 +320,10 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PersonTokenRequired => f.write_str("PersonTokenRequired"),
-            Self::Revoked { auth_token } => f
+            Self::Revoked { auth_token, .. } => f
                 .debug_struct("Revoked")
                 .field("auth_token", auth_token)
-                .finish(),
+                .finish_non_exhaustive(),
             Self::AuthTokenRequired { .. } => {
                 f.debug_struct("AuthTokenRequired").finish_non_exhaustive()
             }
@@ -323,8 +331,8 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
                 f.debug_tuple("SignatureFailure").field(error).finish()
             }
             Self::Forbidden { .. } => f.write_str("Forbidden"),
-            Self::MethodNotAllowed => f.write_str("MethodNotAllowed"),
-            Self::Gone => f.write_str("Gone"),
+            Self::MethodNotAllowed { .. } => f.write_str("MethodNotAllowed"),
+            Self::Gone { .. } => f.write_str("Gone"),
             Self::StillPending { location } => f
                 .debug_struct("StillPending")
                 .field("location", location)
@@ -389,7 +397,10 @@ impl<T> AuthDecision<T> {
                 );
                 response
             }
-            Self::Revoked { auth_token } => {
+            Self::Revoked {
+                auth_token,
+                budget_header,
+            } => {
                 let mut response = revoked_jwt();
                 if auth_token {
                     response.headers_mut().insert(
@@ -399,6 +410,7 @@ impl<T> AuthDecision<T> {
                             .expect("static requirement"),
                     );
                 }
+                insert_budget(&mut response, budget_header);
                 response
             }
             Self::AuthTokenRequired {
@@ -424,14 +436,19 @@ impl<T> AuthDecision<T> {
                 insert_budget(&mut response, budget_header);
                 response
             }
-            Self::MethodNotAllowed => {
+            Self::MethodNotAllowed { budget_header } => {
                 let mut response = refusal(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
                 response
                     .headers_mut()
                     .insert("allow", "GET".parse().expect("static allow"));
+                insert_budget(&mut response, budget_header);
                 response
             }
-            Self::Gone => refusal(StatusCode::GONE, "gone"),
+            Self::Gone { budget_header } => {
+                let mut response = refusal(StatusCode::GONE, "gone");
+                insert_budget(&mut response, budget_header);
+                response
+            }
             // The host still holds the grant. This is the same pending answer as
             // the original 202, without a new resource token: the agent already
             // has the auth token and is polling. Dropping the grant without a
@@ -1144,7 +1161,10 @@ where
                         if parsed.unverified_claims().aud != self.config.issuer {
                             return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                         }
-                        return Ok(AuthDecision::Revoked { auth_token: false });
+                        return Ok(AuthDecision::Revoked {
+                            auth_token: false,
+                            budget_header: None,
+                        });
                     }
                     Err(error) => return Err(SignatureFailure::Token(error)),
                 };
@@ -1157,7 +1177,10 @@ where
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                 }
                 if self.presented_revoked(&issuer, &jti, now) {
-                    return Ok(AuthDecision::Revoked { auth_token: false });
+                    return Ok(AuthDecision::Revoked {
+                        auth_token: false,
+                        budget_header: None,
+                    });
                 }
                 if self.mission_refused(claims.mission_s256.is_some())
                     || unsupported_companion(&claims.extra, false, false)
@@ -1238,7 +1261,11 @@ where
                         if parsed.unverified_claims().aud != self.config.issuer {
                             return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                         }
-                        return Ok(AuthDecision::Revoked { auth_token: true });
+                        // An expired token's budget expired with it.
+                        return Ok(AuthDecision::Revoked {
+                            auth_token: true,
+                            budget_header: None,
+                        });
                     }
                     Err(error) => return Err(SignatureFailure::Token(error)),
                 };
@@ -1251,7 +1278,11 @@ where
                     return Err(SignatureFailure::Token(TokenError::AudienceMismatch));
                 }
                 if self.presented_revoked(&issuer, &jti, now) {
-                    return Ok(AuthDecision::Revoked { auth_token: true });
+                    let grant = read_granted(&claims.extra).ok().flatten();
+                    return Ok(AuthDecision::Revoked {
+                        auth_token: true,
+                        budget_header: self.untouched_budget(&token, grant.as_ref()),
+                    });
                 }
                 let valid_role = match &self.access_server {
                     Some(issuer) => claims.dwk == "aauth-access.json" && &claims.iss == issuer,
@@ -1283,7 +1314,7 @@ where
                 }
                 let r3 = match self.r3_gate(&token, request, now, challenge_jti) {
                     Ok(r3) => r3,
-                    Err(decision) => return Ok(decision),
+                    Err(decision) => return Ok(self.with_budget(decision, &token, grant.as_ref())),
                 };
                 // A Core route always needs the scope profile; an R3 route needs
                 // it as well only when the host configured both to be enforced.
@@ -1310,20 +1341,26 @@ where
                     .as_ref()
                     .and_then(R3Grant::held_request)
                     .unwrap_or(request);
+                // A refusal after admission reports what is left of a budgeted grant.
+                let budgeted = grant.clone().map(|grant| (token.clone(), grant));
+                let refused = |decision: AuthDecision<O::Context>| match &budgeted {
+                    Some((token, grant)) => self.with_budget(decision, token, Some(grant)),
+                    None => decision,
+                };
                 // Every admission, Core or R3, passes the shared post-callback
                 // verification: a revocation completed during host policy fences it.
                 match self.admit_auth(token, policy_request, now, challenge_jti, grant, meter)? {
                     AuthDecision::Granted(mut admitted) => {
                         match self.post_callback_admission(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
-                            Err(decision) => return Ok(decision),
+                            Err(decision) => return Ok(refused(decision)),
                         }
                         Ok(AuthDecision::Granted(admitted))
                     }
                     AuthDecision::Observed(mut admitted) => {
                         match self.post_callback_admission(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,
-                            Err(decision) => return Ok(decision),
+                            Err(decision) => return Ok(refused(decision)),
                         }
                         Ok(AuthDecision::Observed(admitted))
                     }
@@ -1336,7 +1373,11 @@ where
                                 admitted.r3 = claimed;
                                 Ok(AuthDecision::Held(admitted))
                             }
-                            Err(decision) => Ok(decision),
+                            Err(decision) => {
+                                // Release the hold before reading what is left.
+                                drop(admitted);
+                                Ok(refused(decision))
+                            }
                         }
                     }
                     decision => Ok(decision),
@@ -1535,18 +1576,58 @@ where
         gate.challenge_extra(requested.as_ref(), None, None)
             .map_err(|_| ProactiveDecision::InvalidBudget)
     }
+    /// `AAuth-Budget` for a budgeted auth token this call refuses without
+    /// metering: what is left of its grant.
+    fn untouched_budget(
+        &self,
+        token: &VerifiedAuthToken,
+        grant: Option<&Budget>,
+    ) -> Option<String> {
+        let gate = self.budgets.as_ref()?;
+        gate.untouched_header(token, grant?).ok()
+    }
     fn forbidden_budget(
         &self,
         token: &VerifiedAuthToken,
         grant: Option<&Budget>,
     ) -> AuthDecision<O::Context> {
-        let header = grant.and_then(|grant| {
-            self.budgets
-                .as_ref()
-                .and_then(|gate| gate.untouched_header(token, grant).ok())
-        });
         AuthDecision::Forbidden {
-            budget_header: header,
+            budget_header: self.untouched_budget(token, grant),
+        }
+    }
+    /// Give a refusal of a budgeted auth token that carries no `AAuth-Budget`
+    /// the figure its grant has left. Release any hold first. A per-call
+    /// challenge, hold or completion never answers a budgeted token: the
+    /// class-R3 Budget profile refuses `r3_per_call`, and a per-call token
+    /// carries no budget.
+    fn with_budget(
+        &self,
+        decision: AuthDecision<O::Context>,
+        token: &VerifiedAuthToken,
+        grant: Option<&Budget>,
+    ) -> AuthDecision<O::Context> {
+        match decision {
+            AuthDecision::Forbidden {
+                budget_header: None,
+            } => self.forbidden_budget(token, grant),
+            AuthDecision::Revoked {
+                auth_token,
+                budget_header: None,
+            } => AuthDecision::Revoked {
+                auth_token,
+                budget_header: self.untouched_budget(token, grant),
+            },
+            AuthDecision::MethodNotAllowed {
+                budget_header: None,
+            } => AuthDecision::MethodNotAllowed {
+                budget_header: self.untouched_budget(token, grant),
+            },
+            AuthDecision::Gone {
+                budget_header: None,
+            } => AuthDecision::Gone {
+                budget_header: self.untouched_budget(token, grant),
+            },
+            other => other,
         }
     }
     fn admit_auth(
@@ -1655,7 +1736,10 @@ where
                         ) =>
                     {
                         gate.release(&reservation);
-                        Ok(AuthDecision::Revoked { auth_token: true })
+                        Ok(AuthDecision::Revoked {
+                            auth_token: true,
+                            budget_header: self.untouched_budget(&token, Some(&grant)),
+                        })
                     }
                     Ok(admitted) => match gate.commit(&reservation, maximum, now) {
                         Ok(header) => Ok(AuthDecision::Granted(Box::new(AuthAuthorized {

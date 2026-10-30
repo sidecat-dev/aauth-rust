@@ -328,6 +328,40 @@ fn a_conflicting_grant_for_the_same_jti_is_500_and_omits_the_budget_header() {
 }
 
 #[test]
+fn a_revoked_budgeted_token_is_refused_with_what_its_grant_has_left() {
+    let resource = resource().with_revocation();
+    let mut revoke = Request::builder()
+        .method("POST")
+        .uri(format!("{RESOURCE}/revoke"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"jti": "revoked", "exp": 4_000})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut revoke,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps".into(),
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(resource.revoke(&revoke, NOW).status(), 200);
+    let refused = resource
+        .authorize(
+            &present(&auth("revoked", Some(2_000), "read"), None),
+            NOW,
+            "c-revoked",
+        )
+        .into_response();
+    assert_eq!(refused.status(), 401);
+    assert_eq!(refused.headers()["signature-error"], "error=revoked_jwt");
+    let header = refused.headers()["aauth-budget"].to_str().unwrap();
+    assert!(header.contains("remaining=2000"), "{header}");
+}
+
+#[test]
 fn an_insufficient_refusal_can_omit_required() {
     let resource = resource().without_stated_required();
     let refused = resource

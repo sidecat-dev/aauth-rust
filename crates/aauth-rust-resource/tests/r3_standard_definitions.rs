@@ -2989,7 +2989,9 @@ fn revocation_during_a_class_call_does_not_draw_down_the_grant() {
         "rt-revoke-during",
     );
     match resource.authorize(&signed_call("/op/permit", &auth), NOW, "revoked-during") {
-        AuthDecision::Revoked { auth_token: true } => {}
+        AuthDecision::Revoked {
+            auth_token: true, ..
+        } => {}
         other => panic!("revoked during the call: {other:?}"),
     }
     assert_eq!(

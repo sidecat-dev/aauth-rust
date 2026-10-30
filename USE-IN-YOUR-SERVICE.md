@@ -514,7 +514,10 @@ boxed refusal response. Application policy sees the verified Auth token and
 actual request only after audience, holder, expiry and configured scopes pass.
 Return your own response after performing authorized work. Admission does not
 freeze time: a long-running operation must decide whether to recheck expiry
-before its eventual effect.
+before its eventual effect. When a budgeted Auth token is refused, the
+`Forbidden`, `Revoked`, `MethodNotAllowed` and `Gone` decisions carry
+`budget_header`; `into_response()` sends it as `AAuth-Budget`, and a host that
+builds its own refusal must send it too.
 
 `BoxedAuthPolicy` names a captured boolean policy, and
 `BoxedAuthAdmissionPolicy<T>` names one returning `Result<T, Deny>` for typed

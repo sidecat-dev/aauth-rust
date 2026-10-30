@@ -1150,6 +1150,8 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
     let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
     let resource = resource(&store, &calls, false)
         .with_budgets(units.clone(), "https://resource.example/usage", 500, 500)
+        .unwrap()
+        .with_r3_per_call(missionless_per_call())
         .unwrap();
     let also = core_resource(&calls)
         .with_budgets(units, "https://resource.example/usage", 1_000, 1_000)
@@ -1199,6 +1201,29 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
         .authorize(&call("/mcp/records.read", &token, 2), NOW, "unused")
         .into_result()
         .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // The R3 gate refuses an operation outside the grant before metering, and
+    // still reports what the budget has left.
+    let denied = resource
+        .authorize(&call("/mcp/records.delete", &token, 2), NOW, "unused")
+        .into_response();
+    assert_eq!(denied.status(), 403);
+    assert!(denied.headers().contains_key("aauth-budget"));
+    // So does a pending URL that the same token is sent to.
+    let posted = resource
+        .authorize(
+            &call_method("POST", "/r3/pending/unknown", &token, 2),
+            NOW,
+            "unused",
+        )
+        .into_response();
+    assert_eq!(posted.status(), 405);
+    assert!(posted.headers().contains_key("aauth-budget"));
+    let gone = resource
+        .authorize(&call("/r3/pending/unknown", &token, 2), NOW, "unused")
+        .into_response();
+    assert_eq!(gone.status(), 410);
+    assert!(gone.headers().contains_key("aauth-budget"));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 

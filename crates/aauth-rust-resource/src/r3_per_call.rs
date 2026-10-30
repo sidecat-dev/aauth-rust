@@ -1212,7 +1212,11 @@ where
             Ok(Some(record)) => record,
             // A pending URL that names no stored invocation is gone. A miss on
             // the mapped completion route stays a refusal of that token.
-            Ok(None) if pending_id.is_some() => return Err(AuthDecision::Gone),
+            Ok(None) if pending_id.is_some() => {
+                return Err(AuthDecision::Gone {
+                    budget_header: None,
+                });
+            }
             Ok(None) => return Err(forbidden()),
             Err(_) => return Err(AuthDecision::InternalError),
         };
@@ -1312,7 +1316,10 @@ where
         let claims = token.claims();
         // Host policy is a callback: a revocation it completed fences admission.
         if self.presented_revoked(&claims.iss, &claims.jti, now) {
-            return Err(AuthDecision::Revoked { auth_token: true });
+            return Err(AuthDecision::Revoked {
+                auth_token: true,
+                budget_header: None,
+            });
         }
         let Some(mut grant) = grant else {
             return Ok(None);
@@ -1345,7 +1352,10 @@ where
                     // Revoked during the claim callback: the claim stays bound
                     // and nothing is retained, so no later replay can release.
                     if self.presented_revoked(&claims.iss, &claims.jti, now) {
-                        return Err(AuthDecision::Revoked { auth_token: true });
+                        return Err(AuthDecision::Revoked {
+                            auth_token: true,
+                            budget_header: None,
+                        });
                     }
                     match per_call.calls.retain(&completion.uri, &fence, &released) {
                         Ok(stored) => Err(AuthDecision::Replayed(Box::new(restore(&stored)))),
@@ -1381,7 +1391,10 @@ where
         // The store is host code too. A completed revocation during its claim or
         // retain callback fences first execution, first release and replay.
         if self.presented_revoked(&claims.iss, &claims.jti, now) {
-            Err(AuthDecision::Revoked { auth_token: true })
+            Err(AuthDecision::Revoked {
+                auth_token: true,
+                budget_header: None,
+            })
         } else {
             outcome
         }

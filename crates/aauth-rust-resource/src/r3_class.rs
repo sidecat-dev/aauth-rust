@@ -773,7 +773,9 @@ where
         if let Some(id) = request.uri().path().strip_prefix("/r3/pending/") {
             // Method before the id and the token, matching held-poll admission.
             if request.method() != http::Method::GET {
-                return Err(AuthDecision::MethodNotAllowed);
+                return Err(AuthDecision::MethodNotAllowed {
+                    budget_header: None,
+                });
             }
             if !carries_r3(&claims.extra) || id.is_empty() || id.contains('/') {
                 return Err(forbidden());
