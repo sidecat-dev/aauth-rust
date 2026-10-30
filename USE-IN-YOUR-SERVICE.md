@@ -1290,6 +1290,23 @@ and `post_audit` refuses it with `ChannelError::MissionTerminated`. Use
 Auth or Resource token. `with_missions` shares one tracker across Agents you build
 separately for the same agent. Nothing here contacts the Person Server.
 
+## Read usage counters
+
+A Person Server or Access Server reads a metered resource's counters at its
+`usage_endpoint`. `person_server.usage_request(endpoint, &query)` and
+`access_server.usage_request(endpoint, &query)` build the signed POST: the server
+signs as itself under `jwks_uri`, with its own `issuer` as `id` and its metadata
+document as `dwk`, covering `content-type` and `content-digest`. The
+`UsageQuery` carries at most one scope key (`sub`, `tenant` or `mission`) and
+optional `jkts`. An Access Server names the Person Server in `ps` whenever it
+sends a scope key; a Person Server never does. Take the endpoint from the
+resource's admitted metadata, apply egress admission, send the exact bytes, and
+read the answer with `read_usage(&response, &query)`. It requires `200`, an `aud`
+equal to the caller, and the scope key echoed unchanged. A resource that has no
+figure for a scope or key omits it. Verify an optional response signature with
+`aauth_rust_budgets::verify_usage_signature`, and poll no faster than your
+decisions need.
+
 ## Prepare explicit Agent polls
 
 `aauth_rust_agent::PollSession::new(endpoint, &response, now, deadline)` parses

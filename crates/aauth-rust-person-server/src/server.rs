@@ -13,6 +13,7 @@ pub use r3::{
     R3ProposalDecision, R3ProposalRequest,
 };
 mod subagents;
+mod usage;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
 

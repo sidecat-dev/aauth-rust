@@ -28,7 +28,8 @@ pub use issuer::{
 pub use ledger::{Caller, ChargeError, KeyRole, Ledger, Refusal, Reservation, TokenAccount};
 pub use usage::{
     Counters, SignedUsage, USAGE_COVERAGE, UsageQuery, UsageResponse, answer_usage,
-    parse_usage_query, sign_usage_response, usage_signature_covers, verify_usage_signature,
+    parse_usage_query, parse_usage_response, sign_usage_response, usage_signature_covers,
+    verify_usage_signature,
 };
 pub use value::{
     Budget, ConsentFigure, ConsumptionRecord, DESCRIPTION_TEXT_LIMIT, Error, MAX_AMOUNT,

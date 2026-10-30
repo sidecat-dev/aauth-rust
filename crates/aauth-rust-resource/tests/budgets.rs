@@ -7,7 +7,7 @@ use std::thread;
 use aauth_rust_access_server::{AccessServer, Config as AsConfig, Decision};
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
-use aauth_rust_budgets::{ChargeError, IssuerPolicy, Refusal, UnitDeclaration};
+use aauth_rust_budgets::{ChargeError, IssuerPolicy, Refusal, UnitDeclaration, UsageQuery};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, AuthToken, Confirmation, ResourceToken, TokenError,
     mint_auth_token,
@@ -752,6 +752,103 @@ impl Policy for Host {
     fn consent(&self, _: &PsAuthorization) -> Result<(), PsPolicyError> {
         Ok(())
     }
+}
+
+#[test]
+fn person_and_access_servers_ask_for_usage_signed_as_themselves() {
+    let resource = resource();
+    let granted = resource
+        .authorize(
+            &present(&auth("asked", Some(2_000), "read"), None),
+            NOW,
+            "asked-c",
+        )
+        .into_response();
+    assert_eq!(granted.status(), 200);
+    let person = PersonServer::new(
+        PsConfig::new(PS, "ps", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        Host,
+        || NOW,
+        || "ps-id".to_owned(),
+    )
+    .unwrap();
+    let holder = SigningKey::from_seed([2; 32])
+        .public_jwk()
+        .thumbprint()
+        .unwrap();
+    let query = UsageQuery {
+        sub: Some("directed".into()),
+        tenant: None,
+        mission: None,
+        ps: None,
+        jkts: Some(vec![holder.clone()]),
+    };
+    let asked = person
+        .usage_request("https://orders.example/usage", &query)
+        .unwrap();
+    assert!(
+        asked.headers()["signature-key"]
+            .to_str()
+            .unwrap()
+            .contains("jwks_uri;id=\"https://ps.example\";dwk=\"aauth-person.json\"")
+    );
+    let answer = resource.usage(&asked, NOW);
+    assert_eq!(
+        answer.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(answer.body())
+    );
+    let usage = person.read_usage(&answer, &query).unwrap();
+    assert_eq!(usage.aud, PS);
+    assert_eq!(usage.scope, Some(("sub", "directed".to_owned())));
+    assert_eq!(usage.usage.unwrap().all_time, 1_000);
+    assert_eq!(usage.jkts.unwrap()[&holder], 1_000);
+    // A person server names no `ps`; it is the caller.
+    let named = UsageQuery {
+        ps: Some(PS.into()),
+        ..query.clone()
+    };
+    assert!(
+        person
+            .usage_request("https://orders.example/usage", &named)
+            .is_err()
+    );
+    assert!(
+        person
+            .usage_request("http://orders.example/usage", &query)
+            .is_err()
+    );
+
+    let access = AccessServer::new(
+        AsConfig::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |_: &aauth_rust_access_server::AuthorizationRequest| {
+            Err(aauth_rust_access_server::PolicyError::Denied)
+        },
+        || NOW,
+        || "as-id".to_owned(),
+    )
+    .unwrap();
+    // An access server names the person server whose `sub` it asks about.
+    assert!(
+        access
+            .usage_request("https://orders.example/usage", &query)
+            .is_err()
+    );
+    let asked = access
+        .usage_request("https://orders.example/usage", &named)
+        .unwrap();
+    let answer = resource.usage(&asked, NOW);
+    assert_eq!(answer.status(), 200);
+    let usage = access.read_usage(&answer, &named).unwrap();
+    assert_eq!(usage.aud, AS);
+    // The access server issued none of these tokens, so it sees no figure.
+    assert_eq!(usage.usage, None);
+    // An answer produced for one caller is not read as a statement about another.
+    assert!(person.read_usage(&answer, &query).is_err());
 }
 
 #[test]

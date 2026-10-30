@@ -39,6 +39,7 @@
 #![deny(missing_docs)]
 mod continuation;
 mod revocation;
+mod usage;
 mod wire;
 use aauth_rust_budgets::{
     Budget, IssuerPolicy, MAX_AMOUNT, check_declared, issue_auth_budget, parse_budget,

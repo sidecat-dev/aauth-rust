@@ -24,6 +24,141 @@ pub struct UsageQuery {
     pub jkts: Option<Vec<String>>,
 }
 
+impl UsageQuery {
+    /// The request body a person server or access server sends to a
+    /// `usage_endpoint` (`draft-hardt-aauth-budgets`, Usage Request).
+    ///
+    /// # Errors
+    /// Returns [`Error::Malformed`] when the query breaks a rule
+    /// [`parse_usage_query`] applies for `role`: at most one scope key, a
+    /// scope key or `jkts`, `ps` with a scope key exactly when the caller is an
+    /// access server, and no empty value.
+    pub fn to_value(&self, role: KeyRole) -> Result<Value, Error> {
+        let mut object = Map::new();
+        for (name, value) in [
+            ("sub", &self.sub),
+            ("tenant", &self.tenant),
+            ("mission_s256", &self.mission),
+            ("ps", &self.ps),
+        ] {
+            if let Some(value) = value {
+                object.insert(name.to_owned(), Value::String(value.clone()));
+            }
+        }
+        if let Some(jkts) = &self.jkts {
+            object.insert(
+                "jkts".to_owned(),
+                Value::Array(jkts.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        let value = Value::Object(object);
+        if parse_usage_query(&value, role)? != *self
+            || (role == KeyRole::AccessServer && self.ps.is_some() && self.scope().is_none())
+        {
+            return Err(Error::Malformed);
+        }
+        Ok(value)
+    }
+
+    fn scope(&self) -> Option<(&'static str, &str)> {
+        self.sub
+            .as_deref()
+            .map(|value| ("sub", value))
+            .or_else(|| self.tenant.as_deref().map(|value| ("tenant", value)))
+            .or_else(|| self.mission.as_deref().map(|value| ("mission_s256", value)))
+    }
+}
+
+/// Read a usage response for `query`, sent by the caller identified as `caller`
+/// (`draft-hardt-aauth-budgets`, Usage Response).
+///
+/// `aud` must be `caller`, so a response produced for another party is not
+/// taken as a statement about this one. The scope key must be echoed
+/// unchanged, and no other scope key may appear. `usage` and `jkts` are
+/// read when present; a resource omits a scope or thumbprint it has no figure
+/// for. Unknown members are ignored. Verify an optional response signature
+/// separately with [`verify_usage_signature`].
+///
+/// # Errors
+/// Returns [`Error::Malformed`] for a body that is not one object, a wrong or
+/// missing `aud`, `as_of`, `unit` or `decimals`, a changed or extra scope
+/// key, a negative or non-integer figure, or `usage` without `all_time`.
+/// Returns [`Error::Range`] for a figure above fifteen digits.
+pub fn parse_usage_response(
+    bytes: &[u8],
+    caller: &str,
+    query: &UsageQuery,
+) -> Result<UsageResponse, Error> {
+    let value = aauth_rust_jose::strict_json(bytes).map_err(|_| Error::Malformed)?;
+    let Value::Object(object) = value else {
+        return Err(Error::Malformed);
+    };
+    let text = |name: &str| match object.get(name) {
+        Some(Value::String(value)) if !value.is_empty() => Ok(value.clone()),
+        _ => Err(Error::Malformed),
+    };
+    let integer = |value: &Value| -> Result<i64, Error> {
+        let figure = value.as_i64().filter(|n| *n >= 0).ok_or(Error::Malformed)?;
+        if figure > MAX_AMOUNT {
+            return Err(Error::Range);
+        }
+        Ok(figure)
+    };
+    if text("aud")? != caller {
+        return Err(Error::Malformed);
+    }
+    let as_of = integer(object.get("as_of").ok_or(Error::Malformed)?)?;
+    let unit = text("unit")?;
+    let decimals = integer(object.get("decimals").ok_or(Error::Malformed)?)?;
+    let expected = query.scope();
+    for name in ["sub", "tenant", "mission_s256"] {
+        let echoed = object.get(name);
+        match expected {
+            Some((key, value)) if key == name => {
+                if echoed.and_then(Value::as_str) != Some(value) {
+                    return Err(Error::Malformed);
+                }
+            }
+            _ if echoed.is_some() => return Err(Error::Malformed),
+            _ => {}
+        }
+    }
+    let usage = match object.get("usage") {
+        None => None,
+        Some(Value::Object(counters)) => {
+            let period = |name: &str| counters.get(name).map(integer).transpose();
+            Some(Counters {
+                day: period("day")?,
+                week: period("week")?,
+                month: period("month")?,
+                year: period("year")?,
+                all_time: period("all_time")?.ok_or(Error::Malformed)?,
+            })
+        }
+        Some(_) => return Err(Error::Malformed),
+    };
+    let jkts = match object.get("jkts") {
+        None => None,
+        Some(Value::Object(figures)) => {
+            let mut keys = BTreeMap::new();
+            for (thumbprint, figure) in figures {
+                keys.insert(thumbprint.clone(), integer(figure)?);
+            }
+            Some(keys)
+        }
+        Some(_) => return Err(Error::Malformed),
+    };
+    Ok(UsageResponse {
+        as_of,
+        aud: caller.to_owned(),
+        unit,
+        decimals,
+        scope: expected.map(|(name, value)| (name, value.to_owned())),
+        usage,
+        jkts,
+    })
+}
+
 /// Calendar counters. `all_time` is always present when `usage` is present.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Counters {
