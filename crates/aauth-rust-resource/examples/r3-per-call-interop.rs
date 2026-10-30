@@ -54,13 +54,17 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         t.federated_protected_runs,
     );
     println!(
-        "federated held: challenge={} too-early={} wait={} poll={} replay={} replay-matches={} protected-runs={}",
+        "federated held: challenge={} too-early={} wait={} poll={} replay={} replay-matches={} method={} method-err={} unknown={} unknown-err={} protected-runs={}",
         t.federated_held_challenge_status,
         t.federated_held_poll_too_early,
         t.federated_held_poll_wait,
         t.federated_held_poll_status,
         t.federated_held_replay_status,
         t.federated_held_replay_matches,
+        t.federated_held_method_status,
+        t.federated_held_method_error,
+        t.federated_held_unknown_status,
+        t.federated_held_unknown_error,
         t.federated_held_protected_runs,
     );
     Ok(())

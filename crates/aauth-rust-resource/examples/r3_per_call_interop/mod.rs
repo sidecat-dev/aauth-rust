@@ -27,7 +27,9 @@
 //!    replay. `POST /records/held-1` is the only held-delivery request: the
 //!    Resource returns `202`. The agent refuses that poll until `Retry-After`
 //!    elapses, then a `GET` of the pending URL runs the protected handler once
-//!    and replays the same auth token. Budget stays unset.
+//!    and replays the same auth token. A `POST` of that pending URL is `405`
+//!    `method_not_allowed`. A `GET` of a different pending id is `410` `gone`.
+//!    Budget stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -143,6 +145,10 @@ pub struct InteropTranscript {
     pub federated_held_poll_status: u16,
     pub federated_held_replay_status: u16,
     pub federated_held_replay_matches: bool,
+    pub federated_held_method_status: u16,
+    pub federated_held_method_error: String,
+    pub federated_held_unknown_status: u16,
+    pub federated_held_unknown_error: String,
     pub federated_held_protected_runs: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
@@ -1619,6 +1625,62 @@ fn handle_federated_converse(
     if !held_replay_matches {
         return Err(http_failure("federated held replay", &held_replayed));
     }
+    // Go checks the method before it loads or claims the invocation.
+    let method_req = post_at(&poll_holder, &poll_target, b"{}", poll_at)?;
+    let method_refused = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &method_req,
+    )?;
+    let held_method_status = method_refused.status().as_u16();
+    let held_method_error = member(&method_refused, "error").unwrap_or_default();
+    let held_method_allow = method_refused
+        .headers()
+        .get("allow")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if held_method_status != 405
+        || held_method_error != "method_not_allowed"
+        || held_method_allow != "GET"
+    {
+        return Err(format!(
+            "federated held non-GET poll failed ({held_method_status} {held_method_error} allow={held_method_allow}): {}",
+            String::from_utf8_lossy(method_refused.body())
+        )
+        .into());
+    }
+    let unknown_id = "not-this-held-call";
+    if pending_id == unknown_id || !held_pending_id_ok(unknown_id) {
+        return Err("federated held unknown pending id is not a distinct URL-safe id".into());
+    }
+    let unknown_req = signed_get(
+        &poll_holder,
+        &format!("{FED_RECORDS}/pending/{unknown_id}"),
+        poll_at,
+    )?;
+    let unknown = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &unknown_req,
+    )?;
+    let held_unknown_status = unknown.status().as_u16();
+    let held_unknown_error = member(&unknown, "error").unwrap_or_default();
+    if held_unknown_status != 410 || held_unknown_error != "gone" {
+        return Err(http_failure("federated held unknown pending id", &unknown));
+    }
+    let still_req = signed_get(&poll_holder, &poll_target, poll_at)?;
+    let still = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &still_req,
+    )?;
+    if still.status().as_u16() != 200 || still.body() != polled.body() {
+        return Err(http_failure("federated held replay after rejection", &still));
+    }
 
     Ok(json!({
         "person_status": person_status,
@@ -1636,6 +1698,10 @@ fn handle_federated_converse(
         "held_poll_status": held_poll_status,
         "held_replay_status": held_replay_status,
         "held_replay_matches": held_replay_matches,
+        "held_method_status": held_method_status,
+        "held_method_error": held_method_error,
+        "held_unknown_status": held_unknown_status,
+        "held_unknown_error": held_unknown_error,
     }))
 }
 
@@ -1971,6 +2037,10 @@ pub fn run() -> Result<InteropTranscript> {
         federated_held_replay_matches: raw["federated_held_replay_matches"]
             .as_bool()
             .unwrap_or(false),
+        federated_held_method_status: number(&raw, "federated_held_method_status")? as u16,
+        federated_held_method_error: text(&raw, "federated_held_method_error")?,
+        federated_held_unknown_status: number(&raw, "federated_held_unknown_status")? as u16,
+        federated_held_unknown_error: text(&raw, "federated_held_unknown_error")?,
         federated_held_protected_runs: number(&raw, "federated_held_protected_runs")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
@@ -2032,6 +2102,10 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_held_poll_status != 200
         || t.federated_held_replay_status != 200
         || !t.federated_held_replay_matches
+        || t.federated_held_method_status != 405
+        || t.federated_held_method_error != "method_not_allowed"
+        || t.federated_held_unknown_status != 410
+        || t.federated_held_unknown_error != "gone"
         || t.federated_held_protected_runs != 1
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]

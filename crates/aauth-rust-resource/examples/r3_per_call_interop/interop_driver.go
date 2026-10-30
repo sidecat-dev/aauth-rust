@@ -92,21 +92,25 @@ type federatedConverseRequest struct {
 }
 
 type federatedConverseResponse struct {
-	PersonStatus            int  `json:"person_status"`
-	ClassExchangeStatus     int  `json:"class_exchange_status"`
-	ClassVerified           bool `json:"class_verified"`
-	ProposalChallengeStatus int  `json:"proposal_challenge_status"`
-	ProposalExchangeStatus  int  `json:"proposal_exchange_status"`
-	ProposalVerified        bool `json:"proposal_verified"`
-	CompletionStatus        int  `json:"completion_status"`
-	ReplayStatus            int  `json:"replay_status"`
-	ReplayMatches           bool `json:"replay_matches"`
-	HeldChallengeStatus     int  `json:"held_challenge_status"`
-	HeldPollTooEarly        bool `json:"held_poll_too_early"`
-	HeldPollWait            int  `json:"held_poll_wait"`
-	HeldPollStatus          int  `json:"held_poll_status"`
-	HeldReplayStatus        int  `json:"held_replay_status"`
-	HeldReplayMatches       bool `json:"held_replay_matches"`
+	PersonStatus            int    `json:"person_status"`
+	ClassExchangeStatus     int    `json:"class_exchange_status"`
+	ClassVerified           bool   `json:"class_verified"`
+	ProposalChallengeStatus int    `json:"proposal_challenge_status"`
+	ProposalExchangeStatus  int    `json:"proposal_exchange_status"`
+	ProposalVerified        bool   `json:"proposal_verified"`
+	CompletionStatus        int    `json:"completion_status"`
+	ReplayStatus            int    `json:"replay_status"`
+	ReplayMatches           bool   `json:"replay_matches"`
+	HeldChallengeStatus     int    `json:"held_challenge_status"`
+	HeldPollTooEarly        bool   `json:"held_poll_too_early"`
+	HeldPollWait            int    `json:"held_poll_wait"`
+	HeldPollStatus          int    `json:"held_poll_status"`
+	HeldReplayStatus        int    `json:"held_replay_status"`
+	HeldReplayMatches       bool   `json:"held_replay_matches"`
+	HeldMethodStatus        int    `json:"held_method_status"`
+	HeldMethodError         string `json:"held_method_error"`
+	HeldUnknownStatus       int    `json:"held_unknown_status"`
+	HeldUnknownError        string `json:"held_unknown_error"`
 }
 
 type transcriptOutput struct {
@@ -164,6 +168,10 @@ type transcriptOutput struct {
 	FederatedHeldPollStatus                     int      `json:"federated_held_poll_status"`
 	FederatedHeldReplayStatus                   int      `json:"federated_held_replay_status"`
 	FederatedHeldReplayMatches                  bool     `json:"federated_held_replay_matches"`
+	FederatedHeldMethodStatus                   int      `json:"federated_held_method_status"`
+	FederatedHeldMethodError                    string   `json:"federated_held_method_error"`
+	FederatedHeldUnknownStatus                  int      `json:"federated_held_unknown_status"`
+	FederatedHeldUnknownError                   string   `json:"federated_held_unknown_error"`
 	FederatedHeldProtectedRuns                  int      `json:"federated_held_protected_runs"`
 	Reads                                       int      `json:"reads"`
 	Deletes                                     []string `json:"deletes"`
@@ -1144,6 +1152,10 @@ func main() {
 	out.FederatedHeldPollStatus = fedOut.HeldPollStatus
 	out.FederatedHeldReplayStatus = fedOut.HeldReplayStatus
 	out.FederatedHeldReplayMatches = fedOut.HeldReplayMatches
+	out.FederatedHeldMethodStatus = fedOut.HeldMethodStatus
+	out.FederatedHeldMethodError = fedOut.HeldMethodError
+	out.FederatedHeldUnknownStatus = fedOut.HeldUnknownStatus
+	out.FederatedHeldUnknownError = fedOut.HeldUnknownError
 	out.FederatedHeldProtectedRuns = fedCounts.HeldProtectedRuns
 
 	finalState := fetchState()
