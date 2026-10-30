@@ -819,6 +819,22 @@ harness threads (705 passed, 0 failed, 9 ignored in 78 targets) and the
 `2026-10-30T11:37:26.652223103+00:00`, `Result=success`, `ExecMainStatus=0`.
 These are engineering checks, not product QA.
 
+Independent consumer QA of that candidate, over HTTPS with live aauth-go,
+found one defect. The Resource gave every Resource token a fixed 300-second
+lifetime, including mission-bound ones. With less than five minutes left on
+the Person token, the Agent then refused the Resource's own challenge.
+Commit `d778d45265684a6b523f6ba6f5db1047ea3ae278` (tree
+`e207cf45a321a0e953b9a6cebb76a65764830003`) ends a mission-bound Resource token
+no later than the token presented with it, as aauth-go does. This covers the
+reactive challenge, the proactive R3 grant and the budget step-up. Missionless
+tokens keep 300 seconds. `a_mission_resource_token_ends_with_the_person_token`
+pins a two-minute mission on both R3 paths. Host3 `aauth-claude-missions03` at
+that commit passed rustfmt, library and binary Clippy with `-D warnings`,
+`cargo test --locked --no-fail-fast` with two harness threads (706 passed,
+0 failed, 9 ignored in 78 targets) and the `r3-per-call-interop` tests. Receipt
+START `2026-10-30T13:45:55.864099778+00:00`, END
+`2026-10-30T13:53:08.853082365+00:00`, `Result=success`, `ExecMainStatus=0`.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
