@@ -614,6 +614,47 @@ receipt and does not change behavior. It does not change the DirectR3 interop
 pin or retained-grant `budget_consumed`. This is not a separate product-QA
 pass and not power loss.
 
+A five-second auth token for `expire-1` now returns 401 at its exp. Commit
+`fa5f08c446df7d38aab48d6b8a556a7739bafbc6` (tree
+`ef086893c751f6632b1603e18ae6160b2205fd6b`) issued that `records.delete`
+proposal for five seconds and presented it with a signature created at exp.
+Host3 `aauth-wc07-completion-fedexpire01` at that source returned 200
+`{"deleted":true}`. Invocation `0b6a13da67b143398af8fe3778695024`. START
+`2026-10-30T04:39:26.497417235+00:00`, log mtime
+`2026-10-30T04:39:39.685698081Z`. The log recorded `CARGO_RC 1` and no
+`FEDEXPIRE01_DONE`. Go sets signature `VerifiedAt` from the server clock, so
+the signature created time did not expire the token. That unit is not a pass.
+Commit `278f59faff5580467ef774a8f17178d44832b3e1` (tree
+`e60632bd0c4923194adbbd9b21d38c53ac88a9ee`) moves the federated server clock
+to that exp after issuance and signs the completion at the same instant. The
+status is `401` `invalid_token`. The problem type is
+`urn:ietf:params:sig-error:expired_jwt`. The `Signature-Error` header is
+`error=expired_jwt`. The JSON `error` field stays `invalid_token`. The
+protected handler did not run. `POST /records/r-1` stays the 401 completion.
+Only `POST /records/held-1` is held. Budget stays unset. The DirectR3 clock
+stays at InitialNow. Host3 `aauth-wc07-completion-fedexpire02` ran at that
+source. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The held challenge is
+202, the immediate poll is refused, the wait is 5, the poll is 200, the
+replay is 200, and the replay body matches. The method is 405
+`method_not_allowed`, and the unknown pending id is 410 `gone`. The different
+compact token is 403 `access_denied`. The expired call is 401
+`invalid_token` with signature error `error=expired_jwt`, and its protected
+handler ran zero times. The held protected handler ran once. The r-1
+completion stayed 200 with one protected run. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Reads stayed 2 and both
+deletes stayed `"r-1"`. The transcript check required three proposal
+consents, three proposal authorizations, and four issuances. Class consent
+and class authorization stayed one. Receipt START
+`2026-10-30T04:45:07.658500613+00:00`, log mtime
+`2026-10-30T04:45:21.019017701Z`. systemd-run invocation
+`42fbfb6d97744efea1d666b2c0f2c9f2`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDEXPIRE02_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. This is not a separate product-QA pass and
+not power loss. The clock advance is not a wall-clock sleep.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
