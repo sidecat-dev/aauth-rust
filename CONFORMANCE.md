@@ -420,6 +420,31 @@ still requires `aauth-person.json` on a delivered Auth token. This is not
 the Go four-party HTTP exchange, not a separate product-QA pass, and not
 power loss.
 
+A later Agent change accepts the grant Go's access server issues. The signed
+`dwk` selects the issuer role. `aauth-person.json` still requires `iss == ps`.
+`aauth-access.json` is an Access Server. In both cases `iss` is the Resource
+token's `aud`, and that audience is no longer required to be the Person
+Server. A per-call grant uses the class token's `dwk`, including when the
+Person Server and Access Server identifiers are the same. The tests are
+`access_server_class_grant_uses_the_signed_access_document`,
+`direct_person_server_grant_still_verifies`,
+`access_server_per_call_grant_uses_the_class_document`, and
+`shared_identifier_keeps_the_class_tokens_access_document`. Host3
+`aauth-wc07-completion-agentdlv01` ran that file at
+`b571a068d7d92d40adac1447116874f50ff886bb` (tree
+`03844aeb3dcf97b548639a46c1e8c70867145c90`). Four tests passed and none
+failed. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Receipt START
+`2026-10-30T01:55:01.369101645+00:00`, log mtime
+`2026-10-30T01:55:25.050481331Z`. systemd-run invocation
+`350646b4ff4f4df9aa9cc260c41c147e`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. This
+commit records that receipt and does not change behavior. It does not change
+the DirectR3 interop pin or retained-grant `budget_consumed`. This is not
+the Go federated HTTP exchange, not a separate product-QA pass, and not
+power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
