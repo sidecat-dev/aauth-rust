@@ -187,6 +187,9 @@ fn person() -> String {
     person_on_mission(None)
 }
 fn person_on_mission(mission: Option<&str>) -> String {
+    person_on_mission_until(mission, 3000)
+}
+fn person_on_mission_until(mission: Option<&str>, exp: i64) -> String {
     mint_person_token(
         &SigningKey::from_seed([3; 32]),
         "ps-1",
@@ -197,7 +200,7 @@ fn person_on_mission(mission: Option<&str>) -> String {
             sub: "directed-person".into(),
             jti: "person-1".into(),
             iat: NOW,
-            exp: 3000,
+            exp,
             cnf: Confirmation {
                 jwk: SigningKey::from_seed([2; 32]).public_jwk(),
             },
@@ -2478,6 +2481,70 @@ fn missionless_per_call() -> R3PerCallConfig {
         release: None,
         held_result_lifetime: 300,
     }
+}
+
+#[test]
+fn a_mission_resource_token_ends_with_the_person_token() {
+    const MISSION: &str = "N1fWRFx_bLw1RcyTspTOoOuN1ct9hw7mEHZuGFMTmhw";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let resource = core_resource(&calls)
+        .with_mission_context()
+        .with_r3(r3_config(&store, false))
+        .unwrap();
+    let expiry = |response: Response<Vec<u8>>, proactive: bool| -> i64 {
+        let compact = if proactive {
+            assert_eq!(response.status(), 200);
+            let body: Value = serde_json::from_slice(response.body()).unwrap();
+            body["resource_token"].as_str().unwrap().to_owned()
+        } else {
+            assert_eq!(response.status(), 401);
+            response.headers()["aauth-requirement"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("requirement=auth-token;resource-token=\"")
+                .unwrap()
+                .strip_suffix('"')
+                .unwrap()
+                .to_owned()
+        };
+        verify_resource_token(&compact, &keys(), NOW)
+            .unwrap()
+            .claims()
+            .exp
+    };
+    // A two-minute mission: the Resource token ends with the Person token.
+    let person = person_on_mission_until(Some(MISSION), NOW + 120);
+    let proactive = resource
+        .authorize_endpoint(
+            &authorize_as(
+                ORIGIN,
+                person.clone(),
+                json!({ "r3_operations": operations(&["records.read"]) }),
+            ),
+            NOW,
+            "rt-short",
+        )
+        .into_response();
+    assert_eq!(expiry(proactive, true), NOW + 120);
+    let reactive = resource
+        .authorize(&call("/mcp/records.read", &person, 2), NOW, "rt-short-2")
+        .into_response();
+    assert_eq!(expiry(reactive, false), NOW + 120);
+    // A missionless Person token keeps the ordinary five-minute challenge.
+    let reactive = resource
+        .authorize(
+            &call(
+                "/mcp/records.read",
+                &person_on_mission_until(None, NOW + 120),
+                2,
+            ),
+            NOW,
+            "rt-short-3",
+        )
+        .into_response();
+    assert_eq!(expiry(reactive, false), NOW + 300);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

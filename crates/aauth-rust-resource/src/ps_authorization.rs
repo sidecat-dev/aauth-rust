@@ -1193,7 +1193,11 @@ where
                         .thumbprint()
                         .map_err(|error| SignatureFailure::Token(error.into()))?,
                     iat: now,
-                    exp: now.saturating_add(300),
+                    exp: challenge_exp(
+                        now,
+                        self.mission_context && claims.mission_s256.is_some(),
+                        claims.exp,
+                    ),
                     scope: Some(self.config.scopes.join(" ")),
                     account,
                     login_hint,
@@ -1467,7 +1471,11 @@ where
                         .thumbprint()
                         .map_err(|error| SignatureFailure::Token(error.into()))?,
                     iat: now,
-                    exp: now.saturating_add(300),
+                    exp: challenge_exp(
+                        now,
+                        self.mission_context && claims.mission_s256.is_some(),
+                        claims.exp,
+                    ),
                     scope: None,
                     account: None,
                     login_hint: None,
@@ -1768,7 +1776,11 @@ where
             presented_jti: claims.jti.clone(),
             agent_jkt: claims.cnf.jwk.thumbprint().map_err(|_| ())?,
             iat: now,
-            exp: now.saturating_add(300),
+            exp: challenge_exp(
+                now,
+                self.mission_context && claims.mission_s256.is_some(),
+                claims.exp,
+            ),
             scope: Some(self.config.scopes.join(" ")),
             account: claims.account.clone(),
             login_hint: None,
@@ -2027,5 +2039,15 @@ fn insert_budget(response: &mut Response<Vec<u8>>, header: Option<String>) {
         && let Ok(value) = header.parse()
     {
         response.headers_mut().insert("aauth-budget", value);
+    }
+}
+
+/// A mission-bound Resource token never outlives the token presented with it.
+fn challenge_exp(now: i64, mission_bound: bool, presented_exp: i64) -> i64 {
+    let exp = now.saturating_add(300);
+    if mission_bound {
+        exp.min(presented_exp)
+    } else {
+        exp
     }
 }
