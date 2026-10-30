@@ -62,6 +62,52 @@ impl Display {
         self.irreversible.as_deref()
     }
 
+    /// One display for a document composed from several definitions
+    /// (`draft-hardt-aauth-r3`, Operations Spanning Multiple Definitions).
+    ///
+    /// Summaries are joined with `; ` in the given order. `implications` and
+    /// `irreversible` are concatenated, one part per line. `data_accessed` is
+    /// the union of the distinct values, joined with `; `. A member is present
+    /// when any part has it, and empty when every part that has it is empty.
+    ///
+    /// # Errors
+    /// Returns [`Error`] when `parts` is empty.
+    pub fn merged(parts: &[&Display]) -> Result<Self, Error> {
+        let (first, rest) = parts
+            .split_first()
+            .ok_or_else(|| Error::new("r3: a merged display needs at least one part"))?;
+        if rest.is_empty() {
+            return Ok((*first).clone());
+        }
+        fn joined<'a>(
+            values: impl Iterator<Item = Option<&'a str>>,
+            separator: &str,
+            distinct: bool,
+        ) -> Option<String> {
+            let mut present = false;
+            let mut kept: Vec<&str> = Vec::new();
+            for value in values.flatten() {
+                present = true;
+                if !value.is_empty() && !(distinct && kept.contains(&value)) {
+                    kept.push(value);
+                }
+            }
+            present.then(|| kept.join(separator))
+        }
+        let display = Self {
+            summary: parts
+                .iter()
+                .map(|part| part.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+            implications: joined(parts.iter().map(|part| part.implications()), "\n", false),
+            data_accessed: joined(parts.iter().map(|part| part.data_accessed()), "; ", true),
+            irreversible: joined(parts.iter().map(|part| part.irreversible()), "\n", false),
+        };
+        display.validate()?;
+        Ok(display)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Error> {
         if self.summary.trim().is_empty() {
             return Err(Error::new("r3: display summary is required"));

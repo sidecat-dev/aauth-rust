@@ -607,6 +607,28 @@ application state. Wrong-audience Person/Auth tokens return local
 policy. Their wire code remains the pinned draft's `invalid_jwt`; obtain a
 credential for the intended Resource instead of refreshing an otherwise valid JWT.
 
+## Compose one R3 document across definitions
+
+A Resource may organize its R3 authorization into several internal definitions,
+for example one per scope or operation group, each with its own consent text.
+Group them with `R3Definitions::new(vec![(operations, display), ...])`. Each
+operation belongs to exactly one group, and all groups share one vocabulary.
+Install the result as the vocabulary's display:
+
+```rust
+vocabulary.display = Some(definitions.into_display());
+```
+
+A resource token always references one document whose `operations` are exactly
+the requested set. When those operations come from more than one group, that
+document's `display` is the merge of the groups' displays (`Display::merged`):
+summaries joined with `; `, `implications` and `irreversible` concatenated one per
+line, and the distinct `data_accessed` values joined with `; `. A request inside
+one group gets that group's display unchanged. The composed bytes are committed
+like any other document before the token is released, so an identical
+combination always has the same digest. A requested operation outside every
+group is a host error, and the request is refused without a token.
+
 ## Hold a side-effect-free call for release
 
 Use this when the Resource can run a query before the person approves disclosure.

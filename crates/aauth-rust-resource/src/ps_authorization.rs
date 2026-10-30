@@ -43,9 +43,9 @@ pub use r3_call_directory::DirectoryCallStore;
 mod r3_document_directory;
 pub use r3_class::{
     BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, BoxedR3Release,
-    R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,
-    R3DocumentStore, R3Grant, R3HeldRequest, R3HostError, R3PendingHeaders, R3PerCallConfig,
-    R3ProposalRecord, R3Release, R3StoreError, R3Vocabulary,
+    R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3Definitions,
+    R3DocumentRecord, R3DocumentStore, R3Grant, R3HeldRequest, R3HostError, R3PendingHeaders,
+    R3PerCallConfig, R3ProposalRecord, R3Release, R3StoreError, R3Vocabulary,
 };
 pub use r3_document_directory::DirectoryDocumentStore;
 

@@ -64,6 +64,90 @@ impl std::error::Error for R3HostError {
 /// Host consent description for one validated operation set.
 pub type BoxedR3Display = Box<dyn Fn(&OperationSet) -> Result<Display, R3HostError> + Send + Sync>;
 
+/// A Resource's internal R3 definitions for one vocabulary, for example one
+/// per scope or operation group, each with its own consent text
+/// (`draft-hardt-aauth-r3`, Operations Spanning Multiple Definitions).
+///
+/// A Resource token always references one document whose `operations` are
+/// exactly the requested set. When the requested operations come from more
+/// than one of these definitions, that document is the composed one: its
+/// `display` merges the definitions' displays with [`Display::merged`]. A
+/// request inside one definition gets that definition's display unchanged.
+/// The composed bytes are committed like any other document, so the same
+/// combination always has the same digest. Install it as an
+/// [`R3Vocabulary::display`] with [`Self::into_display`].
+pub struct R3Definitions {
+    definitions: Vec<(OperationSet, Display)>,
+}
+
+impl R3Definitions {
+    /// Group the definitions in the order their displays are merged.
+    ///
+    /// # Errors
+    /// [`PsConfigurationError::InvalidR3Profile`] for an empty list, an empty
+    /// operation set, definitions from different vocabularies, or two
+    /// definitions that share an operation: each operation must belong to
+    /// exactly one definition.
+    pub fn new(definitions: Vec<(OperationSet, Display)>) -> Result<Self, PsConfigurationError> {
+        let invalid = PsConfigurationError::InvalidR3Profile;
+        let Some((first, _)) = definitions.first() else {
+            return Err(invalid);
+        };
+        for (index, (operations, _)) in definitions.iter().enumerate() {
+            if operations.vocabulary() != first.vocabulary()
+                || operations.operations().map_err(|_| invalid)?.is_empty()
+            {
+                return Err(invalid);
+            }
+            for (earlier, _) in &definitions[..index] {
+                if !operations.is_disjoint(earlier).map_err(|_| invalid)? {
+                    return Err(invalid);
+                }
+            }
+        }
+        Ok(Self { definitions })
+    }
+
+    /// The display for a document covering `requested`: the one definition's
+    /// display, or the merge of every definition the operations come from.
+    ///
+    /// # Errors
+    /// [`R3HostError`] when a requested operation is in none of the
+    /// definitions, or the operations cannot be compared.
+    pub fn display(&self, requested: &OperationSet) -> Result<Display, R3HostError> {
+        let mut used = vec![false; self.definitions.len()];
+        for operation in requested.operations().map_err(R3HostError::new)? {
+            let single =
+                OperationSet::new(std::slice::from_ref(&operation)).map_err(R3HostError::new)?;
+            let mut found = false;
+            for (index, (operations, _)) in self.definitions.iter().enumerate() {
+                if single.is_subset_of(operations).map_err(R3HostError::new)? {
+                    used[index] = true;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Err(R3HostError::new(
+                    "requested R3 operation is in no internal definition",
+                ));
+            }
+        }
+        let parts: Vec<&Display> = self
+            .definitions
+            .iter()
+            .zip(used)
+            .filter_map(|((_, display), used)| used.then_some(display))
+            .collect();
+        Display::merged(&parts).map_err(R3HostError::new)
+    }
+
+    /// This composition as the vocabulary's display callback.
+    pub fn into_display(self) -> BoxedR3Display {
+        Box::new(move |requested: &OperationSet| self.display(requested))
+    }
+}
+
 /// Host mapping from one protected request to its R3 operation.
 ///
 /// `Ok(None)` names a Core-only route. The mapping runs only after the

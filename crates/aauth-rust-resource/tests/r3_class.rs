@@ -21,8 +21,8 @@ use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
     BoxedR3Present, BoxedR3Release, Deny, ProactiveDecision, PsAuthorizationConfig,
     PsAuthorizationResource, PsConfigurationError, R3CallResult, R3CallStore, R3CallToken, R3Claim,
-    R3Config, R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig, R3ProposalRecord,
-    R3Release, R3StoreError, R3Vocabulary,
+    R3Config, R3Definitions, R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig,
+    R3ProposalRecord, R3Release, R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -506,6 +506,78 @@ fn r3_operations_commit_exact_document_and_lineage_before_the_token_is_released(
         verify_resource_token(body["resource_token"].as_str().unwrap(), &keys(), NOW).unwrap();
     assert_eq!(verified.claims().scope.as_deref(), Some("records.read"));
     assert_eq!(store.records.lock().unwrap().len(), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn operations_from_several_internal_definitions_reference_one_composed_document() {
+    let set = |tools: &[&str]| {
+        OperationSet::new(&tools.iter().map(|tool| mcp(tool)).collect::<Vec<_>>()).unwrap()
+    };
+    let read = R3Display::new("Read your records", None, Some("Record titles"), None).unwrap();
+    let delete = R3Display::new(
+        "Delete your records",
+        Some("Records are removed"),
+        Some("Record titles"),
+        Some("Deleted records cannot be restored"),
+    )
+    .unwrap();
+    assert!(
+        R3Definitions::new(vec![
+            (set(&["records.read"]), read.clone()),
+            (set(&["records.read", "records.delete"]), delete.clone()),
+        ])
+        .is_err(),
+        "an operation belongs to one definition"
+    );
+    let definitions = R3Definitions::new(vec![
+        (set(&["records.read"]), read),
+        (set(&["records.delete"]), delete),
+    ])
+    .unwrap();
+    let store = Arc::new(VolatileTestStore::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut config = r3_config(&store, false);
+    config.vocabularies[0].display = Some(definitions.into_display());
+    let resource = core_resource(&calls).with_r3(config).unwrap();
+    let issue_for = |tools: &[&str], jti: &str| {
+        let response = resource
+            .authorize_endpoint(
+                &authorize(json!({ "r3_operations": operations(tools) })),
+                NOW,
+                jti,
+            )
+            .into_response();
+        assert_eq!(response.status(), 200);
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        let verified =
+            verify_resource_token(body["resource_token"].as_str().unwrap(), &keys(), NOW).unwrap();
+        let record = store.records.lock().unwrap()[verified.reference().uri()].clone();
+        standard_registry()
+            .unwrap()
+            .parse_referenced_document(&record.reference, &record.exact_json)
+            .unwrap()
+    };
+
+    let single = issue_for(&["records.read"], "rt-single");
+    assert_eq!(single.display().unwrap().summary(), "Read your records");
+    assert_eq!(single.display().unwrap().implications(), None);
+
+    let composed = issue_for(&["records.read", "records.delete"], "rt-composed");
+    assert!(
+        composed
+            .operation_set()
+            .equal(&set(&["records.read", "records.delete"]))
+            .unwrap()
+    );
+    let display = composed.display().unwrap();
+    assert_eq!(display.summary(), "Read your records; Delete your records");
+    assert_eq!(display.implications(), Some("Records are removed"));
+    assert_eq!(display.data_accessed(), Some("Record titles"));
+    assert_eq!(
+        display.irreversible(),
+        Some("Deleted records cannot be restored")
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 

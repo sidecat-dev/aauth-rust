@@ -17,7 +17,7 @@ use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,
     BoxedR3Display, BoxedR3OperationMapper, HeldAdmission, ObservedAdmission, ProactiveDecision,
-    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError, R3Config,
+    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError, R3Config, R3Definitions,
     R3DocumentRecord, R3DocumentStore, R3Grant, R3HostError, R3StoreError, R3Vocabulary,
 };
 pub use ps_authorization::{
