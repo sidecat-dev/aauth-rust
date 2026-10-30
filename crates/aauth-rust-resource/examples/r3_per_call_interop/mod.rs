@@ -25,12 +25,13 @@
 //!    with `ConsentDocument` and `ConsentProposal`. One class document covers
 //!    `records.delete`. `POST /records/r-1` stays a `401` completion and exact
 //!    replay. `POST /records/held-1` is the only held-delivery request: the
-//!    Resource returns `202`, and a later `GET` of that pending URL runs the
-//!    protected handler once and replays the same auth token. Budget stays unset.
+//!    Resource returns `202`. The agent refuses that poll until `Retry-After`
+//!    elapses, then a `GET` of the pending URL runs the protected handler once
+//!    and replays the same auth token. Budget stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
-use aauth_rust_agent::Agent;
+use aauth_rust_agent::{Agent, PollError, PollSession};
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
@@ -137,6 +138,8 @@ pub struct InteropTranscript {
     pub federated_replay_matches: bool,
     pub federated_protected_runs: usize,
     pub federated_held_challenge_status: u16,
+    pub federated_held_poll_too_early: bool,
+    pub federated_held_poll_wait: usize,
     pub federated_held_poll_status: u16,
     pub federated_held_replay_status: u16,
     pub federated_held_replay_matches: bool,
@@ -1506,40 +1509,30 @@ fn handle_federated_converse(
         &held_req,
     )?;
     let held_challenge_status = held_challenged.status().as_u16();
-    let held_body: Value = serde_json::from_slice(held_challenged.body()).unwrap_or(Value::Null);
-    if held_challenge_status != 202
-        || held_body.get("status").and_then(Value::as_str) != Some("pending")
-    {
+    let mut held_poll = PollSession::new(
+        &format!("{FED_RECORDS}/records/held-1"),
+        &held_challenged,
+        clock,
+        clock + 60,
+    )
+    .map_err(|_| "federated held challenge is not a pending poll")?;
+    if held_challenge_status != 202 || held_poll.pending().retry_after != 5 {
         return Err(http_failure("federated held challenge", &held_challenged));
     }
-    if held_challenged
-        .headers()
-        .get("retry-after")
-        .and_then(|value| value.to_str().ok())
-        != Some("5")
-        || held_challenged
-            .headers()
-            .get("cache-control")
-            .and_then(|value| value.to_str().ok())
-            != Some("no-store")
-    {
-        return Err(http_failure(
-            "federated held challenge headers",
-            &held_challenged,
-        ));
-    }
-    let held_location = held_challenged
-        .headers()
-        .get("location")
-        .and_then(|value| value.to_str().ok())
-        .ok_or("federated held challenge missing Location")?;
-    let pending_id = held_location
+    let pending_id = held_poll
+        .pending()
+        .location
         .strip_prefix(&format!("{FED_RECORDS}/pending/"))
         .ok_or("federated held Location is not the resource pending URL")?;
     if !held_pending_id_ok(pending_id) {
         return Err("federated held pending identifier is not URL-safe".into());
     }
-    let held_rt = challenge(&held_challenged)?;
+    let held_rt = match &held_poll.pending().requirement {
+        aauth_rust_core::continuation::Requirement::AuthToken { resource_token } => {
+            resource_token.clone()
+        }
+        _ => return Err("federated held challenge is not an auth-token requirement".into()),
+    };
     let verified_held = agent.verify_r3_proposal_challenge(
         &held_rt,
         FED_RECORDS,
@@ -1584,19 +1577,37 @@ fn handle_federated_converse(
         return Err("federated held grant was not issued by the access server".into());
     }
     let poll_holder = agent.with_token(held_grant)?;
-    let poll_target = held_location.to_owned();
-    let poll_req = signed_get(&poll_holder, &poll_target, clock)?;
+    let held_poll_too_early = match held_poll.request(&poll_holder, clock) {
+        Err(PollError::TooEarly { at }) if at == clock + 5 => true,
+        Err(error) => return Err(format!("federated held poll wait: {error}").into()),
+        Ok(_) => return Err("federated held poll ran before Retry-After".into()),
+    };
+    let held_poll_wait = 5_i64;
+    let poll_at = clock + held_poll_wait;
+    let poll_req = held_poll
+        .request(&poll_holder, poll_at)
+        .map_err(|error| format!("federated held poll request: {error}"))?;
     let polled = TlsServer::send_held_external(
         fed_records_addr,
         "fed-records.example",
         &fed_records_cert,
         &poll_req,
     )?;
+    let accepted = held_poll
+        .accept(polled, poll_at)
+        .map_err(|error| format!("federated held poll accept: {error}"))?;
+    let polled = accepted.ok_or("federated held poll stayed pending")?;
     let held_poll_status = polled.status().as_u16();
     if held_poll_status != 200 || polled.body() != br#"{"deleted":true}"# {
         return Err(http_failure("federated held poll", &polled));
     }
-    let replay_poll_req = signed_get(&poll_holder, &poll_target, clock)?;
+    match held_poll.request(&poll_holder, poll_at) {
+        Err(PollError::Finished) => {}
+        Ok(_) => return Err("federated held session polled after the terminal response".into()),
+        Err(error) => return Err(format!("federated held finished poll: {error}").into()),
+    }
+    let poll_target = held_poll.pending().location.clone();
+    let replay_poll_req = signed_get(&poll_holder, &poll_target, poll_at)?;
     let held_replayed = TlsServer::send_held_external(
         fed_records_addr,
         "fed-records.example",
@@ -1620,6 +1631,8 @@ fn handle_federated_converse(
         "replay_status": replay_status,
         "replay_matches": replay_matches,
         "held_challenge_status": held_challenge_status,
+        "held_poll_too_early": held_poll_too_early,
+        "held_poll_wait": held_poll_wait,
         "held_poll_status": held_poll_status,
         "held_replay_status": held_replay_status,
         "held_replay_matches": held_replay_matches,
@@ -1949,6 +1962,10 @@ pub fn run() -> Result<InteropTranscript> {
         federated_replay_matches: raw["federated_replay_matches"].as_bool().unwrap_or(false),
         federated_protected_runs: number(&raw, "federated_protected_runs")? as usize,
         federated_held_challenge_status: number(&raw, "federated_held_challenge_status")? as u16,
+        federated_held_poll_too_early: raw["federated_held_poll_too_early"]
+            .as_bool()
+            .unwrap_or(false),
+        federated_held_poll_wait: number(&raw, "federated_held_poll_wait")? as usize,
         federated_held_poll_status: number(&raw, "federated_held_poll_status")? as u16,
         federated_held_replay_status: number(&raw, "federated_held_replay_status")? as u16,
         federated_held_replay_matches: raw["federated_held_replay_matches"]
@@ -2010,6 +2027,8 @@ pub fn run() -> Result<InteropTranscript> {
         || !t.federated_replay_matches
         || t.federated_protected_runs != 1
         || t.federated_held_challenge_status != 202
+        || !t.federated_held_poll_too_early
+        || t.federated_held_poll_wait != 5
         || t.federated_held_poll_status != 200
         || t.federated_held_replay_status != 200
         || !t.federated_held_replay_matches

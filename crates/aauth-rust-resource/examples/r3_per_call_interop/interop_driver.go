@@ -102,6 +102,8 @@ type federatedConverseResponse struct {
 	ReplayStatus            int  `json:"replay_status"`
 	ReplayMatches           bool `json:"replay_matches"`
 	HeldChallengeStatus     int  `json:"held_challenge_status"`
+	HeldPollTooEarly        bool `json:"held_poll_too_early"`
+	HeldPollWait            int  `json:"held_poll_wait"`
 	HeldPollStatus          int  `json:"held_poll_status"`
 	HeldReplayStatus        int  `json:"held_replay_status"`
 	HeldReplayMatches       bool `json:"held_replay_matches"`
@@ -157,6 +159,8 @@ type transcriptOutput struct {
 	FederatedReplayMatches                      bool     `json:"federated_replay_matches"`
 	FederatedProtectedRuns                      int      `json:"federated_protected_runs"`
 	FederatedHeldChallengeStatus                int      `json:"federated_held_challenge_status"`
+	FederatedHeldPollTooEarly                   bool     `json:"federated_held_poll_too_early"`
+	FederatedHeldPollWait                       int      `json:"federated_held_poll_wait"`
 	FederatedHeldPollStatus                     int      `json:"federated_held_poll_status"`
 	FederatedHeldReplayStatus                   int      `json:"federated_held_replay_status"`
 	FederatedHeldReplayMatches                  bool     `json:"federated_held_replay_matches"`
@@ -1135,6 +1139,8 @@ func main() {
 	out.FederatedReplayMatches = fedOut.ReplayMatches
 	out.FederatedProtectedRuns = fedCounts.ProtectedRuns
 	out.FederatedHeldChallengeStatus = fedOut.HeldChallengeStatus
+	out.FederatedHeldPollTooEarly = fedOut.HeldPollTooEarly
+	out.FederatedHeldPollWait = fedOut.HeldPollWait
 	out.FederatedHeldPollStatus = fedOut.HeldPollStatus
 	out.FederatedHeldReplayStatus = fedOut.HeldReplayStatus
 	out.FederatedHeldReplayMatches = fedOut.HeldReplayMatches
