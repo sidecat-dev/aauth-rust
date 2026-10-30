@@ -1691,3 +1691,161 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
         other => panic!("GET replay: {other:?}"),
     }
 }
+
+#[test]
+fn held_poll_while_the_grant_is_unretained_stays_pending() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let resource = PsAuthorizationResource::new(config(), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: true,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-live",
+    );
+    let class = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    let held = resource
+        .authorize(&call("/mcp/records.delete", &class, 2), NOW, "challenge-live")
+        .into_response();
+    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    let stored = proposals.only();
+    let mut claims = auth_claims(None);
+    claims.jti = "per-call-live".into();
+    let per_call = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("per-call auth token");
+    let pending = "/r3/pending/challenge-live";
+    let grant = match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-grant") {
+        AuthDecision::Granted(admitted) => admitted.r3_grant().expect("held completion").clone(),
+        other => panic!("first poll: {other:?}"),
+    };
+    let before = calls.load(Ordering::SeqCst);
+    match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-live") {
+        AuthDecision::StillPending { location } => {
+            assert_eq!(
+                location,
+                format!("{ORIGIN}/r3/pending/challenge-live")
+            );
+        }
+        other => panic!("poll while the grant is held: {other:?}"),
+    }
+    let response = resource
+        .authorize(&call(pending, &per_call, 2), NOW, "poll-live-http")
+        .into_response();
+    assert_eq!(response.status(), 202, "{}", String::from_utf8_lossy(response.body()));
+    assert_eq!(
+        response.headers().get("location").unwrap().to_str().unwrap(),
+        format!("{ORIGIN}/r3/pending/challenge-live").as_str()
+    );
+    assert_eq!(response.headers().get("retry-after").unwrap().to_str().unwrap(), "1");
+    assert_eq!(
+        response.headers().get("cache-control").unwrap().to_str().unwrap(),
+        "no-store"
+    );
+    assert_eq!(
+        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/json"
+    );
+    assert!(response.headers().get("aauth-requirement").is_none());
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(body["status"], "pending");
+    assert!(calls.load(Ordering::SeqCst) >= before);
+    let retained = resource.r3_retain(
+        &grant,
+        Response::builder().status(200).body(b"held-once".to_vec()).unwrap(),
+    );
+    assert_eq!(retained.body(), b"held-once");
+    match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-after") {
+        AuthDecision::Replayed(replay) => assert_eq!(replay.body(), b"held-once"),
+        other => panic!("replay after retain: {other:?}"),
+    }
+
+    let dropped = resource
+        .authorize(
+            &call("/mcp/records.delete", &class, 2),
+            NOW,
+            "challenge-drop",
+        )
+        .into_response();
+    assert_eq!(dropped.status(), 202, "{}", String::from_utf8_lossy(dropped.body()));
+    let stored = proposals
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .find(|record| {
+            record
+                .held
+                .as_ref()
+                .is_some_and(|held| held.pending_id == "challenge-drop")
+        })
+        .cloned()
+        .expect("dropped proposal");
+    let mut dropped_claims = auth_claims(None);
+    dropped_claims.jti = "per-call-drop".into();
+    let dropped_token = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &dropped_claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("dropped per-call auth token");
+    let dropped_pending = "/r3/pending/challenge-drop";
+    match resource.authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-drop-grant") {
+        AuthDecision::Granted(_) => {}
+        other => panic!("grant that will be dropped: {other:?}"),
+    }
+    match resource.authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-dropped") {
+        AuthDecision::InternalError => {}
+        other => panic!("poll after the grant was dropped: {other:?}"),
+    }
+    let abandoned = resource
+        .authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-dropped-http")
+        .into_response();
+    assert_eq!(abandoned.status(), 500, "{}", String::from_utf8_lossy(abandoned.body()));
+    let abandoned_body: Value = serde_json::from_slice(abandoned.body()).unwrap();
+    assert_eq!(abandoned_body["error"], "server_error");
+    match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-first-intact") {
+        AuthDecision::Replayed(replay) => assert_eq!(replay.body(), b"held-once"),
+        other => panic!("first result changed: {other:?}"),
+    }
+}

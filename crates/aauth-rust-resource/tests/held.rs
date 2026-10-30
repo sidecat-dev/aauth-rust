@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
 };
 
 use aauth_rust_resource::{HeldInvocations, HeldPoll};
@@ -77,5 +80,57 @@ fn repeated_auth_token_replays_the_held_result() {
     let HeldPoll::DifferentToken = poll(&held, "other", "auth-1", 2000, 1000, &calls) else {
         panic!("the same jti executed a second pending invocation");
     };
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_poll_during_execution_does_not_run_again() {
+    let held = Arc::new(HeldInvocations::new());
+    held.open("job").unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let held_run = Arc::clone(&held);
+    let calls_run = Arc::clone(&calls);
+    let entered_run = Arc::clone(&entered);
+    let release_run = Arc::clone(&release);
+    let worker = thread::spawn(move || {
+        held_run.poll("job", "auth-1", 2000, 1000, move || {
+            calls_run.fetch_add(1, Ordering::SeqCst);
+            entered_run.wait();
+            release_run.wait();
+            shipped()
+        })
+    });
+    entered.wait();
+    let during = {
+        let calls = Arc::clone(&calls);
+        held.poll("job", "auth-1", 2000, 1500, move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            shipped()
+        })
+    };
+    release.wait();
+    match during {
+        HeldPoll::Unfinished => {}
+        HeldPoll::Executed(_) => panic!("second poll executed"),
+        HeldPoll::Replayed(_) => panic!("second poll replayed an unfinished claim"),
+        HeldPoll::Unknown => panic!("second poll missed the pending id"),
+        HeldPoll::DifferentToken => panic!("second poll was treated as a different token"),
+        HeldPoll::Expired => panic!("second poll expired the live claim"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let HeldPoll::Executed(done) = worker.join().expect("first poll") else {
+        panic!("first poll did not finish");
+    };
+    assert_eq!(done.body(), b"shipped");
+    let calls_replay = Arc::clone(&calls);
+    let HeldPoll::Replayed(again) = held.poll("job", "auth-1", 2000, 1600, move || {
+        calls_replay.fetch_add(1, Ordering::SeqCst);
+        shipped()
+    }) else {
+        panic!("finished poll did not replay");
+    };
+    assert_eq!(again.body(), b"shipped");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

@@ -2,7 +2,7 @@
 //! Mission context is opt-in through `with_mission_context`.
 //! Budgets are opt-in through `with_budgets`.
 //! Immediate class R3 is opt-in through `with_r3`.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -270,6 +270,12 @@ pub enum AuthDecision<T = ()> {
     MethodNotAllowed,
     /// The pending id is not a stored held invocation.
     Gone,
+    /// The host still holds this held grant and has not retained a result.
+    /// The poll stays pending. The invocation does not run again.
+    StillPending {
+        /// Pending URL at this Resource's signed origin.
+        location: String,
+    },
     /// Host-supplied challenge identifier/time could not produce a valid token.
     InternalError,
     /// Verified Auth token, holder proof, route scopes and host policy admitted it.
@@ -309,6 +315,10 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
             Self::Forbidden { .. } => f.write_str("Forbidden"),
             Self::MethodNotAllowed => f.write_str("MethodNotAllowed"),
             Self::Gone => f.write_str("Gone"),
+            Self::StillPending { location } => f
+                .debug_struct("StillPending")
+                .field("location", location)
+                .finish(),
             Self::InternalError => f.write_str("InternalError"),
             Self::Granted(value) => f
                 .debug_struct("Granted")
@@ -416,6 +426,27 @@ impl<T> AuthDecision<T> {
                 response
             }
             Self::Gone => refusal(StatusCode::GONE, "gone"),
+            // The host still holds the grant. This is the same pending answer as
+            // the original 202, without a new resource token: the agent already
+            // has the auth token and is polling. Dropping the grant without a
+            // retained result is `500`, not another 202.
+            Self::StillPending { location } => {
+                let mut response =
+                    Response::new(json!({"status":"pending"}).to_string().into_bytes());
+                *response.status_mut() = StatusCode::ACCEPTED;
+                let Ok(location) = location.parse() else {
+                    return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+                };
+                let headers = response.headers_mut();
+                headers.insert("location", location);
+                headers.insert("retry-after", "1".parse().expect("static retry"));
+                headers.insert("cache-control", "no-store".parse().expect("static cache"));
+                headers.insert(
+                    "content-type",
+                    "application/json".parse().expect("static content type"),
+                );
+                response
+            }
             // A hold or an unmetered admission is not an HTTP grant. Mapping it
             // here does not commit the reservation. Dropping the hold releases it.
             Self::Held(_) | Self::Observed(_) => {
@@ -634,6 +665,8 @@ pub struct PsAuthorizationResource<K, P> {
     budgets: Option<Arc<BudgetGate>>,
     omit_required: bool,
     r3: Option<Box<r3_class::R3Profile>>,
+    /// Proposal URIs whose held execution grant the host still holds.
+    executing: Arc<Mutex<BTreeSet<String>>>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -688,6 +721,7 @@ where
             budgets: None,
             omit_required: false,
             r3: None,
+            executing: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges

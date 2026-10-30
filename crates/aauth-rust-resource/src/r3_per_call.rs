@@ -9,7 +9,9 @@
 //! against the stored exact bytes, the class lineage and the holder, then
 //! claims the proposal once: the first exact token gets a fence to execute,
 //! the same token again gets the retained result, and anything uncertain
-//! executes nothing.
+//! executes nothing. A second poll of a held invocation, while the host still
+//! holds that grant and has not retained a result, stays `202`. Dropping the
+//! grant without a retained result leaves the next poll `500`.
 //!
 //! Approving Release Rather Than Execution: under `202` only, a host
 //! [`BoxedR3Release`] may run a side-effect-free call before approval. The
@@ -20,8 +22,8 @@
 //! expired during approval) is proposed again from that custody: the stored
 //! proposal bytes and response move to the new challenge, the prior record is
 //! retired, and the call does not run again.
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
 use aauth_rust_r3::{
@@ -325,11 +327,55 @@ pub(super) struct R3Completion {
     pub(super) token: R3CallToken,
     pub(super) fence: Option<String>,
     pub(super) held: Option<Request<Vec<u8>>>,
+    /// Pending id when this completion is the held poll. Absent on a `401` retry.
+    pub(super) pending_id: Option<String>,
+    /// Set only while this process has handed the host a held execution grant.
+    pub(super) executing: Option<Arc<ExecutingHold>>,
     /// Release gating: retained and answered at claim; never reaches the host.
     pub(super) released: Option<R3CallResult>,
     /// Held-result horizon copied from the proposal record. Completion refuses
     /// at this instant even when the per-call Auth token is still unexpired.
     pub(super) release_until: Option<i64>,
+}
+
+/// Removes one proposal URI from the in-process held-execution set.
+///
+/// The last clone drops the registration. [`ExecutingHold::finish`] removes it
+/// earlier, when retention returns, so a later poll is not still pending.
+pub(super) struct ExecutingHold {
+    uri: String,
+    open: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl ExecutingHold {
+    pub(super) fn register(open: &Arc<Mutex<BTreeSet<String>>>, uri: &str) -> Arc<Self> {
+        open.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(uri.to_owned());
+        Arc::new(Self {
+            uri: uri.to_owned(),
+            open: Arc::clone(open),
+        })
+    }
+
+    pub(super) fn contains(open: &Mutex<BTreeSet<String>>, uri: &str) -> bool {
+        open.lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(uri)
+    }
+
+    pub(super) fn finish(&self) {
+        self.open
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.uri);
+    }
+}
+
+impl Drop for ExecutingHold {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 fn proposal_uri(
@@ -519,13 +565,19 @@ where
         ) else {
             return refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
         };
-        match per_call
+        let stored = match per_call
             .calls
             .retain(&completion.uri, fence, &snapshot(&response))
         {
             Ok(stored) => restore(&stored),
             Err(_) => refusal(StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+        };
+        // Retention has returned. A later poll is the stored result, or `500`
+        // when nothing was stored. It is not still pending.
+        if let Some(hold) = &completion.executing {
+            hold.finish();
         }
+        stored
     }
 
     /// Build, retain and release the proposal challenge for one per-call operation.
@@ -952,6 +1004,8 @@ where
                 },
                 fence: None,
                 held,
+                pending_id: pending_id.map(str::to_owned),
+                executing: None,
                 released: record.released.clone(),
                 release_until: record.release_until,
             }),
@@ -1016,6 +1070,10 @@ where
                     }
                 } else {
                     completion.fence = Some(fence);
+                    if completion.held.is_some() {
+                        completion.executing =
+                            Some(ExecutingHold::register(&self.executing, &completion.uri));
+                    }
                     Ok(Some(grant))
                 }
             }
@@ -1023,7 +1081,19 @@ where
             Ok(R3Claim::DifferentToken | R3Claim::Expired) => Err(AuthDecision::Forbidden {
                 budget_header: None,
             }),
-            // Unfinished, an empty fence, or an uncertain store: never a second effect.
+            // The host still holds this held grant. The poll stays pending.
+            // Nothing runs. A `401` retry, a dropped grant, and an uncertain
+            // store stay `500`: there is no second effect.
+            Ok(R3Claim::Unfinished) if completion.held.is_some() => {
+                match completion.pending_id.as_deref() {
+                    Some(id) if ExecutingHold::contains(self.executing.as_ref(), &completion.uri) => {
+                        Err(AuthDecision::StillPending {
+                            location: format!("{}/r3/pending/{id}", self.document_origin()),
+                        })
+                    }
+                    _ => Err(AuthDecision::InternalError),
+                }
+            }
             Ok(_) | Err(_) => Err(AuthDecision::InternalError),
         };
         // The store is host code too. A completed revocation during its claim or
