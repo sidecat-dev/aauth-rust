@@ -388,6 +388,14 @@ fn fetch_uri(uri: &str, id: &str, dwk: &str, kid: &str, seed: u8) -> Request<Vec
     .unwrap();
     request
 }
+/// The pending path a held `202` names in its `Location`, at the signed origin.
+fn pending_path(response: &Response<Vec<u8>>) -> String {
+    let location = response.headers()["location"].to_str().unwrap();
+    location
+        .strip_prefix(ORIGIN)
+        .expect("pending URL at the signed origin")
+        .to_owned()
+}
 fn discloses(response: &Response<Vec<u8>>, record: &R3DocumentRecord) -> bool {
     response.body() == &record.exact_json
         || response
@@ -1670,11 +1678,8 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
         "{}",
         String::from_utf8_lossy(held.body())
     );
-    let location = held.headers().get("location").unwrap().to_str().unwrap();
-    assert!(
-        location.ends_with("/r3/pending/challenge-hold"),
-        "{location}"
-    );
+    let pending = pending_path(&held);
+    assert!(pending.starts_with("/r3/pending/"), "{pending}");
     let stored = proposals.only();
     let mut claims = auth_claims(None);
     claims.jti = "per-call-1".into();
@@ -1687,7 +1692,7 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
         &stored.exact_json,
     )
     .expect("per-call auth token");
-    let pending = "/r3/pending/challenge-hold";
+    let pending = pending.as_str();
     let before = calls.load(Ordering::SeqCst);
     let posted = resource
         .authorize(
@@ -1779,6 +1784,80 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
     }
 }
 
+// Core Pending URL Security: pending URLs are unguessable. A held call's
+// pending id is drawn from the system random source. It is not the challenge
+// identifier, which the proposal Resource token carries as its `jti`, nor the
+// presented Auth token's `jti`, nor derived from anything else in the request:
+// two Resources that hold the same call under the same challenge identifier
+// name different pending URLs.
+#[test]
+fn a_held_pending_id_is_random_and_not_the_token_jti() {
+    let hold = || {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(VolatileTestStore::default());
+        let proposals = Arc::new(MemoryCalls::new());
+        let resource = resource(&store, &calls, false)
+            .with_r3_per_call(R3PerCallConfig {
+                calls: proposals.clone(),
+                hold: true,
+                ..missionless_per_call()
+            })
+            .unwrap();
+        let record = issue(
+            &resource,
+            &store,
+            &["records.read", "records.delete"],
+            "rt-random",
+        );
+        let class = class_token(
+            &record,
+            &["records.read"],
+            &["records.delete"],
+            &auth_claims(None),
+            3,
+            "ps-1",
+        );
+        let held = resource
+            .authorize(
+                &call("/mcp/records.delete", &class, 2),
+                NOW,
+                "challenge-hold",
+            )
+            .into_response();
+        assert_eq!(
+            held.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(held.body())
+        );
+        let id = pending_path(&held)
+            .strip_prefix("/r3/pending/")
+            .expect("held pending path")
+            .to_owned();
+        let stored = proposals.only();
+        assert_eq!(stored.held.as_ref().expect("held call").pending_id, id);
+        let challenge = verify_resource_token(&stored.resource_token, &keys(), NOW).unwrap();
+        assert_eq!(challenge.claims().jti, "challenge-hold");
+        assert_eq!(challenge.claims().presented_jti, "auth-1");
+        id
+    };
+    let first = hold();
+    let second = hold();
+    for id in [&first, &second] {
+        assert_eq!(id.len(), 22, "{id}");
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'),
+            "{id}"
+        );
+        assert!(
+            !id.contains("challenge-hold") && !id.contains("auth-1"),
+            "{id}"
+        );
+    }
+    assert_ne!(first, second);
+}
+
 #[test]
 fn held_poll_while_the_grant_is_unretained_stays_pending() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1847,7 +1926,8 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
         &stored.exact_json,
     )
     .expect("per-call auth token");
-    let pending = "/r3/pending/challenge-live";
+    let pending = pending_path(&held);
+    let pending = pending.as_str();
     let grant = match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-grant") {
         AuthDecision::Granted(admitted) => admitted.r3_grant().expect("held completion").clone(),
         other => panic!("first poll: {other:?}"),
@@ -1855,7 +1935,7 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
     let before = calls.load(Ordering::SeqCst);
     match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-live") {
         AuthDecision::StillPending { location } => {
-            assert_eq!(location, format!("{ORIGIN}/r3/pending/challenge-live"));
+            assert_eq!(location, format!("{ORIGIN}{pending}"));
         }
         other => panic!("poll while the grant is held: {other:?}"),
     }
@@ -1875,7 +1955,7 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
             .unwrap()
             .to_str()
             .unwrap(),
-        format!("{ORIGIN}/r3/pending/challenge-live").as_str()
+        format!("{ORIGIN}{pending}").as_str()
     );
     assert_eq!(
         response
@@ -1939,12 +2019,7 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
         .lock()
         .unwrap()
         .values()
-        .find(|record| {
-            record
-                .held
-                .as_ref()
-                .is_some_and(|held| held.pending_id == "challenge-drop")
-        })
+        .find(|record| record.resource_token_jti == "challenge-drop")
         .cloned()
         .expect("dropped proposal");
     let mut dropped_claims = auth_claims(None);
@@ -1958,7 +2033,8 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
         &stored.exact_json,
     )
     .expect("dropped per-call auth token");
-    let dropped_pending = "/r3/pending/challenge-drop";
+    let dropped_pending = pending_path(&dropped);
+    let dropped_pending = dropped_pending.as_str();
     match resource.authorize(
         &call(dropped_pending, &dropped_token, 2),
         NOW,
@@ -2404,12 +2480,7 @@ fn a_released_application_202_replays_with_its_pending_headers_or_as_server_erro
             .lock()
             .unwrap()
             .values()
-            .find(|record| {
-                record
-                    .held
-                    .as_ref()
-                    .is_some_and(|held| held.pending_id == challenge)
-            })
+            .find(|record| record.resource_token_jti == challenge)
             .cloned()
             .expect("held release");
         let mut claims = auth_claims(None);
@@ -2423,7 +2494,7 @@ fn a_released_application_202_replays_with_its_pending_headers_or_as_server_erro
             &stored.exact_json,
         )
         .expect("per-call auth token");
-        let pending = format!("/r3/pending/{challenge}");
+        let pending = pending_path(&held);
         ["release", "replay"].map(|presentation| {
             match resource.authorize(
                 &call(&pending, &per_call, 2),
@@ -2870,11 +2941,11 @@ impl ReleaseHost {
             &format!("challenge-{}", tool.replace('.', "-")),
         )
     }
-    /// Call `tool` with `class` and return the proposal held under `pending_id`.
-    fn hold_with(&self, tool: &str, class: &str, pending_id: &str) -> R3ProposalRecord {
+    /// Call `tool` with `class` under `challenge` and return the held proposal.
+    fn hold_with(&self, tool: &str, class: &str, challenge: &str) -> R3ProposalRecord {
         let held = self
             .resource
-            .authorize(&call(&format!("/mcp/{tool}"), class, 2), NOW, pending_id)
+            .authorize(&call(&format!("/mcp/{tool}"), class, 2), NOW, challenge)
             .into_response();
         assert_eq!(
             held.status(),
@@ -2882,16 +2953,17 @@ impl ReleaseHost {
             "{}",
             String::from_utf8_lossy(held.body())
         );
+        let pending = pending_path(&held);
         self.proposals
             .records
             .lock()
             .unwrap()
             .values()
             .find(|record| {
-                record
-                    .held
-                    .as_ref()
-                    .is_some_and(|held| held.pending_id == pending_id)
+                record.resource_token_jti == challenge
+                    && record.held.as_ref().is_some_and(|stored| {
+                        pending == format!("/r3/pending/{}", stored.pending_id)
+                    })
             })
             .cloned()
             .expect("held proposal")

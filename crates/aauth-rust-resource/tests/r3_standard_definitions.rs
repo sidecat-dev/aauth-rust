@@ -4236,11 +4236,8 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
         .unwrap()
         .0
         .to_owned();
-    let location = held.headers().get("location").unwrap().to_str().unwrap();
-    assert!(
-        location.ends_with("/r3/pending/challenge-hold"),
-        "{location}"
-    );
+    let pending = pending_path(&held);
+    assert!(pending.starts_with("/r3/pending/"), "{pending}");
     assert!(
         calls
             .records
@@ -4270,11 +4267,7 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
         AuthDecision::Forbidden { .. } => {}
         other => panic!("held call on the mapped route: {other:?}"),
     }
-    let grant = match resource.authorize(
-        &signed_call("/r3/pending/challenge-hold", &per_call_auth),
-        NOW,
-        "pending-1",
-    ) {
+    let grant = match resource.authorize(&signed_call(&pending, &per_call_auth), NOW, "pending-1") {
         AuthDecision::Granted(admitted) => {
             let grant = admitted.r3_grant().expect("held completion").clone();
             assert!(grant.is_per_call());
@@ -4292,11 +4285,7 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
             .unwrap(),
     );
     assert_eq!(stored.body(), b"held");
-    match resource.authorize(
-        &signed_call("/r3/pending/challenge-hold", &per_call_auth),
-        NOW,
-        "pending-2",
-    ) {
+    match resource.authorize(&signed_call(&pending, &per_call_auth), NOW, "pending-2") {
         AuthDecision::Replayed(response) => assert_eq!(response.body(), b"held"),
         other => panic!("held replay: {other:?}"),
     }
@@ -4506,7 +4495,7 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
     match resource.authorize(
-        &signed_call("/r3/pending/challenge-release", &per_call_auth),
+        &signed_call(&pending_path(&held), &per_call_auth),
         NOW,
         "release-1",
     ) {
@@ -4519,7 +4508,7 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
         "approval does not run the call again"
     );
     match resource.authorize(
-        &signed_call("/r3/pending/challenge-release", &per_call_auth),
+        &signed_call(&pending_path(&held), &per_call_auth),
         NOW,
         "release-2",
     ) {
@@ -4754,7 +4743,7 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
         "the same class token computes again"
     );
     let first_record = calls
-        .load_pending("challenge-first")
+        .load_pending(&pending_id(&first))
         .unwrap()
         .expect("first record");
     assert!(!calls.superseded(first_record.reference.uri()));
@@ -4836,7 +4825,7 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     );
     assert!(calls.superseded(first_record.reference.uri()));
     let successor = calls
-        .load_pending("challenge-next")
+        .load_pending(&pending_id(&reused))
         .unwrap()
         .expect("successor");
     assert_eq!(
@@ -4845,14 +4834,14 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     );
     assert_eq!(successor.released.as_ref().unwrap().body, b"released-1");
     let same_record = calls
-        .load_pending("challenge-same")
+        .load_pending(&pending_id(&same))
         .unwrap()
         .expect("same-token record");
     assert!(same_record.supersedes.is_none());
     assert!(!calls.superseded(same_record.reference.uri()));
     assert_eq!(same_record.released.as_ref().unwrap().body, b"released-2");
     match resource.authorize(
-        &signed_call_at("/r3/pending/challenge-first", &first_auth, later),
+        &signed_call_at(&pending_path(&first), &first_auth, later),
         later,
         "retired",
     ) {
@@ -4888,7 +4877,7 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     );
     let successor_auth = member(&next_approved, "auth_token").expect("successor per-call token");
     match resource.authorize(
-        &signed_call_at("/r3/pending/challenge-next", &successor_auth, later),
+        &signed_call_at(&pending_path(&reused), &successor_auth, later),
         later,
         "successor",
     ) {
@@ -4910,7 +4899,7 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     );
     let same_auth = member(&same_approved, "auth_token").expect("same-token per-call token");
     match resource.authorize(
-        &signed_call_at("/r3/pending/challenge-same", &same_auth, later),
+        &signed_call_at(&pending_path(&same), &same_auth, later),
         later,
         "same-completion",
     ) {
@@ -5697,6 +5686,23 @@ fn parsers_admit_and_refuse_over_real_tls() {
         assert_eq!(refused.status(), 403, "{}", profile.name);
         assert_eq!(calls.load(Ordering::SeqCst), 1, "{}", profile.name);
     }
+}
+
+/// The pending path a held `202` names in its `Location`, at the Resource origin.
+fn pending_path(response: &Response<Vec<u8>>) -> String {
+    let location = response.headers()["location"].to_str().unwrap();
+    location
+        .strip_prefix(RESOURCE)
+        .expect("pending URL at the Resource origin")
+        .to_owned()
+}
+
+/// The pending id that ends a held `202`'s pending path.
+fn pending_id(response: &Response<Vec<u8>>) -> String {
+    pending_path(response)
+        .strip_prefix("/r3/pending/")
+        .expect("held pending path")
+        .to_owned()
 }
 
 fn signed_call(path: &str, token: &str) -> Request<Vec<u8>> {

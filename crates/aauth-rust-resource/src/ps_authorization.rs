@@ -299,7 +299,8 @@ pub enum AuthDecision<T = ()> {
     R3Pending {
         /// Resource token referencing the retained proposal.
         resource_token: String,
-        /// Pending URL at this Resource's signed origin.
+        /// Pending URL at this Resource's signed origin. Its last segment is a
+        /// fresh random pending id, not the challenge identifier.
         location: String,
     },
     /// The retained result for this exact per-call Auth token: a replay of

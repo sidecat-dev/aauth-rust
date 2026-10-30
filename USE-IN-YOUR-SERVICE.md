@@ -526,8 +526,11 @@ credential for the intended Resource instead of refreshing an otherwise valid JW
 ## Hold a side-effect-free call for release
 
 Use this when the Resource can run a query before the person approves disclosure.
-Set `R3PerCallConfig::hold` and `release`. The `release` callback must change
-nothing outside the result it returns. Audited, billed, or third-party work
+Set `R3PerCallConfig::hold` and `release`. A held call is answered `202` with a
+pending URL `{signed_origin}/r3/pending/{id}`; the Resource draws `id` from
+`aauth_rust_core::continuation::generate_pending_id` (128 random bits), so read
+the URL from `Location`. `HeldInvocations::open` draws its ids the same way. The
+`release` callback must change nothing outside the result it returns. Audited, billed, or third-party work
 needs execution consent instead: return `None` for it. The Resource does not
 call `release` for an operation its definition annotates `budget: true`.
 

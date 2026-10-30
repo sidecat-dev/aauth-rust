@@ -1,25 +1,15 @@
 //! One held invocation result, keyed by the auth token `jti`.
-//! The first poll runs the invocation. A later poll of that same token at the
-//! same pending id returns the stored result through the token's `exp`.
+//! The ledger draws each pending id. The first poll runs the invocation. A
+//! later poll of that same token at the same pending id returns the stored
+//! result through the token's `exp`.
 
 use std::{
     collections::BTreeMap,
     sync::{Mutex, MutexGuard},
 };
 
+use aauth_rust_core::continuation::generate_pending_id;
 use http::{Response, StatusCode};
-
-/// A pending id was empty, too long, or already open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HeldError;
-
-impl std::fmt::Display for HeldError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("held pending id must be one unused path token of 1..=128 characters")
-    }
-}
-
-impl std::error::Error for HeldError {}
 
 /// What a poll of a held invocation does.
 pub enum HeldPoll {
@@ -64,21 +54,21 @@ impl HeldInvocations {
         Self::default()
     }
 
-    /// Reserve `pending_id` before the agent polls it.
+    /// Reserve a fresh pending id before the agent polls it, and return it.
     ///
-    /// # Errors
-    /// Returns [`HeldError`] when the id is not 1..=128 characters from
-    /// `A-Za-z0-9_-`, or when that id is already reserved.
-    pub fn open(&self, pending_id: &str) -> Result<(), HeldError> {
-        if !valid_token(pending_id) {
-            return Err(HeldError);
-        }
+    /// The id is [`generate_pending_id`]: 128 bits from the operating system's
+    /// secure random source as 22 base64url characters. The host builds the
+    /// pending URL from it, so that URL is unguessable. An id already open is
+    /// never returned again.
+    pub fn open(&self) -> String {
         let mut open = self.pending();
-        if open.contains_key(pending_id) {
-            return Err(HeldError);
+        loop {
+            let pending_id = generate_pending_id();
+            if !open.contains_key(&pending_id) {
+                open.insert(pending_id.clone(), None);
+                return pending_id;
+            }
         }
-        open.insert(pending_id.to_owned(), None);
-        Ok(())
     }
 
     /// Poll `pending_id` with the auth token `jti`.

@@ -8,7 +8,7 @@ use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentTok
 use aauth_rust_signature_key::{
     Error, KeyMaterial, PreparedRequest, required_components, role_signature_alg_header,
 };
-pub use held::{HeldError, HeldInvocations, HeldPoll};
+pub use held::{HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,

@@ -36,6 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use aauth_rust_core::continuation::generate_pending_id;
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
 use aauth_rust_r3::{
     Display, Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
@@ -138,7 +139,9 @@ pub struct R3Release {
 /// One held request, retained so the `202` completion runs the exact call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct R3HeldRequest {
-    /// Pending identifier in `{signed_origin}/r3/pending/{id}`.
+    /// Pending identifier in `{signed_origin}/r3/pending/{id}`. The Resource
+    /// draws it with [`generate_pending_id`]: 128 bits from the operating
+    /// system's secure random source, not derived from any token or request.
     pub pending_id: String,
     /// Original method.
     pub method: String,
@@ -432,13 +435,6 @@ fn proposal_uri(
         digest(&entitlement),
         digest(lineage.as_bytes())
     )
-}
-
-fn pending_token(value: &str) -> bool {
-    (1..=128).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn snapshot(response: &Response<Vec<u8>>) -> R3CallResult {
@@ -864,9 +860,6 @@ where
             return forbidden;
         };
         let c = token.claims();
-        if !pending_token(challenge_jti) {
-            return AuthDecision::InternalError;
-        }
         // The proposal Resource token carries the class token's scope, and a
         // Resource token carries only scopes this Resource describes. Refuse
         // before anything runs.
@@ -1061,7 +1054,12 @@ where
         ) else {
             return AuthDecision::InternalError;
         };
-        let held = per_call.hold.then(|| held_request(request, challenge_jti));
+        // A held call's pending URL ends in a fresh random id, never the
+        // challenge identifier, which the Resource token carries as its `jti`.
+        let pending_id = per_call.hold.then(generate_pending_id);
+        let held = pending_id
+            .as_deref()
+            .map(|pending_id| held_request(request, pending_id));
         let record = R3ProposalRecord {
             reference,
             exact_json: publication.exact,
@@ -1093,10 +1091,10 @@ where
         if committed.is_err() {
             return AuthDecision::InternalError;
         }
-        if per_call.hold {
+        if let Some(pending_id) = pending_id {
             AuthDecision::R3Pending {
                 resource_token: compact,
-                location: format!("{}/r3/pending/{challenge_jti}", self.document_origin()),
+                location: format!("{}/r3/pending/{pending_id}", self.document_origin()),
             }
         } else {
             AuthDecision::AuthTokenRequired {
