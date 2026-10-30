@@ -516,7 +516,7 @@ fn invalid_r3_requests_release_no_token_and_retain_nothing() {
         ),
         (
             json!({ "budget": {}, "r3_operations": operations(&["records.read"]) }),
-            "invalid_request",
+            "invalid_budget",
         ),
         (
             json!({ "scope": "records.write", "r3_operations": operations(&["records.read"]) }),
