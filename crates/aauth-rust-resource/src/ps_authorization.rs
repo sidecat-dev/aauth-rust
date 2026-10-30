@@ -107,7 +107,7 @@ impl std::fmt::Display for PsConfigurationError {
                 "budget profile needs declared units, a finite bound, and an HTTPS usage endpoint"
             }
             Self::InvalidR3Profile => {
-                "R3 needs registered authoritative definitions on a direct, unmetered, missionless Resource"
+                "R3 needs registered authoritative definitions and does not compose with missions"
             }
         })
     }

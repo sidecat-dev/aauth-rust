@@ -1,4 +1,4 @@
-//! Per-call proposals on the direct Person-Server path (`draft-hardt-aauth-r3`,
+//! Per-call proposals on a Person-Server Resource (`draft-hardt-aauth-r3`,
 //! Per-Call Proposals, Flow steps 1, 3 and 4).
 //!
 //! An operation in the class token's `r3_per_call` is challenged with a
@@ -829,8 +829,8 @@ where
         if self.retained_proposal(profile, &record, exact_uri).is_err() {
             return document_response(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
         }
-        let entitled = (signer == record.person_server || signer == record.auth_token_issuer)
-            && role == PERSON_DOCUMENT;
+        let entitled = (signer == record.person_server && role == PERSON_DOCUMENT)
+            || (signer == record.auth_token_issuer && role == self.auth_token_issuer_document());
         if !entitled {
             return document_response(StatusCode::NOT_FOUND, "not_found");
         }
@@ -905,7 +905,7 @@ where
         // The approval belongs to this proposal's PS, subject, tenant and holder,
         // and was issued while its proposal Resource token was valid.
         if claims.iss != record.auth_token_issuer
-            || claims.dwk != PERSON_DOCUMENT
+            || claims.dwk != self.auth_token_issuer_document()
             || claims.ps != record.person_server
             || claims.sub != record.subject
             || claims.tenant != record.tenant

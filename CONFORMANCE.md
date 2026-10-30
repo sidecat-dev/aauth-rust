@@ -393,6 +393,21 @@ log mtime `2026-10-29T21:19:29.356935+00:00`. The reopen filter passed 3,
 ignored the worker entry, and failed 0. The composition refusal passed 1
 and failed 0. `systemctl show` reported `Result=success`.
 
+A later library change allows class and per-call R3 on a federated Resource.
+`new_federated(...).with_r3(...)` keeps the access server. The Resource token
+`aud` is that server. The retained class document names `aauth-access.json`.
+The Person Server still fetches with `aauth-person.json`. An access-server
+Auth token (`aauth-access.json`) admits a class operation and one per-call
+completion; the same token then replays. A Person-Server Auth token on that
+Resource is refused. Direct R3 still records `aauth-person.json`. A mission
+composition is still `InvalidR3Profile`, and a mission added afterwards is
+still `500`. The test is
+`federated_access_server_serves_and_admits_class_and_per_call_r3`. This
+paragraph does not record a Host3 run. It does not change the DirectR3
+interop pin, `query-runs=2`, or retained-grant `budget_consumed`. The Agent
+still requires `aauth-person.json` on a delivered Auth token. This is not
+the Go four-party HTTP exchange and it is not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.

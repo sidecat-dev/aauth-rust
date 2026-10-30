@@ -10,13 +10,16 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_r3::{
     AuthoritativeSnapshot, Authorization, DefinitionRegistry, Display as R3Display,
-    GrantedOperations, McpCodec, Operation, OperationSet, ToolsListPage, ToolsListSnapshot, digest,
-    standard_registry, verify_budget_resource_token, verify_resource_token,
+    GrantedOperations, McpCodec, Operation, OperationSet, Parameters, PresentedParameter,
+    ToolsListPage, ToolsListSnapshot, digest, standard_registry, verify_budget_resource_token,
+    verify_resource_token,
 };
 use aauth_rust_resource::{
-    AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3OperationMapper, Deny, ProactiveDecision,
-    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError, R3Config,
-    R3DocumentRecord, R3DocumentStore, R3HostError, R3StoreError, R3Vocabulary,
+    AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
+    BoxedR3Present, Deny, ProactiveDecision, PsAuthorizationConfig, PsAuthorizationResource,
+    PsConfigurationError, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config,
+    R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig, R3ProposalRecord,
+    R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -1034,18 +1037,6 @@ fn per_call_and_unsupported_compositions_are_refused_explicitly() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let federated = PsAuthorizationResource::new_federated(
-        config(),
-        "https://as.example",
-        keys(),
-        policy(&calls),
-    )
-    .unwrap()
-    .with_r3(r3_config(&store, false));
-    assert!(matches!(
-        federated,
-        Err(PsConfigurationError::InvalidR3Profile)
-    ));
     let missionful = core_resource(&calls)
         .with_mission_context()
         .with_r3(r3_config(&store, false));
@@ -1243,4 +1234,263 @@ fn literal_reference_fetch_and_grant_compose_on_a_differing_signed_origin() {
         .into_response();
     assert_eq!(refused.status(), 403);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+const AS: &str = "https://as.example";
+
+fn federated_keys() -> Keys {
+    let mut trusted = keys().0;
+    trusted.push(issuer_key(AS, "aauth-access.json", 7, "as-key"));
+    // The wrong discovery role must verify and then be refused, not fail closed
+    // as an unknown key.
+    trusted.push(issuer_key(AS, "aauth-person.json", 7, "as-key"));
+    Keys(trusted)
+}
+
+fn access_claims(jti: &str) -> AuthClaims {
+    let mut claims = auth_claims(None);
+    claims.iss = AS.into();
+    claims.dwk = "aauth-access.json".into();
+    claims.jti = jti.into();
+    claims
+}
+
+/// Process-memory proposals for one test. Not a durable `R3CallStore`.
+struct MemoryCalls {
+    records: Mutex<BTreeMap<String, R3ProposalRecord>>,
+    calls: Mutex<BTreeMap<String, (R3CallToken, String, Option<R3CallResult>)>>,
+}
+impl MemoryCalls {
+    fn new() -> Self {
+        Self {
+            records: Mutex::new(BTreeMap::new()),
+            calls: Mutex::new(BTreeMap::new()),
+        }
+    }
+    fn only(&self) -> R3ProposalRecord {
+        let records = self.records.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        records.values().next().expect("proposal").clone()
+    }
+}
+impl R3CallStore for MemoryCalls {
+    fn commit(&self, record: &R3ProposalRecord) -> Result<(), R3StoreError> {
+        let mut records = self.records.lock().unwrap();
+        let uri = record.reference.uri().to_owned();
+        if records.contains_key(&uri) {
+            return Err(R3StoreError::Conflict);
+        }
+        records.insert(uri, record.clone());
+        Ok(())
+    }
+    fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self.records.lock().unwrap().get(uri).cloned())
+    }
+    fn load_pending(&self, _: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(None)
+    }
+    fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
+        if self.load(uri)?.is_none() {
+            return Err(R3StoreError::Unavailable(R3HostError::new("missing proposal")));
+        }
+        if now >= token.retain_until {
+            return Ok(R3Claim::Expired);
+        }
+        let mut calls = self.calls.lock().unwrap();
+        let Some(bound) = calls.get_mut(uri) else {
+            calls.insert(
+                uri.to_owned(),
+                (token.clone(), format!("fence-{uri}"), None),
+            );
+            return Ok(R3Claim::Execute {
+                fence: format!("fence-{uri}"),
+            });
+        };
+        if bound.0.compact_sha256 != token.compact_sha256 || bound.0.jti != token.jti {
+            return Ok(R3Claim::DifferentToken);
+        }
+        Ok(match bound.2.clone() {
+            Some(result) => R3Claim::Replay(result),
+            None => R3Claim::Unfinished,
+        })
+    }
+    fn retain(
+        &self,
+        uri: &str,
+        fence: &str,
+        result: &R3CallResult,
+    ) -> Result<R3CallResult, R3StoreError> {
+        let mut calls = self.calls.lock().unwrap();
+        let Some(bound) = calls.get_mut(uri) else {
+            return Err(R3StoreError::Conflict);
+        };
+        if bound.1 != fence || bound.2.is_some() {
+            return Err(R3StoreError::Conflict);
+        }
+        bound.2 = Some(result.clone());
+        Ok(result.clone())
+    }
+    fn held_releases(
+        &self,
+        _: &str,
+        _: &str,
+        _: i64,
+    ) -> Result<Vec<R3ProposalRecord>, R3StoreError> {
+        Ok(Vec::new())
+    }
+    fn supersede(&self, _: &str, _: &R3ProposalRecord, _: i64) -> Result<(), R3StoreError> {
+        Err(R3StoreError::Conflict)
+    }
+}
+
+#[test]
+fn federated_access_server_serves_and_admits_class_and_per_call_r3() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let resource = PsAuthorizationResource::new_federated(config(), AS, federated_keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+
+    let record = issue(&resource, &store, &["records.read", "records.delete"], "rt-as");
+    assert_eq!(record.person_server, PS);
+    assert_eq!(record.auth_token_issuer, AS);
+    assert_eq!(record.auth_token_issuer_document, "aauth-access.json");
+    let issued = verify_resource_token(&record.resource_token, &keys(), NOW).unwrap();
+    assert_eq!(issued.claims().aud, AS);
+    assert_eq!(issued.claims().ps, PS);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let served = resource.r3_document(&fetch(&record, AS, "aauth-access.json", "as-key", 7), NOW);
+    assert_eq!(served.status(), 200);
+    assert_eq!(served.body(), &record.exact_json);
+    let person_fetch = resource.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
+    assert_eq!(person_fetch.status(), 200);
+    assert_eq!(person_fetch.body(), &record.exact_json);
+    let wrong_role = resource.r3_document(&fetch(&record, AS, "aauth-person.json", "as-key", 7), NOW);
+    assert_eq!(wrong_role.status(), 404);
+    assert!(!discloses(&wrong_role, &record));
+    let stranger = resource.r3_document(
+        &fetch(&record, OTHER_PS, "aauth-person.json", "ops-1", 5),
+        NOW,
+    );
+    assert_eq!(stranger.status(), 404);
+    assert!(!discloses(&stranger, &record));
+
+    let class_as = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &access_claims("auth-as"),
+        7,
+        "as-key",
+    );
+    resource
+        .authorize(&call("/mcp/records.read", &class_as, 2), NOW, "unused")
+        .into_result()
+        .expect("access-server class grant");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let class_ps = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    match resource.authorize(&call("/mcp/records.read", &class_ps, 2), NOW, "unused") {
+        AuthDecision::SignatureFailure(_) => {}
+        other => panic!("person-signed auth token on a federated resource: {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let proposal_token = match resource.authorize(
+        &call("/mcp/records.delete", &class_as, 2),
+        NOW,
+        "challenge-1",
+    ) {
+        AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
+        other => panic!("per-call challenge: {other:?}"),
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let proposal = verify_resource_token(&proposal_token, &keys(), NOW).unwrap();
+    assert_eq!(proposal.claims().aud, AS);
+    assert_eq!(proposal.claims().ps, PS);
+    let stored = proposals.only();
+    assert_eq!(stored.reference.uri(), proposal.reference().uri());
+    assert_eq!(stored.auth_token_issuer, AS);
+    assert_eq!(stored.person_server, PS);
+    let proposal_fetch = resource.r3_document(
+        &fetch_uri(stored.reference.uri(), AS, "aauth-access.json", "as-key", 7),
+        NOW,
+    );
+    assert_eq!(proposal_fetch.status(), 200);
+    assert_eq!(proposal_fetch.body(), &stored.exact_json);
+    let proposal_ps = resource.r3_document(
+        &fetch_uri(stored.reference.uri(), PS, "aauth-person.json", "ps-1", 3),
+        NOW,
+    );
+    assert_eq!(proposal_ps.status(), 200);
+    assert_eq!(proposal_ps.body(), &stored.exact_json);
+    let proposal_stranger = resource.r3_document(
+        &fetch_uri(
+            stored.reference.uri(),
+            OTHER_PS,
+            "aauth-person.json",
+            "ops-1",
+            5,
+        ),
+        NOW,
+    );
+    assert_eq!(proposal_stranger.status(), 404);
+
+    let completion = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([7; 32]),
+        "as-key",
+        &access_claims("per-call-1"),
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("per-call auth token");
+    let grant = match resource.authorize(&call("/mcp/records.delete", &completion, 2), NOW, "run-1")
+    {
+        AuthDecision::Granted(admitted) => {
+            let grant = admitted.r3_grant().expect("per-call grant").clone();
+            assert!(grant.is_per_call());
+            grant
+        }
+        other => panic!("first completion: {other:?}"),
+    };
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let retained = resource.r3_retain(
+        &grant,
+        Response::builder().status(200).body(b"deleted".to_vec()).unwrap(),
+    );
+    assert_eq!(retained.body(), b"deleted");
+    match resource.authorize(&call("/mcp/records.delete", &completion, 2), NOW, "run-2") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"deleted"),
+        other => panic!("replay: {other:?}"),
+    }
 }

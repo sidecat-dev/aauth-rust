@@ -1,12 +1,14 @@
-//! Immediate, unmetered class R3 on the direct Person-Server path.
+//! Class R3 on a Person-Server Resource.
 //!
 //! `draft-hardt-aauth-r3` at the pinned revision: Resource Metadata Extensions,
 //! Authorization Endpoint Extensions, Content Addressing, R3 Document Access
 //! Restriction, Operation Validation and Resource Enforcement. The host selects
 //! the authoritative definitions, maps each protected request to at most one
 //! operation, and supplies a durable immutable document store. Per-call
-//! proposals are opt-in through `with_r3_per_call`. Budgets, missions, release
-//! gating and AS federation are refused.
+//! proposals are opt-in through `with_r3_per_call`. A configured access server
+//! is the federated profile: its Auth tokens and document fetches use
+//! `aauth-access.json`, and the Resource token audience is that server. A
+//! mission composition is refused.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -27,6 +29,7 @@ use super::{
 use crate::{PolicyOutcome, SignatureFailure};
 
 const PERSON_DOCUMENT: &str = "aauth-person.json";
+const ACCESS_DOCUMENT: &str = "aauth-access.json";
 
 #[path = "r3_per_call.rs"]
 mod per_call;
@@ -107,7 +110,8 @@ pub struct R3DocumentRecord {
     pub person_server: String,
     /// `aud` of the Resource token: the Auth-token issuer entitled to fetch.
     pub auth_token_issuer: String,
-    /// Discovery role of that issuer; `aauth-person.json` on the direct path.
+    /// Discovery role of that issuer. `aauth-person.json` on the direct path
+    /// and `aauth-access.json` when this Resource has an access server.
     pub auth_token_issuer_document: String,
     /// `jti` of the Resource token. It is part of the document URI.
     pub resource_token_jti: String,
@@ -362,33 +366,50 @@ where
     P: Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> O,
     O: PolicyOutcome,
 {
-    /// Enable immediate, unmetered class R3 on this direct Person-Server Resource.
+    /// Enable class R3 on this Person-Server Resource.
     ///
     /// Metadata advertises `r3_vocabularies`. `POST /authorize` accepts
     /// `r3_operations`, validates them against the selected definition, commits
-    /// the exact document and its PS fetch entitlement, and only then returns
+    /// the exact document and its fetch entitlement, and only then returns
     /// the Resource token. [`Self::r3_document`] serves those bytes to the
-    /// entitled signer. A protected request that the host maps to an operation
-    /// requires a PS Auth token whose `r3_granted` covers it. Unmapped routes
-    /// keep Core scope authorization and refuse R3 Auth tokens.
+    /// entitled signer. On the direct path the Person Server, signing
+    /// `aauth-person.json`, is that issuer. After [`Self::new_federated`] the
+    /// access server is the Resource-token audience and signs
+    /// `aauth-access.json`; the Person Server remains entitled to fetch with
+    /// `aauth-person.json`. A protected request that the host maps to an
+    /// operation requires an Auth token from that issuer whose `r3_granted`
+    /// covers it. Unmapped routes keep Core scope authorization and refuse R3
+    /// Auth tokens. Budgets remain a separate profile via [`Self::with_budgets`].
     ///
     /// # Errors
     /// [`PsConfigurationError::InvalidR3Profile`] for an empty registry,
     /// definition set or vocabulary list, a snapshot from an unregistered
-    /// parser or registration, a repeated vocabulary, or an AS, budget or
-    /// mission composition this profile does not implement. Calling
-    /// [`Self::with_mission_context`] afterwards makes every request a `500`.
+    /// parser or registration, a repeated vocabulary, or a mission composition
+    /// this profile does not implement. Calling [`Self::with_mission_context`]
+    /// afterwards makes every request a `500`.
     pub fn with_r3(mut self, config: R3Config) -> Result<Self, PsConfigurationError> {
-        if self.access_server.is_some() || self.mission_context {
+        if self.mission_context {
             return Err(PsConfigurationError::InvalidR3Profile);
         }
         self.r3 = Some(Box::new(R3Profile::new(config)?));
         Ok(self)
     }
 
-    /// A composition added after [`Self::with_r3`] that this profile refuses.
+    /// A mission composition added with R3. This profile refuses it.
     pub(super) fn r3_composition_refused(&self) -> bool {
-        self.r3.is_some() && (self.mission_context || self.access_server.is_some())
+        self.r3.is_some() && self.mission_context
+    }
+
+    /// Discovery document of the Auth-token issuer for this Resource's topology.
+    ///
+    /// Matches Go `resource`: an access server selects `aauth-access.json`,
+    /// and the direct Person-Server path selects `aauth-person.json`.
+    pub(super) fn auth_token_issuer_document(&self) -> &'static str {
+        if self.access_server.is_some() {
+            ACCESS_DOCUMENT
+        } else {
+            PERSON_DOCUMENT
+        }
     }
 
     pub(super) fn r3_metadata(&self) -> Option<Value> {
@@ -516,7 +537,7 @@ where
         if record.reference.uri() != exact_uri
             || record.person_server.is_empty()
             || record.auth_token_issuer.is_empty()
-            || record.auth_token_issuer_document != PERSON_DOCUMENT
+            || record.auth_token_issuer_document != self.auth_token_issuer_document()
             || class_document_uri(
                 &self.document_origin(),
                 record.reference.digest(),
@@ -596,7 +617,7 @@ where
             exact_json: exact,
             person_server: claims.ps.clone(),
             auth_token_issuer: claims.aud.clone(),
-            auth_token_issuer_document: PERSON_DOCUMENT.into(),
+            auth_token_issuer_document: self.auth_token_issuer_document().into(),
             resource_token_jti: claims.jti.clone(),
             resource_token: compact.clone(),
             presented_jti: claims.presented_jti.clone(),
