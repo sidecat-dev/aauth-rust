@@ -970,6 +970,39 @@ pinned drafts:
 Still open: upstream tokens that carry `mission_s256`, and `/token` with an
 upstream token issued by an Access Server. Both need four-party call chaining.
 
+Features added on 2026-10-30:
+
+- Every role can publish `name`, `description`, `logo_uri`, `logo_dark_uri`,
+  `documentation_uri`, `tos_uri` and `policy_uri`. Each URL must be `https`,
+  and key discovery refuses metadata whose display URL is not.
+- `AAuth-Capabilities` is read and written. An absent or unreadable header
+  declares nothing. `ChainedInteraction::open` takes the caller's capabilities
+  and does not raise an interaction the caller did not declare.
+- `AgentIdentityResource::with_further_schemes` accepts schemes beside `jwt`
+  and lists them all on refusal; those requests return
+  `Decision::OtherScheme` for the host to verify.
+- An `Agent` tracks missions its Person Server reported terminated.
+  `post_audit` refuses them, and `may_present` tells the host whether a
+  mission-bound token may be used.
+- `Store::replace_binding` establishes a new agent-person binding after
+  revocation. Bindings and token records carry a generation, so earlier
+  credentials stay revoked.
+- `usage_request` and `read_usage` let the Person Server and Access Server
+  query a Resource's usage endpoint and check the answer was produced for the
+  caller.
+- `R3Definitions` groups a Resource's internal definitions. A request spanning
+  several gets one document with a merged display.
+- Resource-initiated interaction, three-party: a Resource puts its own flow in
+  the challenge with `authorize_with_interaction`. The Person Server, with
+  `with_resource_interaction`, then checks the code, validates the Resource
+  URL through the host's egress check, and redirects with a per-flow callback.
+  A callback that carries an error ends the request with the mapped polling
+  error.
+
+Still open: consent through a supervision server, which needs Supervision. Also
+open: metering release-gated R3 calls, which needs a Budgets and per-call
+combination that neither the drafts' wire format nor aauth-go offers.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
