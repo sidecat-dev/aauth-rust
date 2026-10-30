@@ -2,11 +2,11 @@
 
 MIT-licensed Rust libraries for [AAuth](https://github.com/dickhardt/AAuth),
 alongside [aauth-go](https://gitlab.com/sidecat-dev/aauth-go).
-Showcase tag `v0.1.0-alpha.7`. The crates are not on crates.io.
+Showcase tag `v0.1.0-alpha.8`. The crates are not on crates.io.
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
-git checkout v0.1.0-alpha.7
+git checkout v0.1.0-alpha.8
 cargo run --locked -p aauth-rust-resource --example direct-identity
 ```
 
@@ -16,7 +16,9 @@ are under Run the local example.
 
 Every crate in this workspace is MIT, including `aauth-rust-budgets` and
 `aauth-rust-r3`. The workspace `LICENSE` and each crate `LICENSE` are the same
-text. Third-party crates keep their own licenses.
+text. Direct dependencies are mostly MIT OR Apache-2.0. These locked direct
+dependencies are not MIT-only: `ed25519-dalek` 2.2.0 is BSD-3-Clause, `ring`
+0.17.14 is Apache-2.0 AND ISC, and `rustls-webpki` 0.103.15 is ISC.
 
 [CONFORMANCE.md](CONFORMANCE.md) is the behavior record. This tag does not claim
 full R3, Events, Bootstrap, or Supervision. Directory recovery there is a process
@@ -220,11 +222,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-agent = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
 TOML
 cd ../aauth-service
@@ -261,8 +263,8 @@ federated Person Server and Access Server, add these entries to the same
 `[dependencies]` table:
 
 ```toml
-aauth-rust-person-server = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-person-server" }
-aauth-rust-access-server = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-person-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.8", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
 Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
