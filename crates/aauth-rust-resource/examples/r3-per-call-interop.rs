@@ -69,5 +69,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         t.federated_held_mismatch_error,
         t.federated_held_protected_runs,
     );
+    println!(
+        "federated expired: status={} error={} type={} signature-error={} protected-runs={}",
+        t.federated_expired_status,
+        t.federated_expired_error,
+        t.federated_expired_type,
+        t.federated_expired_signature_error,
+        t.federated_expired_protected_runs,
+    );
     Ok(())
 }

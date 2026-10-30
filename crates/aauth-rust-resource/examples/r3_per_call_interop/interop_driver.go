@@ -114,6 +114,10 @@ type federatedConverseResponse struct {
 	HeldUnknownError        string `json:"held_unknown_error"`
 	HeldMismatchStatus      int    `json:"held_mismatch_status"`
 	HeldMismatchError       string `json:"held_mismatch_error"`
+	ExpiredStatus           int    `json:"expired_status"`
+	ExpiredError            string `json:"expired_error"`
+	ExpiredType             string `json:"expired_type"`
+	ExpiredSignatureError   string `json:"expired_signature_error"`
 }
 
 type transcriptOutput struct {
@@ -178,6 +182,11 @@ type transcriptOutput struct {
 	FederatedHeldMismatchStatus                 int      `json:"federated_held_mismatch_status"`
 	FederatedHeldMismatchError                  string   `json:"federated_held_mismatch_error"`
 	FederatedHeldProtectedRuns                  int      `json:"federated_held_protected_runs"`
+	FederatedExpiredStatus                      int      `json:"federated_expired_status"`
+	FederatedExpiredError                       string   `json:"federated_expired_error"`
+	FederatedExpiredType                        string   `json:"federated_expired_type"`
+	FederatedExpiredSignatureError              string   `json:"federated_expired_signature_error"`
+	FederatedExpiredProtectedRuns               int      `json:"federated_expired_protected_runs"`
 	Reads                                       int      `json:"reads"`
 	Deletes                                     []string `json:"deletes"`
 	RustPSAuditRecords                          int      `json:"rust_ps_audit_records"`
@@ -1216,6 +1225,11 @@ func main() {
 	out.FederatedHeldMismatchStatus = fedOut.HeldMismatchStatus
 	out.FederatedHeldMismatchError = fedOut.HeldMismatchError
 	out.FederatedHeldProtectedRuns = fedCounts.HeldProtectedRuns
+	out.FederatedExpiredStatus = fedOut.ExpiredStatus
+	out.FederatedExpiredError = fedOut.ExpiredError
+	out.FederatedExpiredType = fedOut.ExpiredType
+	out.FederatedExpiredSignatureError = fedOut.ExpiredSignatureError
+	out.FederatedExpiredProtectedRuns = fedCounts.ExpiredProtectedRuns
 
 	finalState := fetchState()
 	out.GoToRustQueryRuns = finalState.QueryRuns
@@ -1257,6 +1271,7 @@ type federatedCounts struct {
 	ASIssuances              int
 	ProtectedRuns            int
 	HeldProtectedRuns        int
+	ExpiredProtectedRuns     int
 }
 
 func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, federatedCounts) {
@@ -1291,6 +1306,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	var asProposalAuthorizations atomic.Int32
 	var protectedRuns atomic.Int32
 	var heldRuns atomic.Int32
+	var expiredRuns atomic.Int32
 	issuances := &memoryIssuanceStore{}
 	admitResource := func(_ context.Context, endpoint string) error {
 		if !strings.HasPrefix(endpoint, fedResourceIssuer+"/r3/") {
@@ -1318,6 +1334,8 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 				protectedRuns.Add(1)
 			case "/records/held-1":
 				heldRuns.Add(1)
+			case "/records/expire-1":
+				expiredRuns.Add(1)
 			default:
 				http.Error(w, "unexpected protected path", http.StatusInternalServerError)
 				return
@@ -1453,7 +1471,13 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 					return accessserver.R3ProposalDecision{}, errors.New("federated interop: proposal operation is not records.delete")
 				}
 				asProposalAuthorizations.Add(1)
-				return accessserver.R3ProposalDecision{Lifetime: 5 * time.Minute}, nil
+				lifetime := 5 * time.Minute
+				if record, ok := proposal.Parameters().Get("record"); ok {
+					if inline, inlineOK := record.InlineJSON(); inlineOK && bytes.Equal(inline, []byte(`"expire-1"`)) {
+						lifetime = 5 * time.Second
+					}
+				}
+				return accessserver.R3ProposalDecision{Lifetime: lifetime}, nil
 			},
 			Issuances: issuances,
 		},
@@ -1551,5 +1575,6 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		ASIssuances:              issuances.len(),
 		ProtectedRuns:            int(protectedRuns.Load()),
 		HeldProtectedRuns:        int(heldRuns.Load()),
+		ExpiredProtectedRuns:     int(expiredRuns.Load()),
 	}
 }

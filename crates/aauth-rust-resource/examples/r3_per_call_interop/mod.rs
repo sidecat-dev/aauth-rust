@@ -30,7 +30,11 @@
 //!    and replays the same auth token. A `POST` of that pending URL is `405`
 //!    `method_not_allowed`. A `GET` of a different pending id is `410` `gone`.
 //!    A second compact form of the same auth-token claims is `403`
-//!    `access_denied` and does not run the handler again. Budget stays unset.
+//!    `access_denied` and does not run the handler again. A `records.delete`
+//!    proposal for record `expire-1` is issued for five seconds. Presenting
+//!    that auth token at its `exp` is `401` `invalid_token` with
+//!    `Signature-Error: error=expired_jwt`, and the handler does not run. The
+//!    Go server clock stays at InitialNow. Budget stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -153,6 +157,11 @@ pub struct InteropTranscript {
     pub federated_held_mismatch_status: u16,
     pub federated_held_mismatch_error: String,
     pub federated_held_protected_runs: usize,
+    pub federated_expired_status: u16,
+    pub federated_expired_error: String,
+    pub federated_expired_type: String,
+    pub federated_expired_signature_error: String,
+    pub federated_expired_protected_runs: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
     pub rust_ps_audit_records: usize,
@@ -286,6 +295,14 @@ fn held_pending_id_ok(id: &str) -> bool {
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
+}
+fn header_value(response: &Response<Vec<u8>>, name: &str) -> String {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned()
 }
 fn member(response: &Response<Vec<u8>>, name: &str) -> Option<String> {
     serde_json::from_slice::<Value>(response.body())
@@ -1736,6 +1753,99 @@ fn handle_federated_converse(
         ));
     }
 
+    // Five-second auth token. The signature moves to exp. Go's server clock
+    // stays at InitialNow, inside the 60-second signature window.
+    let expire_at = clock + 5;
+    let expire_challenge_req = post_at(
+        &holder,
+        &format!("{FED_RECORDS}/records/expire-1"),
+        b"{}",
+        clock,
+    )?;
+    let expire_challenged = TlsServer::send_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &expire_challenge_req,
+    )?;
+    if expire_challenged.status().as_u16() != 401 {
+        return Err(http_failure(
+            "federated short-lived proposal challenge",
+            &expire_challenged,
+        ));
+    }
+    let expire_rt = challenge(&expire_challenged)?;
+    let verified_expire = agent.verify_r3_proposal_challenge(
+        &expire_rt,
+        FED_RECORDS,
+        FED_PS,
+        &class_auth,
+        trust,
+        clock,
+    )?;
+    let expire_exchange_req = post_at(
+        &agent,
+        &format!("{FED_PS}/token"),
+        json!({"resource_token": expire_rt, "presented_token": class_auth})
+            .to_string()
+            .as_bytes(),
+        clock,
+    )?;
+    let expire_exchange_resp = TlsServer::send_external(
+        fed_ps_addr,
+        "fed-ps.example",
+        &fed_ps_cert,
+        &expire_exchange_req,
+    )?;
+    if expire_exchange_resp.status().as_u16() != 200 {
+        return Err(http_failure(
+            "federated short-lived proposal exchange",
+            &expire_exchange_resp,
+        ));
+    }
+    let expire_grant =
+        member(&expire_exchange_resp, "auth_token").ok_or("federated short-lived grant missing")?;
+    let expire_delivered = agent.verify_r3_per_call_delivery(
+        &expire_grant,
+        FED_RECORDS,
+        &verified_expire,
+        &class_auth,
+        &registry,
+        trust,
+        clock,
+    )?;
+    if expire_delivered.claims().exp != expire_at {
+        return Err("federated short-lived auth token does not expire at five seconds".into());
+    }
+    let expire_holder = agent.with_token(expire_grant)?;
+    let expire_req = post_at(
+        &expire_holder,
+        &format!("{FED_RECORDS}/records/expire-1"),
+        b"{}",
+        expire_at,
+    )?;
+    let expired = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &expire_req,
+    )?;
+    let federated_expired_status = expired.status().as_u16();
+    let federated_expired_error = member(&expired, "error").unwrap_or_default();
+    let federated_expired_type = member(&expired, "type").unwrap_or_default();
+    let federated_expired_signature_error = header_value(&expired, "signature-error");
+    if federated_expired_status != 401
+        || federated_expired_error != "invalid_token"
+        || federated_expired_type != "urn:ietf:params:sig-error:expired_jwt"
+        || federated_expired_signature_error != "error=expired_jwt"
+    {
+        return Err(format!(
+            "federated expired auth token failed ({federated_expired_status} {federated_expired_error} {federated_expired_type} {federated_expired_signature_error}): {}",
+            String::from_utf8_lossy(expired.body())
+        )
+        .into());
+    }
+
     Ok(json!({
         "person_status": person_status,
         "class_exchange_status": class_exchange_status,
@@ -1758,6 +1868,10 @@ fn handle_federated_converse(
         "held_unknown_error": held_unknown_error,
         "held_mismatch_status": held_mismatch_status,
         "held_mismatch_error": held_mismatch_error,
+        "expired_status": federated_expired_status,
+        "expired_error": federated_expired_error,
+        "expired_type": federated_expired_type,
+        "expired_signature_error": federated_expired_signature_error,
     }))
 }
 
@@ -2100,6 +2214,11 @@ pub fn run() -> Result<InteropTranscript> {
         federated_held_mismatch_status: number(&raw, "federated_held_mismatch_status")? as u16,
         federated_held_mismatch_error: text(&raw, "federated_held_mismatch_error")?,
         federated_held_protected_runs: number(&raw, "federated_held_protected_runs")? as usize,
+        federated_expired_status: number(&raw, "federated_expired_status")? as u16,
+        federated_expired_error: text(&raw, "federated_expired_error")?,
+        federated_expired_type: text(&raw, "federated_expired_type")?,
+        federated_expired_signature_error: text(&raw, "federated_expired_signature_error")?,
+        federated_expired_protected_runs: number(&raw, "federated_expired_protected_runs")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
             raw.get("deletes").cloned().ok_or("missing deletes")?,
@@ -2146,10 +2265,10 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_proposal_exchange_status != 200
         || !t.federated_proposal_verified
         || t.federated_ps_class_consents != 1
-        || t.federated_ps_proposal_consents != 2
+        || t.federated_ps_proposal_consents != 3
         || t.federated_as_class_authorizations != 1
-        || t.federated_as_proposal_authorizations != 2
-        || t.federated_as_issuances != 3
+        || t.federated_as_proposal_authorizations != 3
+        || t.federated_as_issuances != 4
         || t.federated_completion_status != 200
         || t.federated_replay_status != 200
         || !t.federated_replay_matches
@@ -2167,6 +2286,11 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_held_mismatch_status != 403
         || t.federated_held_mismatch_error != "access_denied"
         || t.federated_held_protected_runs != 1
+        || t.federated_expired_status != 401
+        || t.federated_expired_error != "invalid_token"
+        || t.federated_expired_type != "urn:ietf:params:sig-error:expired_jwt"
+        || t.federated_expired_signature_error != "error=expired_jwt"
+        || t.federated_expired_protected_runs != 0
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]
         || t.rust_ps_audit_records != 8
