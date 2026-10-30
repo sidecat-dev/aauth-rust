@@ -1,9 +1,13 @@
 //! Buffered request signing and immediate PS credential-context verification.
+//! AAuth Events: subscription requests signed with a subscribe token, and
+//! verification of delivered event tokens and bodies.
 //! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
 mod access;
 mod credentials;
+mod events;
 pub use credentials::FederatedContext;
+pub use events::{EventError, EventSubscriptions, ReceivedEvent, verify_event};
 mod subagents;
 pub use subagents::Subagent;
 
