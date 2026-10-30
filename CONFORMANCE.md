@@ -719,6 +719,31 @@ recorded `CARGO_RC 0` and `HELDLIVE01_DONE`. This commit records that receipt
 and does not change behavior. It does not change the DirectR3 interop pin.
 This is not a separate product-QA pass and not power loss.
 
+A second presentation of a `401` completion stays `503` while its grant is
+unretained. Behavior commit `24b48dd397a3c69dcd3ab1ae2326e4c900e231ba` (tree
+`5b0e927878eb66d1a17585d3b4fc83b0d5bb16be`) keeps that proposal URI while the
+host still holds the cloned execution grant. The response is `503`
+`temporarily_unavailable` with `Retry-After: 1`. It has no `Location` and no
+`AAuth-Requirement`. Retaining the result then replays `ran-once`. Dropping
+that grant without a retained result returns `500` `server_error`. The first
+retained result still replays. A held poll whose grant is still held stays
+`202`. Host3 `aauth-wc07-completion-retrylive01` at that source passed
+`a_retry_while_the_grant_is_unretained_is_unavailable` 1/0 with 16 filtered,
+`held_poll_while_the_grant_is_unretained_stays_pending` 1/0 with 16 filtered,
+and
+`a_per_call_executes_once_and_the_replay_returns_the_retained_result` 1/0
+with 41 filtered. This unit did not run `r3-per-call-interop`. It did not
+rerun directory reopen or interrupted retain. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay as previously recorded.
+Retained-grant `budget_consumed` stays unresolved. Receipt START
+`2026-10-30T06:05:02.130016325+00:00`, log mtime
+`2026-10-30T06:05:16.317087Z`. systemd-run invocation
+`f2a1501a4a5e45958fad82558899e1d3`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `RETRYLIVE01_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin.
+This is not a separate product-QA pass and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
