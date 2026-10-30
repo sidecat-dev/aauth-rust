@@ -9,8 +9,8 @@
 use http::{Response, StatusCode, Uri};
 
 use crate::continuation::{
-    PendingResponse, Requirement, generate_interaction_code, generate_pending_id,
-    is_emitted_interaction_code,
+    PendingResponse, Requirement, canonical_interaction_code, generate_interaction_code,
+    generate_pending_id, is_emitted_interaction_code,
 };
 
 /// The interaction URL or callback is not an HTTPS URL without a query or fragment,
@@ -108,8 +108,9 @@ pub struct InteractionQuery {
 ///
 /// # Errors
 /// Returns [`InteractionError`] when `code` is missing, repeated, or not an
-/// emitted interaction code, when `callback` is repeated or not an HTTPS URL
-/// without a query or fragment, or when another parameter is present.
+/// interaction code in any case once aliases are folded, when `callback` is
+/// repeated or not an HTTPS URL without a query or fragment, or when another
+/// parameter is present.
 pub fn parse_interaction_query(query: &str) -> Result<InteractionQuery, InteractionError> {
     let pairs = pairs(query)?;
     let mut code = None;
@@ -122,7 +123,7 @@ pub fn parse_interaction_query(query: &str) -> Result<InteractionQuery, Interact
         }
     }
     let code = code
-        .filter(|code| is_emitted_interaction_code(code))
+        .filter(|code| canonical_interaction_code(code).is_some())
         .ok_or(InteractionError)?;
     if let Some(callback) = &callback {
         https_target(callback)?;

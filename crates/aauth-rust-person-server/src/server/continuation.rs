@@ -142,6 +142,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let d = self.deferred.as_ref().ok_or_else(Failure::internal)?;
         let requirement = match &pending.requirement {
             Requirement::Payment { .. } | Requirement::Claims(_) => Requirement::Approval,
+            // Codes compare without case, so an AS code read in lower case is
+            // relayed in the upper case a server emits.
+            Requirement::Interaction { url, code } => Requirement::Interaction {
+                url: url.clone(),
+                code: code.to_ascii_uppercase(),
+            },
             other => other.clone(),
         };
         PendingResponse::new(

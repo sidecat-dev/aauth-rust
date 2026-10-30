@@ -336,13 +336,36 @@ fn interaction_codes_require_eight_crockford_symbols_when_parsed_and_constructed
 }
 
 #[test]
-fn interaction_codes_preserve_case_and_optional_hyphens() {
-    for code in [
-        "C0DE8X42",
-        "c0de8x42",
-        "C0de-8x42",
-        "0123456789ABCDEFGHJKMNPQRSTVWXYZ",
-    ] {
+fn interaction_codes_are_emitted_in_upper_case_and_parsed_in_any_case() {
+    for code in ["c0de8x42", "C0de-8x42"] {
+        assert!(!is_emitted_interaction_code(code), "{code}");
+        let requirement = Requirement::Interaction {
+            url: "https://as.example/consent".into(),
+            code: code.into(),
+        };
+        assert!(
+            PendingResponse::new(
+                "https://as.example/token",
+                "/pending/interaction",
+                5,
+                requirement.clone(),
+            )
+            .is_err(),
+            "constructed {code}"
+        );
+        let field =
+            format!("requirement=interaction; url=\"https://as.example/consent\"; code=\"{code}\"");
+        assert_eq!(
+            PendingResponse::parse(
+                "https://as.example/token",
+                &response(202, &field, json!({"status":"pending"})),
+            )
+            .unwrap()
+            .requirement,
+            requirement,
+        );
+    }
+    for code in ["C0DE8X42", "C0DE-8X42", "0123456789ABCDEFGHJKMNPQRSTVWXYZ"] {
         let requirement = Requirement::Interaction {
             url: "https://as.example/consent".into(),
             code: code.into(),

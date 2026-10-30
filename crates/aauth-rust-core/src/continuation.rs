@@ -37,9 +37,10 @@ pub enum Requirement {
     Interaction {
         /// HTTPS interaction target without a query or fragment; never fetched.
         url: String,
-        /// At least eight case-insensitive Crockford Base32 symbols, optionally
-        /// hyphenated. A server emits one from [`generate_interaction_code`];
-        /// the host manages single use.
+        /// At least eight Crockford Base32 symbols, optionally hyphenated.
+        /// Parsing accepts either case; a server emits only the upper-case
+        /// alphabet, as [`generate_interaction_code`] draws it. The host manages
+        /// single use.
         code: String,
     },
     /// Host is obtaining approval without directing the person at the Agent.
@@ -227,7 +228,8 @@ impl PendingResponse {
         })
     }
     /// Build validated deferred framing. Bodies are bounded and cannot contain
-    /// a grant. `response` returns an error if a caller mutates these public fields
+    /// a grant, and an interaction code must pass [`is_emitted_interaction_code`].
+    /// `response` returns an error if a caller mutates these public fields
     /// into an invalid combination.
     pub fn new(
         endpoint: &str,
@@ -298,11 +300,16 @@ impl PendingResponse {
             )),
             Requirement::Claims(_) => Some("requirement=claims".into()),
             Requirement::Clarification { .. } => Some("requirement=clarification".into()),
-            Requirement::Interaction { url, code } => Some(format!(
-                "requirement=interaction; url={}; code={}",
-                sf_string(url)?,
-                sf_string(code)?
-            )),
+            Requirement::Interaction { url, code } => {
+                if !is_emitted_interaction_code(code) {
+                    return Err(PendingError);
+                }
+                Some(format!(
+                    "requirement=interaction; url={}; code={}",
+                    sf_string(url)?,
+                    sf_string(code)?
+                ))
+            }
             Requirement::Payment { authenticate } => {
                 response = response.header("www-authenticate", authenticate);
                 None
@@ -316,18 +323,9 @@ impl PendingResponse {
             .map_err(|_| PendingError)
     }
 }
+// A received code may arrive in either case. Only emission is upper case.
 fn valid_interaction_code(code: &str) -> bool {
-    let mut symbols = 0;
-    for byte in code.bytes() {
-        match byte.to_ascii_uppercase() {
-            b'-' => {}
-            b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z' => {
-                symbols += 1
-            }
-            _ => return false,
-        }
-    }
-    (8..=128).contains(&symbols)
+    is_emitted_interaction_code(&code.to_ascii_uppercase())
 }
 
 /// Comparison value of an interaction code.
@@ -352,10 +350,22 @@ pub fn canonical_interaction_code(code: &str) -> Option<String> {
     (8..=128).contains(&out.len()).then_some(out)
 }
 
-/// True when a server may emit this code. Aliases `I`, `L`, and `O` are rejected.
-/// Hyphens are allowed and do not count as symbols.
+/// True when a server may emit this code: eight to 128 symbols of the
+/// upper-case Crockford alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`. Lower case
+/// and the aliases `I`, `L`, and `O` are rejected. Hyphens are allowed and do
+/// not count as symbols.
 pub fn is_emitted_interaction_code(code: &str) -> bool {
-    valid_interaction_code(code)
+    let mut symbols = 0;
+    for byte in code.bytes() {
+        match byte {
+            b'-' => {}
+            b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z' => {
+                symbols += 1
+            }
+            _ => return false,
+        }
+    }
+    (8..=128).contains(&symbols)
 }
 
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
