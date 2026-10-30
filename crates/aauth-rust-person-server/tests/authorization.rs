@@ -1215,6 +1215,36 @@ fn federated_delivery_verifies_as_result_and_retains_exact_step_up_ancestry() {
     );
 }
 #[test]
+fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint() {
+    // Core upstream-token-verification: an Auth token's iss may be an AS this
+    // PS presented a person token to for that token's aud and sub.
+    let f = Fixture::new();
+    let server = f.server(2000).with_federation(AccessTransport {
+        mode: 0,
+        calls: Arc::new(AtomicUsize::new(0)),
+        now: f.host.now.clone(),
+    });
+    let holder = agent(false);
+    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+    let challenge = resource(&holder, &person, "read", |r| {
+        r.aud = "https://as.example".into()
+    });
+    let upstream = compact(
+        &f.exchange(&server, &holder, &challenge, &person, None),
+        "auth_token",
+    );
+    let downstream = compact(
+        &f.person(&server, &agent(true), INVENTORY, Some(&upstream)),
+        "person_token",
+    );
+    let downstream = PersonToken::parse(&downstream)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(downstream.claims().sub, "inventory-person");
+    assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+}
+#[test]
 fn federation_never_releases_unverified_or_unretained_as_tokens() {
     for mode in [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,

@@ -749,7 +749,9 @@ Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
 Missions and recursive sub-agent delegation remain named gaps of this Core-scope
 profile. The AS verifies chained requests from any PS; this Rust PS does not yet
-relay `upstream_token` through federation and refuses that request. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
+relay `upstream_token` through federation and refuses that request. It does accept
+an Auth token its AS issued, which it retained on delivery, as `upstream_token` at
+`/person`. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 

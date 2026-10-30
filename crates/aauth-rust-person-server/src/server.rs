@@ -537,12 +537,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         now: i64,
     ) -> Result<Upstream, Failure> {
         let token = self.verify_presented(compact, now, "upstream")?;
-        if token.ps != self.config.issuer
-            || token.issuer != self.config.issuer
-            || token.aud != agent.claims().iss
-        {
+        if token.ps != self.config.issuer || token.aud != agent.claims().iss {
             return Err(Failure::parameter("invalid_upstream_token"));
         }
+        // The token's `iss` is this PS, or an AS this PS presented a person
+        // token to for its `aud` and `sub`: only then does this PS hold its
+        // record, retained on issuance or on federated delivery.
         let record = self.load_record(&token, compact, now, "upstream")?;
         let binding = self
             .binding(&record.principal, BindingContext::Upstream)?
