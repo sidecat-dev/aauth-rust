@@ -7,8 +7,9 @@ use aauth_rust_signature_key::{
     KeyCacheAnswer, KeyCacheStore, KeyMaterial, PreparedRequest, RequestSignature,
     ServerKeyBinding, accept_pinned_peer, accept_response, admit_fetch, admit_redirect,
     choose_presented_scheme, origin_is_allowed, origin_pseudonym, present_issued_cid,
-    recognized_tokens, select_presented_scheme, sign_request, sign_requests, signature_error_code,
-    verify_application_jwt, verify_discovered_jwt,
+    recognized_tokens, select_presented_scheme, sign_request, sign_requests,
+    sign_requests_with_components, signature_error_code, verify_application_jwt,
+    verify_discovered_jwt,
 };
 use http::Request;
 use serde_json::json;
@@ -281,6 +282,108 @@ fn expires_cannot_precede_or_equal_created() {
     let (mut req, _) = signed();
     req.headers_mut().insert("signature-input","sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"signature-key\");created=1020;expires=1010".parse().unwrap());
     assert!(PreparedRequest::prepare(&req, "sig", 1000, 60).is_err());
+}
+
+#[test]
+fn listed_additional_components_are_covered_once_after_the_base() {
+    let key = SigningKey::from_seed([7; 32]);
+    let part = || RequestSignature {
+        label: "sig",
+        key: &key,
+        material: KeyMaterial::Hwk(key.public_jwk()),
+    };
+    let listed = [
+        "x-tenant",
+        "content-digest",
+        "@path",
+        "x-tenant",
+        "signature-key",
+    ];
+    let mut req = request();
+    req.headers_mut()
+        .insert("x-tenant", " acme ".parse().unwrap());
+    sign_requests_with_components(&mut req, &[part()], &listed, 1000).unwrap();
+    assert_eq!(
+        req.headers()["signature-input"],
+        "sig=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"x-tenant\" \"signature-key\");created=1000"
+    );
+    // A listed digest covers empty content too.
+    assert_eq!(
+        req.headers()["content-digest"],
+        "sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:"
+    );
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    prepared.verify(&key.public_jwk()).unwrap();
+    let base = String::from_utf8(prepared.signature_base().to_vec()).unwrap();
+    assert!(base.contains("\n\"x-tenant\": acme\n"), "{base}");
+    req.headers_mut()
+        .insert("x-tenant", "other".parse().unwrap());
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60)
+            .unwrap()
+            .verify(&key.public_jwk()),
+        Err(Error::InvalidSignature)
+    );
+    req.headers_mut().remove("x-tenant");
+    assert_eq!(
+        PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap_err(),
+        Error::InvalidSignature
+    );
+
+    // A listed derived component and content fields the base already covers.
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("https://resource.example/orders")
+        .header("content-type", "application/json")
+        .body(b"{}".to_vec())
+        .unwrap();
+    sign_requests_with_components(
+        &mut req,
+        &[part()],
+        &["content-type", "content-digest", "@query"],
+        1000,
+    )
+    .unwrap();
+    assert_eq!(
+        req.headers()["signature-input"],
+        "sig=(\"@method\" \"@authority\" \"@path\" \"content-digest\" \"content-type\" \"@query\" \"signature-key\");created=1000"
+    );
+    let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+    prepared.verify(&key.public_jwk()).unwrap();
+    assert!(
+        String::from_utf8(prepared.signature_base().to_vec())
+            .unwrap()
+            .contains("\n\"@query\": ?\n")
+    );
+
+    // A component the signer cannot cover is refused before the request changes.
+    for listed in [
+        "x-absent",
+        "X-Tenant",
+        "@target-uri",
+        "@status",
+        "signature",
+        "signature-input",
+        "x tenant",
+        "",
+    ] {
+        let mut req = request();
+        req.headers_mut()
+            .insert("x-tenant", "acme".parse().unwrap());
+        assert_eq!(
+            sign_requests_with_components(&mut req, &[part()], &[listed], 1000),
+            Err(Error::InvalidInput),
+            "{listed:?}"
+        );
+        for name in [
+            "signature-input",
+            "signature",
+            "signature-key",
+            "content-digest",
+        ] {
+            assert!(!req.headers().contains_key(name), "{listed:?} {name}");
+        }
+    }
 }
 
 fn resign(req: &mut Request<Vec<u8>>, key: &SigningKey) {

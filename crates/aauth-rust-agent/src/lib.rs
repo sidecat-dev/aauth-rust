@@ -16,7 +16,9 @@ mod governance;
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
-use aauth_rust_signature_key::{Error, KeyMaterial, sign_request};
+use aauth_rust_signature_key::{
+    Error, KeyMaterial, RequestSignature, sign_requests_with_components,
+};
 pub use access::AccessSession;
 pub use attempts::ResourceTokenAttempts;
 pub use governance::{ChannelError, InteractionCompletion, PermissionDecision};
@@ -28,6 +30,7 @@ use std::sync::Arc;
 pub struct Agent {
     key: Arc<SigningKey>,
     token: String,
+    components: Vec<String>,
 }
 impl Agent {
     /// Retain exact issuer-provided bytes and ensure the local proof key matches.
@@ -55,14 +58,43 @@ impl Agent {
         Ok(Self {
             key: self.key.clone(),
             token,
+            components: self.components.clone(),
         })
+    }
+    /// Cover a Resource's `additional_signature_components` on every request
+    /// this Agent signs, including R3 authorization requests and polls. The
+    /// list replaces any earlier one, and [`Self::with_token`] keeps it.
+    /// The Agent does not fetch Resource metadata: pass the published array.
+    ///
+    /// Use the returned Agent only for that Resource. Signing fails with
+    /// `InvalidInput` rather than omit a listed component: an entry must be a
+    /// lowercase field name present on the request, or `@method`,
+    /// `@authority`, `@path` or `@query`. A listed `content-digest` is always
+    /// computed from the actual content.
+    pub fn with_additional_signature_components<I, S>(&self, components: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self {
+            key: self.key.clone(),
+            token: self.token.clone(),
+            components: components
+                .into_iter()
+                .map(|component| component.as_ref().to_owned())
+                .collect(),
+        }
     }
     fn from_shared_key(key: Arc<SigningKey>, token: String) -> Result<Self, TokenError> {
         let parsed = AgentToken::parse(&token)?;
         if parsed.unverified_claims().cnf.jwk.thumbprint()? != key.public_jwk().thumbprint()? {
             return Err(TokenError::ConfirmationKeyMismatch);
         }
-        Ok(Self { key, token })
+        Ok(Self {
+            key,
+            token,
+            components: Vec::new(),
+        })
     }
     /// Return an owned copy of the retained proof key's public JWK.
     /// Use it for enrollment or renewed token claims without parsing an old token.
@@ -76,17 +108,25 @@ impl Agent {
     }
     /// Sign once, last, after URI and headers are final. `now` is Unix seconds.
     /// This replaces any signature headers; it never sends or retries a request.
+    /// The signature also covers any components set with
+    /// [`Self::with_additional_signature_components`].
     ///
     /// # Errors
     /// Nonempty content is digest-covered (up to 1 MiB), including Content-Type
     /// when present. Hosts must pass actual bytes and bound body collection.
     /// Rejects oversized/non-HTTPS requests, invalid clocks and malformed
-    /// signing material. See the Signature-Key error explanation for a remedy.
+    /// signing material. A listed component that cannot be covered is
+    /// `InvalidInput`. See the Signature-Key error explanation for a remedy.
     pub fn sign(&self, request: &mut Request<Vec<u8>>, now: i64) -> Result<(), Error> {
-        sign_request(
+        let components: Vec<&str> = self.components.iter().map(String::as_str).collect();
+        sign_requests_with_components(
             request,
-            &self.key,
-            KeyMaterial::Jwt(self.token.clone()),
+            &[RequestSignature {
+                label: "sig",
+                key: &self.key,
+                material: KeyMaterial::Jwt(self.token.clone()),
+            }],
+            &components,
             now,
         )
     }

@@ -106,7 +106,8 @@ impl Agent {
     /// The body is `{"r3_operations":…}` with the exact serialized operation
     /// set, plus `scope` only when the caller asks for Core scope too. The
     /// request is signed with `person_token` as the `jwt` credential and covers
-    /// `content-type` and `content-digest`. No request is sent.
+    /// `content-type`, `content-digest` and any components set with
+    /// [`Agent::with_additional_signature_components`]. No request is sent.
     ///
     /// # Errors
     /// [`R3AgentError::InvalidInput`] for a non-HTTPS endpoint or malformed

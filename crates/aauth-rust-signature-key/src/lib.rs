@@ -48,9 +48,10 @@ pub enum Error {
     /// Malformed framing, stale proof, unsupported component or failed signature.
     InvalidSignature,
     #[error(
-        "signature coverage is incomplete: include method, authority, path, Signature-Key, query/Authorization when present, and Content-Digest plus Content-Type when content requires them"
+        "signature coverage is incomplete: include method, authority, path, Signature-Key, query/Authorization when present, Content-Digest plus Content-Type when content requires them, and every field the server lists; a listed field must be a lowercase name present on the request"
     )]
-    /// The selected signature omits required covered components.
+    /// The selected signature omits required covered components, or a listed
+    /// additional component cannot be covered.
     InvalidInput,
     #[error(
         "created is too far in the future: synchronize the clock and use Unix seconds rather than milliseconds"
@@ -459,6 +460,19 @@ pub(crate) fn discovery_name(dwk: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 
+/// Derived components this profile reconstructs.
+const DERIVED_COMPONENTS: &[&str] = &["@method", "@authority", "@path", "@query"];
+
+/// A lowercase HTTP field name that a signature may cover. `signature` and
+/// `signature-input` carry the proof itself and are never covered.
+fn field_component(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "signature" | "signature-input")
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
+        })
+}
+
 fn components(input: &InnerList) -> Result<Vec<&str>, Error> {
     let mut result = Vec::new();
     let mut seen = BTreeSet::new();
@@ -531,8 +545,8 @@ fn build_base(req: &Request<Vec<u8>>, input: &InnerList) -> Result<Vec<u8>, Erro
                 lines.push(format!("\"@query\": ?{}", req.uri().query().unwrap_or("")));
                 continue;
             }
-            "signature-key" | "authorization" | "content-digest" | "content-type" => {
-                lines.push(format!("\"{name}\": {}", header(req, name)?));
+            field if field_component(field) => {
+                lines.push(format!("\"{field}\": {}", header(req, field)?));
                 continue;
             }
             _ => return Err(Error::InvalidSignature),
@@ -557,6 +571,10 @@ pub struct PreparedRequest {
 impl PreparedRequest {
     /// Capture a selected hwk/jwt assertion at `now` with a window in Unix seconds.
     /// Local clocks are limited to 0..=8589934591 (through 2242).
+    /// Beyond the required set, a signature may cover any lowercase header
+    /// field present on the request, such as one a server lists in
+    /// `additional_signature_components`. Derived components other than
+    /// `@method`, `@authority`, `@path` and `@query` are refused.
     ///
     /// # Errors
     /// Returns profile, syntax, coverage, time or key-conveyance errors. No proof
@@ -762,6 +780,39 @@ pub fn sign_requests(
     parts: &[RequestSignature<'_>],
     now: i64,
 ) -> Result<(), Error> {
+    sign_requests_with_components(req, parts, &[], now)
+}
+
+/// Sign every label, also covering the components a server lists in its
+/// `additional_signature_components` metadata.
+///
+/// Each entry is a lowercase HTTP field name or one of `@method`,
+/// `@authority`, `@path` and `@query`. Entries the base components do not
+/// already cover follow them in list order, and `signature-key` stays last.
+/// A repeated entry is covered once. A listed `content-digest` is computed
+/// from the actual content, even when it is empty, and keeps its base position.
+///
+/// # Errors
+/// As for [`sign_requests`]. Returns [`Error::InvalidInput`], before the
+/// request is changed, for any other derived component, a name that is not a
+/// lowercase field name, `signature`, `signature-input`, or a listed field
+/// the request does not carry. The signer never omits a listed component.
+pub fn sign_requests_with_components(
+    req: &mut Request<Vec<u8>>,
+    parts: &[RequestSignature<'_>],
+    additional: &[&str],
+    now: i64,
+) -> Result<(), Error> {
+    for name in additional {
+        let derived = DERIVED_COMPONENTS.contains(name);
+        if !derived && !field_component(name) {
+            return Err(Error::InvalidInput);
+        }
+        let generated = matches!(*name, "content-digest" | "signature-key");
+        if !derived && !generated && !req.headers().contains_key(*name) {
+            return Err(Error::InvalidInput);
+        }
+    }
     if parts.is_empty() || req.body().len() > MAX_BODY_BYTES {
         return Err(if parts.is_empty() {
             Error::InvalidInput
@@ -791,7 +842,7 @@ pub fn sign_requests(
     if req.headers().contains_key("authorization") {
         covered.push("authorization");
     }
-    if content_digest::needed(req) {
+    if content_digest::needed(req) || additional.contains(&"content-digest") {
         let digest = content_digest::field(req.body());
         req.headers_mut().insert(
             "content-digest",
@@ -800,6 +851,11 @@ pub fn sign_requests(
         covered.push("content-digest");
         if !req.body().is_empty() && req.headers().contains_key("content-type") {
             covered.push("content-type");
+        }
+    }
+    for name in additional {
+        if *name != "signature-key" && !covered.contains(name) {
+            covered.push(*name);
         }
     }
     covered.push("signature-key");

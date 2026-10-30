@@ -81,6 +81,18 @@ metadata; the verifier helper does not supply those roles. Point agents at this 
 Use the configured canonical HTTPS identity; a caller-supplied Host is not that
 identity. The Rust Agent does not fetch metadata automatically.
 
+When a Resource's metadata lists `additional_signature_components`, pass that
+array to `agent.with_additional_signature_components(list)` and use the
+returned Agent for that Resource. Every request it signs, including R3
+authorization requests and polls, covers each listed component after the base
+set, and `with_token` keeps the list. An entry must be a lowercase field name
+present on the request, or `@method`, `@authority`, `@path` or `@query`. A
+listed `content-digest` is computed from the actual content, even when empty.
+Signing returns `InvalidInput` rather than omit a listed component, so a host
+adds a listed field such as a tenant header before signing. The verifier
+reconstructs any covered lowercase field. Lower-level callers use
+`sign_requests_with_components`.
+
 Only the named fields are authenticated. Content-Encoding and other headers
 are not automatically covered. The library does not transform content; if your
 host interprets an encoding, reject unsupported encodings or use a profile that

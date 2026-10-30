@@ -105,6 +105,8 @@ impl PollSession {
     }
     /// Prepare exactly one signed GET after the server's required wait. It never
     /// resends the initial POST or its content. The host sends these exact bytes.
+    /// Like every request here, it covers the components `agent` carries from
+    /// [`Agent::with_additional_signature_components`].
     pub fn request(&self, agent: &Agent, now: i64) -> Result<Request<Vec<u8>>, PollError> {
         self.current(now)?;
         if now < self.next_at {
