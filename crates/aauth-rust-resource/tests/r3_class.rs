@@ -2279,3 +2279,155 @@ fn an_application_202_replays_with_its_pending_headers_or_as_server_error() {
         other => panic!("first pending result changed: {other:?}"),
     }
 }
+
+#[test]
+fn a_released_application_202_replays_with_its_pending_headers_or_as_server_error() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    // The first computation answers a same-origin pending 202, the second a cross-origin one.
+    let computed = Arc::new(AtomicUsize::new(0));
+    let runs = Arc::clone(&computed);
+    let release: aauth_rust_resource::BoxedR3Release = Box::new(
+        move |_: &Request<Vec<u8>>,
+              _: &Operation,
+              _: &BTreeMap<String, PresentedParameter>,
+              _: Option<&str>| {
+            let location = if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                format!("{ORIGIN}/jobs/released")
+            } else {
+                "https://elsewhere.example/jobs/released".to_owned()
+            };
+            Ok(Some(aauth_rust_resource::R3Release {
+                result: aauth_rust_r3::ProposalResult::new(b"{}").unwrap(),
+                display: aauth_rust_r3::ProposalDisplay::new(
+                    &R3Display::new("The call already ran", None, None, None).unwrap(),
+                    None,
+                )
+                .unwrap(),
+                response: Response::builder()
+                    .status(202)
+                    .header("location", location)
+                    .header("retry-after", "5")
+                    .header("cache-control", "no-store")
+                    .header("content-type", "application/json")
+                    .body(br#"{"status":"pending"}"#.to_vec())
+                    .unwrap(),
+            }))
+        },
+    );
+    let resource = PsAuthorizationResource::new(config(), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: true,
+            release: Some(release),
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-released",
+    );
+    let class = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    // Approve one release and present its per-call token twice at the pending URL.
+    let release_twice = |challenge: &str, jti: &str| {
+        let held = resource
+            .authorize(&call("/mcp/records.delete", &class, 2), NOW, challenge)
+            .into_response();
+        assert_eq!(
+            held.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(held.body())
+        );
+        let stored = proposals
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| {
+                record
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.pending_id == challenge)
+            })
+            .cloned()
+            .expect("held release");
+        let mut claims = auth_claims(None);
+        claims.jti = jti.into();
+        let per_call = aauth_rust_r3::mint_per_call_auth_token(
+            &standard_registry().unwrap(),
+            &SigningKey::from_seed([3; 32]),
+            "ps-1",
+            &claims,
+            &stored.reference,
+            &stored.exact_json,
+        )
+        .expect("per-call auth token");
+        let pending = format!("/r3/pending/{challenge}");
+        ["release", "replay"].map(|presentation| {
+            match resource.authorize(
+                &call(&pending, &per_call, 2),
+                NOW,
+                &format!("{jti}-{presentation}"),
+            ) {
+                AuthDecision::Replayed(response) => *response,
+                other => panic!("{presentation} of {challenge}: {other:?}"),
+            }
+        })
+    };
+
+    for response in release_twice("challenge-released", "per-call-released") {
+        assert_eq!(
+            response.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        assert_eq!(
+            response.headers()["location"],
+            format!("{ORIGIN}/jobs/released").as_str()
+        );
+        assert_eq!(response.headers()["retry-after"], "5");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.body(), br#"{"status":"pending"}"#);
+    }
+    for response in release_twice("challenge-cross", "per-call-cross") {
+        assert_eq!(
+            response.status(),
+            500,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        assert!(response.headers().get("location").is_none());
+        assert!(response.headers().get("retry-after").is_none());
+        let body: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(body["error"], "server_error");
+    }
+    assert_eq!(computed.load(Ordering::SeqCst), 2);
+}

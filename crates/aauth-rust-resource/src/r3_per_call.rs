@@ -117,6 +117,7 @@ pub struct R3Release {
     /// approved is release of its result; this crate does not judge prose.
     pub display: ProposalDisplay,
     /// The computed response, released once on approval and never otherwise.
+    /// An application `202` is kept under the same rule as an executed call.
     pub response: Response<Vec<u8>>,
 }
 
@@ -530,13 +531,15 @@ fn same_origin_location(origin: &str, location: &str) -> bool {
     if authority_has_user(base_authority) || reference.authority().is_some_and(authority_has_user) {
         return false;
     }
-    // `scheme:opaque` has no authority. A relative reference borrows the Resource origin.
-    if reference.scheme().is_some() && reference.authority().is_none() {
-        return false;
-    }
-    let scheme = reference.scheme().unwrap_or(base_scheme);
-    let authority = reference.authority().unwrap_or(base_authority);
-    scheme == base_scheme && authority == base_authority
+    // A reference without a scheme must be a path on the Resource origin;
+    // `http::Uri` would also read `*` and a bare host as request targets.
+    let Some(scheme) = reference.scheme() else {
+        return location.starts_with('/');
+    };
+    // `scheme:opaque` has no authority.
+    reference
+        .authority()
+        .is_some_and(|authority| scheme == base_scheme && authority == base_authority)
 }
 
 fn authority_has_user(authority: &http::uri::Authority) -> bool {
@@ -930,7 +933,8 @@ where
             exact,
             expires_at: now.saturating_add(PROPOSAL_LIFETIME).min(c.exp),
             release_until: release.is_some().then_some(horizon),
-            released: release.map(|release| snapshot(&release.response)),
+            released: release
+                .map(|release| prepare_retained(&self.document_origin(), &release.response)),
             supersedes: None,
         };
         self.publish_proposal(
@@ -1668,6 +1672,11 @@ mod tests {
             ("location", &["/jobs/7#done"]),
             ("location", &["https://user@resource.example:8443/jobs/7"]),
             ("location", &["mailto:ops@resource.example"]),
+            ("location", &["*"]),
+            ("location", &["resource.example:8443"]),
+            // aauth-go resolves these against the Resource origin; this profile refuses them.
+            ("location", &["jobs/7"]),
+            ("location", &["?attempt=2"]),
             ("retry-after", &[]),
             ("retry-after", &["5", "6"]),
             ("retry-after", &["soon"]),
