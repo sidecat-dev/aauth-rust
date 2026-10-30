@@ -19,6 +19,11 @@
 //!    of ungranted `records.delete`, plus Go PS `DirectR3Config`'s `400
 //!    invalid_resource_token` refusal when presented a per-call proposal
 //!    Resource token fetched from Rust Resource.
+//! 3. Federated converse, on servers that do not replace the DirectR3 set:
+//!    the Rust Agent against Go `resource.NewFederatedAuthorization` with R3,
+//!    Go `accessserver` `R3Config`, and Go `personserver.NewFederatedAuthorization`
+//!    with `ConsentDocument` and `ConsentProposal`. One class document and one
+//!    proposal are exchanged. The Rust Agent verifies both access-server grants.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -68,6 +73,9 @@ const AP: &str = "https://ap.example";
 const PS: &str = "https://ps.example";
 const GO_AP: &str = "https://go-ap.example";
 const GO_PS: &str = "https://go-ps.example";
+const FED_PS: &str = "https://fed-ps.example";
+const FED_AS: &str = "https://fed-as.example";
+const FED_RECORDS: &str = "https://fed-records.example";
 const RECORDS: &str = "https://records.example";
 const MCP: &str = "urn:aauth:vocabulary:mcp";
 const TOOLS: &[u8] = br#"{"tools":[{"name":"records.read","inputSchema":{"type":"object"}},{"name":"records.delete","inputSchema":{"type":"object"}},{"name":"records.query","inputSchema":{"type":"object"}}]}"#;
@@ -110,6 +118,17 @@ pub struct InteropTranscript {
     pub rust_to_go_ungranted_delete_status: u16,
     pub rust_to_go_proposal_exchange_status: u16,
     pub rust_to_go_proposal_exchange_error: String,
+    pub federated_person_status: u16,
+    pub federated_class_exchange_status: u16,
+    pub federated_class_verified: bool,
+    pub federated_proposal_challenge_status: u16,
+    pub federated_proposal_exchange_status: u16,
+    pub federated_proposal_verified: bool,
+    pub federated_ps_class_consents: usize,
+    pub federated_ps_proposal_consents: usize,
+    pub federated_as_class_authorizations: usize,
+    pub federated_as_proposal_authorizations: usize,
+    pub federated_as_issuances: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
     pub rust_ps_audit_records: usize,
@@ -1222,6 +1241,206 @@ fn handle_converse(
     }))
 }
 
+fn http_failure(step: &str, response: &Response<Vec<u8>>) -> Box<dyn std::error::Error + Send + Sync> {
+    format!(
+        "{step} failed ({}): {}",
+        response.status(),
+        String::from_utf8_lossy(response.body())
+    )
+    .into()
+}
+
+fn handle_federated_converse(
+    request: &Request<Vec<u8>>,
+    trust: &Trust,
+    control: &Arc<AdmissionControl>,
+) -> Result<Value> {
+    let body: Value = serde_json::from_slice(request.body())?;
+    let go_ap_addr: SocketAddr = text(&body, "go_ap_addr")?.parse()?;
+    let go_ap_cert = hex_decode(&text(&body, "go_ap_cert_hex")?)?;
+    let fed_ps_addr: SocketAddr = text(&body, "fed_ps_addr")?.parse()?;
+    let fed_ps_cert = hex_decode(&text(&body, "fed_ps_cert_hex")?)?;
+    let fed_as_addr: SocketAddr = text(&body, "fed_as_addr")?.parse()?;
+    let fed_as_cert = hex_decode(&text(&body, "fed_as_cert_hex")?)?;
+    let fed_records_addr: SocketAddr = text(&body, "fed_records_addr")?.parse()?;
+    let fed_records_cert = hex_decode(&text(&body, "fed_records_cert_hex")?)?;
+    let go_agent_seed_vec = hex_decode(&text(&body, "go_agent_seed_hex")?)?;
+    let go_agent_seed: [u8; 32] = go_agent_seed_vec
+        .try_into()
+        .map_err(|_| "invalid go agent seed length")?;
+    let fed_agent_token = text(&body, "fed_agent_token")?;
+
+    trust.discover_external(go_ap_addr, "go-ap.example", &go_ap_cert, GO_AP, "aauth-agent.json")?;
+    trust.discover_external(
+        fed_ps_addr,
+        "fed-ps.example",
+        &fed_ps_cert,
+        FED_PS,
+        "aauth-person.json",
+    )?;
+    trust.discover_external(
+        fed_as_addr,
+        "fed-as.example",
+        &fed_as_cert,
+        FED_AS,
+        "aauth-access.json",
+    )?;
+    trust.discover_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        FED_RECORDS,
+        "aauth-resource.json",
+    )?;
+
+    let registry = standard_registry()?;
+    let agent = Agent::new(SigningKey::from_seed(go_agent_seed), fed_agent_token)?;
+    let clock = control.now();
+    let delete_only = registry.parse_operation_set(
+        json!({"vocabulary": MCP, "operations": [{"tool":"records.delete"}]})
+            .to_string()
+            .as_bytes(),
+    )?;
+
+    let person_req = post_at(
+        &agent,
+        &format!("{FED_PS}/person"),
+        json!({"resource": FED_RECORDS}).to_string().as_bytes(),
+        clock,
+    )?;
+    let person_resp = TlsServer::send_external(fed_ps_addr, "fed-ps.example", &fed_ps_cert, &person_req)?;
+    let person_status = person_resp.status().as_u16();
+    if person_status != 200 {
+        return Err(http_failure("federated person token", &person_resp));
+    }
+    let person_token = member(&person_resp, "person_token").ok_or("federated person token missing")?;
+
+    let resource_token = agent.r3_authorize(
+        |req| TlsServer::send_external(fed_records_addr, "fed-records.example", &fed_records_cert, &req),
+        &format!("{FED_RECORDS}/authorize"),
+        &person_token,
+        &delete_only,
+        None,
+        clock,
+    )?;
+    let verified = agent.verify_r3_resource_token(
+        &resource_token,
+        FED_RECORDS,
+        FED_PS,
+        &person_token,
+        None,
+        trust,
+        clock,
+    )?;
+    if verified.claims().aud != FED_AS {
+        return Err("federated resource token audience is not the access server".into());
+    }
+
+    let exchange_req = post_at(
+        &agent,
+        &format!("{FED_PS}/token"),
+        json!({"resource_token": resource_token, "presented_token": person_token})
+            .to_string()
+            .as_bytes(),
+        clock,
+    )?;
+    let exchange_resp =
+        TlsServer::send_external(fed_ps_addr, "fed-ps.example", &fed_ps_cert, &exchange_req)?;
+    let class_exchange_status = exchange_resp.status().as_u16();
+    if class_exchange_status != 200 {
+        return Err(http_failure("federated class exchange", &exchange_resp));
+    }
+    let class_auth = member(&exchange_resp, "auth_token").ok_or("federated class grant missing")?;
+    let delivered = agent.verify_r3_auth_delivery(
+        &class_auth,
+        FED_RECORDS,
+        &verified,
+        &person_token,
+        &registry,
+        trust,
+        clock,
+    )?;
+    if delivered.claims().dwk != "aauth-access.json" || delivered.claims().iss != FED_AS {
+        return Err("federated class grant was not issued by the access server".into());
+    }
+
+    let holder = agent.with_token(class_auth.clone())?;
+    let challenge_req = post_at(
+        &holder,
+        &format!("{FED_RECORDS}/records/r-1"),
+        b"{}",
+        clock,
+    )?;
+    let challenged = TlsServer::send_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &challenge_req,
+    )?;
+    let proposal_challenge_status = challenged.status().as_u16();
+    if proposal_challenge_status != 401 {
+        return Err(http_failure("federated proposal challenge", &challenged));
+    }
+    let proposal_rt = challenge(&challenged)?;
+    let verified_proposal = agent.verify_r3_proposal_challenge(
+        &proposal_rt,
+        FED_RECORDS,
+        FED_PS,
+        &class_auth,
+        trust,
+        clock,
+    )?;
+    if verified_proposal.claims().aud != FED_AS {
+        return Err("federated proposal audience is not the access server".into());
+    }
+
+    let proposal_exchange_req = post_at(
+        &agent,
+        &format!("{FED_PS}/token"),
+        json!({"resource_token": proposal_rt, "presented_token": class_auth})
+            .to_string()
+            .as_bytes(),
+        clock,
+    )?;
+    let proposal_exchange_resp = TlsServer::send_external(
+        fed_ps_addr,
+        "fed-ps.example",
+        &fed_ps_cert,
+        &proposal_exchange_req,
+    )?;
+    let proposal_exchange_status = proposal_exchange_resp.status().as_u16();
+    if proposal_exchange_status != 200 {
+        return Err(http_failure(
+            "federated proposal exchange",
+            &proposal_exchange_resp,
+        ));
+    }
+    let per_call =
+        member(&proposal_exchange_resp, "auth_token").ok_or("federated proposal grant missing")?;
+    let per_call_delivered = agent.verify_r3_per_call_delivery(
+        &per_call,
+        FED_RECORDS,
+        &verified_proposal,
+        &class_auth,
+        &registry,
+        trust,
+        clock,
+    )?;
+    if per_call_delivered.claims().dwk != "aauth-access.json" || per_call_delivered.claims().iss != FED_AS
+    {
+        return Err("federated proposal grant was not issued by the access server".into());
+    }
+
+    Ok(json!({
+        "person_status": person_status,
+        "class_exchange_status": class_exchange_status,
+        "class_verified": true,
+        "proposal_challenge_status": proposal_challenge_status,
+        "proposal_exchange_status": proposal_exchange_status,
+        "proposal_verified": true,
+    }))
+}
+
 pub fn run() -> Result<InteropTranscript> {
     let go_ref = resolve_go_reference()?;
     let control = Arc::new(AdmissionControl::new(now()));
@@ -1375,6 +1594,14 @@ pub fn run() -> Result<InteropTranscript> {
                 }
                 Err(error) => json_response(500, json!({"error": error.to_string()})),
             },
+            ("POST", "/federated-converse") => match handle_federated_converse(
+                &request,
+                &interop_trust,
+                &interop_control,
+            ) {
+                Ok(result) => json_response(200, result),
+                Err(error) => json_response(500, json!({"error": error.to_string()})),
+            },
             ("POST", "/converse") => match handle_converse(
                 &request,
                 &interop_root,
@@ -1509,6 +1736,29 @@ pub fn run() -> Result<InteropTranscript> {
             "rust_to_go_proposal_exchange_status",
         )? as u16,
         rust_to_go_proposal_exchange_error: text(&raw, "rust_to_go_proposal_exchange_error")?,
+        federated_person_status: number(&raw, "federated_person_status")? as u16,
+        federated_class_exchange_status: number(&raw, "federated_class_exchange_status")? as u16,
+        federated_class_verified: raw["federated_class_verified"].as_bool().unwrap_or(false),
+        federated_proposal_challenge_status: number(
+            &raw,
+            "federated_proposal_challenge_status",
+        )? as u16,
+        federated_proposal_exchange_status: number(
+            &raw,
+            "federated_proposal_exchange_status",
+        )? as u16,
+        federated_proposal_verified: raw["federated_proposal_verified"]
+            .as_bool()
+            .unwrap_or(false),
+        federated_ps_class_consents: number(&raw, "federated_ps_class_consents")? as usize,
+        federated_ps_proposal_consents: number(&raw, "federated_ps_proposal_consents")? as usize,
+        federated_as_class_authorizations: number(&raw, "federated_as_class_authorizations")?
+            as usize,
+        federated_as_proposal_authorizations: number(
+            &raw,
+            "federated_as_proposal_authorizations",
+        )? as usize,
+        federated_as_issuances: number(&raw, "federated_as_issuances")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
             raw.get("deletes").cloned().ok_or("missing deletes")?,
@@ -1548,6 +1798,17 @@ pub fn run() -> Result<InteropTranscript> {
         || t.rust_to_go_ungranted_delete_status != 403
         || t.rust_to_go_proposal_exchange_status != 400
         || t.rust_to_go_proposal_exchange_error != "invalid_resource_token"
+        || t.federated_person_status != 200
+        || t.federated_class_exchange_status != 200
+        || !t.federated_class_verified
+        || t.federated_proposal_challenge_status != 401
+        || t.federated_proposal_exchange_status != 200
+        || !t.federated_proposal_verified
+        || t.federated_ps_class_consents != 1
+        || t.federated_ps_proposal_consents != 1
+        || t.federated_as_class_authorizations != 1
+        || t.federated_as_proposal_authorizations != 1
+        || t.federated_as_issuances != 2
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]
         || t.rust_ps_audit_records != 8

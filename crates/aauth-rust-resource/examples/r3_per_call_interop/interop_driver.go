@@ -25,12 +25,14 @@ import (
 	"time"
 
 	aauth "gitlab.com/sidecat-dev/aauth-go"
+	"gitlab.com/sidecat-dev/aauth-go/accessserver"
 	"gitlab.com/sidecat-dev/aauth-go/agent"
 	"gitlab.com/sidecat-dev/aauth-go/agentprovider"
 	"gitlab.com/sidecat-dev/aauth-go/jose"
 	"gitlab.com/sidecat-dev/aauth-go/personserver"
 	"gitlab.com/sidecat-dev/aauth-go/r3"
 	"gitlab.com/sidecat-dev/aauth-go/r3/vocab/mcp"
+	"gitlab.com/sidecat-dev/aauth-go/resource"
 	"gitlab.com/sidecat-dev/aauth-go/signaturekey"
 )
 
@@ -75,43 +77,76 @@ type converseResponse struct {
 	ProposalError         string `json:"proposal_error"`
 }
 
+type federatedConverseRequest struct {
+	GoAPAddr          string `json:"go_ap_addr"`
+	GoAPCertHex       string `json:"go_ap_cert_hex"`
+	FedPSAddr         string `json:"fed_ps_addr"`
+	FedPSCertHex      string `json:"fed_ps_cert_hex"`
+	FedASAddr         string `json:"fed_as_addr"`
+	FedASCertHex      string `json:"fed_as_cert_hex"`
+	FedRecordsAddr    string `json:"fed_records_addr"`
+	FedRecordsCertHex string `json:"fed_records_cert_hex"`
+	GoAgentSeedHex    string `json:"go_agent_seed_hex"`
+	FedAgentToken     string `json:"fed_agent_token"`
+}
+
+type federatedConverseResponse struct {
+	PersonStatus            int  `json:"person_status"`
+	ClassExchangeStatus     int  `json:"class_exchange_status"`
+	ClassVerified           bool `json:"class_verified"`
+	ProposalChallengeStatus int  `json:"proposal_challenge_status"`
+	ProposalExchangeStatus  int  `json:"proposal_exchange_status"`
+	ProposalVerified        bool `json:"proposal_verified"`
+}
+
 type transcriptOutput struct {
-	GoToRustPersonTokenIssued                    bool     `json:"go_to_rust_person_token_issued"`
-	GoToRustClassReadStatus                      int      `json:"go_to_rust_class_read_status"`
-	GoToRust401ChallengeStatus                   int      `json:"go_to_rust_401_challenge_status"`
-	GoToRustApprovalExpiryError                  string   `json:"go_to_rust_approval_expiry_error"`
-	GoToRustApprovalReplacementReusedNoReprompt  bool     `json:"go_to_rust_approval_replacement_reused_without_reprompt"`
-	GoToRustSubstitutedParametersStatus          int      `json:"go_to_rust_substituted_parameters_status"`
-	GoToRustPSDeniedOtherRecordStatus            int      `json:"go_to_rust_ps_denied_other_record_status"`
-	GoToRust401RetryStatus                       int      `json:"go_to_rust_401_retry_status"`
-	GoToRust401ReplayStatus                      int      `json:"go_to_rust_401_replay_status"`
-	GoToRust401ReplayMatchesFirst                bool     `json:"go_to_rust_401_replay_matches_first"`
-	GoToRust202HeldStatus                        int      `json:"go_to_rust_202_held_status"`
-	GoToRust202ForeignTokenStatus                int      `json:"go_to_rust_202_foreign_token_status"`
-	GoToRust202PollStatus                        int      `json:"go_to_rust_202_poll_status"`
-	GoToRust202ReplayStatus                      int      `json:"go_to_rust_202_replay_status"`
-	GoToRustReleaseHeldStatus                    int      `json:"go_to_rust_release_held_status"`
-	GoToRustReleasePollStatus                    int      `json:"go_to_rust_release_poll_status"`
-	GoToRustReleaseReplayStatus                  int      `json:"go_to_rust_release_replay_status"`
-	GoToRustQueryRuns                            int      `json:"go_to_rust_query_runs"`
-	ReleaseRetryExpiryError                      string   `json:"release_retry_expiry_error"`
-	ReleaseRetryReusedWithoutReprompt            bool     `json:"release_retry_reused_without_reprompt"`
-	ReleaseRetryRunsBeforeChallenge              int      `json:"release_retry_runs_before_challenge"`
-	ReleaseRetryRunsAfterChallenge               int      `json:"release_retry_runs_after_challenge"`
-	ReleaseRetryPollStatus                       int      `json:"release_retry_poll_status"`
-	ReleaseRetryOldPendingStatus                 int      `json:"release_retry_old_pending_status"`
-	ReleaseRetryBodyMatchesOriginal              bool     `json:"release_retry_body_matches_original"`
-	RustToGoPersonStatus                         int      `json:"rust_to_go_person_status"`
-	RustToGoClassExchangeStatus                  int      `json:"rust_to_go_class_exchange_status"`
-	RustToGoPSFetchedDocument                    bool     `json:"rust_to_go_ps_fetched_document"`
-	RustToGoPSIssuanceRecords                    int      `json:"rust_to_go_ps_issuance_records"`
-	RustToGoClassReadStatus                      int      `json:"rust_to_go_class_read_status"`
-	RustToGoUngrantedDeleteStatus                int      `json:"rust_to_go_ungranted_delete_status"`
-	RustToGoProposalExchangeStatus               int      `json:"rust_to_go_proposal_exchange_status"`
-	RustToGoProposalExchangeError                string   `json:"rust_to_go_proposal_exchange_error"`
-	Reads                                        int      `json:"reads"`
-	Deletes                                      []string `json:"deletes"`
-	RustPSAuditRecords                           int      `json:"rust_ps_audit_records"`
+	GoToRustPersonTokenIssued                   bool     `json:"go_to_rust_person_token_issued"`
+	GoToRustClassReadStatus                     int      `json:"go_to_rust_class_read_status"`
+	GoToRust401ChallengeStatus                  int      `json:"go_to_rust_401_challenge_status"`
+	GoToRustApprovalExpiryError                 string   `json:"go_to_rust_approval_expiry_error"`
+	GoToRustApprovalReplacementReusedNoReprompt bool     `json:"go_to_rust_approval_replacement_reused_without_reprompt"`
+	GoToRustSubstitutedParametersStatus         int      `json:"go_to_rust_substituted_parameters_status"`
+	GoToRustPSDeniedOtherRecordStatus           int      `json:"go_to_rust_ps_denied_other_record_status"`
+	GoToRust401RetryStatus                      int      `json:"go_to_rust_401_retry_status"`
+	GoToRust401ReplayStatus                     int      `json:"go_to_rust_401_replay_status"`
+	GoToRust401ReplayMatchesFirst               bool     `json:"go_to_rust_401_replay_matches_first"`
+	GoToRust202HeldStatus                       int      `json:"go_to_rust_202_held_status"`
+	GoToRust202ForeignTokenStatus               int      `json:"go_to_rust_202_foreign_token_status"`
+	GoToRust202PollStatus                       int      `json:"go_to_rust_202_poll_status"`
+	GoToRust202ReplayStatus                     int      `json:"go_to_rust_202_replay_status"`
+	GoToRustReleaseHeldStatus                   int      `json:"go_to_rust_release_held_status"`
+	GoToRustReleasePollStatus                   int      `json:"go_to_rust_release_poll_status"`
+	GoToRustReleaseReplayStatus                 int      `json:"go_to_rust_release_replay_status"`
+	GoToRustQueryRuns                           int      `json:"go_to_rust_query_runs"`
+	ReleaseRetryExpiryError                     string   `json:"release_retry_expiry_error"`
+	ReleaseRetryReusedWithoutReprompt           bool     `json:"release_retry_reused_without_reprompt"`
+	ReleaseRetryRunsBeforeChallenge             int      `json:"release_retry_runs_before_challenge"`
+	ReleaseRetryRunsAfterChallenge              int      `json:"release_retry_runs_after_challenge"`
+	ReleaseRetryPollStatus                      int      `json:"release_retry_poll_status"`
+	ReleaseRetryOldPendingStatus                int      `json:"release_retry_old_pending_status"`
+	ReleaseRetryBodyMatchesOriginal             bool     `json:"release_retry_body_matches_original"`
+	RustToGoPersonStatus                        int      `json:"rust_to_go_person_status"`
+	RustToGoClassExchangeStatus                 int      `json:"rust_to_go_class_exchange_status"`
+	RustToGoPSFetchedDocument                   bool     `json:"rust_to_go_ps_fetched_document"`
+	RustToGoPSIssuanceRecords                   int      `json:"rust_to_go_ps_issuance_records"`
+	RustToGoClassReadStatus                     int      `json:"rust_to_go_class_read_status"`
+	RustToGoUngrantedDeleteStatus               int      `json:"rust_to_go_ungranted_delete_status"`
+	RustToGoProposalExchangeStatus              int      `json:"rust_to_go_proposal_exchange_status"`
+	RustToGoProposalExchangeError               string   `json:"rust_to_go_proposal_exchange_error"`
+	FederatedPersonStatus                       int      `json:"federated_person_status"`
+	FederatedClassExchangeStatus                int      `json:"federated_class_exchange_status"`
+	FederatedClassVerified                      bool     `json:"federated_class_verified"`
+	FederatedProposalChallengeStatus            int      `json:"federated_proposal_challenge_status"`
+	FederatedProposalExchangeStatus             int      `json:"federated_proposal_exchange_status"`
+	FederatedProposalVerified                   bool     `json:"federated_proposal_verified"`
+	FederatedPSClassConsents                    int      `json:"federated_ps_class_consents"`
+	FederatedPSProposalConsents                 int      `json:"federated_ps_proposal_consents"`
+	FederatedASClassAuthorizations              int      `json:"federated_as_class_authorizations"`
+	FederatedASProposalAuthorizations           int      `json:"federated_as_proposal_authorizations"`
+	FederatedASIssuances                        int      `json:"federated_as_issuances"`
+	Reads                                       int      `json:"reads"`
+	Deletes                                     []string `json:"deletes"`
+	RustPSAuditRecords                          int      `json:"rust_ps_audit_records"`
 }
 
 type memoryTokenStore struct {
@@ -155,6 +190,115 @@ func (s *memoryIssuanceStore) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.records)
+}
+
+type memoryDocumentStore struct {
+	mu      sync.Mutex
+	records map[string]resource.R3DocumentRecord
+}
+
+func (s *memoryDocumentStore) Commit(_ context.Context, record resource.R3DocumentRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
+		s.records = make(map[string]resource.R3DocumentRecord)
+	}
+	key := record.Reference.URI()
+	if existing, ok := s.records[key]; ok {
+		if !bytes.Equal(existing.ExactJSON, record.ExactJSON) ||
+			existing.PersonServer != record.PersonServer ||
+			existing.AuthTokenIssuer != record.AuthTokenIssuer ||
+			existing.AuthTokenIssuerDocument != record.AuthTokenIssuerDocument {
+			return resource.ErrR3DocumentConflict
+		}
+		return nil
+	}
+	s.records[key] = record.Clone()
+	return nil
+}
+
+func (s *memoryDocumentStore) Load(_ context.Context, uri string) (resource.R3DocumentRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[uri]
+	if !ok {
+		return resource.R3DocumentRecord{}, resource.ErrR3DocumentNotFound
+	}
+	return record.Clone(), nil
+}
+
+type memoryProposalStore struct {
+	mu      sync.Mutex
+	records map[string]resource.R3ProposalRecord
+}
+
+func (s *memoryProposalStore) Commit(_ context.Context, record resource.R3ProposalRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
+		s.records = make(map[string]resource.R3ProposalRecord)
+	}
+	key := record.Reference.URI()
+	if _, ok := s.records[key]; ok {
+		return resource.ErrR3ProposalConflict
+	}
+	cloned := record
+	cloned.ExactJSON = append([]byte(nil), record.ExactJSON...)
+	s.records[key] = cloned
+	return nil
+}
+
+func (s *memoryProposalStore) Load(_ context.Context, uri string) (resource.R3ProposalRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[uri]
+	if !ok {
+		return resource.R3ProposalRecord{}, resource.ErrR3ProposalNotFound
+	}
+	record.ExactJSON = append([]byte(nil), record.ExactJSON...)
+	return record, nil
+}
+
+type memoryRetryStore struct {
+	mu      sync.Mutex
+	records map[string]resource.R3RetryInvocation
+}
+
+func (s *memoryRetryStore) Prepare(_ context.Context, invocation resource.R3RetryInvocation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
+		s.records = make(map[string]resource.R3RetryInvocation)
+	}
+	key := invocation.Reference.URI()
+	if _, ok := s.records[key]; ok {
+		return resource.ErrR3RetryConflict
+	}
+	cloned := invocation
+	cloned.ExactProposal = append([]byte(nil), invocation.ExactProposal...)
+	cloned.RequiredScopes = append([]string(nil), invocation.RequiredScopes...)
+	s.records[key] = cloned
+	return nil
+}
+
+func (s *memoryRetryStore) Load(_ context.Context, reference r3.Reference) (resource.R3RetryInvocation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	invocation, ok := s.records[reference.URI()]
+	if !ok {
+		return resource.R3RetryInvocation{}, resource.ErrR3RetryNotFound
+	}
+	invocation.ExactProposal = append([]byte(nil), invocation.ExactProposal...)
+	invocation.RequiredScopes = append([]string(nil), invocation.RequiredScopes...)
+	return invocation, nil
+}
+
+func (s *memoryRetryStore) Claim(context.Context, r3.Reference, resource.R3RetryAuthToken) (resource.R3RetryClaim, error) {
+	return resource.R3RetryClaim{}, resource.ErrR3RetryNotFound
+}
+
+func (s *memoryRetryStore) Retain(context.Context, resource.R3RetryExecution, resource.HeldResponse) (resource.HeldResponse, error) {
+	return resource.HeldResponse{}, resource.ErrR3RetryUnresolved
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -782,6 +926,43 @@ func main() {
 	out.RustToGoProposalExchangeStatus = convOut.ProposalStatus
 	out.RustToGoProposalExchangeError = convOut.ProposalError
 
+	// Direction 3: Rust Agent against a separate Go federated Resource,
+	// Access Server, and Person Server. The DirectR3 servers above stay
+	// class-only and are not reused.
+	_ = fetchState()
+	fedAgentToken, err := goAP.Issue(aauth.AgentTokenRequest{
+		Agent:        "aauth:federated@go-ap.example",
+		PersonServer: "https://fed-ps.example",
+		PublicKey:    goAgentKey.PublicJWK(),
+		Lifetime:     30 * time.Minute,
+	})
+	must(err, "issue federated agent token")
+	fedOut, fedCounts := federatedExchange(federatedExchangeConfig{
+		Clock:         clock,
+		Resolver:      resolver,
+		Registry:      registry,
+		HTTPClient:    httpClient,
+		CertPool:      certPool,
+		HostMu:        &hostMu,
+		HostMap:       hostMap,
+		GoAPAddr:      goAPSrv.Listener.Addr().String(),
+		GoAPDER:       goAPDER,
+		GoAgentSeed:   goAgentSeed,
+		FedAgentToken: fedAgentToken,
+		DeleteOp:      deleteR3Op,
+	})
+	out.FederatedPersonStatus = fedOut.PersonStatus
+	out.FederatedClassExchangeStatus = fedOut.ClassExchangeStatus
+	out.FederatedClassVerified = fedOut.ClassVerified
+	out.FederatedProposalChallengeStatus = fedOut.ProposalChallengeStatus
+	out.FederatedProposalExchangeStatus = fedOut.ProposalExchangeStatus
+	out.FederatedProposalVerified = fedOut.ProposalVerified
+	out.FederatedPSClassConsents = fedCounts.PSClassConsents
+	out.FederatedPSProposalConsents = fedCounts.PSProposalConsents
+	out.FederatedASClassAuthorizations = fedCounts.ASClassAuthorizations
+	out.FederatedASProposalAuthorizations = fedCounts.ASProposalAuthorizations
+	out.FederatedASIssuances = fedCounts.ASIssuances
+
 	finalState := fetchState()
 	out.GoToRustQueryRuns = finalState.QueryRuns
 	out.Reads = finalState.Reads
@@ -791,4 +972,304 @@ func main() {
 	encodedOut, err := json.Marshal(out)
 	must(err, "encode transcript")
 	fmt.Println(string(encodedOut))
+}
+
+const (
+	fedPSIssuer       = "https://fed-ps.example"
+	fedASIssuer       = "https://fed-as.example"
+	fedResourceIssuer = "https://fed-records.example"
+)
+
+type federatedExchangeConfig struct {
+	Clock         aauth.Clock
+	Resolver      signaturekey.KeyResolver
+	Registry      r3.Registry
+	HTTPClient    *http.Client
+	CertPool      *x509.CertPool
+	HostMu        *sync.RWMutex
+	HostMap       map[string]string
+	GoAPAddr      string
+	GoAPDER       []byte
+	GoAgentSeed   []byte
+	FedAgentToken string
+	DeleteOp      r3.Operation
+}
+
+type federatedCounts struct {
+	PSClassConsents          int
+	PSProposalConsents       int
+	ASClassAuthorizations    int
+	ASProposalAuthorizations int
+	ASIssuances              int
+}
+
+func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, federatedCounts) {
+	fedResourceSeed := bytes.Repeat([]byte{0x51}, ed25519.SeedSize)
+	fedResourceKey, err := jose.NewEd25519SigningKey("fed-resource-1", ed25519.NewKeyFromSeed(fedResourceSeed))
+	must(err, "fed resource key")
+	fedASSeed := bytes.Repeat([]byte{0x61}, ed25519.SeedSize)
+	fedASKey, err := jose.NewEd25519SigningKey("fed-as-1", ed25519.NewKeyFromSeed(fedASSeed))
+	must(err, "fed access key")
+	fedPSSeed := bytes.Repeat([]byte{0x71}, ed25519.SeedSize)
+	fedPSKey, err := jose.NewEd25519SigningKey("fed-ps-1", ed25519.NewKeyFromSeed(fedPSSeed))
+	must(err, "fed person key")
+
+	var fedIDs atomic.Int64
+	nextID := func() string {
+		return fmt.Sprintf("fed-%d", fedIDs.Add(1))
+	}
+	definitions, err := r3.NewDefinitionRegistry(mcp.DefinitionRegistration())
+	must(err, "fed definition registry")
+	definitionSource := mcp.NewToolsListSnapshot(mcp.NewInitialToolsListPage([]byte(
+		`{"tools":[{"name":"records.delete","inputSchema":{"type":"object"}}]}`,
+	)))
+	definition, err := mcp.ParseDefinition(fedResourceIssuer+"/mcp", definitionSource)
+	must(err, "fed mcp definition")
+
+	var psClassConsents atomic.Int32
+	var psProposalConsents atomic.Int32
+	var asClassAuthorizations atomic.Int32
+	var asProposalAuthorizations atomic.Int32
+	issuances := &memoryIssuanceStore{}
+	admitResource := func(_ context.Context, endpoint string) error {
+		if !strings.HasPrefix(endpoint, fedResourceIssuer+"/r3/") {
+			return errors.New("federated interop: unexpected R3 endpoint")
+		}
+		return nil
+	}
+
+	fedResource, err := resource.NewFederatedAuthorization(resource.FederatedAuthorizationConfig{
+		Issuer:       fedResourceIssuer,
+		AccessServer: fedASIssuer,
+		SigningKey:   fedResourceKey,
+		KeyResolver:  cfg.Resolver,
+		Clock:        cfg.Clock,
+		NewID:        nextID,
+		ResolvePerson: func(_ context.Context, identity resource.PersonIdentity, personContext resource.PersonContext) error {
+			if identity.Issuer != fedPSIssuer || identity.Subject != "fed-person" || personContext.Tenant != "" {
+				return errors.New("federated interop: unexpected person")
+			}
+			return nil
+		},
+		Protected: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"deleted":true}`))
+		}),
+		MaxSignedBodyBytes:           1 << 20,
+		MaxRetainedRequestBodyBytes:  64 << 10,
+		MaxRetainedResponseBodyBytes: 64 << 10,
+		MaxRetainedHeaderBytes:       16 << 10,
+		R3: &resource.R3Config{
+			Registry:    cfg.Registry,
+			Definitions: definitions,
+			Vocabularies: []resource.R3VocabularyConfig{{
+				Definition: definition,
+			}},
+			Documents: &memoryDocumentStore{},
+			HTTP: resource.R3HTTPAdapter{
+				OperationForRequest: func(request *http.Request) (r3.Operation, bool, error) {
+					if request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/records/") {
+						return cfg.DeleteOp, true, nil
+					}
+					return r3.Operation{}, false, nil
+				},
+				PresentParameters: func(request *http.Request, _ r3.Operation) (map[string]r3.PresentedParameter, error) {
+					record := strings.TrimPrefix(request.URL.Path, "/records/")
+					if record == "" || record == request.URL.Path || strings.Contains(record, "/") {
+						return nil, errors.New("federated interop: unexpected record path")
+					}
+					encoded, marshalErr := json.Marshal(record)
+					if marshalErr != nil {
+						return nil, marshalErr
+					}
+					presented, presentErr := r3.NewPresentedInlineParameter(encoded)
+					if presentErr != nil {
+						return nil, presentErr
+					}
+					return map[string]r3.PresentedParameter{"record": presented}, nil
+				},
+			},
+			PerCall: &resource.R3PerCallConfig{
+				Proposals: &memoryProposalStore{},
+				Retries:   &memoryRetryStore{},
+				DescribeCall: func(_ context.Context, invocation r3.Invocation, account *string) (resource.R3CallDescription, error) {
+					if account != nil {
+						return resource.R3CallDescription{}, errors.New("federated interop: account is not used")
+					}
+					presented, ok := invocation.PresentedParameters()["record"]
+					if !ok {
+						return resource.R3CallDescription{}, errors.New("federated interop: missing record")
+					}
+					encoded, ok := presented.InlineJSON()
+					if !ok {
+						return resource.R3CallDescription{}, errors.New("federated interop: record is not inline")
+					}
+					inline, inlineErr := r3.NewInlineParameter(encoded)
+					if inlineErr != nil {
+						return resource.R3CallDescription{}, inlineErr
+					}
+					parameters, paramErr := r3.NewParameters(map[string]r3.Parameter{"record": inline})
+					if paramErr != nil {
+						return resource.R3CallDescription{}, paramErr
+					}
+					return resource.R3CallDescription{Parameters: parameters}, nil
+				},
+			},
+		},
+	})
+	must(err, "new federated resource")
+
+	fedAS, err := accessserver.New(accessserver.Config{
+		Issuer:      fedASIssuer,
+		SigningKey:  fedASKey,
+		KeyResolver: cfg.Resolver,
+		Clock:       cfg.Clock,
+		NewID:       nextID,
+		TrustPersonServer: func(_ context.Context, issuer string) error {
+			if issuer != fedPSIssuer {
+				return errors.New("federated interop: untrusted person server")
+			}
+			return nil
+		},
+		Authorize: func(context.Context, accessserver.AuthorizationRequest) (accessserver.Decision, error) {
+			return accessserver.Decision{}, errors.New("federated interop: core policy must not receive an R3 request")
+		},
+		R3: &accessserver.R3Config{
+			Registry:   cfg.Registry,
+			HTTPClient: cfg.HTTPClient,
+			Admit:      admitResource,
+			AuthorizeDocument: func(_ context.Context, _ accessserver.AuthorizationRequest, _ r3.Reference, document r3.Document) (accessserver.R3DocumentDecision, error) {
+				typed, opErr := mcp.NewOperation("records.delete")
+				if opErr != nil {
+					return accessserver.R3DocumentDecision{}, opErr
+				}
+				wanted, setErr := mcp.NewOperationSet(typed)
+				if setErr != nil {
+					return accessserver.R3DocumentDecision{}, setErr
+				}
+				same, equalErr := document.OperationSet().Equal(wanted)
+				if equalErr != nil || !same {
+					return accessserver.R3DocumentDecision{}, errors.New("federated interop: class document is not records.delete")
+				}
+				empty, grantErr := r3.NewGrantedOperations(mcp.Vocabulary())
+				if grantErr != nil {
+					return accessserver.R3DocumentDecision{}, grantErr
+				}
+				perCall, grantErr := r3.NewGrantedOperations(mcp.Vocabulary(), cfg.DeleteOp)
+				if grantErr != nil {
+					return accessserver.R3DocumentDecision{}, grantErr
+				}
+				authorization, authErr := r3.NewAuthorization(empty, perCall, document)
+				if authErr != nil {
+					return accessserver.R3DocumentDecision{}, authErr
+				}
+				asClassAuthorizations.Add(1)
+				return accessserver.R3DocumentDecision{
+					Lifetime:      10 * time.Minute,
+					Authorization: &authorization,
+				}, nil
+			},
+			AuthorizeProposal: func(_ context.Context, _ accessserver.AuthorizationRequest, _ r3.Reference, proposal r3.Proposal) (accessserver.R3ProposalDecision, error) {
+				same, equalErr := proposal.Operation().Equal(cfg.DeleteOp)
+				if equalErr != nil || !same {
+					return accessserver.R3ProposalDecision{}, errors.New("federated interop: proposal operation is not records.delete")
+				}
+				asProposalAuthorizations.Add(1)
+				return accessserver.R3ProposalDecision{Lifetime: 5 * time.Minute}, nil
+			},
+			Issuances: issuances,
+		},
+	})
+	must(err, "new federated access server")
+
+	fedPS, err := personserver.NewFederatedAuthorization(personserver.FederatedAuthorizationConfig{
+		Issuer:      fedPSIssuer,
+		SigningKey:  fedPSKey,
+		KeyResolver: cfg.Resolver,
+		Clock:       cfg.Clock,
+		NewID:       nextID,
+		HTTPClient:  cfg.HTTPClient,
+		Tokens:      &memoryTokenStore{},
+		AccessServerEndpoint: func(_ context.Context, issuer string) (string, error) {
+			if issuer != fedASIssuer {
+				return "", errors.New("federated interop: unknown access server")
+			}
+			return fedASIssuer + "/token", nil
+		},
+		BindPerson: func(_ context.Context, request personserver.PersonTokenRequest) (personserver.Person, error) {
+			if request.Agent != "aauth:federated@go-ap.example" || request.Resource != fedResourceIssuer {
+				return personserver.Person{}, personserver.ErrAccessDenied
+			}
+			return personserver.Person{Subject: "fed-person", Lifetime: 30 * time.Minute}, nil
+		},
+		Consent: func(context.Context, personserver.AuthorizationRequest) error {
+			return errors.New("federated interop: core consent must not receive an R3 request")
+		},
+		R3: &personserver.R3Config{
+			Registry: cfg.Registry,
+			Admit:    admitResource,
+			ConsentDocument: func(context.Context, personserver.AuthorizationRequest, r3.Reference, r3.Document) error {
+				psClassConsents.Add(1)
+				return nil
+			},
+			ConsentProposal: func(context.Context, personserver.AuthorizationRequest, r3.Reference, r3.Proposal) error {
+				psProposalConsents.Add(1)
+				return nil
+			},
+		},
+	})
+	must(err, "new federated person server")
+
+	fedPSSrv, fedPSDER, err := startTLSServer("fed-ps.example", fedPS.Handler())
+	must(err, "start fed ps tls")
+	defer fedPSSrv.Close()
+	fedASSrv, fedASDER, err := startTLSServer("fed-as.example", fedAS.Handler())
+	must(err, "start fed as tls")
+	defer fedASSrv.Close()
+	fedRecordsSrv, fedRecordsDER, err := startTLSServer("fed-records.example", fedResource.Handler())
+	must(err, "start fed resource tls")
+	defer fedRecordsSrv.Close()
+
+	for _, der := range [][]byte{fedPSDER, fedASDER, fedRecordsDER} {
+		cert, parseErr := x509.ParseCertificate(der)
+		must(parseErr, "parse fed cert")
+		cfg.CertPool.AddCert(cert)
+	}
+	cfg.HostMu.Lock()
+	cfg.HostMap["fed-ps.example"] = fedPSSrv.Listener.Addr().String()
+	cfg.HostMap["fed-as.example"] = fedASSrv.Listener.Addr().String()
+	cfg.HostMap["fed-records.example"] = fedRecordsSrv.Listener.Addr().String()
+	cfg.HostMu.Unlock()
+
+	body, err := json.Marshal(federatedConverseRequest{
+		GoAPAddr:          cfg.GoAPAddr,
+		GoAPCertHex:       hex.EncodeToString(cfg.GoAPDER),
+		FedPSAddr:         fedPSSrv.Listener.Addr().String(),
+		FedPSCertHex:      hex.EncodeToString(fedPSDER),
+		FedASAddr:         fedASSrv.Listener.Addr().String(),
+		FedASCertHex:      hex.EncodeToString(fedASDER),
+		FedRecordsAddr:    fedRecordsSrv.Listener.Addr().String(),
+		FedRecordsCertHex: hex.EncodeToString(fedRecordsDER),
+		GoAgentSeedHex:    hex.EncodeToString(cfg.GoAgentSeed),
+		FedAgentToken:     cfg.FedAgentToken,
+	})
+	must(err, "marshal federated converse")
+	fedClient := &http.Client{Transport: cfg.HTTPClient.Transport, Timeout: 30 * time.Second}
+	resp, err := fedClient.Post("https://interop.example/federated-converse", "application/json", bytes.NewReader(body))
+	must(err, "post federated converse")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		rawErr, _ := io.ReadAll(resp.Body)
+		must(fmt.Errorf("federated converse failed (%d): %s", resp.StatusCode, string(rawErr)), "federated converse status")
+	}
+	var out federatedConverseResponse
+	must(json.NewDecoder(resp.Body).Decode(&out), "decode federated converse")
+	return out, federatedCounts{
+		PSClassConsents:          int(psClassConsents.Load()),
+		PSProposalConsents:       int(psProposalConsents.Load()),
+		ASClassAuthorizations:    int(asClassAuthorizations.Load()),
+		ASProposalAuthorizations: int(asProposalAuthorizations.Load()),
+		ASIssuances:              issuances.len(),
+	}
 }
