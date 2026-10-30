@@ -2341,6 +2341,8 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
         (2099, 1, 1),
     );
     let trust = ca.der().as_ref().to_vec();
+    let ca_crl = crl(&ca, &ca_key, &[], (2099, 1, 1));
+    let crls = [ca_crl.as_slice()];
     let der = leaf.der().as_ref().to_vec();
     let x5t = sha256(&der);
     let pem = leaf.pem();
@@ -2361,7 +2363,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     );
     let prepared = prepare_x509(&req).unwrap();
     let identity = prepared
-        .verify_x509(&pem, &[trust.as_slice()], 1000)
+        .verify_x509(&pem, &[trust.as_slice()], &crls, 1000)
         .unwrap();
     assert_eq!(identity.url, url);
     assert_eq!(identity.thumbprint, x5t);
@@ -2373,23 +2375,23 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     let other = ca_cert("other.example", &other_key);
     assert_eq!(
         prepared
-            .verify_x509(&pem, &[other.der().as_ref()], 1000)
+            .verify_x509(&pem, &[other.der().as_ref()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
     assert_eq!(
         prepared
-            .verify_x509(&pem, &[der.as_slice()], 1000)
+            .verify_x509(&pem, &[der.as_slice()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
     assert_eq!(
-        prepared.verify_x509(&pem, &[], 1000).unwrap_err(),
+        prepared.verify_x509(&pem, &[], &crls, 1000).unwrap_err(),
         Error::InvalidKey
     );
     assert_eq!(
         prepared
-            .verify_x509("not a certificate", &[trust.as_slice()], 1000)
+            .verify_x509("not a certificate", &[trust.as_slice()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
@@ -2402,7 +2404,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     assert_eq!(
         prepare_x509(&wrong_thumb)
             .unwrap()
-            .verify_x509(&pem, &[trust.as_slice()], 1000)
+            .verify_x509(&pem, &[trust.as_slice()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
@@ -2414,7 +2416,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     assert_eq!(
         prepare_x509(&bad_sig)
             .unwrap()
-            .verify_x509(&pem, &[trust.as_slice()], 1000)
+            .verify_x509(&pem, &[trust.as_slice()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidSignature
     );
@@ -2442,7 +2444,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     assert_eq!(
         prepare_x509(&expired_req)
             .unwrap()
-            .verify_x509(&expired.pem(), &[trust.as_slice()], 86_401)
+            .verify_x509(&expired.pem(), &[trust.as_slice()], &crls, 86_401)
             .unwrap_err(),
         Error::InvalidKey
     );
@@ -2469,7 +2471,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     assert_eq!(
         prepare_x509(&pending_req)
             .unwrap()
-            .verify_x509(&pending.pem(), &[trust.as_slice()], 1000)
+            .verify_x509(&pending.pem(), &[trust.as_slice()], &crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
@@ -2495,6 +2497,9 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     let root = ca_cert("root.example", &root_key);
     let mid_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
     let mut mid_params = rcgen::CertificateParams::new(vec!["mid.example".into()]).unwrap();
+    mid_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "mid.example");
     mid_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     stamp(&mut mid_params, (1970, 1, 1), (2099, 1, 1));
     let mid = mid_params.signed_by(&mid_key, &root, &root_key).unwrap();
@@ -2520,14 +2525,29 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
     )
     .unwrap();
     let chained_pem = format!("{}{}", chained.pem(), mid.pem());
+    let mid_crl = crl(&mid, &mid_key, &[], (2099, 1, 1));
+    let root_crl = crl(&root, &root_key, &[], (2099, 1, 1));
+    let chain_crls = [mid_crl.as_slice(), root_crl.as_slice()];
     let chained_proof = prepare_x509(&chained_req).unwrap();
     let chained_id = chained_proof
-        .verify_x509(&chained_pem, &[root.der().as_ref()], 1000)
+        .verify_x509(&chained_pem, &[root.der().as_ref()], &chain_crls, 1000)
         .unwrap();
     assert_eq!(chained_id.thumbprint, chained_thumb);
+    // The intermediate needs its own CRL from the root.
     assert_eq!(
         chained_proof
-            .verify_x509(&chained.pem(), &[root.der().as_ref()], 1000)
+            .verify_x509(
+                &chained_pem,
+                &[root.der().as_ref()],
+                &[mid_crl.as_slice()],
+                1000,
+            )
+            .unwrap_err(),
+        Error::InvalidKey
+    );
+    assert_eq!(
+        chained_proof
+            .verify_x509(&chained.pem(), &[root.der().as_ref()], &chain_crls, 1000)
             .unwrap_err(),
         Error::InvalidKey
     );
@@ -2536,6 +2556,7 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
             .verify_x509(
                 &format!("{}{}", mid.pem(), chained.pem()),
                 &[root.der().as_ref()],
+                &chain_crls,
                 1000,
             )
             .unwrap_err(),
@@ -2575,11 +2596,62 @@ fn x509_checks_the_chain_and_selects_one_algorithm() {
         assert_eq!(
             prepare_x509(&x509_request(&rsa_header, &vec![1u8; len]))
                 .unwrap()
-                .verify_x509(&rsa_leaf.pem(), &[trust.as_slice()], 1000)
+                .verify_x509(&rsa_leaf.pem(), &[trust.as_slice()], &crls, 1000)
                 .unwrap_err(),
             Error::UnsupportedAlgorithm,
             "rsa signature length {len}"
         );
+    }
+}
+
+#[test]
+fn x509_requires_a_current_crl_for_every_certificate() {
+    let seed = [9u8; 32];
+    let leaf_key = rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(
+        &pkcs8_pem(&ed25519_pkcs8(&seed)),
+        &rcgen::PKCS_ED25519,
+    )
+    .unwrap();
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let ca = ca_cert("ca.example", &ca_key);
+    let mut params = rcgen::CertificateParams::new(vec!["leaf.example".into()]).unwrap();
+    params.serial_number = Some(rcgen::SerialNumber::from(7u64));
+    stamp(&mut params, (1970, 1, 1), (2099, 1, 1));
+    let leaf = params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+    let mut req = request();
+    sign_request(
+        &mut req,
+        &SigningKey::from_seed(seed),
+        KeyMaterial::X509 {
+            x5u: "https://client.example/leaf.pem".into(),
+            x5t: sha256(leaf.der().as_ref()),
+        },
+        1000,
+    )
+    .unwrap();
+    let prepared = prepare_x509(&req).unwrap();
+    let verify =
+        |crls: &[&[u8]], now| prepared.verify_x509(&leaf.pem(), &[ca.der().as_ref()], crls, now);
+
+    let current = crl(&ca, &ca_key, &[], (2099, 1, 1));
+    verify(&[current.as_slice()], 1000).unwrap();
+    let revoked = crl(&ca, &ca_key, &[7], (2099, 1, 1));
+    let stale = crl(&ca, &ca_key, &[], (1970, 1, 2));
+    let other_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let foreign = crl(
+        &ca_cert("other.example", &other_key),
+        &other_key,
+        &[],
+        (2099, 1, 1),
+    );
+    for (crls, now) in [
+        (vec![], 1000),
+        (vec![revoked.as_slice()], 1000),
+        (vec![stale.as_slice()], 86_401),
+        (vec![foreign.as_slice()], 1000),
+        (vec![b"not a crl".as_slice()], 1000),
+    ] {
+        assert_eq!(verify(&crls, now).unwrap_err(), Error::InvalidKey, "{now}");
     }
 }
 
@@ -2597,6 +2669,7 @@ fn ec_certificate(
         rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(&pkcs8_pem(doc.as_ref()), cert_alg).unwrap();
     let ca_key = rcgen::KeyPair::generate_for(cert_alg).unwrap();
     let ca = ca_cert("ec-ca.example", &ca_key);
+    let ca_crl = crl(&ca, &ca_key, &[], (2099, 1, 1));
     let leaf = issued(
         "ec-leaf.example",
         &key,
@@ -2614,7 +2687,12 @@ fn ec_certificate(
     });
     let identity = prepare_x509(&req)
         .unwrap()
-        .verify_x509(&leaf.pem(), &[ca.der().as_ref()], 1000)
+        .verify_x509(
+            &leaf.pem(),
+            &[ca.der().as_ref()],
+            &[ca_crl.as_slice()],
+            1000,
+        )
         .unwrap();
     assert_eq!(identity.key.alg, alg);
     assert_eq!(identity.key.crv, crv);
@@ -2623,7 +2701,12 @@ fn ec_certificate(
     assert_eq!(
         prepare_x509(&x509_request(&header, &vec![1u8; wrong_len]))
             .unwrap()
-            .verify_x509(&leaf.pem(), &[ca.der().as_ref()], 1000)
+            .verify_x509(
+                &leaf.pem(),
+                &[ca.der().as_ref()],
+                &[ca_crl.as_slice()],
+                1000
+            )
             .unwrap_err(),
         Error::InvalidSignature
     );
@@ -2631,6 +2714,10 @@ fn ec_certificate(
 
 fn ca_cert(name: &str, key: &rcgen::KeyPair) -> rcgen::Certificate {
     let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
+    // A CRL is matched to a certificate by its issuer's name.
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, name);
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     stamp(&mut params, (1970, 1, 1), (2099, 1, 1));
     params.self_signed(key).unwrap()
@@ -2647,6 +2734,34 @@ fn issued(
     let mut params = rcgen::CertificateParams::new(vec![name.into()]).unwrap();
     stamp(&mut params, before, after);
     params.signed_by(key, issuer, issuer_key).unwrap()
+}
+
+fn crl(
+    issuer: &rcgen::Certificate,
+    key: &rcgen::KeyPair,
+    revoked: &[u64],
+    next_update: (i32, u8, u8),
+) -> Vec<u8> {
+    rcgen::CertificateRevocationListParams {
+        this_update: rcgen::date_time_ymd(1970, 1, 1),
+        next_update: rcgen::date_time_ymd(next_update.0, next_update.1, next_update.2),
+        crl_number: rcgen::SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: revoked
+            .iter()
+            .map(|serial| rcgen::RevokedCertParams {
+                serial_number: rcgen::SerialNumber::from(*serial),
+                revocation_time: rcgen::date_time_ymd(1970, 1, 1),
+                reason_code: None,
+                invalidity_date: None,
+            })
+            .collect(),
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    }
+    .signed_by(issuer, key)
+    .unwrap()
+    .der()
+    .to_vec()
 }
 
 fn stamp(params: &mut rcgen::CertificateParams, before: (i32, u8, u8), after: (i32, u8, u8)) {

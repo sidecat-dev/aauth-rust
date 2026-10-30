@@ -1,9 +1,11 @@
 //! `x509` Signature-Key members.
 //!
 //! This crate does not fetch `x5u`. The host resolves that exact URL, passes
-//! the PEM chain, and passes the trust anchors it already accepts. Revocation
-//! evidence is also host-owned: this check does not fetch a CRL or OCSP
-//! response. The first PEM certificate is the end entity.
+//! the PEM chain, and passes the trust anchors it already accepts. It also
+//! fetches the certificate revocation lists (CRLs) for the chain and passes
+//! them; this check verifies each CRL and refuses a certificate it revokes or
+//! that no current CRL covers. OCSP is not supported. The first PEM
+//! certificate is the end entity.
 use super::{Error, KeyMaterial, PreparedRequest};
 use aauth_rust_jose::Jwk;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -13,7 +15,11 @@ use rustls_pki_types::{
 };
 use sha2::{Digest, Sha256};
 use std::time::Duration;
-use webpki::{EndEntityCert, ExtendedKeyUsageValidator, KeyPurposeIdIter};
+use webpki::{
+    BorrowedCertRevocationList, CertRevocationList, EndEntityCert, ExpirationPolicy,
+    ExtendedKeyUsageValidator, KeyPurposeIdIter, RevocationCheckDepth, RevocationOptionsBuilder,
+    UnknownStatusPolicy,
+};
 
 /// Certificate and key that verified one `x509` proof.
 #[derive(Clone, Debug)]
@@ -140,13 +146,20 @@ impl PreparedRequest {
     ///
     /// `chain_pem` is the PEM the host obtained for this member's `x5u`. The
     /// first certificate is the end entity and the rest are intermediates.
-    /// `trust_anchors_der` are DER trust anchors. `now` is the verifier clock
-    /// in Unix seconds and is compared with the certificates' validity.
+    /// `trust_anchors_der` are DER trust anchors. `crls_der` are the DER
+    /// RFC 5280 CRLs the host obtained for this chain. `now` is the verifier
+    /// clock in Unix seconds and is compared with the certificates' validity
+    /// and each CRL's `nextUpdate`.
     ///
-    /// Chain validation runs before the thumbprint comparison and before the
-    /// HTTP signature check. A leaf that matches `x5t` and whose key would
-    /// verify the signature is still rejected when it does not chain to one
-    /// of the supplied anchors.
+    /// Chain validation, including revocation, runs before the thumbprint
+    /// comparison and before the HTTP signature check. A leaf that matches
+    /// `x5t` and whose key would verify the signature is still rejected when it
+    /// does not chain to one of the supplied anchors. The end entity and every
+    /// intermediate must each be covered by a supplied CRL that its issuer
+    /// signed and that is not past `nextUpdate`; a certificate that one lists,
+    /// or that none covers, is rejected. Pass one CRL per issuer: the first
+    /// whose issuer name matches is the one checked. Delta CRLs are not
+    /// supported.
     ///
     /// The end-entity subject public key selects exactly one HTTP algorithm:
     /// Ed25519, P-256 as ES256, or P-384 as ES384. `rsaEncryption` does not
@@ -154,15 +167,17 @@ impl PreparedRequest {
     /// `unsupported_algorithm`.
     ///
     /// # Errors
-    /// `invalid_key` when this request is not `x509`, the PEM or anchors are
-    /// unusable, the chain or validity check fails, or `x5t` does not equal
-    /// the SHA-256 of the end-entity DER. `unsupported_algorithm` when the
-    /// certificate key is not one of the three algorithms above.
+    /// `invalid_key` when this request is not `x509`, the PEM, anchors or CRLs
+    /// are unusable, the chain, validity or revocation check fails, or `x5t`
+    /// does not equal the SHA-256 of the end-entity DER.
+    /// `unsupported_algorithm` when the certificate key is not one of the
+    /// three algorithms above.
     /// `invalid_signature` when the HTTP signature does not match that key.
     pub fn verify_x509(
         &self,
         chain_pem: &str,
         trust_anchors_der: &[&[u8]],
+        crls_der: &[&[u8]],
         now: i64,
     ) -> Result<X509Identity, Error> {
         let KeyMaterial::X509 { x5u, x5t } = &self.key else {
@@ -173,6 +188,22 @@ impl PreparedRequest {
         }
         let certs = pem_certs(chain_pem)?;
         let anchors = trust_anchors(trust_anchors_der)?;
+        let lists = crls_der
+            .iter()
+            .map(|der| {
+                BorrowedCertRevocationList::from_der(der)
+                    .map(CertRevocationList::from)
+                    .map_err(|_| Error::InvalidKey)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let crls: Vec<&CertRevocationList<'_>> = lists.iter().collect();
+        // Every certificate in the path needs a current CRL from its issuer.
+        let revocation = RevocationOptionsBuilder::new(&crls)
+            .map_err(|_| Error::InvalidKey)?
+            .with_depth(RevocationCheckDepth::Chain)
+            .with_status_policy(UnknownStatusPolicy::Deny)
+            .with_expiration_policy(ExpirationPolicy::Enforce)
+            .build();
         let ee = CertificateDer::from_slice(&certs[0]);
         let end_entity = EndEntityCert::try_from(&ee).map_err(|_| Error::InvalidKey)?;
         let intermediates: Vec<CertificateDer<'_>> = certs[1..]
@@ -191,7 +222,7 @@ impl PreparedRequest {
                 &intermediates,
                 UnixTime::since_unix_epoch(Duration::from_secs(now as u64)),
                 AnyExtendedKeyUsage,
-                None,
+                Some(revocation),
                 None,
             )
             .map_err(|_| Error::InvalidKey)?;
