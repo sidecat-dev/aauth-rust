@@ -478,6 +478,32 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. This is not a completed protected per-call,
 not a separate product-QA pass, and not power loss.
 
+The same federated proposal now completes once and replays that auth token.
+Behavior `7defa9a573e59321fcb352d2bc19c288426d050e` (tree
+`cc190d0624c918fc8a551ff81d2140e1d4b54546`) claims the prepared retry, runs
+the protected handler, and retains that response. Host3
+`aauth-wc07-completion-fedcall01` at that source returned 400
+`invalid_request`. The example transport sent `Connection: close`, which Go
+will not retain. Invocation `30981be59d8941f9bee16e2e4ac4743c`. That unit is
+not a pass. Commit `cf3c81abc4c958aaf5d9db91c3dcad4302c31df4` (tree
+`158e8a4bc7af7b7ff45c3ace34db76d696cb30bb`) sends the completion and the
+replay without connection close. The 401 challenge still uses the existing
+transport. Host3 `aauth-wc07-completion-fedcall02` ran at that source.
+`r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. Completion status is
+200, replay status is 200, the replay body matches, and the protected
+handler ran once. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Reads stayed 2 and both
+deletes stayed `"r-1"`. Receipt START
+`2026-10-30T03:08:43.820844829+00:00`, log mtime
+`2026-10-30T03:08:55.614566569Z`. systemd-run invocation
+`34849f1178534f94b152c02eba2b9b2f`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDCALL_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. This is not a separate product-QA pass and
+not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
