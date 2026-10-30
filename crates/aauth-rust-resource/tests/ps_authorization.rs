@@ -232,6 +232,97 @@ fn verified_person_challenges_without_admission_and_copies_exact_lineage() {
     assert_eq!(validated.compact(), compact);
 }
 
+/// Verified challenge claims, without the identifiers that differ per presentation.
+fn challenge_claims(resource: &Resource, person: &str, challenge_jti: &str) -> Value {
+    let response = resource
+        .authorize(&signed(person), NOW, challenge_jti)
+        .into_response();
+    let verified = ResourceToken::parse(challenge_token(&response))
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    let mut claims = serde_json::to_value(verified.claims()).unwrap();
+    let object = claims.as_object_mut().unwrap();
+    assert_eq!(object.remove("jti"), Some(json!(challenge_jti)));
+    object.remove("presented_jti");
+    claims
+}
+
+// Core Person Token and Continuity, Not Identity Proofing: a person token is
+// the same `(iss, sub)` again, not evidence of identity proofing, legal
+// identity or an assurance level, and it never stands in for an auth token.
+#[test]
+fn a_person_token_is_continuity_not_identity_proofing() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = resource(calls.clone(), true).with_authorization_endpoint();
+    // Claims a person server might add about how it established the person.
+    let mut proofed = person_claims();
+    proofed.jti = "person-proofed".into();
+    proofed.extra = BTreeMap::from([
+        ("acr".into(), json!("urn:example:assurance:high")),
+        ("amr".into(), json!(["hwk", "face"])),
+        (
+            "verified_claims".into(),
+            json!({
+                "verification": {"trust_framework": "example", "assurance_level": "high"},
+                "claims": {"given_name": "Ada", "family_name": "Lovelace", "birthdate": "1815-12-10"}
+            }),
+        ),
+        ("name".into(), json!("Ada Lovelace")),
+    ]);
+    let proofed_token =
+        mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &proofed).unwrap();
+
+    // The asserted proofing changes nothing the Resource issues: the same
+    // person, the same scope and lifetime, and no claim about the person
+    // beyond `(iss, sub)` and the organizational `tenant`.
+    let plain = challenge_claims(&resource, &person(), "challenge-plain");
+    let asserted = challenge_claims(&resource, &proofed_token, "challenge-proofed");
+    assert_eq!(asserted, plain);
+    for name in ["acr", "amr", "verified_claims", "name"] {
+        assert!(asserted.get(name).is_none(), "{name}");
+    }
+    let proactive = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&proofed_token), Some("records.read")),
+            NOW,
+            "proactive-proofed",
+        )
+        .into_response();
+    assert_eq!(proactive.status(), 200);
+    let body: Value = serde_json::from_slice(proactive.body()).unwrap();
+    let issued = ResourceToken::parse(body["resource_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    let issued = serde_json::to_value(issued.claims()).unwrap();
+    for name in ["acr", "amr", "verified_claims", "name"] {
+        assert!(issued.get(name).is_none(), "{name}");
+    }
+
+    // Continuity is the pair: the same asserted proofing under another `sub`
+    // is another person at this Resource.
+    let mut other = proofed.clone();
+    other.sub = "another-directed-person".into();
+    other.jti = "person-other".into();
+    let other = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &other).unwrap();
+    let other = challenge_claims(&resource, &other, "challenge-other");
+    assert_eq!(other["sub"], "another-directed-person");
+    assert_eq!(other["ps"], plain["ps"]);
+
+    // An ask names the person by `(ps, sub)`. Proofing claims satisfy no ask
+    // for a different subject.
+    let mut ask = asked();
+    ask.sub = "another-directed-person".into();
+    let response = resource
+        .authorize_for(&signed(&proofed_token), NOW, "challenge-ask", &ask)
+        .into_response();
+    assert_verified_mismatch(&response);
+
+    // A person token is never authorization, whatever it asserts.
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn auth_admission_carries_verified_auth_and_host_context() {
     let calls = Arc::new(AtomicUsize::new(0));
