@@ -655,6 +655,38 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. This is not a separate product-QA pass and
 not power loss. The clock advance is not a wall-clock sleep.
 
+A Person token on a budgeted mapped R3 route now returns 401. Behavior commit
+`f12b2168e3880f37b77e5ff39c6efd32e92e4423` (tree
+`13260e4337599f9a4d1b49488bdddd7f061771c7`) drops the Core `budget` extra
+before the reactive class mint. A proactive `/authorize` body that carries a
+budget object still mints a budget resource token. A non-GET of
+`/r3/pending/{id}` returns 405 `method_not_allowed` with `Allow: GET`. A
+pending id that is not stored returns 410 `gone`. A different per-call token
+on a stored invocation stays 403 `access_denied`, and the original token
+still replays. `verify_r3_resource_token` and class delivery require a
+Person-Server parent, so an access-server auth token is not that parent. A
+per-call token must be issued by the class token's issuer.
+`verify_r3_proposal_challenge` still requires the proposal audience to be
+that issuer. Host3 `aauth-wc07-completion-qadefect01` at that source passed
+`qa_d1_budgeted_mapped_person_challenge_is_unauthorized` and
+`qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone` 2/0
+with 13 filtered, then
+`person_challenge_on_a_mapped_route_issues_a_retained_class_document` 1/0
+with 14 filtered, `r3_and_budgets_issue_a_combined_resource_token` 1/0 with
+14 filtered, and
+`federated_access_server_serves_and_admits_class_and_per_call_r3` 1/0 with
+14 filtered. `r3_delivery` passed 5/0, including
+`qa_d3_person_parent_and_class_issuer`. This unit did not run
+`r3-per-call-interop`. `query-runs=2` and `proposal-err=invalid_resource_token`
+stay as previously recorded. Retained-grant `budget_consumed` stays
+unresolved. Receipt START `2026-10-30T05:15:10.637795155+00:00`, log mtime
+`2026-10-30T05:15:19.879434881Z`. systemd-run invocation
+`b077d368c17641068111c6e6f7103477`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `QADEFECT01_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin.
+This is not a separate product-QA pass and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
