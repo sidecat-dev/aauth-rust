@@ -248,6 +248,22 @@ fn malformed_fields_are_not_missing_coverage_errors() {
 }
 
 #[test]
+fn a_missing_signature_field_is_invalid_signature() {
+    for field in ["signature", "signature-input", "signature-key"] {
+        let (mut req, _) = signed();
+        req.headers_mut().remove(field);
+        assert_eq!(
+            PreparedRequest::prepare(&req, "sig", 1000, 60)
+                .err()
+                .unwrap()
+                .code(),
+            "invalid_signature",
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn local_signing_errors_explain_body_uri_and_clock_units() {
     let key = SigningKey::from_seed([7; 32]);
     let material = || KeyMaterial::Hwk(key.public_jwk());

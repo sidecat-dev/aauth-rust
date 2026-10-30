@@ -577,8 +577,10 @@ impl PreparedRequest {
     /// `@method`, `@authority`, `@path` and `@query` are refused.
     ///
     /// # Errors
-    /// Returns profile, syntax, coverage, time or key-conveyance errors. No proof
-    /// is authenticated until [`PreparedRequest::verify`] succeeds.
+    /// Returns profile, syntax, coverage, time or key-conveyance errors. A
+    /// request without `Signature`, `Signature-Input` or `Signature-Key` is
+    /// `InvalidSignature`. No proof is authenticated until
+    /// [`PreparedRequest::verify`] succeeds.
     pub fn prepare(
         req: &Request<Vec<u8>>,
         label: &str,
@@ -607,6 +609,14 @@ impl PreparedRequest {
         }
         if window < 0 || !(0..=(1_i64 << 33) - 1).contains(&now) {
             return Err(Error::InvalidClock);
+        }
+        // A request missing any of the three fields is not signed, so this is
+        // `invalid_signature` before coverage or key material is read.
+        if ["signature", "signature-input", "signature-key"]
+            .iter()
+            .any(|name| !req.headers().contains_key(*name))
+        {
+            return Err(Error::InvalidSignature);
         }
         let inputs = dictionary(req, "signature-input")?;
         let Some(ListEntry::InnerList(input)) = inputs.get(label) else {
