@@ -587,6 +587,33 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. It does not record a different-token replay.
 This is not a separate product-QA pass and not power loss.
 
+A second compact form of that held auth token now returns 403. Commit
+`1e4c188ff1b017dd36cb93b1ede6cc15ed4adac3` (tree
+`c7924ac3382357890bc787c537a97763c4289ffd`) re-signs the same auth-token
+payload with example key `fed-as-2` and sends a GET of the completed pending
+URL. The status is `403` `access_denied`. The original token then replays the
+retained body. The protected handler still ran once. `POST /records/r-1`
+stays the 401 completion. Budget stays unset. Host3
+`aauth-wc07-completion-fedmismatch01` ran at that source.
+`r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The held challenge is
+202, the immediate poll is refused, the wait is 5, the poll is 200, the
+replay is 200, and the replay body matches. The method is 405
+`method_not_allowed`, and the unknown pending id is 410 `gone`. The different
+compact token is 403 `access_denied`. The held protected handler ran once.
+The r-1 completion stayed 200 with one protected run. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Reads stayed 2 and both
+deletes stayed `"r-1"`. The example required the original token to replay
+after the 403. The printed line does not show that follow-up. Receipt START
+`2026-10-30T04:13:22.942879710+00:00`, log mtime
+`2026-10-30T04:13:35.922429178Z`. systemd-run invocation
+`03d2325e0a0d422ab54a71b57bc107a0`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDMISMATCH01_DONE`. This commit records that
+receipt and does not change behavior. It does not change the DirectR3 interop
+pin or retained-grant `budget_consumed`. This is not a separate product-QA
+pass and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
