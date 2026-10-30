@@ -339,17 +339,24 @@ pub fn unknown_pending() -> Response<Vec<u8>> {
 
 /// Read a revocation HTTP result the way a cascade caller does.
 ///
-/// An empty body is recorded with nothing reported. A non-empty body that is
-/// not a JSON object is `revocation_unavailable`. `downstream` may be absent.
+/// An empty `200` body is recorded with nothing reported. A non-empty body that
+/// is not a JSON object is `revocation_unavailable`. `downstream` may be absent.
+/// Any other status is read from the problem body's `error` member, not from
+/// the status: `unsupported_iss` is [`CallOutcome::Unsupported`], and any other
+/// value, or a body without one, is [`CallOutcome::Unavailable`].
 pub fn read_call_outcome(status: u16, body: &[u8]) -> CallOutcome {
     if status == 202 {
         return CallOutcome::Deferred;
     }
-    if status == 403 {
-        return CallOutcome::Unsupported;
-    }
     if status != 200 {
-        return CallOutcome::Unavailable;
+        let unsupported = strict_json(body).is_ok_and(|value| {
+            value.get("error").and_then(Value::as_str) == Some("unsupported_iss")
+        });
+        return if unsupported {
+            CallOutcome::Unsupported
+        } else {
+            CallOutcome::Unavailable
+        };
     }
     if body.is_empty() {
         return CallOutcome::Recorded;
@@ -357,5 +364,24 @@ pub fn read_call_outcome(status: u16, body: &[u8]) -> CallOutcome {
     match strict_json(body) {
         Ok(value) if value.is_object() => CallOutcome::Recorded,
         _ => CallOutcome::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CallOutcome, read_call_outcome};
+
+    #[test]
+    fn a_refusal_is_read_from_its_error_member() {
+        let refusal = |error: &str| format!(r#"{{"error":"{error}"}}"#).into_bytes();
+        for (status, body, outcome) in [
+            (403, refusal("unsupported_iss"), CallOutcome::Unsupported),
+            (400, refusal("unsupported_iss"), CallOutcome::Unsupported),
+            (403, refusal("access_denied"), CallOutcome::Unavailable),
+            (403, Vec::new(), CallOutcome::Unavailable),
+            (429, refusal("rate_limited"), CallOutcome::Unavailable),
+        ] {
+            assert_eq!(read_call_outcome(status, &body), outcome, "{status}");
+        }
     }
 }
