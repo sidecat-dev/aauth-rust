@@ -225,7 +225,7 @@ fn validate_common(
     }
     Ok(())
 }
-fn validate_digest(value: &str) -> Result<(), TokenError> {
+pub(crate) fn validate_digest(value: &str) -> Result<(), TokenError> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| TokenError::InvalidJwt)?;
@@ -234,7 +234,10 @@ fn validate_digest(value: &str) -> Result<(), TokenError> {
     }
     Ok(())
 }
-fn reject_reserved(extra: &BTreeMap<String, Value>, reserved: &[&str]) -> Result<(), TokenError> {
+pub(crate) fn reject_reserved(
+    extra: &BTreeMap<String, Value>,
+    reserved: &[&str],
+) -> Result<(), TokenError> {
     if reserved.iter().any(|name| extra.contains_key(*name)) {
         return Err(TokenError::InvalidJwt);
     }
@@ -381,7 +384,7 @@ impl AuthClaims {
     }
 }
 
-fn parse_claims<T: serde::de::DeserializeOwned>(
+pub(crate) fn parse_claims<T: serde::de::DeserializeOwned>(
     compact: &str,
     typ: &str,
 ) -> Result<(Jws, T, String), TokenError> {
@@ -421,7 +424,7 @@ fn verify_signature(
     }
     Ok(())
 }
-fn mint<T: Serialize>(
+pub(crate) fn mint<T: Serialize>(
     key: &SigningKey,
     kid: &str,
     typ: &str,

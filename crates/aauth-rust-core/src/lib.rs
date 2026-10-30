@@ -1,8 +1,10 @@
-//! AAuth Agent, Person, Resource and Auth JWT trust verification.
+//! AAuth Agent, Person, Resource and Auth JWT trust verification, plus the
+//! Events subscribe and event tokens in [`events`].
 //! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
 pub mod continuation;
 mod discovery;
+pub mod events;
 mod identifiers;
 pub mod interaction;
 mod mission;
