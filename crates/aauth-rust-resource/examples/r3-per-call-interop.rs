@@ -40,5 +40,18 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         t.deletes,
         t.rust_ps_audit_records,
     );
+    println!(
+        "federated: person={} class-exchange={} class-verified={} proposal-challenge={} proposal-exchange={} proposal-verified={} completion={} replay={} replay-matches={} protected-runs={}",
+        t.federated_person_status,
+        t.federated_class_exchange_status,
+        t.federated_class_verified,
+        t.federated_proposal_challenge_status,
+        t.federated_proposal_exchange_status,
+        t.federated_proposal_verified,
+        t.federated_completion_status,
+        t.federated_replay_status,
+        t.federated_replay_matches,
+        t.federated_protected_runs,
+    );
     Ok(())
 }

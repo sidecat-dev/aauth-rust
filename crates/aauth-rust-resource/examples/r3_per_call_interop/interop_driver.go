@@ -98,6 +98,9 @@ type federatedConverseResponse struct {
 	ProposalChallengeStatus int  `json:"proposal_challenge_status"`
 	ProposalExchangeStatus  int  `json:"proposal_exchange_status"`
 	ProposalVerified        bool `json:"proposal_verified"`
+	CompletionStatus        int  `json:"completion_status"`
+	ReplayStatus            int  `json:"replay_status"`
+	ReplayMatches           bool `json:"replay_matches"`
 }
 
 type transcriptOutput struct {
@@ -145,6 +148,10 @@ type transcriptOutput struct {
 	FederatedASClassAuthorizations              int      `json:"federated_as_class_authorizations"`
 	FederatedASProposalAuthorizations           int      `json:"federated_as_proposal_authorizations"`
 	FederatedASIssuances                        int      `json:"federated_as_issuances"`
+	FederatedCompletionStatus                   int      `json:"federated_completion_status"`
+	FederatedReplayStatus                       int      `json:"federated_replay_status"`
+	FederatedReplayMatches                      bool     `json:"federated_replay_matches"`
+	FederatedProtectedRuns                      int      `json:"federated_protected_runs"`
 	Reads                                       int      `json:"reads"`
 	Deletes                                     []string `json:"deletes"`
 	RustPSAuditRecords                          int      `json:"rust_ps_audit_records"`
@@ -260,16 +267,24 @@ func (s *memoryProposalStore) Load(_ context.Context, uri string) (resource.R3Pr
 	return record, nil
 }
 
+type memoryRetryEntry struct {
+	invocation resource.R3RetryInvocation
+	state      string
+	token      resource.R3RetryAuthToken
+	fence      string
+	response   resource.HeldResponse
+}
+
 type memoryRetryStore struct {
 	mu      sync.Mutex
-	records map[string]resource.R3RetryInvocation
+	records map[string]*memoryRetryEntry
 }
 
 func (s *memoryRetryStore) Prepare(_ context.Context, invocation resource.R3RetryInvocation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.records == nil {
-		s.records = make(map[string]resource.R3RetryInvocation)
+		s.records = make(map[string]*memoryRetryEntry)
 	}
 	key := invocation.Reference.URI()
 	if _, ok := s.records[key]; ok {
@@ -278,28 +293,76 @@ func (s *memoryRetryStore) Prepare(_ context.Context, invocation resource.R3Retr
 	cloned := invocation
 	cloned.ExactProposal = append([]byte(nil), invocation.ExactProposal...)
 	cloned.RequiredScopes = append([]string(nil), invocation.RequiredScopes...)
-	s.records[key] = cloned
+	s.records[key] = &memoryRetryEntry{invocation: cloned, state: "pending"}
 	return nil
 }
 
 func (s *memoryRetryStore) Load(_ context.Context, reference r3.Reference) (resource.R3RetryInvocation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	invocation, ok := s.records[reference.URI()]
+	entry, ok := s.records[reference.URI()]
 	if !ok {
 		return resource.R3RetryInvocation{}, resource.ErrR3RetryNotFound
 	}
+	invocation := entry.invocation
 	invocation.ExactProposal = append([]byte(nil), invocation.ExactProposal...)
 	invocation.RequiredScopes = append([]string(nil), invocation.RequiredScopes...)
 	return invocation, nil
 }
 
-func (s *memoryRetryStore) Claim(context.Context, r3.Reference, resource.R3RetryAuthToken) (resource.R3RetryClaim, error) {
-	return resource.R3RetryClaim{}, resource.ErrR3RetryNotFound
+func (s *memoryRetryStore) Claim(_ context.Context, reference r3.Reference, token resource.R3RetryAuthToken) (resource.R3RetryClaim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.records[reference.URI()]
+	if !ok {
+		return resource.R3RetryClaim{}, resource.ErrR3RetryNotFound
+	}
+	switch entry.state {
+	case "pending":
+		if !token.PresentedAt.Before(entry.invocation.CompletionUntil) {
+			return resource.R3RetryClaim{}, resource.ErrR3RetryExpired
+		}
+		entry.state = "executing"
+		entry.token = token
+		entry.fence = "fence-1"
+		return resource.NewHeldExecution(resource.HeldExecution{
+			InvocationID: reference.URI(),
+			Fence:        entry.fence,
+		}), nil
+	case "executing":
+		return resource.R3RetryClaim{}, resource.ErrR3RetryConflict
+	case "completed":
+		if entry.token.SHA256 != token.SHA256 {
+			return resource.R3RetryClaim{}, resource.ErrR3RetryTokenMismatch
+		}
+		return resource.NewHeldReplay(entry.response), nil
+	case "unresolved":
+		return resource.R3RetryClaim{}, resource.ErrR3RetryUnresolved
+	default:
+		return resource.R3RetryClaim{}, resource.ErrR3RetryConflict
+	}
 }
 
-func (s *memoryRetryStore) Retain(context.Context, resource.R3RetryExecution, resource.HeldResponse) (resource.HeldResponse, error) {
-	return resource.HeldResponse{}, resource.ErrR3RetryUnresolved
+func (s *memoryRetryStore) Retain(_ context.Context, execution resource.R3RetryExecution, response resource.HeldResponse) (resource.HeldResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.records[execution.InvocationID]
+	if !ok || entry.state != "executing" || entry.fence != execution.Fence {
+		return resource.HeldResponse{}, resource.ErrR3RetryCompletionStale
+	}
+	entry.response = resource.HeldResponse{
+		StatusCode: response.StatusCode,
+		Header:     response.Header.Clone(),
+		Body:       append([]byte(nil), response.Body...),
+		Trailer:    response.Trailer.Clone(),
+	}
+	entry.state = "completed"
+	return resource.HeldResponse{
+		StatusCode: entry.response.StatusCode,
+		Header:     entry.response.Header.Clone(),
+		Body:       append([]byte(nil), entry.response.Body...),
+		Trailer:    entry.response.Trailer.Clone(),
+	}, nil
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -963,6 +1026,10 @@ func main() {
 	out.FederatedASClassAuthorizations = fedCounts.ASClassAuthorizations
 	out.FederatedASProposalAuthorizations = fedCounts.ASProposalAuthorizations
 	out.FederatedASIssuances = fedCounts.ASIssuances
+	out.FederatedCompletionStatus = fedOut.CompletionStatus
+	out.FederatedReplayStatus = fedOut.ReplayStatus
+	out.FederatedReplayMatches = fedOut.ReplayMatches
+	out.FederatedProtectedRuns = fedCounts.ProtectedRuns
 
 	finalState := fetchState()
 	out.GoToRustQueryRuns = finalState.QueryRuns
@@ -1002,6 +1069,7 @@ type federatedCounts struct {
 	ASClassAuthorizations    int
 	ASProposalAuthorizations int
 	ASIssuances              int
+	ProtectedRuns            int
 }
 
 func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, federatedCounts) {
@@ -1031,6 +1099,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	var psProposalConsents atomic.Int32
 	var asClassAuthorizations atomic.Int32
 	var asProposalAuthorizations atomic.Int32
+	var protectedRuns atomic.Int32
 	issuances := &memoryIssuanceStore{}
 	admitResource := func(_ context.Context, endpoint string) error {
 		if !strings.HasPrefix(endpoint, fedResourceIssuer+"/r3/") {
@@ -1053,6 +1122,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 			return nil
 		},
 		Protected: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			protectedRuns.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"deleted":true}`))
@@ -1272,5 +1342,6 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		ASClassAuthorizations:    int(asClassAuthorizations.Load()),
 		ASProposalAuthorizations: int(asProposalAuthorizations.Load()),
 		ASIssuances:              issuances.len(),
+		ProtectedRuns:            int(protectedRuns.Load()),
 	}
 }

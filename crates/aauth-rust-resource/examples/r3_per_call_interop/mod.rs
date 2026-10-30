@@ -23,7 +23,8 @@
 //!    the Rust Agent against Go `resource.NewFederatedAuthorization` with R3,
 //!    Go `accessserver` `R3Config`, and Go `personserver.NewFederatedAuthorization`
 //!    with `ConsentDocument` and `ConsentProposal`. One class document and one
-//!    proposal are exchanged. The Rust Agent verifies both access-server grants.
+//!    proposal are exchanged. The Rust Agent verifies both access-server grants,
+//!    completes that proposal once, and replays the same auth token.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -129,6 +130,10 @@ pub struct InteropTranscript {
     pub federated_as_class_authorizations: usize,
     pub federated_as_proposal_authorizations: usize,
     pub federated_as_issuances: usize,
+    pub federated_completion_status: u16,
+    pub federated_replay_status: u16,
+    pub federated_replay_matches: bool,
+    pub federated_protected_runs: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
     pub rust_ps_audit_records: usize,
@@ -1426,9 +1431,45 @@ fn handle_federated_converse(
         trust,
         clock,
     )?;
-    if per_call_delivered.claims().dwk != "aauth-access.json" || per_call_delivered.claims().iss != FED_AS
+    if per_call_delivered.claims().dwk != "aauth-access.json"
+        || per_call_delivered.claims().iss != FED_AS
     {
         return Err("federated proposal grant was not issued by the access server".into());
+    }
+
+    let completion_holder = agent.with_token(per_call.clone())?;
+    let completion_req = post_at(
+        &completion_holder,
+        &format!("{FED_RECORDS}/records/r-1"),
+        b"{}",
+        clock,
+    )?;
+    let completed = TlsServer::send_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &completion_req,
+    )?;
+    let completion_status = completed.status().as_u16();
+    if completion_status != 200 || completed.body() != br#"{"deleted":true}"# {
+        return Err(http_failure("federated proposal completion", &completed));
+    }
+    let replay_req = post_at(
+        &completion_holder,
+        &format!("{FED_RECORDS}/records/r-1"),
+        b"{}",
+        clock,
+    )?;
+    let replayed = TlsServer::send_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &replay_req,
+    )?;
+    let replay_status = replayed.status().as_u16();
+    let replay_matches = replay_status == 200 && replayed.body() == completed.body();
+    if !replay_matches {
+        return Err(http_failure("federated proposal replay", &replayed));
     }
 
     Ok(json!({
@@ -1438,6 +1479,9 @@ fn handle_federated_converse(
         "proposal_challenge_status": proposal_challenge_status,
         "proposal_exchange_status": proposal_exchange_status,
         "proposal_verified": true,
+        "completion_status": completion_status,
+        "replay_status": replay_status,
+        "replay_matches": replay_matches,
     }))
 }
 
@@ -1759,6 +1803,10 @@ pub fn run() -> Result<InteropTranscript> {
             "federated_as_proposal_authorizations",
         )? as usize,
         federated_as_issuances: number(&raw, "federated_as_issuances")? as usize,
+        federated_completion_status: number(&raw, "federated_completion_status")? as u16,
+        federated_replay_status: number(&raw, "federated_replay_status")? as u16,
+        federated_replay_matches: raw["federated_replay_matches"].as_bool().unwrap_or(false),
+        federated_protected_runs: number(&raw, "federated_protected_runs")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
             raw.get("deletes").cloned().ok_or("missing deletes")?,
@@ -1809,6 +1857,10 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_as_class_authorizations != 1
         || t.federated_as_proposal_authorizations != 1
         || t.federated_as_issuances != 2
+        || t.federated_completion_status != 200
+        || t.federated_replay_status != 200
+        || !t.federated_replay_matches
+        || t.federated_protected_runs != 1
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]
         || t.rust_ps_audit_records != 8
