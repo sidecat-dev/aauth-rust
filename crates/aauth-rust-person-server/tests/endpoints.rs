@@ -1,8 +1,8 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
-    AgentClaims, AgentKeyResolver, AgentProviderKeys, AuthToken, Confirmation, PersonToken,
-    ResourceClaims, TokenError, TrustedIssuerKeys, mint_resource_token,
+    AgentClaims, AgentKeyResolver, AgentProviderKeys, AuthToken, Confirmation, MetadataDisplay,
+    PersonToken, ResourceClaims, TokenError, TrustedIssuerKeys, mint_resource_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
@@ -179,6 +179,29 @@ fn person_binding_and_direct_grant_retain_identity_and_clip_parent_expiry() {
             "auth_token_endpoint": "https://ps.example/token"
         })
     );
+    let branded = server.with_display(
+        MetadataDisplay::new()
+            .with_name("Example PS")
+            .unwrap()
+            .with_logo_uri("https://ps.example/logo.svg")
+            .unwrap()
+            .with_policy_uri("https://ps.example/privacy")
+            .unwrap(),
+    );
+    let published: Value = serde_json::from_slice(&branded.metadata()).unwrap();
+    assert_eq!(
+        published,
+        json!({
+            "issuer": "https://ps.example",
+            "jwks_uri": "https://ps.example/.well-known/jwks.json",
+            "person_token_endpoint": "https://ps.example/person",
+            "auth_token_endpoint": "https://ps.example/token",
+            "name": "Example PS",
+            "logo_uri": "https://ps.example/logo.svg",
+            "policy_uri": "https://ps.example/privacy"
+        })
+    );
+    let server = branded;
     let person = value(&person_response)["person_token"]
         .as_str()
         .unwrap()

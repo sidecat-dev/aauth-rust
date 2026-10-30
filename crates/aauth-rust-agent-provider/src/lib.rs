@@ -4,8 +4,8 @@
 #![deny(missing_docs)]
 pub mod events;
 use aauth_rust_core::{
-    AgentClaims, AgentKeyResolver, AgentToken, TokenError, validate_server_identifier,
-    verify_subagent,
+    AgentClaims, AgentKeyResolver, AgentToken, MetadataDisplay, TokenError,
+    validate_server_identifier, verify_subagent,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use serde_json::json;
@@ -16,6 +16,7 @@ pub struct AgentProvider {
     kid: String,
     key: SigningKey,
     event_endpoint: Option<String>,
+    display: MetadataDisplay,
 }
 impl AgentProvider {
     /// Configure the issuer identity, public JWKS kid and caller-owned signing key.
@@ -32,7 +33,14 @@ impl AgentProvider {
             kid: kid.into(),
             key,
             event_endpoint: None,
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
     }
     /// Issue a top-level Agent token after the host approves enrollment and
     /// assigns a unique `jti`. `iat`/`exp` use Unix seconds, with `exp > iat` and a lifetime of at most 24 hours.
@@ -100,7 +108,8 @@ impl AgentProvider {
     }
     /// Public AP metadata bytes with the configured issuer and default JWKS URL.
     /// Serve at `/.well-known/aauth-agent.json` over verified HTTPS.
-    /// `event_endpoint` is present after [`Self::with_event_endpoint`].
+    /// `event_endpoint` is present after [`Self::with_event_endpoint`], and
+    /// the display members after [`Self::with_display`].
     ///
     /// # Errors
     /// Returns `InvalidJwt` if discovery serialization fails.
@@ -108,6 +117,9 @@ impl AgentProvider {
         let mut metadata = json!({"issuer":self.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.issuer)});
         if let Some(endpoint) = &self.event_endpoint {
             metadata["event_endpoint"] = json!(endpoint);
+        }
+        for (member, value) in self.display.members() {
+            metadata[member] = json!(value);
         }
         serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
     }

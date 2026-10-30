@@ -6,7 +6,9 @@ pub mod events;
 mod held;
 mod ps_authorization;
 mod session;
-use aauth_rust_core::{AgentKeyResolver, AgentToken, TokenError, VerifiedAgentToken};
+use aauth_rust_core::{
+    AgentKeyResolver, AgentToken, MetadataDisplay, TokenError, VerifiedAgentToken,
+};
 use aauth_rust_signature_key::{
     Error, KeyMaterial, PreparedRequest, required_components, role_signature_alg_header,
 };
@@ -304,6 +306,7 @@ pub struct AgentIdentityResource<K, P> {
     policy: P,
     authority: String,
     path: Option<String>,
+    display: MetadataDisplay,
 }
 impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
 where
@@ -327,7 +330,14 @@ where
             policy,
             authority: aauth_rust_signature_key::canonical_authority(&uri)?,
             path: Some(uri.path().to_owned()),
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
     }
     /// Bind one Resource to an HTTPS origin across all router paths.
     /// Every request must still be signed over its actual path and use this
@@ -351,7 +361,7 @@ where
     /// `/.well-known/aauth-resource.json` as application/json over HTTPS.
     /// Advertises Agent-token access and the actual 60-second signature window.
     /// No JWKS or token/authorization endpoint is invented for a verifying role.
-    /// Hosts may add branding to an owned copy without changing protocol fields.
+    /// Display members are present after [`Self::with_display`].
     /// Conditional body digest/type requirements are reported by `required_input`;
     /// this document does not declare them unconditional for every empty request.
     ///
@@ -375,11 +385,13 @@ where
     pub fn metadata_for(&self, issuer: &str) -> Result<Vec<u8>, ConfigurationError> {
         aauth_rust_core::validate_server_identifier(issuer)
             .map_err(|_| ConfigurationError::InvalidIssuer)?;
-        Ok(serde_json::json!({
+        let mut metadata = serde_json::json!({
             "issuer":issuer, "access_mode":"agent-token", "signature_window":60
-        })
-        .to_string()
-        .into_bytes())
+        });
+        for (member, value) in self.display.members() {
+            metadata[member] = serde_json::json!(value);
+        }
+        Ok(metadata.to_string().into_bytes())
     }
     /// Replace admission policy while retaining the configured target and keys.
     pub fn with_policy<Q, R>(self, policy: Q) -> AgentIdentityResource<K, Q>
@@ -392,6 +404,7 @@ where
             policy,
             authority: self.authority,
             path: self.path,
+            display: self.display,
         }
     }
     /// Check a buffered absolute HTTPS request at `now` in Unix seconds.

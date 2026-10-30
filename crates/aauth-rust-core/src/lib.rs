@@ -7,6 +7,7 @@ mod discovery;
 pub mod events;
 mod identifiers;
 pub mod interaction;
+mod metadata;
 mod mission;
 pub mod resource_link;
 pub mod revocation;
@@ -15,6 +16,7 @@ pub use mission::{ApprovedMission, MissionError};
 mod tokens;
 pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};
+pub use metadata::{DISPLAY_URI_MEMBERS, DisplayError, MetadataDisplay};
 pub use revocation::{
     CallOutcome, DownstreamReport, RevocationBody, RevocationDirectory, RevocationLedger,
     RevocationLimits,
@@ -91,9 +93,10 @@ pub enum TokenError {
     )]
     /// Agent token dwk does not name aauth-agent.json.
     InvalidDiscoveryDocument,
-    /// Discovery metadata has no usable HTTPS JWKS URL; a key refresh cannot fix it.
+    /// Discovery metadata has no usable HTTPS JWKS URL, or a display URL such
+    /// as `logo_uri` is not `https`; a key refresh cannot fix it.
     #[error(
-        "invalid AP metadata jwks_uri: provide an HTTPS URL with a host and valid port, without userinfo or fragment"
+        "invalid AP metadata jwks_uri or display URL: provide HTTPS URLs with a host and valid port, without userinfo; jwks_uri also without fragment"
     )]
     InvalidDiscoveryMetadata,
     /// sub domain must match the Agent Provider issuer host.

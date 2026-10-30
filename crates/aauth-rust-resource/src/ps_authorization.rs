@@ -14,8 +14,8 @@ use aauth_rust_budgets::{
     read_granted, sender_field, sign_usage_response, validate_endpoint_url,
 };
 use aauth_rust_core::{
-    AgentKeyResolver, AgentToken, AuthToken, PersonToken, ResourceClaims, TokenError,
-    VerifiedAuthToken, mint_resource_token, validate_server_identifier,
+    AgentKeyResolver, AgentToken, AuthToken, MetadataDisplay, PersonToken, ResourceClaims,
+    TokenError, VerifiedAuthToken, mint_resource_token, validate_server_identifier,
 };
 use aauth_rust_jose::{Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
@@ -709,6 +709,7 @@ pub struct PsAuthorizationResource<K, P> {
     r3: Option<Box<r3_class::R3Profile>>,
     /// Proposal URIs whose held execution grant the host still holds.
     executing: Arc<Mutex<BTreeSet<String>>>,
+    display: MetadataDisplay,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -777,7 +778,16 @@ where
             omit_required: false,
             r3: None,
             executing: Arc::new(Mutex::new(BTreeSet::new())),
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. A Person Server presents `name`,
+    /// `description` and `logo_uri` at consent as resource-asserted content.
+    /// The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
     /// target this AS; only its aauth-access.json Auth tokens may grant access,
@@ -945,6 +955,7 @@ where
     /// `r3_vocabularies` is present only after [`Self::with_r3`] and names each
     /// selected definition's discovery endpoint.
     /// AS selection is carried by its signed challenge audience.
+    /// Display members are present after [`Self::with_display`].
     ///
     /// # Errors
     /// Returns a serialization error as InvalidJwt.
@@ -969,6 +980,9 @@ where
         }
         if let Some(vocabularies) = self.r3_metadata() {
             metadata["r3_vocabularies"] = vocabularies;
+        }
+        for (member, value) in self.display.members() {
+            metadata[member] = json!(value);
         }
         serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
     }

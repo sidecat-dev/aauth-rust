@@ -170,14 +170,44 @@ its own multi-key JWKS can retain public keys for its outstanding tokens; the
 resolver selects by kid and tests cover old/new verification and later removal.
 The host owns retention, refresh and retirement policy. Go shares this AP gap.
 
-`metadata()` supplies minimal issuer/JWKS-location bytes. A host can publish its
-own metadata with the same exact issuer and admitted HTTPS JWKS URL, plus the
-draft's branding/policy fields. No AP branding builder is provided.
+`metadata()` supplies minimal issuer/JWKS-location bytes, plus the display
+members described in [Publish display metadata](#publish-display-metadata).
 `AgentIdentityResource::metadata_for(issuer)` is a separate verifier-only Resource
 document. Server identifiers have no port or path. In local deployments,
 map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.
+
+## Publish display metadata
+
+The four metadata documents share seven optional display members: `name`,
+`description`, `logo_uri`, `logo_dark_uri`, `documentation_uri`, `tos_uri` and
+`policy_uri`. Build them with `aauth_rust_core::MetadataDisplay` and pass the
+value to `with_display` on `AgentProvider`, `PersonServer`, `AccessServer`,
+`PsAuthorizationResource` or `AgentIdentityResource`:
+
+```rust
+use aauth_rust_core::MetadataDisplay;
+let display = MetadataDisplay::new()
+    .with_name("Example Calendar")?
+    .with_description("Calendar access for **your** agents.")?
+    .with_logo_uri("https://calendar.example/logo.png")?
+    .with_policy_uri("https://calendar.example/privacy")?;
+let person_server = person_server.with_display(display);
+```
+
+Each `with_` method checks its value as it is set. Every URL must be an
+absolute `https` URL with a host and no userinfo; a fragment is allowed. `name`
+is at most 256 bytes and `description` at most 16384, without control characters
+other than line breaks and tabs in the description. `metadata()` writes exactly the
+members you set, beside the protocol fields.
+
+To show another server's members, for example an agent provider's name and logo
+at a new-agent enrollment, read its fetched document with
+`MetadataDisplay::from_metadata`. The `description` is Markdown from that server:
+sanitize it before rendering. Key discovery (`metadata_jwks_uri`,
+`AgentProviderKeys` and `TrustedIssuerKeys`) refuses a document whose display URL
+is not `https` with `InvalidDiscoveryMetadata`, as aauth-go does.
 
 ### Collocated AP and Resource keys
 

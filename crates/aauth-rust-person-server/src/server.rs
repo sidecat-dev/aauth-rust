@@ -26,9 +26,9 @@ use aauth_rust_budgets::{
     parse_budget, parse_resource_claims, read_granted, verify_delivered,
 };
 use aauth_rust_core::{
-    AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonClaims, PersonToken,
-    ResourceToken, TokenError, VerifiedAgentToken, VerifiedResourceToken, mint_auth_token,
-    mint_person_token, validate_server_identifier,
+    AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, MetadataDisplay,
+    PersonClaims, PersonToken, ResourceToken, TokenError, VerifiedAgentToken,
+    VerifiedResourceToken, mint_auth_token, mint_person_token, validate_server_identifier,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
@@ -100,6 +100,7 @@ pub struct PersonServer<K, S, P, C, I> {
     budgets: Option<BudgetState>,
     r3: Option<Box<R3IssuerConfig>>,
     r3_approvals: Mutex<Vec<r3::RecordedApproval>>,
+    display: MetadataDisplay,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -220,7 +221,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             budgets: None,
             r3: None,
             r3_approvals: Mutex::new(Vec::new()),
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
     }
     /// Enable AS federation for every /token request, including
     /// collocated PS=AS. No direct-issuance fallback; consent defaults denied.
@@ -292,6 +300,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map(|_| aauth_rust_budgets::consent_figure(budget, description))
     }
     /// Public PS metadata; only implemented Person/Auth endpoints are advertised.
+    /// Display members are present after [`Self::with_display`].
     pub fn metadata(&self) -> Vec<u8> {
         let mut value = json!({"issuer":self.config.issuer,"person_token_endpoint":format!("{}/person",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer),"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer)});
         if self.revocation.is_some() {
@@ -304,6 +313,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             value["interaction_endpoint"] = json!(format!("{}/interaction", self.config.issuer));
             value["permission_endpoint"] = json!(format!("{}/permission", self.config.issuer));
             value["audit_endpoint"] = json!(format!("{}/audit", self.config.issuer));
+        }
+        for (member, display) in self.display.members() {
+            value[member] = json!(display);
         }
         value.to_string().into_bytes()
     }

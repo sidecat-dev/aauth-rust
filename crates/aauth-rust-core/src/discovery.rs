@@ -19,7 +19,9 @@ pub trait AgentKeyResolver: Send + Sync {
 ///
 /// # Errors
 /// Rejects oversized/malformed metadata, missing/mismatched issuer, or a missing
-/// or invalid HTTPS location (userinfo and fragments are forbidden).
+/// or invalid HTTPS location (userinfo and fragments are forbidden). A present
+/// `logo_uri`, `logo_dark_uri`, `documentation_uri`, `tos_uri` or `policy_uri`
+/// that is not an `https` URL is also `InvalidDiscoveryMetadata`.
 pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, TokenError> {
     crate::validate_server_identifier(expected_issuer)?;
     if bytes.len() > 65536 {
@@ -33,6 +35,8 @@ pub fn metadata_jwks_uri(expected_issuer: &str, bytes: &[u8]) -> Result<String, 
     if issuer != expected_issuer {
         return Err(TokenError::IssuerMismatch);
     }
+    crate::metadata::check_display_uris(&metadata)
+        .map_err(|_| TokenError::InvalidDiscoveryMetadata)?;
     let uri = metadata
         .get("jwks_uri")
         .and_then(Value::as_str)

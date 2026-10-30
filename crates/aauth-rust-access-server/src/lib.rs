@@ -45,9 +45,10 @@ use aauth_rust_budgets::{
     parse_resource_claims,
 };
 use aauth_rust_core::{
-    AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
-    ResourceToken, TokenError, VerifiedAgentToken, VerifiedAuthToken, VerifiedPersonToken,
-    VerifiedResourceToken, mint_auth_token, validate_server_identifier, verify_subagent,
+    AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, MetadataDisplay,
+    PersonToken, ResourceClaims, ResourceToken, TokenError, VerifiedAgentToken, VerifiedAuthToken,
+    VerifiedPersonToken, VerifiedResourceToken, mint_auth_token, validate_server_identifier,
+    verify_subagent,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
@@ -193,6 +194,7 @@ pub struct AccessServer<K, P, C, I> {
     deferred: Option<continuation::Deferred>,
     revocation: Option<revocation::Gate>,
     budgets: Option<IssuerPolicy>,
+    display: MetadataDisplay,
 }
 struct Resolver<'a, K> {
     config: &'a Config,
@@ -251,7 +253,14 @@ impl<
             deferred: None,
             revocation: None,
             budgets: None,
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
     }
     /// Cap issued budgets. An empty unit cache accepts the signed scale.
     ///
@@ -268,11 +277,15 @@ impl<
         Ok(self)
     }
     /// Metadata served at /.well-known/aauth-access.json. No unsupported endpoints
-    /// or companion capabilities are advertised.
+    /// or companion capabilities are advertised. Display members are present
+    /// after [`Self::with_display`].
     pub fn metadata(&self) -> Vec<u8> {
         let mut value = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"auth_token_endpoint":format!("{}/token",self.config.issuer)});
         if self.revocation.is_some() {
             value["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
+        }
+        for (member, display) in self.display.members() {
+            value[member] = json!(display);
         }
         value.to_string().into_bytes()
     }
