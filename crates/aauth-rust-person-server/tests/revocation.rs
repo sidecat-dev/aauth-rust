@@ -575,6 +575,9 @@ fn deferred_revocation_poll_is_limited_to_the_caller() {
     );
     assert!(poll.body().is_empty());
     assert!(!poll.headers().contains_key("content-type"));
+    let gone = server.handle(&signed_server("GET", path, ap_key(), None, 1000));
+    assert_eq!(gone.status(), 410);
+    assert_eq!(value(&gone)["error"], "gone");
     let unsigned = Request::builder()
         .method("GET")
         .uri(location)

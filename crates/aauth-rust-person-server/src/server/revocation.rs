@@ -24,6 +24,8 @@ struct Job {
     report: bool,
     key: (String, String),
     targets: Vec<Target>,
+    /// The cascade reached its terminal response, so a later poll is `410`.
+    done: bool,
 }
 #[derive(Clone)]
 struct Target {
@@ -107,7 +109,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             Err(error) => return error.response(),
         };
         let key = (self.config.issuer.clone(), jti.to_owned());
-        self.finish(&self.config.issuer, key, true, targets)
+        self.finish(&self.config.issuer, key, true, targets, None)
     }
     pub(super) fn route_revocation(
         &self,
@@ -169,7 +171,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             Vec::new()
         };
         let key = (caller.id.clone(), body.jti);
-        Ok(self.finish(&caller.id, key, false, targets))
+        Ok(self.finish(&caller.id, key, false, targets, None))
     }
     fn revoke_poll(
         &self,
@@ -198,6 +200,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 report: job.report,
                 key: job.key.clone(),
                 targets: job.targets.clone(),
+                done: job.done,
             })
         };
         let Some(job) = job else {
@@ -209,15 +212,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if !request.body().is_empty() {
             return Err(Failure::parameter("invalid_request"));
         }
+        if job.done {
+            return Ok(problem(StatusCode::GONE, "gone", None));
+        }
         let _ = now;
-        Ok(self.finish(&job.caller, job.key, job.report, job.targets))
+        Ok(self.finish(&job.caller, job.key, job.report, job.targets, Some(&id)))
     }
+    /// Dispatch the cascade and answer. `polled` is the pending id being polled,
+    /// which a deferred answer keeps.
     fn finish(
         &self,
         caller: &str,
         key: (String, String),
         report: bool,
         targets: Vec<Target>,
+        polled: Option<&str>,
     ) -> Response<Vec<u8>> {
         let Some(gate) = &self.revocation else {
             return problem(StatusCode::NOT_FOUND, "not_found", None);
@@ -234,7 +243,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             true
         }) && states.iter().any(|state| state.deferred)
         {
-            let id = aauth_rust_core::continuation::generate_pending_id();
+            let id = polled.map_or_else(
+                aauth_rust_core::continuation::generate_pending_id,
+                str::to_owned,
+            );
             if let Ok(mut pending) = gate.pending.lock() {
                 pending.insert(
                     id.clone(),
@@ -243,6 +255,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         report,
                         key,
                         targets,
+                        done: false,
                     },
                 );
             }
@@ -252,7 +265,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             );
         }
         if let Ok(mut pending) = gate.pending.lock() {
-            pending.retain(|_, job| job.key != key);
+            for job in pending.values_mut().filter(|job| job.key == key) {
+                job.done = true;
+            }
         }
         let reports = aggregate(&states);
         if !report {

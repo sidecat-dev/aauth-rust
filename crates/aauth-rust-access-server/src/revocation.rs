@@ -30,6 +30,8 @@ struct Job {
     report: bool,
     key: (String, String),
     targets: Vec<Target>,
+    /// The cascade reached its terminal response, so a later poll is `410`.
+    done: bool,
 }
 #[derive(Clone)]
 struct Target {
@@ -213,7 +215,7 @@ impl<
             Vec::new()
         };
         let issuer = caller.id.clone();
-        Ok(self.finish(&issuer, (caller.id, body.jti), report, targets))
+        Ok(self.finish(&issuer, (caller.id, body.jti), report, targets, None))
     }
     fn revoke_poll(
         &self,
@@ -239,6 +241,7 @@ impl<
                     report: job.report,
                     key: job.key.clone(),
                     targets: job.targets.clone(),
+                    done: job.done,
                 })
             });
         let Some(job) = job else {
@@ -250,7 +253,10 @@ impl<
         if !request.body().is_empty() {
             return Err(Failure::parameter("invalid_request"));
         }
-        Ok(self.finish(&job.caller, job.key, job.report, job.targets))
+        if job.done {
+            return Ok(problem(StatusCode::GONE, "gone", None));
+        }
+        Ok(self.finish(&job.caller, job.key, job.report, job.targets, Some(&id)))
     }
     fn auth_targets(&self, caller: &str, presented_jti: &str) -> Vec<Target> {
         let Some(gate) = &self.revocation else {
@@ -268,12 +274,15 @@ impl<
             })
             .collect()
     }
+    /// Dispatch the cascade and answer. `polled` is the pending id being polled,
+    /// which a deferred answer keeps.
     fn finish(
         &self,
         caller: &str,
         key: (String, String),
         report: bool,
         targets: Vec<Target>,
+        polled: Option<&str>,
     ) -> Response<Vec<u8>> {
         let Some(gate) = &self.revocation else {
             return problem(StatusCode::NOT_FOUND, "not_found", None);
@@ -289,7 +298,10 @@ impl<
             attempts.insert(key.clone(), states.clone());
         }
         if states.iter().any(|state| state.deferred) {
-            let id = aauth_rust_core::continuation::generate_pending_id();
+            let id = polled.map_or_else(
+                aauth_rust_core::continuation::generate_pending_id,
+                str::to_owned,
+            );
             if let Ok(mut pending) = gate.pending.lock() {
                 pending.insert(
                     id.clone(),
@@ -298,6 +310,7 @@ impl<
                         report,
                         key,
                         targets,
+                        done: false,
                     },
                 );
             }
@@ -307,7 +320,9 @@ impl<
             );
         }
         if let Ok(mut pending) = gate.pending.lock() {
-            pending.retain(|_, job| job.key != key);
+            for job in pending.values_mut().filter(|job| job.key == key) {
+                job.done = true;
+            }
         }
         if !report {
             empty_ok()

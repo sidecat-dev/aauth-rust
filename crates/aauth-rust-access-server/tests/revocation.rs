@@ -11,7 +11,7 @@ use http::Request;
 use serde_json::{Value, json};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicI64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 };
 
 const AS: &str = "https://as.example";
@@ -42,10 +42,14 @@ impl RevocationDirectory for Recording {
         CallOutcome::Recorded
     }
 }
-struct Deferring;
+struct Deferring(AtomicBool);
 impl RevocationDirectory for Deferring {
     fn revoke(&self, _: &str, _: &str, _: i64) -> CallOutcome {
-        CallOutcome::Deferred
+        if self.0.load(Ordering::SeqCst) {
+            CallOutcome::Deferred
+        } else {
+            CallOutcome::Recorded
+        }
     }
 }
 fn agent_claims() -> AgentClaims {
@@ -281,7 +285,8 @@ fn resource_token_revocation_does_not_defer_and_refuses_the_challenge() {
 }
 
 #[test]
-fn deferred_downstream_revocation_pending_url_carries_random_bits() {
+fn deferred_downstream_revocation_pending_url_is_random_and_gone_after_the_answer() {
+    let directory = Arc::new(Deferring(AtomicBool::new(true)));
     let server = AccessServer::new(
         Config::new(AS, "as", SigningKey::from_seed([4; 32])),
         Keys,
@@ -295,7 +300,7 @@ fn deferred_downstream_revocation_pending_url_carries_random_bits() {
         || "auth-1".into(),
     )
     .unwrap()
-    .with_revocation_directory(Arc::new(Deferring));
+    .with_revocation_directory(directory.clone());
     let granted = server.handle(&token_request(token_body(1200), 1000));
     assert_eq!(
         granted.status(),
@@ -327,4 +332,28 @@ fn deferred_downstream_revocation_pending_url_carries_random_bits() {
         id.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     );
+    let poll = || {
+        let mut request = Request::builder()
+            .method("GET")
+            .uri(location)
+            .body(Vec::new())
+            .unwrap();
+        sign_request(
+            &mut request,
+            &SigningKey::from_seed([3; 32]),
+            KeyMaterial::JwksUri {
+                id: PS.into(),
+                dwk: "aauth-person.json".into(),
+                kid: "ps".into(),
+            },
+            1000,
+        )
+        .unwrap();
+        server.handle(&request)
+    };
+    directory.0.store(false, Ordering::SeqCst);
+    assert_eq!(poll().status(), 200);
+    let gone = poll();
+    assert_eq!(gone.status(), 410);
+    assert_eq!(value(gone.body())["error"], "gone");
 }
