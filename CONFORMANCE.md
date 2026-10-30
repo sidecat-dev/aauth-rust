@@ -402,11 +402,23 @@ completion; the same token then replays. A Person-Server Auth token on that
 Resource is refused. Direct R3 still records `aauth-person.json`. A mission
 composition is still `InvalidR3Profile`, and a mission added afterwards is
 still `500`. The test is
-`federated_access_server_serves_and_admits_class_and_per_call_r3`. This
-paragraph does not record a Host3 run. It does not change the DirectR3
-interop pin, `query-runs=2`, or retained-grant `budget_consumed`. The Agent
+`federated_access_server_serves_and_admits_class_and_per_call_r3`. Host3
+`aauth-wc07-completion-fedr301` ran that test at
+`d127366037486a700ec9ab0b8802425f0f48b2d7` (tree
+`8ee20ca97f842201ae87e269a6fc0fb9d4e9b1c4`). It passed 1 and failed 0, with
+12 filtered. `per_call_and_unsupported_compositions_are_refused_explicitly`
+passed 1 and failed 0, with 12 filtered. `r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Receipt START
+`2026-10-30T01:20:19.111840811+00:00`, log mtime
+`2026-10-30T01:20:34.563439467Z`. systemd-run invocation
+`409cf4842f204830a5c592308ee126ad`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. This
+commit records that receipt and does not change behavior. It does not change
+the DirectR3 interop pin or retained-grant `budget_consumed`. The Agent
 still requires `aauth-person.json` on a delivered Auth token. This is not
-the Go four-party HTTP exchange and it is not power loss.
+the Go four-party HTTP exchange, not a separate product-QA pass, and not
+power loss.
 
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
