@@ -530,6 +530,30 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. This is not a separate product-QA pass and
 not power loss.
 
+The agent now refuses an immediate poll of that held 202. Behavior
+`fd30916fe64ae28206725c004a72adc32054e03e` (tree
+`08d01b56f5e2d06a3959689fc4a7b7d11482a305`) parses the pending response and
+keeps the GET until `Retry-After` of 5 seconds has elapsed. The same auth
+token then runs the protected handler once. A second GET of that pending URL
+replays the retained body. The finished poll session does not send another
+poll. `POST /records/r-1` stays the 401 completion. Budget stays unset.
+Host3 `aauth-wc07-completion-fedwait01` ran at that source.
+`r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The held challenge is
+202, the immediate poll is refused, the wait is 5, the poll is 200, the
+replay is 200, and the replay body matches. The held protected handler ran
+once. The r-1 completion stayed 200 with one protected run. `query-runs=2`
+and `proposal-err=invalid_resource_token` stay visible. Reads stayed 2 and
+both deletes stayed `"r-1"`. Receipt START
+`2026-10-30T03:46:39.964492728+00:00`, log mtime
+`2026-10-30T03:46:52.760416762Z`. systemd-run invocation
+`7c94b0fed3d04cbbb4579b0ee51b4182`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDWAIT_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. This is not a separate product-QA pass and
+not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
