@@ -224,6 +224,8 @@ impl TlsServer {
     }
     /// Go retains a per-call completion only when the request has no
     /// connection-close semantics. The caller still drops the socket.
+    /// Only the per-call interop example sends this way.
+    #[allow(dead_code)]
     pub fn send_held_external(
         address: SocketAddr,
         host: &'static str,

@@ -1264,10 +1264,13 @@ fn access_claims(jti: &str) -> AuthClaims {
     claims
 }
 
+/// Claim token, fence and retained result of one proposal URI.
+type ClaimedCall = (R3CallToken, String, Option<R3CallResult>);
+
 /// Process-memory proposals for one test. Not a durable `R3CallStore`.
 struct MemoryCalls {
     records: Mutex<BTreeMap<String, R3ProposalRecord>>,
-    calls: Mutex<BTreeMap<String, (R3CallToken, String, Option<R3CallResult>)>>,
+    calls: Mutex<BTreeMap<String, ClaimedCall>>,
 }
 impl MemoryCalls {
     fn new() -> Self {

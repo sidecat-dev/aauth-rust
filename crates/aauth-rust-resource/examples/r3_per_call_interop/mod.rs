@@ -656,10 +656,10 @@ impl R3CallStore for FileCalls {
         now: i64,
     ) -> std::result::Result<R3Claim, R3StoreError> {
         let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
-        if let Some(record) = self.load(uri)? {
-            if record.release_until.is_some_and(|until| now >= until) {
-                return Ok(R3Claim::Expired);
-            }
+        if let Some(record) = self.load(uri)?
+            && record.release_until.is_some_and(|until| now >= until)
+        {
+            return Ok(R3Claim::Expired);
         }
         let path = self.claim_path(uri);
         match fs::read(&path) {
