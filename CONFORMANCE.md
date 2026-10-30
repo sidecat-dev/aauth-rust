@@ -504,6 +504,32 @@ and does not change behavior. It does not change the DirectR3 interop pin or
 retained-grant `budget_consumed`. This is not a separate product-QA pass and
 not power loss.
 
+POST /records/held-1 on that federated resource now returns 202 and one poll
+runs the protected handler. Behavior
+`841376a93ce79347f400fefd4b5d07f0b1a6efdc` (tree
+`dde0616b607ca2c284d4a4db9ae7801b20049bd4`) keeps `POST /records/r-1` as the
+401 completion. The held path is the only request selected for
+`HeldInvocations`. Budget stays unset. The initial POST omits connection
+close because Go snapshots that challenge. The poll is a signed GET of the
+pending URL and also omits connection close. Host3
+`aauth-wc07-completion-fedheld01` ran at that source. `r3-per-call-interop`
+against Go `3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The held
+challenge is 202, the poll is 200, the replay is 200, the replay body
+matches, and the held protected handler ran once. The r-1 completion stayed
+200, its replay stayed 200, and its protected handler still ran once. The
+transcript check required two proposal consents, two proposal authorizations,
+and three issuances. Class consent and class authorization stayed one.
+`query-runs=2` and `proposal-err=invalid_resource_token` stay visible. Reads
+stayed 2 and both deletes stayed `"r-1"`. Receipt START
+`2026-10-30T03:34:08.931098592+00:00`, log mtime
+`2026-10-30T03:34:22.314289833Z`. systemd-run invocation
+`1f614cc373594a9db776759da60e8b98`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDHELD_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. This is not a separate product-QA pass and
+not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
