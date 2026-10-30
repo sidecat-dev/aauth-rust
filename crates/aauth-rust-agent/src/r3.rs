@@ -21,7 +21,8 @@ use aauth_rust_r3::{
     OperationSet, R3TokenError, Registry, VerifiedR3AuthToken, VerifiedR3ResourceToken,
     verify_auth_token_claims, verify_resource_token,
 };
-use http::{Request, Response};
+use aauth_rust_signature_key::signature_error_code;
+use http::{HeaderMap, Request, Response, StatusCode};
 
 /// Boxed host transport failure.
 pub type R3TransportError = Box<dyn std::error::Error + Send + Sync>;
@@ -43,7 +44,9 @@ pub enum R3AgentError {
     Refused {
         /// HTTP status of the refusal.
         status: u16,
-        /// `error` member of the problem body, when present.
+        /// For `401`, the `error` token of `Signature-Error`; the body is not
+        /// read. Otherwise the `error` member of the problem body. `None` when
+        /// that carrier is absent or malformed.
         error: Option<String>,
     },
     /// A JWT failed Core trust, signature or time verification.
@@ -70,6 +73,24 @@ fn scope_values(scope: &str) -> bool {
                     .bytes()
                     .all(|b| b == 0x21 || (0x23..=0x5b).contains(&b) || (0x5d..=0x7e).contains(&b))
         })
+}
+
+/// `error` token of a `Signature-Error` field, its field lines combined as one
+/// dictionary. Absent, non-ASCII or malformed fields yield `None`.
+fn signature_error(headers: &HeaderMap) -> Option<String> {
+    let mut field = String::new();
+    let mut present = false;
+    for value in headers.get_all("signature-error") {
+        if present {
+            field.push_str(", ");
+        }
+        field.push_str(value.to_str().ok()?);
+        present = true;
+    }
+    if !present {
+        return None;
+    }
+    signature_error_code(&field).ok()
 }
 
 /// Core scope on an R3 grant: absent grants none, which is never broader than
@@ -134,6 +155,9 @@ impl Agent {
     /// compact Resource token. Verify it with [`Self::verify_r3_resource_token`]
     /// before forwarding it to the Person Server.
     ///
+    /// A `401` is a signature failure whose machine-readable code is the
+    /// `Signature-Error` header. Its body is never read.
+    ///
     /// # Errors
     /// As for [`Self::r3_authorization_request`], plus
     /// [`R3AgentError::Transport`] and [`R3AgentError::Refused`].
@@ -157,6 +181,12 @@ impl Agent {
             now,
         )?;
         let response = transport(request).map_err(|error| R3AgentError::Transport(error.into()))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(R3AgentError::Refused {
+                status: StatusCode::UNAUTHORIZED.as_u16(),
+                error: signature_error(response.headers()),
+            });
+        }
         let body: Option<serde_json::Value> = serde_json::from_slice(response.body()).ok();
         if response.status() != 200 {
             return Err(R3AgentError::Refused {
