@@ -445,6 +445,39 @@ the DirectR3 interop pin or retained-grant `budget_consumed`. This is not
 the Go federated HTTP exchange, not a separate product-QA pass, and not
 power loss.
 
+One separate Go HTTP exchange now verifies an access-server class grant and
+one proposal beside the DirectR3 pin. Behavior
+`34b7b9640b0f58925a9161974f25f605eec29ffa` (tree
+`c8ca1a3d2e82a5ebcddc082f5d228d20458d2aef`) adds Go
+`resource.NewFederatedAuthorization`, an `accessserver` `R3Config`, and
+`personserver.NewFederatedAuthorization` on hosts that do not replace the
+DirectR3 servers. The class document grants only `records.delete`. The
+proposal is the 401 from `POST /records/r-1`. The Rust Agent verifies both
+grants: `dwk` is `aauth-access.json` and `iss` is that Access Server. Person
+status is 200, class exchange is 200, and the class grant verifies. The
+proposal challenge is 401, the proposal exchange is 200, and the per-call
+grant verifies. The Person Server records one class consent and one proposal
+consent. The Access Server records one class authorization, one proposal
+authorization, and two issuances. Retry Claim and Retain stay unresolved, so
+this exchange does not finish the protected call. Commit
+`7f1e2dc3b9fc14833213da8d3680d9751550e0b8` (tree
+`cf212af050dc33e6bd0504d088d6b37e60067bdd`) imports `strings`. Host3 at the
+parent stopped in `go run` before any exchange. Host3
+`aauth-wc07-completion-fedhttp02` ran at that import fix.
+`r3-per-call-interop` against Go
+`3f7fc54b8ea1e310148c922b1d09e64bd6e24739` exited 0. The example's transcript
+check required the counts above. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay visible. Reads stayed 2 and both
+deletes stayed `"r-1"`. Receipt START
+`2026-10-30T02:35:13.010942722+00:00`, log mtime
+`2026-10-30T02:35:25.147777167Z`. systemd-run invocation
+`fcadd014ff4c4f9482d1a529cf4e3e91`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `FEDHTTP_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin or
+retained-grant `budget_consumed`. This is not a completed protected per-call,
+not a separate product-QA pass, and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
