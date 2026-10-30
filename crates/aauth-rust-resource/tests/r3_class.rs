@@ -2768,6 +2768,7 @@ fn tool_name(operation: &Operation) -> String {
 struct ReleaseHost {
     resource: Resource,
     proposals: Arc<MemoryCalls>,
+    record: R3DocumentRecord,
     class: String,
     /// Calls the release hook was asked to run.
     asked: Arc<Mutex<Vec<String>>>,
@@ -2854,6 +2855,7 @@ fn release_host() -> ReleaseHost {
     ReleaseHost {
         resource,
         proposals,
+        record,
         class,
         asked,
         ran,
@@ -2862,14 +2864,17 @@ fn release_host() -> ReleaseHost {
 impl ReleaseHost {
     /// Call `tool` with the class token and return its held proposal.
     fn hold(&self, tool: &str) -> R3ProposalRecord {
-        let pending_id = format!("challenge-{}", tool.replace('.', "-"));
+        self.hold_with(
+            tool,
+            &self.class,
+            &format!("challenge-{}", tool.replace('.', "-")),
+        )
+    }
+    /// Call `tool` with `class` and return the proposal held under `pending_id`.
+    fn hold_with(&self, tool: &str, class: &str, pending_id: &str) -> R3ProposalRecord {
         let held = self
             .resource
-            .authorize(
-                &call(&format!("/mcp/{tool}"), &self.class, 2),
-                NOW,
-                &pending_id,
-            )
+            .authorize(&call(&format!("/mcp/{tool}"), class, 2), NOW, pending_id)
             .into_response();
         assert_eq!(
             held.status(),
@@ -3020,6 +3025,48 @@ fn a_metered_or_audited_call_runs_only_after_approval() {
             "records.audit after approval"
         ]
     );
+}
+
+// Core Scopes, on the per-call path: the proposal Resource token carries the
+// presented class token's scope, so the Resource issues one only when it
+// describes every value in that scope.
+#[test]
+fn a_per_call_resource_token_carries_only_described_scopes() {
+    let host = release_host();
+    let mut described = auth_claims(Some("records.read"));
+    described.jti = "auth-described".into();
+    let class = class_token(
+        &host.record,
+        &[],
+        &RELEASE_OPERATIONS,
+        &described,
+        3,
+        "ps-1",
+    );
+    let held = host.hold_with("records.export", &class, "challenge-described");
+    let issued = verify_resource_token(&held.resource_token, &keys(), NOW).unwrap();
+    assert_eq!(issued.claims().scope.as_deref(), Some("records.read"));
+
+    let mut undescribed = auth_claims(Some("records.read admin"));
+    undescribed.jti = "auth-undescribed".into();
+    let class = class_token(
+        &host.record,
+        &[],
+        &RELEASE_OPERATIONS,
+        &undescribed,
+        3,
+        "ps-1",
+    );
+    let refused = host.resource.authorize(
+        &call("/mcp/records.query", &class, 2),
+        NOW,
+        "challenge-undescribed",
+    );
+    assert!(matches!(refused, AuthDecision::Forbidden { .. }));
+    // No proposal was committed, and the release hook was not asked to run.
+    assert_eq!(host.proposals.records.lock().unwrap().len(), 1);
+    assert!(host.asked.lock().unwrap().is_empty());
+    assert!(host.ran.lock().unwrap().is_empty());
 }
 
 const WIDGETS_URI: &str = "https://vocabulary.example/widgets";

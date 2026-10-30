@@ -784,7 +784,10 @@ where
     /// per-call proposal, and complete them once.
     ///
     /// Requires [`Self::with_r3`]. Without this, a per-call operation is
-    /// refused with `403` and never served.
+    /// refused with `403` and never served. A class token whose `scope` names
+    /// a value outside the configured `scope_descriptions` is refused with
+    /// `403` before anything runs, since its proposal Resource token would
+    /// carry that scope.
     ///
     /// # Errors
     /// [`PsConfigurationError::InvalidR3Profile`] when class R3 is not enabled,
@@ -863,6 +866,16 @@ where
         let c = token.claims();
         if !pending_token(challenge_jti) {
             return AuthDecision::InternalError;
+        }
+        // The proposal Resource token carries the class token's scope, and a
+        // Resource token carries only scopes this Resource describes. Refuse
+        // before anything runs.
+        if c.scope.as_deref().is_some_and(|scope| {
+            scope
+                .split(' ')
+                .any(|value| !self.config.scope_descriptions.contains_key(value))
+        }) {
+            return forbidden;
         }
         let Ok(presented) = (per_call.present)(request, operation) else {
             return AuthDecision::InternalError;
