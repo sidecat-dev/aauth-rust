@@ -1,36 +1,27 @@
 # AAuth for Rust
 
-Rust libraries for [AAuth](https://github.com/dickhardt/AAuth), developed alongside
-[aauth-go](https://gitlab.com/sidecat-dev/aauth-go). The current subset lets an
-Agent prove its identity directly to a Resource, or obtain a Person token and
-scoped Auth token from a Person Server for three-party authorization, or use a
-Person Server and Access Server for immediate four-party federation. A Resource
-can act as an Agent for an immediate downstream call on that person's behalf.
-A parent can obtain child-bound Person/Auth credentials for a one-level sub-agent,
-including opt-in AS payment and approval, while retaining consent and polling.
-[CONFORMANCE.md](CONFORMANCE.md) names
-the tested behavior and limits.
+MIT-licensed Rust libraries for [AAuth](https://github.com/dickhardt/AAuth),
+alongside [aauth-go](https://gitlab.com/sidecat-dev/aauth-go).
+Showcase tag `v0.1.0-alpha.7`. The crates are not on crates.io.
 
-The separate [R3 library](crates/aauth-rust-r3/README.md) supplies operation
-vocabularies, documents, definition adapters, per-call proposals and
-signed-reference verification. Resource and Person Server per-call wiring,
-including release gating and held-result refresh, is described in
-[CONFORMANCE.md](CONFORMANCE.md). Full R3 profile conformance is not claimed.
+```sh
+git clone https://gitlab.com/sidecat-dev/aauth-rust.git
+git checkout v0.1.0-alpha.7
+cargo run --locked -p aauth-rust-resource --example direct-identity
+```
 
-The [canonical repository and issue tracker](https://gitlab.com/sidecat-dev/aauth-rust)
-is the project home. Development forks may carry changes before upstream accepts
-them. The commands below start in a development checkout containing this README
-and `Cargo.toml`. Git tag `v0.1.0-alpha.6` marks the latest release. The crates are not on crates.io.
-Each crate archive instead includes the self-contained
-[package overview](PACKAGE-README.md) and its own MIT license; workspace commands
-and service guides require the full checkout.
+That example needs Rust 1.99.1 and a C compiler for its TLS provider. It uses
+loopback only: no account, DNS change, or external service. The checks it prints
+are under Run the local example.
 
-For a parent/child integration, see [the service guide](USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent)
-and [executable native example](crates/aauth-rust-resource/examples/subagent.rs).
-The parent signs PS requests and verifies child-bound deliveries without the
-child's private key; the child signs protected Resource calls. That example uses
-buffered native handlers and explicit fixture identity/payment/approval decisions.
-The separate examples below exercise certificate-verified TLS.
+Every crate in this workspace is MIT, including `aauth-rust-budgets` and
+`aauth-rust-r3`. The workspace `LICENSE` and each crate `LICENSE` are the same
+text. Third-party crates keep their own licenses.
+
+[CONFORMANCE.md](CONFORMANCE.md) is the behavior record. This tag does not claim
+full R3, Events, Bootstrap, or Supervision. Directory recovery there is a process
+exit, not power loss. Person Server, Access Server, budgets, and one-level
+sub-agent guides remain in the sections below.
 
 ## Run the local example
 
@@ -229,11 +220,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-agent = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
 TOML
 cd ../aauth-service
@@ -270,8 +261,8 @@ federated Person Server and Access Server, add these entries to the same
 `[dependencies]` table:
 
 ```toml
-aauth-rust-person-server = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-person-server" }
-aauth-rust-access-server = { version = "0.1.0-alpha.6", path = "../aauth-rust/crates/aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-person-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.7", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
 Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
