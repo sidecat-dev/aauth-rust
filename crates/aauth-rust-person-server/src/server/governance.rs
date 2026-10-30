@@ -206,7 +206,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let agent = self.verify_request(request, now)?;
         direct_agent(&agent)?;
         let body = json_object(request)?;
-        self.mission_if_present(&agent, &body)?;
+        self.mission_if_present(&agent, &body, now)?;
         match body.get("type") {
             Some(Value::String(kind)) if kind == "question" => {
                 let question = required_text(&body, "question")?;
@@ -232,7 +232,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         direct_agent(&agent)?;
         let body = json_object(request)?;
         let action = required_text(&body, "action")?;
-        self.mission_if_present(&agent, &body)?;
+        self.mission_if_present(&agent, &body, now)?;
         let granted = self
             .governance_policy()?
             .permit(&action)
@@ -250,7 +250,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let body = json_object(request)?;
         let s256 = required_text(&body, "mission_s256")?;
         let _action = required_text(&body, "action")?;
-        self.active_mission(&agent, &s256)?;
+        self.active_mission(&agent, &s256, now)?;
         let mut response = Response::new(Vec::new());
         *response.status_mut() = StatusCode::CREATED;
         Ok(response)
@@ -346,14 +346,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         &self,
         agent: &VerifiedAgentToken,
         body: &serde_json::Map<String, Value>,
+        now: i64,
     ) -> Result<(), Failure> {
         if let Some(s256) = optional_text(body, "mission_s256")? {
-            self.active_mission(agent, &s256)?;
+            self.active_mission(agent, &s256, now)?;
         }
         Ok(())
     }
 
-    fn active_mission(&self, agent: &VerifiedAgentToken, s256: &str) -> Result<(), Failure> {
+    fn active_mission(
+        &self,
+        agent: &VerifiedAgentToken,
+        s256: &str,
+        now: i64,
+    ) -> Result<(), Failure> {
         let owner = agent.claims();
         let audit = self
             .store
@@ -362,7 +368,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Some(audit) = audit else {
             return Err(Failure::status(StatusCode::NOT_FOUND, "mission_not_found"));
         };
-        if let Some(reason) = &audit.termination_reason {
+        if let Some(reason) = audit.termination_at(now).map_err(|_| Failure::internal())? {
             return Err(Failure::mission_terminated(reason));
         }
         Ok(())

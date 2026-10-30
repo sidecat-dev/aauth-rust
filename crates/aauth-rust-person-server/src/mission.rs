@@ -211,6 +211,20 @@ impl MissionAudit {
         Ok(())
     }
 
+    /// Why the mission is terminated at `now`: the recorded reason, or `expired`
+    /// once `now` reaches the document's `expires_at`. `None` while it is active.
+    pub(crate) fn termination_at(&self, now: i64) -> Result<Option<&str>, StoreError> {
+        if let Some(reason) = &self.termination_reason {
+            return Ok(Some(reason.as_str()));
+        }
+        let document = ApprovedMission::decode(&self.s256, &self.encoded)
+            .map_err(|_| StoreError::InvalidRecord)?;
+        Ok(document
+            .expires_at()
+            .is_some_and(|expires_at| now >= expires_at)
+            .then_some("expired"))
+    }
+
     /// Apply an update or completion. The row is unchanged when this returns an error.
     ///
     /// # Errors

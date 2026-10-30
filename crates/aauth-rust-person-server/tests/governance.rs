@@ -5,11 +5,14 @@ use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_person_server::{
     AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Governance, GovernanceError, Grant,
-    MemoryStore, OpenedInteraction, Person, PersonRequest, PersonServer, Policy, PolicyError,
+    MemoryStore, MissionAudit, OpenedInteraction, Person, PersonRequest, PersonServer, Policy,
+    PolicyError, Store,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::Request;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::sync::{
     Arc,
@@ -41,6 +44,7 @@ impl Governance for Channel {
 
 struct Fixture {
     server: PersonServer<AgentProviderKeys, MemoryStore, Host, BoxedClock, BoxedTokenIds>,
+    store: MemoryStore,
     owner: Agent,
 }
 
@@ -76,10 +80,11 @@ fn fixture(enabled: bool) -> Fixture {
     )
     .unwrap();
     let ids = Arc::new(AtomicUsize::new(0));
+    let store = MemoryStore::default();
     let mut server = PersonServer::new(
         Config::new("https://ps.example", "ps-1", SigningKey::from_seed([3; 32])),
         keys,
-        MemoryStore::default(),
+        store.clone(),
         Host,
         Box::new(|| 1000i64) as BoxedClock,
         Box::new(move || format!("id-{}", ids.fetch_add(1, Ordering::SeqCst))) as BoxedTokenIds,
@@ -91,6 +96,7 @@ fn fixture(enabled: bool) -> Fixture {
     }
     Fixture {
         server,
+        store,
         owner: issue(&ap),
     }
 }
@@ -341,6 +347,68 @@ fn signed_audit_requires_mission_and_action() {
     );
     assert_eq!(unknown.status(), 404);
     assert_eq!(error_of(&unknown), "mission_not_found");
+}
+
+#[test]
+fn a_mission_past_expires_at_is_terminated_on_every_path() {
+    let fixture = fixture(true);
+    // The server clock reads 1000, which is this document's expires_at.
+    let bytes = br#"{"agent":"aauth:Agent@ap.example","approved_at":"1970-01-01T00:15:00Z","description":"draft the note","expires_at":"1970-01-01T00:16:40Z"}"#;
+    let s256 = URL_SAFE_NO_PAD.encode(Sha256::digest(bytes));
+    fixture
+        .store
+        .write_mission_audit(&MissionAudit {
+            person_server: "https://ps.example".into(),
+            owner_issuer: "https://ap.example".into(),
+            owner_subject: "aauth:Agent@ap.example".into(),
+            s256: s256.clone(),
+            encoded: URL_SAFE_NO_PAD.encode(bytes),
+            updates: Vec::new(),
+            summary: None,
+            termination_reason: None,
+        })
+        .unwrap();
+    let mission = format!("/mission/{s256}");
+    for (path, body) in [
+        (
+            "/permission",
+            json!({ "action": "SendEmail", "mission_s256": s256 }),
+        ),
+        (
+            "/audit",
+            json!({ "action": "WebSearch", "mission_s256": s256 }),
+        ),
+        (
+            "/interaction",
+            json!({ "type": "question", "question": "ship it?", "mission_s256": s256 }),
+        ),
+        (
+            mission.as_str(),
+            json!({ "action": "update", "description": "add the appendix" }),
+        ),
+        (
+            mission.as_str(),
+            json!({ "action": "completion", "summary": "the note is filed" }),
+        ),
+    ] {
+        let response = fixture.server.handle(&raw_post(&fixture.owner, path, body));
+        assert_eq!(response.status(), 403, "{path}");
+        assert_eq!(error_of(&response), "mission_terminated", "{path}");
+        assert_eq!(
+            body_of(&response)["termination_reason"],
+            "expired",
+            "{path}"
+        );
+    }
+    let mut read = Request::builder()
+        .method("GET")
+        .uri(format!("https://ps.example{mission}"))
+        .body(Vec::new())
+        .unwrap();
+    fixture.owner.sign(&mut read, 1000).unwrap();
+    let read = body_of(&fixture.server.handle(&read));
+    assert_eq!(read["mission_status"], "terminated");
+    assert_eq!(read["termination_reason"], "expired");
 }
 
 /// A drawn code holding `symbol`. Each draw holds a given symbol with

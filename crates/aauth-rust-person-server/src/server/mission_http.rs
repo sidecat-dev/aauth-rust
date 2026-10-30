@@ -267,6 +267,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             _ => return Err(Failure::parameter("invalid_request")),
         };
         let owner = agent.claims();
+        // The store's edit sees only a recorded termination; expiry is a
+        // comparison with this request's time.
+        if let Some(audit) = self
+            .store
+            .read_mission_audit(&self.config.issuer, &owner.iss, &owner.sub, s256)
+            .map_err(stored)?
+            && let Some(reason) = audit.termination_at(now).map_err(stored)?
+        {
+            return Err(Failure::mission_terminated(reason));
+        }
         let audit = self
             .store
             .edit_mission_audit(&self.config.issuer, &owner.iss, &owner.sub, s256, edit)
@@ -316,7 +326,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(summary) = &audit.summary {
             value["summary"] = json!({ "s256": summary.s256, "encoded": summary.encoded });
         }
-        if let Some(reason) = &audit.termination_reason {
+        if let Some(reason) = audit.termination_at(now).map_err(stored)? {
             value["mission_status"] = json!("terminated");
             value["termination_reason"] = json!(reason);
         }
