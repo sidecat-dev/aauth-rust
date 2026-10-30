@@ -744,6 +744,49 @@ recorded `CARGO_RC 0` and `RETRYLIVE01_DONE`. This commit records that receipt
 and does not change behavior. It does not change the DirectR3 interop pin.
 This is not a separate product-QA pass and not power loss.
 
+A per-call application `202` is retained only as a same-origin pending
+response. Behavior commits `cda51b0277f0b5258d96ce4566229117137c07f8` and
+`db8af2137bbfd6a3951a26f31d961bdf0cce8caf` keep the `202` with its `Location`,
+`Retry-After` and `Cache-Control` when it has exactly one `Location` on the
+Resource origin (absolute, or a path that starts with one `/`), exactly one
+nonnegative decimal `Retry-After` that fits a nanosecond duration,
+`Cache-Control` containing `no-store`, exactly one `application/json`
+`Content-Type`, and a JSON object whose `status` is a non-empty string with no
+duplicate or case-variant member. These are the conditions of aauth-go
+`validateApplicationPendingResponse` at `3f7fc54`; both refuse a fragment. Rust
+also refuses a network-path (`//host`) reference, even to its own host, and a
+bare relative, query-only, `*` or bare-host reference; aauth-go resolves
+relative references against the Resource origin. Any other `202` is retained as
+`500` `server_error`; that refusal is what each later presentation replays, and
+the call does not run again. A release-gated call's computed response is kept
+under the same rule before approval releases it. `DirectoryCallStore` and the
+example file stores keep the pending headers across reopen. A `no-store` split
+across `Cache-Control` lines is kept, as in aauth-go, but `aauth-rust-agent`
+`PollSession` accepts only one `Cache-Control` line and refuses that replay.
+`an_application_202_is_kept_only_as_a_same_origin_pending_response`,
+`an_application_202_replays_with_its_pending_headers_or_as_server_error`,
+`a_released_application_202_replays_with_its_pending_headers_or_as_server_error`
+and `a_retained_pending_result_reopens_with_its_headers` pin this.
+
+Host3 `aauth-claude-header05` at `457c23a3a1b301791b488b9e94368cbdf904e207`
+(tree `18a9a00990968cc134829351470bd7b05d7c84df`; `db8af21` differs only by
+rustfmt of `tests/r3_class.rs`) ran the GitLab linux job's steps except the
+cross-target checks: build, consumer bootstrap, docs, publish dry run,
+`cargo test --no-fail-fast` (702 passed, 0 failed, 9 ignored in 78 targets),
+every CI example run, `r3-per-call-interop` tests and the `r3-per-call` run.
+Receipt START `2026-10-30T07:41:55.483579755+00:00`, END
+`2026-10-30T07:45:15.351054390+00:00`, `Result=success`, `ExecMainStatus=0`.
+Strict all-targets Clippy still refuses findings that were already on main in
+the `r3-per-call` example and `r3_standard_definitions` tests; library and
+binary targets pass it. The earlier batch at `fb2d290`
+(`aauth-claude-header03`) passed the same steps with 701 workspace tests.
+`fb2d290` also formats the workspace, clears three Clippy findings, and
+corrects `invalid_r3_requests_release_no_token_and_retain_nothing`, which has
+expected `invalid_request` since `cb658a8` made that request `invalid_budget`
+and failed at `0c86939`. Independent consumer QA of the earlier candidate
+`0d62470` found the release-gated and `*`/bare-host gaps that `db8af21`
+closes. These are engineering checks, not product QA, and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
