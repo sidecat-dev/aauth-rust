@@ -10,6 +10,7 @@ use aauth_rust_person_server::{
     Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError, Store,
     StoreError, TokenRecord, TokenReference,
 };
+use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
 use serde_json::{Value, json};
 use std::sync::{
@@ -101,6 +102,9 @@ impl Store for TestStore {
     }
     fn token(&self, reference: &TokenReference) -> Result<Option<TokenRecord>, StoreError> {
         self.inner.token(reference)
+    }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        self.inner.retained()
     }
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         self.inner.revoke_binding(issuer, agent)
@@ -1265,34 +1269,74 @@ fn federated_delivery_verifies_as_result_and_retains_exact_step_up_ancestry() {
     );
 }
 #[test]
-fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint() {
+fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint_until_revoked() {
     // Core upstream-token-verification: an Auth token's iss may be an AS this
-    // PS presented a person token to for that token's aud and sub.
-    let f = Fixture::new();
-    let server = f.server(2000).with_federation(AccessTransport {
-        mode: 0,
-        calls: Arc::new(AtomicUsize::new(0)),
-        now: f.host.now.clone(),
-    });
-    let holder = agent(false);
-    let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
-    let challenge = resource(&holder, &person, "read", |r| {
-        r.aud = "https://as.example".into()
-    });
-    let upstream = compact(
-        &f.exchange(&server, &holder, &challenge, &person, None),
-        "auth_token",
-    );
-    let downstream = compact(
-        &f.person(&server, &agent(true), INVENTORY, Some(&upstream)),
-        "person_token",
-    );
-    let downstream = PersonToken::parse(&downstream)
-        .unwrap()
-        .verify(&Keys, 1000)
-        .unwrap();
-    assert_eq!(downstream.claims().sub, "inventory-person");
-    assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+    // PS presented a person token to for that token's aud and sub. Revoking
+    // that person token, or the agent token it was issued to, revokes the AS
+    // Auth token here too.
+    for revoke_agent in [false, true] {
+        let f = Fixture::new();
+        let server = f
+            .server(2000)
+            .with_revocation()
+            .with_federation(AccessTransport {
+                mode: 0,
+                calls: Arc::new(AtomicUsize::new(0)),
+                now: f.host.now.clone(),
+            });
+        let holder = agent(false);
+        let person = compact(&f.person(&server, &holder, ORDERS, None), "person_token");
+        let challenge = resource(&holder, &person, "read", |r| {
+            r.aud = "https://as.example".into()
+        });
+        let upstream = compact(
+            &f.exchange(&server, &holder, &challenge, &person, None),
+            "auth_token",
+        );
+        let downstream = compact(
+            &f.person(&server, &agent(true), INVENTORY, Some(&upstream)),
+            "person_token",
+        );
+        let downstream = PersonToken::parse(&downstream)
+            .unwrap()
+            .verify(&Keys, 1000)
+            .unwrap();
+        assert_eq!(downstream.claims().sub, "inventory-person");
+        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+        let revoked = if revoke_agent {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri(format!("{PS}/revoke"))
+                .header("content-type", "application/json")
+                .body(serde_json::to_vec(&json!({"jti": "agent-2", "exp": 5000})).unwrap())
+                .unwrap();
+            sign_request(
+                &mut request,
+                &SigningKey::from_seed([1; 32]),
+                KeyMaterial::JwksUri {
+                    id: "https://ap.example".into(),
+                    dwk: "aauth-agent.json".into(),
+                    kid: "ap-key".into(),
+                },
+                1000,
+            )
+            .unwrap();
+            server.handle(&request)
+        } else {
+            let person = PersonToken::parse(&person).unwrap();
+            server.revoke_person_token(&person.unverified_claims().jti)
+        };
+        assert_eq!(
+            revoked.status(),
+            200,
+            "{}",
+            String::from_utf8_lossy(revoked.body())
+        );
+        let refused = f.person(&server, &agent(true), INVENTORY, Some(&upstream));
+        assert_eq!(refused.status(), 400, "revoke_agent={revoke_agent}");
+        assert_eq!(output(&refused)["error"], "revoked_upstream_token");
+        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+    }
 }
 #[test]
 fn federation_never_releases_unverified_or_unretained_as_tokens() {
