@@ -29,7 +29,8 @@
 //!    elapses, then a `GET` of the pending URL runs the protected handler once
 //!    and replays the same auth token. A `POST` of that pending URL is `405`
 //!    `method_not_allowed`. A `GET` of a different pending id is `410` `gone`.
-//!    Budget stays unset.
+//!    A second compact form of the same auth-token claims is `403`
+//!    `access_denied` and does not run the handler again. Budget stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -149,6 +150,8 @@ pub struct InteropTranscript {
     pub federated_held_method_error: String,
     pub federated_held_unknown_status: u16,
     pub federated_held_unknown_error: String,
+    pub federated_held_mismatch_status: u16,
+    pub federated_held_mismatch_error: String,
     pub federated_held_protected_runs: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
@@ -262,6 +265,20 @@ fn signed_get(agent: &Agent, uri: &str, signed_at: i64) -> Result<Request<Vec<u8
     let mut request = Request::builder().method("GET").uri(uri).body(Vec::new())?;
     agent.sign(&mut request, signed_at)?;
     Ok(request)
+}
+fn alternate_access_token(compact: &str, seed: [u8; 32]) -> Result<String> {
+    let parsed = aauth_rust_jose::Jws::parse(compact)?;
+    let mut header = parsed.header().clone();
+    let original_kid = header.get("kid").and_then(Value::as_str).unwrap_or("");
+    if original_kid.is_empty() || original_kid == "fed-as-2" {
+        return Err("held auth token kid cannot be resigned".into());
+    }
+    header["kid"] = json!("fed-as-2");
+    let resigned = aauth_rust_jose::Jws::sign(&header, parsed.payload(), &SigningKey::from_seed(seed))?;
+    if resigned == compact {
+        return Err("alternate compact auth token matches the original".into());
+    }
+    Ok(resigned)
 }
 fn held_pending_id_ok(id: &str) -> bool {
     let bytes = id.as_bytes();
@@ -1302,6 +1319,10 @@ fn handle_federated_converse(
         .try_into()
         .map_err(|_| "invalid go agent seed length")?;
     let fed_agent_token = text(&body, "fed_agent_token")?;
+    let alternate_seed_vec = hex_decode(&text(&body, "fed_as_alternate_seed_hex")?)?;
+    let alternate_seed: [u8; 32] = alternate_seed_vec
+        .try_into()
+        .map_err(|_| "invalid alternate access seed length")?;
 
     trust.discover_external(go_ap_addr, "go-ap.example", &go_ap_cert, GO_AP, "aauth-agent.json")?;
     trust.discover_external(
@@ -1583,7 +1604,7 @@ fn handle_federated_converse(
     {
         return Err("federated held grant was not issued by the access server".into());
     }
-    let poll_holder = agent.with_token(held_grant)?;
+    let poll_holder = agent.with_token(held_grant.clone())?;
     let held_poll_too_early = match held_poll.request(&poll_holder, clock) {
         Err(PollError::TooEarly { at }) if at == clock + 5 => true,
         Err(error) => return Err(format!("federated held poll wait: {error}").into()),
@@ -1682,6 +1703,38 @@ fn handle_federated_converse(
     if still.status().as_u16() != 200 || still.body() != polled.body() {
         return Err(http_failure("federated held replay after rejection", &still));
     }
+    // Same claims, different compact bytes. Go binds the completion to the
+    // original digest and refuses this one without executing again.
+    let alternate_grant = alternate_access_token(&held_grant, alternate_seed)?;
+    let mismatch_holder = agent.with_token(alternate_grant)?;
+    let mismatch_req = signed_get(&mismatch_holder, &poll_target, poll_at)?;
+    let mismatch = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &mismatch_req,
+    )?;
+    let held_mismatch_status = mismatch.status().as_u16();
+    let held_mismatch_error = member(&mismatch, "error").unwrap_or_default();
+    if held_mismatch_status != 403 || held_mismatch_error != "access_denied" {
+        return Err(http_failure(
+            "federated held different-token replay",
+            &mismatch,
+        ));
+    }
+    let bound_req = signed_get(&poll_holder, &poll_target, poll_at)?;
+    let bound = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &bound_req,
+    )?;
+    if bound.status().as_u16() != 200 || bound.body() != polled.body() {
+        return Err(http_failure(
+            "federated held replay after different token",
+            &bound,
+        ));
+    }
 
     Ok(json!({
         "person_status": person_status,
@@ -1703,6 +1756,8 @@ fn handle_federated_converse(
         "held_method_error": held_method_error,
         "held_unknown_status": held_unknown_status,
         "held_unknown_error": held_unknown_error,
+        "held_mismatch_status": held_mismatch_status,
+        "held_mismatch_error": held_mismatch_error,
     }))
 }
 
@@ -2042,6 +2097,8 @@ pub fn run() -> Result<InteropTranscript> {
         federated_held_method_error: text(&raw, "federated_held_method_error")?,
         federated_held_unknown_status: number(&raw, "federated_held_unknown_status")? as u16,
         federated_held_unknown_error: text(&raw, "federated_held_unknown_error")?,
+        federated_held_mismatch_status: number(&raw, "federated_held_mismatch_status")? as u16,
+        federated_held_mismatch_error: text(&raw, "federated_held_mismatch_error")?,
         federated_held_protected_runs: number(&raw, "federated_held_protected_runs")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
@@ -2107,6 +2164,8 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_held_method_error != "method_not_allowed"
         || t.federated_held_unknown_status != 410
         || t.federated_held_unknown_error != "gone"
+        || t.federated_held_mismatch_status != 403
+        || t.federated_held_mismatch_error != "access_denied"
         || t.federated_held_protected_runs != 1
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]

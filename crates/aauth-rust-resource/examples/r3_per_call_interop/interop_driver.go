@@ -79,16 +79,17 @@ type converseResponse struct {
 }
 
 type federatedConverseRequest struct {
-	GoAPAddr          string `json:"go_ap_addr"`
-	GoAPCertHex       string `json:"go_ap_cert_hex"`
-	FedPSAddr         string `json:"fed_ps_addr"`
-	FedPSCertHex      string `json:"fed_ps_cert_hex"`
-	FedASAddr         string `json:"fed_as_addr"`
-	FedASCertHex      string `json:"fed_as_cert_hex"`
-	FedRecordsAddr    string `json:"fed_records_addr"`
-	FedRecordsCertHex string `json:"fed_records_cert_hex"`
-	GoAgentSeedHex    string `json:"go_agent_seed_hex"`
-	FedAgentToken     string `json:"fed_agent_token"`
+	GoAPAddr              string `json:"go_ap_addr"`
+	GoAPCertHex           string `json:"go_ap_cert_hex"`
+	FedPSAddr             string `json:"fed_ps_addr"`
+	FedPSCertHex          string `json:"fed_ps_cert_hex"`
+	FedASAddr             string `json:"fed_as_addr"`
+	FedASCertHex          string `json:"fed_as_cert_hex"`
+	FedRecordsAddr        string `json:"fed_records_addr"`
+	FedRecordsCertHex     string `json:"fed_records_cert_hex"`
+	GoAgentSeedHex        string `json:"go_agent_seed_hex"`
+	FedAgentToken         string `json:"fed_agent_token"`
+	FedASAlternateSeedHex string `json:"fed_as_alternate_seed_hex"`
 }
 
 type federatedConverseResponse struct {
@@ -111,6 +112,8 @@ type federatedConverseResponse struct {
 	HeldMethodError         string `json:"held_method_error"`
 	HeldUnknownStatus       int    `json:"held_unknown_status"`
 	HeldUnknownError        string `json:"held_unknown_error"`
+	HeldMismatchStatus      int    `json:"held_mismatch_status"`
+	HeldMismatchError       string `json:"held_mismatch_error"`
 }
 
 type transcriptOutput struct {
@@ -172,6 +175,8 @@ type transcriptOutput struct {
 	FederatedHeldMethodError                    string   `json:"federated_held_method_error"`
 	FederatedHeldUnknownStatus                  int      `json:"federated_held_unknown_status"`
 	FederatedHeldUnknownError                   string   `json:"federated_held_unknown_error"`
+	FederatedHeldMismatchStatus                 int      `json:"federated_held_mismatch_status"`
+	FederatedHeldMismatchError                  string   `json:"federated_held_mismatch_error"`
 	FederatedHeldProtectedRuns                  int      `json:"federated_held_protected_runs"`
 	Reads                                       int      `json:"reads"`
 	Deletes                                     []string `json:"deletes"`
@@ -500,6 +505,58 @@ func bufferedHandler(next http.Handler) http.Handler {
 		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 		w.WriteHeader(rec.Code)
 		_, _ = w.Write(body)
+	})
+}
+
+// accessJWKSWithAlternate publishes one extra public key beside the access
+// server's signing key. Issuance still uses the original key. The extra key
+// lets the example re-sign the same auth-token payload, which is the held
+// store's different-digest replay.
+func accessJWKSWithAlternate(next http.Handler, alternate jose.JWK) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/.well-known/jwks.json" {
+			next.ServeHTTP(response, request)
+			return
+		}
+		recorded := httptest.NewRecorder()
+		next.ServeHTTP(recorded, request)
+		if recorded.Code != http.StatusOK {
+			for name, values := range recorded.Header() {
+				for _, value := range values {
+					response.Header().Add(name, value)
+				}
+			}
+			response.WriteHeader(recorded.Code)
+			_, _ = response.Write(recorded.Body.Bytes())
+			return
+		}
+		var document struct {
+			Keys []json.RawMessage `json:"keys"`
+		}
+		if err := json.Unmarshal(recorded.Body.Bytes(), &document); err != nil || len(document.Keys) != 1 {
+			http.Error(response, "federated interop: access JWKS", http.StatusInternalServerError)
+			return
+		}
+		encoded, err := json.Marshal(alternate)
+		if err != nil {
+			http.Error(response, "federated interop: alternate access key", http.StatusInternalServerError)
+			return
+		}
+		document.Keys = append(document.Keys, encoded)
+		for name, values := range recorded.Header() {
+			if strings.EqualFold(name, "Content-Length") {
+				continue
+			}
+			for _, value := range values {
+				response.Header().Add(name, value)
+			}
+		}
+		response.WriteHeader(http.StatusOK)
+		encodedDocument, err := json.Marshal(document)
+		if err != nil {
+			return
+		}
+		_, _ = response.Write(encodedDocument)
 	})
 }
 
@@ -1156,6 +1213,8 @@ func main() {
 	out.FederatedHeldMethodError = fedOut.HeldMethodError
 	out.FederatedHeldUnknownStatus = fedOut.HeldUnknownStatus
 	out.FederatedHeldUnknownError = fedOut.HeldUnknownError
+	out.FederatedHeldMismatchStatus = fedOut.HeldMismatchStatus
+	out.FederatedHeldMismatchError = fedOut.HeldMismatchError
 	out.FederatedHeldProtectedRuns = fedCounts.HeldProtectedRuns
 
 	finalState := fetchState()
@@ -1207,6 +1266,9 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	fedASSeed := bytes.Repeat([]byte{0x61}, ed25519.SeedSize)
 	fedASKey, err := jose.NewEd25519SigningKey("fed-as-1", ed25519.NewKeyFromSeed(fedASSeed))
 	must(err, "fed access key")
+	fedASAltSeed := bytes.Repeat([]byte{0x62}, ed25519.SeedSize)
+	fedASAltKey, err := jose.NewEd25519SigningKey("fed-as-2", ed25519.NewKeyFromSeed(fedASAltSeed))
+	must(err, "fed alternate access key")
 	fedPSSeed := bytes.Repeat([]byte{0x71}, ed25519.SeedSize)
 	fedPSKey, err := jose.NewEd25519SigningKey("fed-ps-1", ed25519.NewKeyFromSeed(fedPSSeed))
 	must(err, "fed person key")
@@ -1439,7 +1501,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	fedPSSrv, fedPSDER, err := startTLSServer("fed-ps.example", fedPS.Handler())
 	must(err, "start fed ps tls")
 	defer fedPSSrv.Close()
-	fedASSrv, fedASDER, err := startTLSServer("fed-as.example", fedAS.Handler())
+	fedASSrv, fedASDER, err := startTLSServer("fed-as.example", accessJWKSWithAlternate(fedAS.Handler(), fedASAltKey.PublicJWK()))
 	must(err, "start fed as tls")
 	defer fedASSrv.Close()
 	fedRecordsSrv, fedRecordsDER, err := startTLSServer("fed-records.example", fedResource.Handler())
@@ -1458,16 +1520,17 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	cfg.HostMu.Unlock()
 
 	body, err := json.Marshal(federatedConverseRequest{
-		GoAPAddr:          cfg.GoAPAddr,
-		GoAPCertHex:       hex.EncodeToString(cfg.GoAPDER),
-		FedPSAddr:         fedPSSrv.Listener.Addr().String(),
-		FedPSCertHex:      hex.EncodeToString(fedPSDER),
-		FedASAddr:         fedASSrv.Listener.Addr().String(),
-		FedASCertHex:      hex.EncodeToString(fedASDER),
-		FedRecordsAddr:    fedRecordsSrv.Listener.Addr().String(),
-		FedRecordsCertHex: hex.EncodeToString(fedRecordsDER),
-		GoAgentSeedHex:    hex.EncodeToString(cfg.GoAgentSeed),
-		FedAgentToken:     cfg.FedAgentToken,
+		GoAPAddr:              cfg.GoAPAddr,
+		GoAPCertHex:           hex.EncodeToString(cfg.GoAPDER),
+		FedPSAddr:             fedPSSrv.Listener.Addr().String(),
+		FedPSCertHex:          hex.EncodeToString(fedPSDER),
+		FedASAddr:             fedASSrv.Listener.Addr().String(),
+		FedASCertHex:          hex.EncodeToString(fedASDER),
+		FedRecordsAddr:        fedRecordsSrv.Listener.Addr().String(),
+		FedRecordsCertHex:     hex.EncodeToString(fedRecordsDER),
+		GoAgentSeedHex:        hex.EncodeToString(cfg.GoAgentSeed),
+		FedAgentToken:         cfg.FedAgentToken,
+		FedASAlternateSeedHex: hex.EncodeToString(fedASAltSeed),
 	})
 	must(err, "marshal federated converse")
 	fedClient := &http.Client{Transport: cfg.HTTPClient.Transport, Timeout: 30 * time.Second}
