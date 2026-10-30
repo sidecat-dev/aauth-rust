@@ -31,10 +31,11 @@
 //!    `method_not_allowed`. A `GET` of a different pending id is `410` `gone`.
 //!    A second compact form of the same auth-token claims is `403`
 //!    `access_denied` and does not run the handler again. A `records.delete`
-//!    proposal for record `expire-1` is issued for five seconds. Presenting
-//!    that auth token at its `exp` is `401` `invalid_token` with
-//!    `Signature-Error: error=expired_jwt`, and the handler does not run. The
-//!    Go server clock stays at InitialNow. Budget stays unset.
+//!    proposal for record `expire-1` is issued for five seconds. The federated
+//!    server clock then moves to that `exp`. Presenting the auth token is
+//!    `401` `invalid_token` with `Signature-Error: error=expired_jwt`, and the
+//!    handler does not run. The DirectR3 clock stays at InitialNow. Budget
+//!    stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -295,6 +296,24 @@ fn held_pending_id_ok(id: &str) -> bool {
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
+}
+fn advance_federated_clock(addr: &str) -> Result<()> {
+    let mut stream = std::net::TcpStream::connect(addr)?;
+    let body = br#"{"seconds":5}"#;
+    let header = format!(
+        "POST /advance HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(body)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+    let mut buf = [0u8; 512];
+    let n = io::Read::read(&mut stream, &mut buf)?;
+    let response = String::from_utf8_lossy(&buf[..n]);
+    if !response.starts_with("HTTP/1.1 204") {
+        return Err(format!("federated clock advance failed: {response}").into());
+    }
+    Ok(())
 }
 fn header_value(response: &Response<Vec<u8>>, name: &str) -> String {
     response
@@ -1340,6 +1359,7 @@ fn handle_federated_converse(
     let alternate_seed: [u8; 32] = alternate_seed_vec
         .try_into()
         .map_err(|_| "invalid alternate access seed length")?;
+    let fed_clock_addr = text(&body, "fed_clock_addr")?;
 
     trust.discover_external(go_ap_addr, "go-ap.example", &go_ap_cert, GO_AP, "aauth-agent.json")?;
     trust.discover_external(
@@ -1753,8 +1773,9 @@ fn handle_federated_converse(
         ));
     }
 
-    // Five-second auth token. The signature moves to exp. Go's server clock
-    // stays at InitialNow, inside the 60-second signature window.
+    // Five-second auth token. Go checks exp against its server clock, not the
+    // signature created time. Move that clock to exp and sign there.
+    // DirectR3 stays at InitialNow.
     let expire_at = clock + 5;
     let expire_challenge_req = post_at(
         &holder,
@@ -1817,6 +1838,7 @@ fn handle_federated_converse(
     if expire_delivered.claims().exp != expire_at {
         return Err("federated short-lived auth token does not expire at five seconds".into());
     }
+    advance_federated_clock(&fed_clock_addr)?;
     let expire_holder = agent.with_token(expire_grant)?;
     let expire_req = post_at(
         &expire_holder,

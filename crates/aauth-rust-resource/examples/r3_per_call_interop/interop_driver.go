@@ -90,6 +90,7 @@ type federatedConverseRequest struct {
 	GoAgentSeedHex        string `json:"go_agent_seed_hex"`
 	FedAgentToken         string `json:"fed_agent_token"`
 	FedASAlternateSeedHex string `json:"fed_as_alternate_seed_hex"`
+	FedClockAddr          string `json:"fed_clock_addr"`
 }
 
 type federatedConverseResponse struct {
@@ -1307,6 +1308,13 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	var protectedRuns atomic.Int32
 	var heldRuns atomic.Int32
 	var expiredRuns atomic.Int32
+	// Go's signature VerifiedAt is this clock, not the signature created time.
+	// The example advances it by five seconds only after the short-lived token
+	// is issued. DirectR3 keeps cfg.Clock.
+	var fedClockOffset atomic.Int64
+	fedClock := aauth.ClockFunc(func() time.Time {
+		return cfg.Clock.Now().Add(time.Duration(fedClockOffset.Load()) * time.Second)
+	})
 	issuances := &memoryIssuanceStore{}
 	admitResource := func(_ context.Context, endpoint string) error {
 		if !strings.HasPrefix(endpoint, fedResourceIssuer+"/r3/") {
@@ -1320,7 +1328,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		AccessServer: fedASIssuer,
 		SigningKey:   fedResourceKey,
 		KeyResolver:  cfg.Resolver,
-		Clock:        cfg.Clock,
+		Clock:        fedClock,
 		NewID:        nextID,
 		ResolvePerson: func(_ context.Context, identity resource.PersonIdentity, personContext resource.PersonContext) error {
 			if identity.Issuer != fedPSIssuer || identity.Subject != "fed-person" || personContext.Tenant != "" {
@@ -1419,7 +1427,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		Issuer:      fedASIssuer,
 		SigningKey:  fedASKey,
 		KeyResolver: cfg.Resolver,
-		Clock:       cfg.Clock,
+		Clock:       fedClock,
 		NewID:       nextID,
 		TrustPersonServer: func(_ context.Context, issuer string) error {
 			if issuer != fedPSIssuer {
@@ -1488,7 +1496,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		Issuer:      fedPSIssuer,
 		SigningKey:  fedPSKey,
 		KeyResolver: cfg.Resolver,
-		Clock:       cfg.Clock,
+		Clock:       fedClock,
 		NewID:       nextID,
 		HTTPClient:  cfg.HTTPClient,
 		Tokens:      &memoryTokenStore{},
@@ -1543,6 +1551,23 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	cfg.HostMap["fed-records.example"] = fedRecordsSrv.Listener.Addr().String()
 	cfg.HostMu.Unlock()
 
+	clockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/advance" {
+			http.NotFound(w, r)
+			return
+		}
+		var advance struct {
+			Seconds int64 `json:"seconds"`
+		}
+		if decodeErr := json.NewDecoder(r.Body).Decode(&advance); decodeErr != nil || advance.Seconds != 5 {
+			http.Error(w, "federated interop: clock advance must be five seconds", http.StatusBadRequest)
+			return
+		}
+		fedClockOffset.Store(advance.Seconds)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer clockSrv.Close()
+
 	body, err := json.Marshal(federatedConverseRequest{
 		GoAPAddr:              cfg.GoAPAddr,
 		GoAPCertHex:           hex.EncodeToString(cfg.GoAPDER),
@@ -1555,6 +1580,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		GoAgentSeedHex:        hex.EncodeToString(cfg.GoAgentSeed),
 		FedAgentToken:         cfg.FedAgentToken,
 		FedASAlternateSeedHex: hex.EncodeToString(fedASAltSeed),
+		FedClockAddr:          clockSrv.Listener.Addr().String(),
 	})
 	must(err, "marshal federated converse")
 	fedClient := &http.Client{Transport: cfg.HTTPClient.Transport, Timeout: 30 * time.Second}
