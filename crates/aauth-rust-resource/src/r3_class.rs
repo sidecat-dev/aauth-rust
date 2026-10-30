@@ -276,6 +276,16 @@ impl R3Profile {
             .map_err(|_| ())
     }
 
+    /// Whether the authoritative definition this Resource advertises annotates
+    /// `operation` with `budget: true`, so that running it draws down a budget.
+    /// This reads the Resource's own publication about the operation and says
+    /// nothing about any caller.
+    fn metered(&self, operation: &Operation) -> Result<bool, ()> {
+        let vocabulary = self.vocabularies.get(operation.vocabulary()).ok_or(())?;
+        let hints = vocabulary.definition.hints_for(operation).map_err(|_| ())?;
+        Ok(hints.and_then(|hints| hints.budget()) == Some(true))
+    }
+
     /// Map a verified request. A mapped operation outside the definition is a host error.
     fn route(&self, request: &Request<Vec<u8>>) -> Result<Option<Operation>, ()> {
         match (self.operation_for_request)(request).map_err(|_| ())? {

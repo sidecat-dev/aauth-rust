@@ -1105,10 +1105,10 @@ fn query_release(control: Arc<AdmissionControl>) -> BoxedR3Release {
                     None,
                 )
                 .map_err(|e| R3HostError::new(e.to_string()))?,
+                // The Resource opens `detail` with the statement that the
+                // query has run and that approval releases its result.
                 Some(&format!(
-                    "## Action\nThis query has already run. What you are approving is \
-                     release of its result to the agent.\n\n## Details\nOne record \
-                     ({shown}), including a national identifier."
+                    "## Details\nOne record ({shown}), including a national identifier."
                 )),
             )
             .map_err(|e| R3HostError::new(e.to_string()))?;

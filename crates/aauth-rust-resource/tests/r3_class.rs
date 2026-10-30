@@ -2,24 +2,27 @@
 //!
 //! `VolatileTestStore` is a test double with injected faults. It is process
 //! memory and does not satisfy the durable `R3DocumentStore` contract.
+use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_budgets::UnitDeclaration;
 use aauth_rust_core::{
-    AgentKeyResolver, AuthClaims, Confirmation, PersonClaims, ResourceToken, TokenError,
-    TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
+    AgentClaims, AgentKeyResolver, AuthClaims, Confirmation, PersonClaims, ResourceToken,
+    TokenError, TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_r3::{
-    AuthoritativeSnapshot, Authorization, DefinitionRegistry, Display as R3Display,
-    GrantedOperations, McpCodec, Operation, OperationSet, Parameters, PresentedParameter,
-    ToolsListPage, ToolsListSnapshot, digest, standard_registry, verify_budget_resource_token,
-    verify_resource_token,
+    AccessMode, AnnotationEncoding, AuthoritativeSnapshot, Authorization, Codec, DefinedOperation,
+    DefinitionCodec, DefinitionError, DefinitionMaterial, DefinitionParser, DefinitionRegistry,
+    Display as R3Display, Error as R3Error, GrantedOperations, McpCodec, Operation, OperationSet,
+    Parameters, PresentedParameter, ProposalDisplay, ProposalResult, Registry, SourceEncoding,
+    ToolsListPage, ToolsListSnapshot, Vocabulary, VocabularyUri, digest, standard_registry,
+    standard_vocabularies, verify_budget_resource_token, verify_resource_token,
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
-    BoxedR3Present, Deny, ProactiveDecision, PsAuthorizationConfig, PsAuthorizationResource,
-    PsConfigurationError, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config,
-    R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig, R3ProposalRecord,
-    R3StoreError, R3Vocabulary,
+    BoxedR3Present, BoxedR3Release, Deny, ProactiveDecision, PsAuthorizationConfig,
+    PsAuthorizationResource, PsConfigurationError, R3CallResult, R3CallStore, R3CallToken, R3Claim,
+    R3Config, R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig, R3ProposalRecord,
+    R3Release, R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -2611,4 +2614,548 @@ fn a_mission_class_document_admits_only_an_auth_token_for_that_mission() {
         .into_response();
     assert_eq!(refused.status(), 403);
     assert_eq!(calls.load(Ordering::SeqCst), before);
+}
+
+fn mcp_snapshot(tools: &[u8]) -> AuthoritativeSnapshot {
+    McpCodec::parse_definition(
+        MCP_ENDPOINT,
+        &ToolsListSnapshot::new(vec![ToolsListPage::initial(tools)]),
+    )
+    .unwrap()
+}
+fn r3_config_for(store: &Arc<VolatileTestStore>, tools: &[u8]) -> R3Config {
+    let mut config = r3_config(store, false);
+    config.vocabularies = vec![R3Vocabulary {
+        definition: mcp_snapshot(tools),
+        display: None,
+    }];
+    config
+}
+fn agent_token() -> String {
+    AgentProvider::new(AP, "ap-1", SigningKey::from_seed([1; 32]))
+        .unwrap()
+        .issue(&AgentClaims {
+            iss: AP.into(),
+            dwk: "aauth-agent.json".into(),
+            sub: "aauth:reader@ap.example".into(),
+            jti: "agent-1".into(),
+            iat: NOW,
+            exp: 4000,
+            cnf: Confirmation {
+                jwk: SigningKey::from_seed([2; 32]).public_jwk(),
+            },
+            ps: Some(PS.into()),
+            parent_agent: None,
+            nbf: None,
+            extra: Default::default(),
+        })
+        .unwrap()
+}
+fn outcome(decision: AuthDecision<String>) -> &'static str {
+    match decision {
+        AuthDecision::PersonTokenRequired => "person-token required",
+        AuthDecision::AuthTokenRequired { .. } => "auth-token required",
+        AuthDecision::Forbidden { .. } => "forbidden",
+        AuthDecision::Granted(_) => "granted",
+        other => panic!("unexpected decision: {other:?}"),
+    }
+}
+
+/// The same two tools, annotated: the read says an agent token is enough, and
+/// the delete says it is approved per call and draws down a budget.
+const ANNOTATED_TOOLS: &[u8] = br#"{"tools":[{"name":"records.read","inputSchema":{"type":"object"},"_meta":{"aauth.dev/access-mode":"agent-token"}},{"name":"records.delete","inputSchema":{"type":"object"},"_meta":{"aauth.dev/access-mode":"per-call","aauth.dev/budget":true}}]}"#;
+
+// R3 Operation Access Annotations Are Not Authorization: an annotation is a
+// published expectation, not evidence about the caller. Each request is
+// enforced against the credential presented, so the same requests get the
+// same answers whether or not the definition carries annotations.
+#[test]
+fn annotations_in_the_definition_change_no_enforcement_decision() {
+    let annotated = mcp_snapshot(ANNOTATED_TOOLS);
+    let read = annotated.hints_for(&mcp("records.read")).unwrap().unwrap();
+    assert_eq!(read.access_mode(), Some(AccessMode::AgentToken));
+    let delete = annotated
+        .hints_for(&mcp("records.delete"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(delete.access_mode(), Some(AccessMode::PerCall));
+    assert_eq!(delete.budget(), Some(true));
+    assert!(
+        mcp_snapshot(TOOLS)
+            .hints_for(&mcp("records.read"))
+            .unwrap()
+            .is_none()
+    );
+
+    let run = |tools: &[u8]| {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(VolatileTestStore::default());
+        let resource = core_resource(&calls)
+            .with_r3(r3_config_for(&store, tools))
+            .unwrap();
+        let record = issue(
+            &resource,
+            &store,
+            &["records.read", "records.delete"],
+            "rt-annotations",
+        );
+        // The class token grants the delete and leaves the read per call.
+        let class = class_token(
+            &record,
+            &["records.delete"],
+            &["records.read"],
+            &auth_claims(None),
+            3,
+            "ps-1",
+        );
+        let core = mint_auth_token(
+            &SigningKey::from_seed([3; 32]),
+            "ps-1",
+            &auth_claims(Some("records.read")),
+        )
+        .unwrap();
+        let outcomes = [
+            ("agent token, read", "/mcp/records.read", agent_token()),
+            ("person token, read", "/mcp/records.read", person()),
+            ("core auth token, read", "/mcp/records.read", core.clone()),
+            ("core auth token, delete", "/mcp/records.delete", core),
+            ("class token, read", "/mcp/records.read", class.clone()),
+            ("class token, delete", "/mcp/records.delete", class),
+        ]
+        .map(|(label, path, token)| {
+            let decision = resource.authorize(&call(path, &token, 2), NOW, "challenge-annotations");
+            (label, outcome(decision))
+        });
+        (outcomes, calls.load(Ordering::SeqCst))
+    };
+    let (outcomes, admitted) = run(ANNOTATED_TOOLS);
+    assert_eq!((outcomes, admitted), run(TOOLS));
+    assert_eq!(
+        outcomes,
+        [
+            ("agent token, read", "person-token required"),
+            ("person token, read", "auth-token required"),
+            ("core auth token, read", "forbidden"),
+            ("core auth token, delete", "forbidden"),
+            ("class token, read", "forbidden"),
+            ("class token, delete", "granted"),
+        ]
+    );
+    // Host policy ran once, for the delete the class token grants, although
+    // no budget was presented for it.
+    assert_eq!(admitted, 1);
+}
+
+/// Tools for release gating. Only `records.export` is annotated: running it
+/// draws down a budget.
+const RELEASE_TOOLS: &[u8] = br#"{"tools":[{"name":"records.query","inputSchema":{"type":"object"}},{"name":"records.count","inputSchema":{"type":"object"}},{"name":"records.export","inputSchema":{"type":"object"},"_meta":{"aauth.dev/budget":true}},{"name":"records.audit","inputSchema":{"type":"object"}}]}"#;
+const RELEASE_OPERATIONS: [&str; 4] = [
+    "records.query",
+    "records.count",
+    "records.export",
+    "records.audit",
+];
+const RELEASE_STATEMENT: &str = "## Action\nThis operation has already run. What you are approving is release of its result to the agent.";
+
+fn tool_name(operation: &Operation) -> String {
+    let value: Value = serde_json::from_slice(&operation.json().unwrap()).unwrap();
+    value["tool"].as_str().unwrap().to_owned()
+}
+
+/// A held per-call Resource whose release hook runs, before approval, every
+/// call it is asked to run, except `records.audit`: the host's audit regime
+/// records that call, so the hook keeps it for execution approval.
+struct ReleaseHost {
+    resource: Resource,
+    proposals: Arc<MemoryCalls>,
+    class: String,
+    /// Calls the release hook was asked to run.
+    asked: Arc<Mutex<Vec<String>>>,
+    /// Every execution, in order.
+    ran: Arc<Mutex<Vec<String>>>,
+}
+fn release_host() -> ReleaseHost {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let ran = Arc::new(Mutex::new(Vec::new()));
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |operation: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            let summary = format!("Run {}", tool_name(operation));
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: Some(
+                    ProposalDisplay::new(&R3Display::new(summary, None, None, None).unwrap(), None)
+                        .unwrap(),
+                ),
+            })
+        },
+    );
+    let release: BoxedR3Release = {
+        let (asked, ran) = (Arc::clone(&asked), Arc::clone(&ran));
+        Box::new(
+            move |_: &Request<Vec<u8>>,
+                  operation: &Operation,
+                  _: &BTreeMap<String, PresentedParameter>,
+                  _: Option<&str>| {
+                let tool = tool_name(operation);
+                asked.lock().unwrap().push(tool.clone());
+                if tool == "records.audit" {
+                    return Ok(None);
+                }
+                ran.lock().unwrap().push(format!("{tool} before approval"));
+                let detail = (tool == "records.query")
+                    .then_some("## Details\nOne record, with a national identifier.");
+                Ok(Some(R3Release {
+                    result: ProposalResult::new(br#"{"records":1}"#).unwrap(),
+                    display: ProposalDisplay::new(
+                        &R3Display::new(
+                            format!("Release the result of {tool}"),
+                            None,
+                            Some("One record"),
+                            None,
+                        )
+                        .unwrap(),
+                        detail,
+                    )
+                    .unwrap(),
+                    response: Response::builder()
+                        .status(200)
+                        .body(format!("{tool} result").into_bytes())
+                        .unwrap(),
+                }))
+            },
+        )
+    };
+    let resource = core_resource(&calls)
+        .with_r3(r3_config_for(&store, RELEASE_TOOLS))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: true,
+            release: Some(release),
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(&resource, &store, &RELEASE_OPERATIONS, "rt-release");
+    let class = class_token(
+        &record,
+        &[],
+        &RELEASE_OPERATIONS,
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    ReleaseHost {
+        resource,
+        proposals,
+        class,
+        asked,
+        ran,
+    }
+}
+impl ReleaseHost {
+    /// Call `tool` with the class token and return its held proposal.
+    fn hold(&self, tool: &str) -> R3ProposalRecord {
+        let pending_id = format!("challenge-{}", tool.replace('.', "-"));
+        let held = self
+            .resource
+            .authorize(
+                &call(&format!("/mcp/{tool}"), &self.class, 2),
+                NOW,
+                &pending_id,
+            )
+            .into_response();
+        assert_eq!(
+            held.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(held.body())
+        );
+        self.proposals
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| {
+                record
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.pending_id == pending_id)
+            })
+            .cloned()
+            .expect("held proposal")
+    }
+    /// The proposal as its Person Server fetches it.
+    fn fetched(&self, record: &R3ProposalRecord) -> Value {
+        let response = self.resource.r3_document(
+            &fetch_uri(record.reference.uri(), PS, "aauth-person.json", "ps-1", 3),
+            NOW,
+        );
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), &record.exact_json);
+        serde_json::from_slice(response.body()).unwrap()
+    }
+    /// Present the per-call Auth token approving `record` at its pending URL.
+    fn complete(&self, record: &R3ProposalRecord, jti: &str) -> AuthDecision<String> {
+        let mut claims = auth_claims(None);
+        claims.jti = jti.into();
+        let token = aauth_rust_r3::mint_per_call_auth_token(
+            &standard_registry().unwrap(),
+            &SigningKey::from_seed([3; 32]),
+            "ps-1",
+            &claims,
+            &record.reference,
+            &record.exact_json,
+        )
+        .expect("per-call auth token");
+        let pending = format!("/r3/pending/{}", record.held.as_ref().unwrap().pending_id);
+        self.resource
+            .authorize(&call(&pending, &token, 2), NOW, &format!("{jti}-poll"))
+    }
+}
+
+// R3 Approving Release Rather Than Execution: when the Resource has run the
+// call before seeking approval, `display` states that it has run and that what
+// is approved is release of its result.
+#[test]
+fn a_release_proposal_display_states_the_call_ran_and_approval_releases_its_result() {
+    let host = release_host();
+    // The statement opens `detail`, and the host's own detail follows it.
+    let query = host.hold("records.query");
+    let proposal = host.fetched(&query);
+    assert_eq!(proposal["result"], json!({ "records": 1 }));
+    assert_eq!(
+        proposal["display"]["summary"],
+        "Release the result of records.query"
+    );
+    assert_eq!(proposal["display"]["data_accessed"], "One record");
+    assert_eq!(
+        proposal["display"]["detail"],
+        format!("{RELEASE_STATEMENT}\n\n## Details\nOne record, with a national identifier.")
+    );
+    // Without host detail, `detail` is the statement.
+    let count = host.hold("records.count");
+    let proposal = host.fetched(&count);
+    assert_eq!(proposal["result"], json!({ "records": 1 }));
+    assert_eq!(proposal["display"]["detail"], RELEASE_STATEMENT);
+    // A proposal seeking execution approval does not say the call has run.
+    let audit = host.hold("records.audit");
+    let proposal = host.fetched(&audit);
+    assert!(proposal.get("result").is_none());
+    assert_eq!(
+        proposal["display"],
+        json!({ "summary": "Run records.audit" })
+    );
+    // Approval releases the result computed before approval. Nothing runs again.
+    match host.complete(&query, "per-call-query") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"records.query result"),
+        other => panic!("release: {other:?}"),
+    }
+    assert_eq!(
+        *host.ran.lock().unwrap(),
+        [
+            "records.query before approval",
+            "records.count before approval"
+        ]
+    );
+}
+
+// R3 Approving Release Rather Than Execution: a Resource does not execute
+// before approval where execution is the audited, metered or billed event;
+// approval precedes it. The definition publishes `records.export` with
+// `budget: true`, so the Resource never asks the release hook to run it,
+// although the hook would. The host's audit regime records `records.audit`,
+// and its hook declines to run it.
+#[test]
+fn a_metered_or_audited_call_runs_only_after_approval() {
+    let host = release_host();
+    for tool in ["records.export", "records.audit"] {
+        let held = host.hold(tool);
+        // Held for execution approval: no computed result, and nothing ran.
+        assert!(held.released.is_none(), "{tool}");
+        assert!(held.release_until.is_none(), "{tool}");
+        let proposal = host.fetched(&held);
+        assert!(proposal.get("result").is_none(), "{tool}");
+        assert_eq!(
+            proposal["display"],
+            json!({ "summary": format!("Run {tool}") })
+        );
+        assert!(
+            !host
+                .ran
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|run| run.starts_with(tool)),
+            "{tool}"
+        );
+        // The approved per-call token admits the held call, which runs now.
+        let jti = format!("per-call-{}", tool.replace('.', "-"));
+        let grant = match host.complete(&held, &jti) {
+            AuthDecision::Granted(admitted) => admitted.r3_grant().expect("held call").clone(),
+            other => panic!("{tool} completion: {other:?}"),
+        };
+        host.ran
+            .lock()
+            .unwrap()
+            .push(format!("{tool} after approval"));
+        let response = Response::builder()
+            .status(200)
+            .body(format!("{tool} result").into_bytes())
+            .unwrap();
+        let stored = host.resource.r3_retain(&grant, response);
+        assert_eq!(stored.body(), format!("{tool} result").as_bytes());
+    }
+    assert_eq!(*host.asked.lock().unwrap(), ["records.audit"]);
+    assert_eq!(
+        *host.ran.lock().unwrap(),
+        [
+            "records.export after approval",
+            "records.audit after approval"
+        ]
+    );
+}
+
+const WIDGETS_URI: &str = "https://vocabulary.example/widgets";
+const WIDGETS_ENDPOINT: &str = "https://resource.example/widgets";
+
+/// A proprietary `{"widget": name}` vocabulary, named by the URI it is given.
+struct WidgetCodec(&'static str);
+fn widget_operation(name: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "widget": name })).unwrap()
+}
+impl Codec for WidgetCodec {
+    type Set = Vec<String>;
+    fn uri(&self) -> VocabularyUri {
+        VocabularyUri::parse(self.0).unwrap()
+    }
+    fn annotation_encoding(&self) -> AnnotationEncoding {
+        AnnotationEncoding::UNAVAILABLE
+    }
+    fn validate_discovery_endpoint(&self, endpoint: &str) -> Result<(), R3Error> {
+        if endpoint.starts_with("https://") {
+            Ok(())
+        } else {
+            Err(R3Error::new("widget definitions are served over HTTPS"))
+        }
+    }
+    fn parse_set(&self, raw: &[Vec<u8>]) -> Result<Self::Set, R3Error> {
+        let mut names: Vec<String> = Vec::new();
+        for operation in raw {
+            let value: Value = serde_json::from_slice(operation)
+                .map_err(|_| R3Error::new("widget operation is not JSON"))?;
+            let name = match value.as_object() {
+                Some(members) if members.len() == 1 => {
+                    members.get("widget").and_then(Value::as_str)
+                }
+                _ => None,
+            };
+            match name {
+                Some(name) if !name.is_empty() && !names.iter().any(|seen| seen == name) => {
+                    names.push(name.to_owned());
+                }
+                _ => return Err(R3Error::new("widget operation must be one new widget name")),
+            }
+        }
+        Ok(names)
+    }
+    fn marshal_set(&self, set: &Self::Set) -> Result<Vec<Vec<u8>>, R3Error> {
+        Ok(set.iter().map(|name| widget_operation(name)).collect())
+    }
+    fn union_sets<'a>(
+        &self,
+        sets: impl IntoIterator<Item = &'a Self::Set>,
+    ) -> Result<Self::Set, R3Error>
+    where
+        Self::Set: 'a,
+    {
+        let mut union: Vec<String> = Vec::new();
+        for name in sets.into_iter().flatten() {
+            if !union.contains(name) {
+                union.push(name.clone());
+            }
+        }
+        Ok(union)
+    }
+    fn sets_equal(&self, left: &Self::Set, right: &Self::Set) -> bool {
+        self.is_subset(left, right) && self.is_subset(right, left)
+    }
+    fn is_subset(&self, subset: &Self::Set, superset: &Self::Set) -> bool {
+        subset.iter().all(|name| superset.contains(name))
+    }
+    fn is_disjoint(&self, left: &Self::Set, right: &Self::Set) -> bool {
+        !left.iter().any(|name| right.contains(name))
+    }
+}
+/// A widget definition source: a JSON array of the widget names it serves.
+struct WidgetDefinition(Vocabulary);
+impl DefinitionCodec<[u8]> for WidgetDefinition {
+    fn vocabulary(&self) -> Result<Vocabulary, R3Error> {
+        Ok(self.0.clone())
+    }
+    fn parse_definition(&self, source: &[u8]) -> Result<DefinitionMaterial, DefinitionError> {
+        let names: Vec<String> = serde_json::from_slice(source)
+            .map_err(|_| R3Error::new("widget definition must be an array of names"))?;
+        let operations = names
+            .iter()
+            .map(|name| DefinedOperation::new(&widget_operation(name), None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let encoding = SourceEncoding::new("application/json")?;
+        DefinitionMaterial::new(encoding, source.to_vec(), operations)
+            .map_err(DefinitionError::from)
+    }
+}
+
+// R3 Resource Metadata Extensions: `r3_vocabularies` keys are standard
+// vocabulary URIs from the `urn:aauth:vocabulary:` namespace, or URIs in a
+// third party's own namespace for proprietary vocabularies.
+#[test]
+fn r3_vocabularies_keys_are_standard_urns_or_third_party_uris() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let widgets = Vocabulary::new(WidgetCodec(WIDGETS_URI)).unwrap();
+    let parser = DefinitionParser::new(WidgetDefinition(widgets.clone())).unwrap();
+    let mut config = r3_config(&store, false);
+    config.registry = Registry::new(&[McpCodec::vocabulary().unwrap(), widgets]).unwrap();
+    config.definitions = DefinitionRegistry::new(&[
+        McpCodec::definition_registration().unwrap(),
+        parser.registration(),
+    ])
+    .unwrap();
+    config.vocabularies.push(R3Vocabulary {
+        definition: parser
+            .parse(WIDGETS_ENDPOINT, &br#"["blue","red"]"#[..])
+            .unwrap(),
+        display: None,
+    });
+    let resource = core_resource(&calls).with_r3(config).unwrap();
+    let metadata: Value = serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata["r3_vocabularies"],
+        json!({ MCP_URI: MCP_ENDPOINT, WIDGETS_URI: WIDGETS_ENDPOINT })
+    );
+    let standard = standard_vocabularies().unwrap();
+    for key in metadata["r3_vocabularies"].as_object().unwrap().keys() {
+        let is_standard = standard
+            .iter()
+            .any(|vocabulary| vocabulary.uri().as_str() == key);
+        let in_namespace = key
+            .to_ascii_lowercase()
+            .starts_with("urn:aauth:vocabulary:");
+        assert_eq!(is_standard, in_namespace, "{key}");
+    }
+    // A proprietary vocabulary cannot be registered, and so cannot be
+    // advertised, in the standard namespace.
+    for uri in [
+        "urn:aauth:vocabulary:widgets",
+        "URN:AAUTH:VOCABULARY:widgets",
+    ] {
+        assert!(Vocabulary::new(WidgetCodec(uri)).is_err(), "{uri}");
+    }
 }

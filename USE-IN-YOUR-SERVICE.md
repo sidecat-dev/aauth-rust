@@ -526,7 +526,13 @@ credential for the intended Resource instead of refreshing an otherwise valid JW
 Use this when the Resource can run a query before the person approves disclosure.
 Set `R3PerCallConfig::hold` and `release`. The `release` callback must change
 nothing outside the result it returns. Audited, billed, or third-party work
-needs execution consent instead.
+needs execution consent instead: return `None` for it. The Resource does not
+call `release` for an operation its definition annotates `budget: true`.
+
+The proposal's `display` comes from `R3Release::display`, and the Resource opens
+its `detail` with an `## Action` section saying the operation has already run and
+that what is approved is release of its result. Put your own `detail` sections,
+such as `## Details`, after that; do not repeat it.
 
 `held_result_lifetime` is your retention, in seconds. It is not extended when a
 refreshed class token re-requests the call. The Resource returns the held

@@ -22,9 +22,13 @@
 //!
 //! Approving Release Rather Than Execution: under `202` only, a host
 //! [`BoxedR3Release`] may run a side-effect-free call before approval. The
-//! proposal then carries `result` and a release `display`, and the computed
-//! response is committed with the record. Completion releases that stored
-//! response once to the first exact per-call token; the host executes nothing.
+//! proposal then carries `result` and a release `display` whose `detail` the
+//! Resource opens with the statement that the operation has run and that what
+//! is approved is release of its result. The computed response is committed
+//! with the record. Completion releases that stored response once to the first
+//! exact per-call token; the host executes nothing. An operation the
+//! Resource's own definition annotates `budget: true` draws down a budget when
+//! it runs, so the Resource never asks the hook to run it before approval.
 //! A re-requested held call (for example after the presented class token
 //! expired during approval) is proposed again from that custody: the stored
 //! proposal bytes and response move to the new challenge, the prior record is
@@ -34,7 +38,7 @@ use std::sync::{Arc, Mutex};
 
 use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
 use aauth_rust_r3::{
-    Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
+    Display, Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
     ProposalResult, Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token,
     validate_proposal_account, verify_per_call_auth_token,
 };
@@ -51,6 +55,10 @@ const PERSON_DOCUMENT: &str = "aauth-person.json";
 /// Ceiling on a proposal Resource token's lifetime, and the horizon of a held
 /// release-gated response from the challenge that computed it.
 const PROPOSAL_LIFETIME: i64 = 300;
+/// The `## Action` section that opens every release proposal's `detail`
+/// (`draft-hardt-aauth-r3`, Approving Release Rather Than Execution).
+const RELEASE_ACTION: &str = "## Action\nThis operation has already run. What you are approving is \
+                              release of its result to the agent.";
 
 /// Host extraction of one call's concrete parameter values.
 ///
@@ -96,7 +104,10 @@ pub struct R3CallDescription {
 /// execution approval. `Ok(Some(_))` means the host has run the call and
 /// holds its response for release. Return `Some` only when nothing outside the
 /// result changes when the call runs: the draft forbids executing first where
-/// execution is audited, metered or billed, or calls another party.
+/// execution is audited, metered or billed, or calls another party. The
+/// Resource does not call it for an operation its authoritative definition
+/// annotates `budget: true`; whether a call is audited or billed, or calls
+/// another party, only the host knows.
 pub type BoxedR3Release = Box<
     dyn Fn(
             &Request<Vec<u8>>,
@@ -113,8 +124,11 @@ pub struct R3Release {
     /// Resource-defined `result` members describing what the response holds,
     /// for the issuer and the Person Server. The response is not carried.
     pub result: ProposalResult,
-    /// Consent text. It MUST state that the operation has run and that what is
-    /// approved is release of its result; this crate does not judge prose.
+    /// Consent text describing the result. The proposal's `detail` opens with
+    /// an `## Action` section, written by the Resource, stating that the
+    /// operation has already run and that what is approved is release of its
+    /// result to the agent. This display's own `detail`, when present and
+    /// not empty, follows that section, so it should not repeat it.
     pub display: ProposalDisplay,
     /// The computed response, released once on approval and never otherwise.
     /// An application `202` is kept under the same rule as an executed call.
@@ -695,6 +709,23 @@ struct CallerLineage<'a> {
     presented_jti: &'a str,
 }
 
+/// A release proposal's display: the host's, with `detail` opened by the
+/// statement that the operation has run and that release of its result is
+/// what the person approves.
+fn release_display(display: &ProposalDisplay) -> Result<ProposalDisplay, aauth_rust_r3::Error> {
+    let detail = match display.detail() {
+        Some(detail) if !detail.is_empty() => format!("{RELEASE_ACTION}\n\n{detail}"),
+        _ => RELEASE_ACTION.to_owned(),
+    };
+    let base = Display::new(
+        display.summary(),
+        display.implications(),
+        display.data_accessed(),
+        display.irreversible(),
+    )?;
+    ProposalDisplay::new(&base, Some(&detail))
+}
+
 /// Whether `prior` is a held release this caller may be answered from at
 /// `now`: a computed, held response within its horizon, issued for the same
 /// Person Server, issuer, subject, tenant, holder, account, scope and class
@@ -901,14 +932,26 @@ where
             return AuthDecision::InternalError;
         }
         // Release gating runs the call now, only under 202; with_r3_per_call
-        // refuses release without hold, and this refuses it again.
+        // refuses release without hold, and this refuses it again. Execution
+        // that draws down a budget is the metered event, so approval precedes it.
         let release = match (&per_call.release, per_call.hold) {
-            (Some(run), true) => match run(request, operation, &presented, c.account.as_deref()) {
-                Ok(release) => release,
-                Err(_) => return AuthDecision::InternalError,
+            (Some(run), true) => match profile.metered(operation) {
+                Ok(true) => None,
+                Ok(false) => match run(request, operation, &presented, c.account.as_deref()) {
+                    Ok(release) => release,
+                    Err(_) => return AuthDecision::InternalError,
+                },
+                Err(()) => return AuthDecision::InternalError,
             },
             (Some(_), false) => return AuthDecision::InternalError,
             (None, _) => None,
+        };
+        let display = match &release {
+            Some(release) => match release_display(&release.display) {
+                Ok(display) => Some(display),
+                Err(_) => return AuthDecision::InternalError,
+            },
+            None => description.display,
         };
         let Ok(proposal) = Proposal::new(
             operation,
@@ -916,10 +959,7 @@ where
             ProposalOptions {
                 account: c.account.as_deref(),
                 result: release.as_ref().map(|release| &release.result),
-                display: match &release {
-                    Some(release) => Some(&release.display),
-                    None => description.display.as_ref(),
-                },
+                display: display.as_ref(),
             },
         ) else {
             return AuthDecision::InternalError;
