@@ -1562,11 +1562,24 @@ Resources it has never seen supplies its own resolver, which applies egress
 admission (`admit_fetch`) before fetching their metadata and JWKS.
 
 `EventStore` is the durability contract: each successful write is durable
-before it returns, and `record` is one atomic step. `MemoryEventStore` is a
-volatile reference and does not survive the process; no durable adapter ships
-in this release. Delivery to the Agent is your transport: read
-`store.pending(agent)`, hand each `RecordedEvent`'s `event_token` and `body`
-bytes to the Agent unchanged, and `acknowledge` it once delivered.
+before it returns, and `record` is one atomic step. Use
+`DirectoryEventStore::open(directory)` in production. Each subscription is a
+JSON file with its use count and the events it accepted, and each accepted
+event is a file with its exact token and body bytes. Every write goes to a
+temporary file that is synchronized and renamed, and the directory is then
+synchronized, before the store reports success. Accepting an event writes the
+event file and then the subscription file, whose rename is the commit point:
+an event file no subscription lists was never accepted, and the Resource's
+retry replaces it. A failed or uncertain write is `503`, never `202`. A torn
+subscription file makes that subscription unavailable rather than guessing its
+count. One store value owns its directory; do not open it from two processes.
+This covers process exit and an interrupted write, not power loss on storage
+that ignores `fsync`. Each accepted event rewrites its subscription's file, so
+very long unlimited subscriptions grow that file, and accepted event files are
+retained: this release has no compaction. `MemoryEventStore` is a volatile reference for
+tests. Delivery to the Agent is your transport: read `store.pending(agent)`,
+hand each `RecordedEvent`'s `event_token` and `body` bytes to the Agent
+unchanged, and `acknowledge` it once delivered.
 
 ### Agent
 

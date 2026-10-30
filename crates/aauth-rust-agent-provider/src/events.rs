@@ -18,6 +18,9 @@ use http::{Method, Request, Response, StatusCode};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
+mod directory;
+pub use directory::DirectoryEventStore;
+
 /// One subscription as the Agent Provider recorded it at issuance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscription {
@@ -104,8 +107,10 @@ impl std::error::Error for EventStoreError {}
 
 /// Agent Provider subscription and delivery state.
 ///
-/// [`MemoryEventStore`] is the volatile reference. A durable implementation
-/// must make each successful write durable before it returns.
+/// Each successful write must be durable before it returns: the inbox
+/// answers `202` only after [`EventStore::record`] succeeds.
+/// [`DirectoryEventStore`] is the durable file-backed implementation;
+/// [`MemoryEventStore`] is a volatile reference for tests.
 pub trait EventStore: Send + Sync {
     /// Retain a new subscription before its subscribe token is released.
     ///

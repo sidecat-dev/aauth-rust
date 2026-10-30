@@ -10,7 +10,7 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
 | `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
 | `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; Events subscribe and event tokens; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
-| `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes; opt-in Events subscribe tokens and inbox with a durable-store contract | Core, Signature-Key, JOSE |
+| `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes; opt-in Events subscribe tokens, inbox and file-backed event store | Core, Signature-Key, JOSE |
 | `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions; R3 `/authorize` preparation and class-grant verification; Events subscription signing and event verification | Core, Signature-Key, R3, JOSE |
 | `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
