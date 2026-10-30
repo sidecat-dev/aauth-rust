@@ -30,16 +30,17 @@ use aauth_rust_person_server::{
 use aauth_rust_r3::{
     AuthoritativeSnapshot, DefinitionErrorKind, DefinitionRegistration, DefinitionRegistry,
     FetchBody, FetchLimits, FetchResponse, FetchTransport, GrantedOperations, GrpcCodec,
-    GrpcDefinitionSource, ODataCodec, ODataMetadataSource, Operation, Vocabulary, WsdlCodec,
-    Parameters, PresentedParameter, Proposal, ProposalOptions, Reference,
-    WsdlDocumentSource, digest,
-    mint_budget_resource_token, mint_proposal_resource_token, standard_registry,
+    GrpcDefinitionSource, ODataCodec, ODataMetadataSource, Operation, Parameters,
+    PresentedParameter, Proposal, ProposalOptions, Reference, Vocabulary, WsdlCodec,
+    WsdlDocumentSource, digest, mint_budget_resource_token, mint_proposal_resource_token,
+    standard_registry,
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
-    BoxedR3Present, Deny, DirectoryCallStore, DirectoryDocumentStore, PsAuthorizationConfig, PsAuthorizationResource, R3CallResult,
-    R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord, R3DocumentStore, R3HostError,
-    R3PerCallConfig, R3ProposalRecord, R3StoreError, R3Vocabulary,
+    BoxedR3Present, Deny, DirectoryCallStore, DirectoryDocumentStore, PsAuthorizationConfig,
+    PsAuthorizationResource, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config,
+    R3DocumentRecord, R3DocumentStore, R3HostError, R3PerCallConfig, R3ProposalRecord,
+    R3StoreError, R3Vocabulary,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::{Request, Response};
@@ -322,10 +323,8 @@ fn resource_with_ledger(
             move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| -> Result<String, Deny> {
                 if let Some(slot) = &revoke_during {
                     if let Some(resource) = slot.lock().unwrap().clone() {
-                        let response = resource.revoke(
-                            &ps_revocation(&token.claims().jti, token.claims().exp),
-                            NOW,
-                        );
+                        let response = resource
+                            .revoke(&ps_revocation(&token.claims().jti, token.claims().exp), NOW);
                         assert_eq!(
                             response.status(),
                             200,
@@ -346,31 +345,30 @@ fn resource_with_ledger(
         ) as BoxedAuthAdmissionPolicy<String>
     };
     let resource = PsAuthorizationResource::new(
-            PsAuthorizationConfig {
-                issuer: RESOURCE.into(),
-                signed_origin: RESOURCE.into(),
-                kid: "resource-1".into(),
-                signing_key: SigningKey::from_seed([4; 32]),
-                scopes: vec!["records.read".into()],
-            },
-            keys(),
-            policy,
-        )
-        .unwrap()
-        .with_authorization_endpoint()
-        .with_r3(R3Config {
-            registry: standard_registry().unwrap(),
-            definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration))
-                .unwrap(),
-            vocabularies: vec![R3Vocabulary {
-                definition: profile.snapshot.clone(),
-                display: None,
-            }],
-            documents: documents.clone(),
-            operation_for_request: mapper,
-            require_core_scope: false,
-        })
-        .unwrap();
+        PsAuthorizationConfig {
+            issuer: RESOURCE.into(),
+            signed_origin: RESOURCE.into(),
+            kid: "resource-1".into(),
+            signing_key: SigningKey::from_seed([4; 32]),
+            scopes: vec!["records.read".into()],
+        },
+        keys(),
+        policy,
+    )
+    .unwrap()
+    .with_authorization_endpoint()
+    .with_r3(R3Config {
+        registry: standard_registry().unwrap(),
+        definitions: DefinitionRegistry::new(std::slice::from_ref(&profile.registration)).unwrap(),
+        vocabularies: vec![R3Vocabulary {
+            definition: profile.snapshot.clone(),
+            display: None,
+        }],
+        documents: documents.clone(),
+        operation_for_request: mapper,
+        require_core_scope: false,
+    })
+    .unwrap();
     let resource = if meter {
         let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
         match ledger {
@@ -752,10 +750,7 @@ fn class_resource_token_with_budget_offer_is_authorized() {
         .get("budget")
         .cloned()
         .expect("signed budget grant");
-    assert_eq!(
-        budget,
-        json!({"amount": 500, "unit": "USD", "decimals": 6})
-    );
+    assert_eq!(budget, json!({"amount": 500, "unit": "USD", "decimals": 6}));
     let record = aauth_rust_budgets::ConsumptionRecord::new(claims.presented_jti.clone(), 1)
         .expect("consumption record");
     let (with_record, _) = mint_budget_resource_token(
@@ -801,12 +796,20 @@ fn class_resource_token_with_budget_offer_is_authorized() {
         &format!("{PS}/token"),
         json!({ "resource_token": bad, "presented_token": person }),
     ));
-    assert_eq!(malformed_response.status(), 400, "malformed consumption record");
+    assert_eq!(
+        malformed_response.status(),
+        400,
+        "malformed consumption record"
+    );
     assert_eq!(
         member(&malformed_response, "error").as_deref(),
         Some("invalid_budget")
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "issuance does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "issuance does not run the tool"
+    );
 }
 
 #[test]
@@ -983,7 +986,11 @@ fn per_call_with_a_budget_offer_is_refused() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-per-call-budget")
         .into_response();
-    assert_eq!(issued.status(), 200, "resource still issues the combined token");
+    assert_eq!(
+        issued.status(),
+        200,
+        "resource still issues the combined token"
+    );
     let resource_token = member(&issued, "resource_token").expect("resource token");
     let exchanged = ps.handle(&post(
         &signer,
@@ -996,7 +1003,11 @@ fn per_call_with_a_budget_offer_is_refused() {
         Some("invalid_resource_token")
     );
     assert!(member(&exchanged, "auth_token").is_none());
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "refusal does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "refusal does not run the tool"
+    );
 }
 
 #[test]
@@ -1076,7 +1087,11 @@ fn fresh_resource_spends_the_same_grant_again() {
         }
         other => panic!("spent ledger: {other:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "the spent ledger does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the spent ledger does not run the tool"
+    );
     let (restarted, restarted_calls, _) = resource_with(&profile, true, false, documents);
     match restarted.authorize(&signed_call("/op/permit", &auth), NOW, "restarted-ledger") {
         AuthDecision::Granted(admitted) => {
@@ -1102,7 +1117,10 @@ fn durable_budget_ledger_worker() {
     let (iss, jti) = &ids[0];
     assert!(matches!(
         ledger.reserve(iss, jti, 1),
-        Err(ChargeError::Refused(Refusal::Exhausted { remaining: 0, .. }))
+        Err(ChargeError::Refused(Refusal::Exhausted {
+            remaining: 0,
+            ..
+        }))
     ));
     println!("WROTE {}", std::process::id());
 }
@@ -1345,16 +1363,24 @@ impl R3CallStore for SingleUse {
         Ok(self.records.lock().unwrap().get(uri).cloned())
     }
     fn load_pending(&self, id: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
-        Ok(self.records.lock().unwrap().values().find(|record| {
-            record
-                .held
-                .as_ref()
-                .is_some_and(|held| held.pending_id == id)
-        }).cloned())
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| {
+                record
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.pending_id == id)
+            })
+            .cloned())
     }
     fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
         if self.load(uri)?.is_none() {
-            return Err(R3StoreError::Unavailable(R3HostError::new("missing proposal")));
+            return Err(R3StoreError::Unavailable(R3HostError::new(
+                "missing proposal",
+            )));
         }
         if now >= token.retain_until {
             return Ok(R3Claim::Expired);
@@ -1493,7 +1519,9 @@ impl R3CallStore for ReleaseBook {
     fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
         let record = self.records.lock().unwrap().by_uri.get(uri).cloned();
         let Some(record) = record else {
-            return Err(R3StoreError::Unavailable(R3HostError::new("missing proposal")));
+            return Err(R3StoreError::Unavailable(R3HostError::new(
+                "missing proposal",
+            )));
         };
         if record.release_until.is_some_and(|until| now >= until) {
             return Ok(R3Claim::Expired);
@@ -1501,7 +1529,11 @@ impl R3CallStore for ReleaseBook {
         let mut calls = self.calls.lock().unwrap();
         match calls.get(uri) {
             Some(ReleaseBound::Superseded) => Ok(R3Claim::DifferentToken),
-            Some(ReleaseBound::Live { token: bound, result, .. }) => {
+            Some(ReleaseBound::Live {
+                token: bound,
+                result,
+                ..
+            }) => {
                 if bound.compact_sha256 != token.compact_sha256 || bound.jti != token.jti {
                     return Ok(R3Claim::DifferentToken);
                 }
@@ -1538,7 +1570,12 @@ impl R3CallStore for ReleaseBook {
         result: &R3CallResult,
     ) -> Result<R3CallResult, R3StoreError> {
         let mut calls = self.calls.lock().unwrap();
-        let Some(ReleaseBound::Live { fence: bound, result: slot, .. }) = calls.get_mut(uri) else {
+        let Some(ReleaseBound::Live {
+            fence: bound,
+            result: slot,
+            ..
+        }) = calls.get_mut(uri)
+        else {
             return Err(R3StoreError::Conflict);
         };
         if bound != fence || slot.is_some() {
@@ -1587,9 +1624,10 @@ impl R3CallStore for ReleaseBook {
             || prior.release_until.is_none_or(|until| now >= until)
             || calls.contains_key(prior_uri)
             || records.by_uri.contains_key(&successor)
-            || record.held.as_ref().is_some_and(|held| {
-                Self::pending_taken(&records, &held.pending_id)
-            })
+            || record
+                .held
+                .as_ref()
+                .is_some_and(|held| Self::pending_taken(&records, &held.pending_id))
         {
             return Err(R3StoreError::Conflict);
         }
@@ -1723,13 +1761,13 @@ fn proposal_with_a_budget_offer_is_refused_before_approval() {
     let proposals = Arc::new(AtomicUsize::new(0));
     let permit = operation(&profile, profile.operations[0]);
     let per_call = operation(&profile, profile.operations[1]);
-    let present: BoxedR3Present = Box::new(|_: &Request<Vec<u8>>, _: &Operation| {
-        Err(R3HostError::new("unused"))
-    });
-    let describe: BoxedR3Describe =
-        Box::new(|_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Err(R3HostError::new("unused")));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
             Err(R3HostError::new("unused"))
-        });
+        },
+    );
     let permit_for_map = permit.clone();
     let per_call_for_map = per_call.clone();
     let mapper: BoxedR3OperationMapper = Box::new(move |request: &Request<Vec<u8>>| {
@@ -1939,7 +1977,11 @@ fn proposal_with_a_budget_offer_is_refused_before_approval() {
         "{}",
         String::from_utf8_lossy(approved.body())
     );
-    assert_eq!(proposals.load(Ordering::SeqCst), 1, "the plain proposal is approved");
+    assert_eq!(
+        proposals.load(Ordering::SeqCst),
+        1,
+        "the plain proposal is approved"
+    );
     claims.extra.insert(
         "budget".into(),
         json!({"amount": 500, "unit": "USD", "decimals": 2}),
@@ -2116,19 +2158,18 @@ fn failed_r3_audit_does_not_reserve_the_budget_cap() {
         &person,
         "rt-audit-fail",
     );
-    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        withheld.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
+    );
     assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
     assert!(member(&withheld, "auth_token").is_none());
     assert_eq!(ps.budget_accounted(), Some(0));
     *audit.0.lock().unwrap() = false;
-    let released = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-audit-ok",
-    );
+    let released =
+        exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-audit-ok");
     let amount = aauth_rust_core::AuthToken::parse(&released)
         .unwrap()
         .unverified_claims()
@@ -2198,14 +2239,7 @@ fn reserved_class_call_settles_below_the_hold() {
     )
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
-    let auth = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-settle",
-    );
+    let auth = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-settle");
     let held = match resource.authorize_reserved(&signed_call("/op/permit", &auth), NOW, "hold-1") {
         AuthDecision::Held(held) => held,
         other => panic!("reserve: {other:?}"),
@@ -2240,7 +2274,11 @@ fn reserved_class_call_settles_below_the_hold() {
         }
         other => panic!("over remaining: {other:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "the refusal does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the refusal does not run the tool"
+    );
 }
 
 #[test]
@@ -2402,14 +2440,7 @@ fn dropping_a_class_hold_releases_the_grant() {
     )
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
-    let auth = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-drop-hold",
-    );
+    let auth = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-drop-hold");
     let held = resource.authorize_reserved(&signed_call("/op/permit", &auth), NOW, "hold-drop");
     let AuthDecision::Held(held) = held else {
         panic!("reserve: {held:?}");
@@ -2494,15 +2525,13 @@ fn denied_class_consent_writes_no_audit_and_reserves_nothing() {
     )
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
-    let denied = exchange_budget_response(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-deny",
+    let denied = exchange_budget_response(&resource, &ps, &presented, &signer, &person, "rt-deny");
+    assert_eq!(
+        denied.status(),
+        403,
+        "{}",
+        String::from_utf8_lossy(denied.body())
     );
-    assert_eq!(denied.status(), 403, "{}", String::from_utf8_lossy(denied.body()));
     assert_eq!(member(&denied, "error").as_deref(), Some("access_denied"));
     assert!(member(&denied, "auth_token").is_none());
     assert_eq!(denials.load(Ordering::SeqCst), 1);
@@ -2613,29 +2642,21 @@ fn class_grant_outside_the_document_writes_no_audit_and_reserves_nothing() {
     )
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
-    let refused = exchange_budget_response(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-outside",
+    let refused =
+        exchange_budget_response(&resource, &ps, &presented, &signer, &person, "rt-outside");
+    assert_eq!(
+        refused.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(refused.body())
     );
-    assert_eq!(refused.status(), 500, "{}", String::from_utf8_lossy(refused.body()));
     assert_eq!(member(&refused, "error").as_deref(), Some("server_error"));
     assert!(member(&refused, "auth_token").is_none());
     assert_eq!(decisions.load(Ordering::SeqCst), 1);
     assert_eq!(audits.load(Ordering::SeqCst), 0);
     assert_eq!(ps.budget_accounted(), Some(0));
     phase.store(1, Ordering::SeqCst);
-    let released = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-inside",
-    );
+    let released = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-inside");
     let amount = aauth_rust_core::AuthToken::parse(&released)
         .unwrap()
         .unverified_claims()
@@ -2713,28 +2734,26 @@ fn core_budget_with_r3_enabled_skips_the_class_path_and_a_failed_commit_reserves
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
     fail_commit.store(true, std::sync::atomic::Ordering::SeqCst);
-    let withheld = exchange_core_budget_response(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-core-fail",
+    let withheld =
+        exchange_core_budget_response(&resource, &ps, &presented, &signer, &person, "rt-core-fail");
+    assert_eq!(
+        withheld.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
     );
-    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
     assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
     assert!(member(&withheld, "auth_token").is_none());
     assert_eq!(ps.budget_accounted(), Some(0));
     assert_eq!(r3_calls.load(Ordering::SeqCst), 0);
-    let released = exchange_core_budget_response(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-core-ok",
+    let released =
+        exchange_core_budget_response(&resource, &ps, &presented, &signer, &person, "rt-core-ok");
+    assert_eq!(
+        released.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(released.body())
     );
-    assert_eq!(released.status(), 200, "{}", String::from_utf8_lossy(released.body()));
     let auth = member(&released, "auth_token").expect("core auth token");
     let extra = aauth_rust_core::AuthToken::parse(&auth)
         .unwrap()
@@ -2743,7 +2762,10 @@ fn core_budget_with_r3_enabled_skips_the_class_path_and_a_failed_commit_reserves
         .clone();
     assert!(extra.get("r3_uri").is_none());
     assert_eq!(
-        extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        extra
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(Value::as_i64),
         Some(500)
     );
     assert_eq!(ps.budget_accounted(), Some(500));
@@ -2801,16 +2823,15 @@ fn denied_class_call_releases_the_budget_hold() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let documents = Arc::new(Documents::default());
     let deny = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let (resource, calls, _) =
-        resource_with_ledger(
-            &profile,
-            true,
-            false,
-            documents.clone(),
-            None,
-            Some(Arc::clone(&deny)),
-            None,
-        );
+    let (resource, calls, _) = resource_with_ledger(
+        &profile,
+        true,
+        false,
+        documents.clone(),
+        None,
+        Some(Arc::clone(&deny)),
+        None,
+    );
     let signer = agent();
     let ids = AtomicUsize::new(0);
     let permit = operation(&profile, profile.operations[0]);
@@ -2864,19 +2885,16 @@ fn denied_class_call_releases_the_budget_hold() {
     )
     .expect("person token");
     let presented = signer.with_token(person.clone()).unwrap();
-    let auth = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-deny-call",
-    );
+    let auth = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-deny-call");
     match resource.authorize(&signed_call("/op/permit", &auth), NOW, "denied-call") {
         AuthDecision::Forbidden { .. } => {}
         other => panic!("denied call: {other:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "denial does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "denial does not run the tool"
+    );
     match resource.authorize(&signed_call("/op/permit", &auth), NOW, "after-denial") {
         AuthDecision::Granted(admitted) => {
             let header = admitted.budget_header().expect("committed field");
@@ -2968,7 +2986,11 @@ fn revocation_during_a_class_call_does_not_draw_down_the_grant() {
         AuthDecision::Revoked { auth_token: true } => {}
         other => panic!("revoked during the call: {other:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "policy ran before the fence");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "policy ran before the fence"
+    );
     let token = aauth_rust_core::AuthToken::parse(&auth)
         .unwrap()
         .verify(&keys(), NOW)
@@ -3053,19 +3075,17 @@ fn failed_document_commit_withholds_the_budgeted_class_token() {
     let withheld = resource
         .authorize_endpoint(&authorize, NOW, "rt-doc-fail")
         .into_response();
-    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        withheld.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
+    );
     assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
     assert!(member(&withheld, "resource_token").is_none());
     assert!(documents.records.lock().unwrap().is_empty());
     assert_eq!(ps.budget_accounted(), Some(0));
-    let released = exchange_budget_auth(
-        &resource,
-        &ps,
-        &presented,
-        &signer,
-        &person,
-        "rt-doc-ok",
-    );
+    let released = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-doc-ok");
     let amount = aauth_rust_core::AuthToken::parse(&released)
         .unwrap()
         .unverified_claims()
@@ -3149,10 +3169,19 @@ fn class_audit_survives_when_issuance_commit_fails() {
         &person,
         "rt-issuance-fail",
     );
-    assert_eq!(withheld.status(), 500, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        withheld.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
+    );
     assert_eq!(member(&withheld, "error").as_deref(), Some("server_error"));
     assert!(member(&withheld, "auth_token").is_none());
-    assert_eq!(audits.load(Ordering::SeqCst), 1, "the audit row outlives the token");
+    assert_eq!(
+        audits.load(Ordering::SeqCst),
+        1,
+        "the audit row outlives the token"
+    );
     assert_eq!(ps.budget_accounted(), Some(0));
     let released = exchange_budget_auth(
         &resource,
@@ -3186,9 +3215,7 @@ fn revocation_after_issuance_withholds_the_class_token_without_reserving() {
     let once = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let slot: Arc<
         Mutex<
-            Option<
-                &'static PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>,
-            >,
+            Option<&'static PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>>,
         >,
     > = Arc::new(Mutex::new(None));
     let hook_slot = Arc::clone(&slot);
@@ -3271,7 +3298,12 @@ fn revocation_after_issuance_withholds_the_class_token_without_reserving() {
         &person,
         "rt-before-release",
     );
-    assert_eq!(withheld.status(), 400, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        withheld.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
+    );
     assert_eq!(
         member(&withheld, "error").as_deref(),
         Some("revoked_resource_token")
@@ -3399,7 +3431,12 @@ fn class_grant_that_expires_before_release_reserves_nothing() {
         &person,
         "rt-expired-before-release",
     );
-    assert_eq!(withheld.status(), 400, "{}", String::from_utf8_lossy(withheld.body()));
+    assert_eq!(
+        withheld.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(withheld.body())
+    );
     assert_eq!(
         member(&withheld, "error").as_deref(),
         Some("expired_resource_token")
@@ -3536,12 +3573,8 @@ fn well_formed_budget_consumption_is_not_resolved_and_reserves_nothing() {
         json!({"jti": "other-person", "consumed": 100}),
     );
     let mint = |claims: &aauth_rust_core::ResourceClaims| {
-        aauth_rust_core::mint_resource_token(
-            &SigningKey::from_seed([4; 32]),
-            "resource-1",
-            claims,
-        )
-        .unwrap()
+        aauth_rust_core::mint_resource_token(&SigningKey::from_seed([4; 32]), "resource-1", claims)
+            .unwrap()
     };
     let exchange = |token: String| {
         ps.handle(&post(
@@ -3551,14 +3584,24 @@ fn well_formed_budget_consumption_is_not_resolved_and_reserves_nothing() {
         ))
     };
     let unresolved = exchange(mint(&well_formed));
-    assert_eq!(unresolved.status(), 400, "{}", String::from_utf8_lossy(unresolved.body()));
+    assert_eq!(
+        unresolved.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(unresolved.body())
+    );
     assert_eq!(
         member(&unresolved, "error").as_deref(),
         Some("invalid_resource_token")
     );
     assert!(member(&unresolved, "auth_token").is_none());
     let broken = exchange(mint(&malformed));
-    assert_eq!(broken.status(), 400, "{}", String::from_utf8_lossy(broken.body()));
+    assert_eq!(
+        broken.status(),
+        400,
+        "{}",
+        String::from_utf8_lossy(broken.body())
+    );
     assert_eq!(member(&broken, "error").as_deref(), Some("invalid_budget"));
     assert_eq!(audits.load(Ordering::SeqCst), 0);
     assert_eq!(ps.budget_accounted(), Some(0));
@@ -3709,19 +3752,33 @@ fn failed_proposal_commit_withholds_the_challenge() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-class-before-proposal")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let class_resource = member(&issued, "resource_token").expect("class resource token");
     let class_exchange = ps.handle(&post(
         &signer,
         &format!("{PS}/token"),
         json!({ "resource_token": class_resource, "presented_token": person }),
     ));
-    assert_eq!(class_exchange.status(), 200, "{}", String::from_utf8_lossy(class_exchange.body()));
+    assert_eq!(
+        class_exchange.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(class_exchange.body())
+    );
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
     calls
         .fail_commit
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-fail") {
+    match resource.authorize(
+        &signed_call("/op/refuse", &class_auth),
+        NOW,
+        "challenge-fail",
+    ) {
         AuthDecision::InternalError => {}
         other => panic!("failed proposal commit: {other:?}"),
     }
@@ -3734,7 +3791,11 @@ fn failed_proposal_commit_withholds_the_challenge() {
         other => panic!("recovered proposal commit: {other:?}"),
     }
     assert!(calls.record.lock().unwrap().is_some());
-    assert_eq!(effects.load(Ordering::SeqCst), 0, "the challenge does not run the call");
+    assert_eq!(
+        effects.load(Ordering::SeqCst),
+        0,
+        "the challenge does not run the call"
+    );
 }
 
 #[test]
@@ -3862,26 +3923,41 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-class-once")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let class_resource = member(&issued, "resource_token").expect("class resource token");
     let class_exchange = ps.handle(&post(
         &signer,
         &format!("{PS}/token"),
         json!({ "resource_token": class_resource, "presented_token": person }),
     ));
-    assert_eq!(class_exchange.status(), 200, "{}", String::from_utf8_lossy(class_exchange.body()));
+    assert_eq!(
+        class_exchange.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(class_exchange.body())
+    );
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
-    let challenge = match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-1")
-    {
-        AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
-        other => panic!("proposal challenge: {other:?}"),
-    };
+    let challenge =
+        match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-1") {
+            AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
+            other => panic!("proposal challenge: {other:?}"),
+        };
     let approved = ps.handle(&post(
         &signer,
         &format!("{PS}/token"),
         json!({ "resource_token": challenge, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
     let grant = match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-1") {
@@ -3953,7 +4029,12 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
         &format!("{PS}/token"),
         json!({ "resource_token": unfinished, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     let unfinished_auth = member(&approved, "auth_token").expect("unfinished auth token");
     match resource.authorize(
         &signed_call("/op/refuse", &unfinished_auth),
@@ -4097,7 +4178,12 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-class-held")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let class_resource = member(&issued, "resource_token").expect("class resource token");
     let class_exchange = ps.handle(&post(
         &signer,
@@ -4106,9 +4192,18 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
     ));
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
     let held = resource
-        .authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-hold")
+        .authorize(
+            &signed_call("/op/refuse", &class_auth),
+            NOW,
+            "challenge-hold",
+        )
         .into_response();
-    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    assert_eq!(
+        held.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(held.body())
+    );
     let requirement = held
         .headers()
         .get("aauth-requirement")
@@ -4124,9 +4219,17 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
         .0
         .to_owned();
     let location = held.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.ends_with("/r3/pending/challenge-hold"), "{location}");
     assert!(
-        calls.records.lock().unwrap().values().any(|record| record.held.is_some()),
+        location.ends_with("/r3/pending/challenge-hold"),
+        "{location}"
+    );
+    assert!(
+        calls
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .any(|record| record.held.is_some()),
         "the held call is stored"
     );
     let approved = ps.handle(&post(
@@ -4134,9 +4237,18 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
         &format!("{PS}/token"),
         json!({ "resource_token": challenge, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
-    match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "not-pending") {
+    match resource.authorize(
+        &signed_call("/op/refuse", &per_call_auth),
+        NOW,
+        "not-pending",
+    ) {
         AuthDecision::Forbidden { .. } => {}
         other => panic!("held call on the mapped route: {other:?}"),
     }
@@ -4195,7 +4307,10 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
     );
     let executions = Arc::clone(&ran);
     let release: aauth_rust_resource::BoxedR3Release = Box::new(
-        move |_: &Request<Vec<u8>>, _: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+        move |_: &Request<Vec<u8>>,
+              _: &Operation,
+              _: &BTreeMap<String, PresentedParameter>,
+              _: Option<&str>| {
             executions.fetch_add(1, Ordering::SeqCst);
             Ok(Some(aauth_rust_resource::R3Release {
                 result: aauth_rust_r3::ProposalResult::new(b"{}").unwrap(),
@@ -4324,10 +4439,23 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
     ));
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
     let held = resource
-        .authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-release")
+        .authorize(
+            &signed_call("/op/refuse", &class_auth),
+            NOW,
+            "challenge-release",
+        )
         .into_response();
-    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
-    assert_eq!(ran.load(Ordering::SeqCst), 1, "the call runs before approval");
+    assert_eq!(
+        held.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(held.body())
+    );
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the call runs before approval"
+    );
     let requirement = held
         .headers()
         .get("aauth-requirement")
@@ -4347,7 +4475,12 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
         &format!("{PS}/token"),
         json!({ "resource_token": challenge, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
     match resource.authorize(
@@ -4358,7 +4491,11 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
         AuthDecision::Replayed(response) => assert_eq!(response.body(), b"released"),
         other => panic!("release: {other:?}"),
     }
-    assert_eq!(ran.load(Ordering::SeqCst), 1, "approval does not run the call again");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "approval does not run the call again"
+    );
     match resource.authorize(
         &signed_call("/r3/pending/challenge-release", &per_call_auth),
         NOW,
@@ -4390,7 +4527,10 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     );
     let executions = Arc::clone(&ran);
     let release: aauth_rust_resource::BoxedR3Release = Box::new(
-        move |_: &Request<Vec<u8>>, _: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+        move |_: &Request<Vec<u8>>,
+              _: &Operation,
+              _: &BTreeMap<String, PresentedParameter>,
+              _: Option<&str>| {
             let n = executions.fetch_add(1, Ordering::SeqCst) + 1;
             Ok(Some(aauth_rust_resource::R3Release {
                 result: aauth_rust_r3::ProposalResult::new(b"{}").unwrap(),
@@ -4511,7 +4651,11 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     });
     let issued = resource
         .authorize_endpoint(
-            &post(&presented, &format!("{RESOURCE}/authorize"), class_body.clone()),
+            &post(
+                &presented,
+                &format!("{RESOURCE}/authorize"),
+                class_body.clone(),
+            ),
             NOW,
             "rt-class-rerequest",
         )
@@ -4524,9 +4668,18 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
     ));
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
     let first = resource
-        .authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-first")
+        .authorize(
+            &signed_call("/op/refuse", &class_auth),
+            NOW,
+            "challenge-first",
+        )
         .into_response();
-    assert_eq!(first.status(), 202, "{}", String::from_utf8_lossy(first.body()));
+    assert_eq!(
+        first.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(first.body())
+    );
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     let first_requirement = first
         .headers()
@@ -4547,7 +4700,12 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
         &format!("{PS}/token"),
         json!({ "resource_token": first_challenge, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     let first_auth = member(&approved, "auth_token").expect("first per-call token");
     let later = NOW + 300;
     clock.store(later, Ordering::SeqCst);
@@ -4558,8 +4716,17 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
             "challenge-same",
         )
         .into_response();
-    assert_eq!(same.status(), 202, "{}", String::from_utf8_lossy(same.body()));
-    assert_eq!(ran.load(Ordering::SeqCst), 2, "the same class token computes again");
+    assert_eq!(
+        same.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(same.body())
+    );
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        2,
+        "the same class token computes again"
+    );
     let first_record = calls
         .load_pending("challenge-first")
         .unwrap()
@@ -4591,15 +4758,26 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
             "rt-class-refresh",
         )
         .into_response();
-    assert_eq!(reissued.status(), 200, "{}", String::from_utf8_lossy(reissued.body()));
-    let next_resource = member(&reissued, "resource_token").expect("refreshed class resource token");
+    assert_eq!(
+        reissued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(reissued.body())
+    );
+    let next_resource =
+        member(&reissued, "resource_token").expect("refreshed class resource token");
     let next_exchange = ps.handle(&post_at(
         &signer,
         &format!("{PS}/token"),
         json!({ "resource_token": next_resource, "presented_token": person }),
         later,
     ));
-    assert_eq!(next_exchange.status(), 200, "{}", String::from_utf8_lossy(next_exchange.body()));
+    assert_eq!(
+        next_exchange.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(next_exchange.body())
+    );
     let next_auth = member(&next_exchange, "auth_token").expect("refreshed class auth token");
     let first_jti = aauth_rust_core::AuthToken::parse(&class_auth)
         .unwrap()
@@ -4619,14 +4797,26 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
             "challenge-next",
         )
         .into_response();
-    assert_eq!(reused.status(), 202, "{}", String::from_utf8_lossy(reused.body()));
-    assert_eq!(ran.load(Ordering::SeqCst), 2, "the re-request does not run the call");
+    assert_eq!(
+        reused.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(reused.body())
+    );
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        2,
+        "the re-request does not run the call"
+    );
     assert!(calls.superseded(first_record.reference.uri()));
     let successor = calls
         .load_pending("challenge-next")
         .unwrap()
         .expect("successor");
-    assert_eq!(successor.supersedes.as_deref(), Some(first_record.reference.uri()));
+    assert_eq!(
+        successor.supersedes.as_deref(),
+        Some(first_record.reference.uri())
+    );
     assert_eq!(successor.released.as_ref().unwrap().body, b"released-1");
     let same_record = calls
         .load_pending("challenge-same")
@@ -4664,7 +4854,12 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
         json!({ "resource_token": next_challenge, "presented_token": next_auth }),
         later,
     ));
-    assert_eq!(next_approved.status(), 200, "{}", String::from_utf8_lossy(next_approved.body()));
+    assert_eq!(
+        next_approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(next_approved.body())
+    );
     let successor_auth = member(&next_approved, "auth_token").expect("successor per-call token");
     match resource.authorize(
         &signed_call_at("/r3/pending/challenge-next", &successor_auth, later),
@@ -4681,7 +4876,12 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
         json!({ "resource_token": same_challenge, "presented_token": class_auth }),
         later,
     ));
-    assert_eq!(same_approved.status(), 200, "{}", String::from_utf8_lossy(same_approved.body()));
+    assert_eq!(
+        same_approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(same_approved.body())
+    );
     let same_auth = member(&same_approved, "auth_token").expect("same-token per-call token");
     match resource.authorize(
         &signed_call_at("/r3/pending/challenge-same", &same_auth, later),
@@ -4759,9 +4959,17 @@ fn class_budget_grant_stops_at_period_end() {
         .unwrap()
         .unverified_claims()
         .clone();
-    assert_eq!(claims.exp, NOW + 120, "period_end caps a 600-second decision");
     assert_eq!(
-        claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        claims.exp,
+        NOW + 120,
+        "period_end caps a 600-second decision"
+    );
+    assert_eq!(
+        claims
+            .extra
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(Value::as_i64),
         Some(500)
     );
 }
@@ -4842,7 +5050,11 @@ fn class_grant_signs_zero_when_the_cap_is_spent() {
         }
         other => panic!("zero grant: {other:?}"),
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "a zero grant does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a zero grant does not run the tool"
+    );
 }
 
 #[test]
@@ -4913,7 +5125,11 @@ fn class_cap_is_free_again_after_the_grant_expires() {
         .unverified_claims()
         .clone();
     assert_eq!(
-        first_claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        first_claims
+            .extra
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(Value::as_i64),
         Some(500)
     );
     assert_eq!(first_claims.exp, NOW + 50);
@@ -4924,7 +5140,11 @@ fn class_cap_is_free_again_after_the_grant_expires() {
         .unverified_claims()
         .clone();
     assert_eq!(
-        second_claims.extra.get("budget").and_then(|budget| budget.get("amount")).and_then(Value::as_i64),
+        second_claims
+            .extra
+            .get("budget")
+            .and_then(|budget| budget.get("amount"))
+            .and_then(Value::as_i64),
         Some(500),
         "the cap is free once the first grant reaches exp"
     );
@@ -5001,7 +5221,12 @@ fn r3_only_class_token_is_unchanged_when_budgets_are_enabled() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-r3-only")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let resource_token = member(&issued, "resource_token").expect("resource token");
     assert!(
         ResourceToken::parse(&resource_token)
@@ -5016,7 +5241,12 @@ fn r3_only_class_token_is_unchanged_when_budgets_are_enabled() {
         &format!("{PS}/token"),
         json!({ "resource_token": resource_token, "presented_token": person }),
     ));
-    assert_eq!(exchanged.status(), 200, "{}", String::from_utf8_lossy(exchanged.body()));
+    assert_eq!(
+        exchanged.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(exchanged.body())
+    );
     let auth = member(&exchanged, "auth_token").expect("auth token");
     assert!(
         aauth_rust_core::AuthToken::parse(&auth)
@@ -5107,7 +5337,11 @@ fn budgets_before_r3_still_exchange_and_admit() {
             .cloned(),
         Some(json!({"amount": 500, "unit": "USD", "decimals": 2}))
     );
-    match resource.authorize(&signed_call("/op/permit", &auth), NOW, "admit-budgets-first") {
+    match resource.authorize(
+        &signed_call("/op/permit", &auth),
+        NOW,
+        "admit-budgets-first",
+    ) {
         AuthDecision::Granted(admitted) => assert_eq!(admitted.admitted(), "receipt"),
         other => panic!("budgets-first admission: {other:?}"),
     }
@@ -5117,12 +5351,7 @@ fn budgets_before_r3_still_exchange_and_admit() {
 #[test]
 fn combined_budget_auth_expires_and_a_later_grant_revokes() {
     let profile = profiles().into_iter().next().expect("one parser profile");
-    let (resource, calls, _) = resource_with(
-        &profile,
-        true,
-        true,
-        Arc::new(Documents::default()),
-    );
+    let (resource, calls, _) = resource_with(&profile, true, true, Arc::new(Documents::default()));
     let signer = agent();
     let ids = AtomicUsize::new(0);
     let permit = operation(&profile, profile.operations[0]);
@@ -5201,7 +5430,11 @@ fn combined_budget_auth_expires_and_a_later_grant_revokes() {
         .into_response();
     assert_eq!(expired.status(), 401);
     assert_eq!(expired.headers()["signature-error"], "error=expired_jwt");
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "expiry does not run the tool");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "expiry does not run the tool"
+    );
 
     let second = exchange_budget_auth(&resource, &ps, &presented, &signer, &person, "rt-revoke");
     let second_claims = aauth_rust_core::AuthToken::parse(&second)
@@ -5218,7 +5451,11 @@ fn combined_budget_auth_expires_and_a_later_grant_revokes() {
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let recorded = resource.revoke(&ps_revocation(&second_claims.jti, second_claims.exp), NOW);
-    assert_eq!(recorded.status(), 200, "person server revocation is recorded");
+    assert_eq!(
+        recorded.status(),
+        200,
+        "person server revocation is recorded"
+    );
     let revoked = resource
         .authorize(
             &signed_call_at("/op/permit", &second, NOW),
@@ -5793,7 +6030,8 @@ fn resource_on_call_directory(calls: Arc<dyn R3CallStore>) -> Arc<Resource> {
 #[test]
 #[ignore = "subprocess entry; the parent supplies AAUTH_CALL_DIR and AAUTH_PER_CALL_AUTH"]
 fn directory_call_replays_after_process_exit_worker() {
-    let root = std::path::PathBuf::from(std::env::var_os("AAUTH_CALL_DIR").expect("call directory"));
+    let root =
+        std::path::PathBuf::from(std::env::var_os("AAUTH_CALL_DIR").expect("call directory"));
     let token = std::env::var("AAUTH_PER_CALL_AUTH").expect("per-call auth token");
     let calls = Arc::new(DirectoryCallStore::open(&root).unwrap());
     let resource = resource_on_call_directory(calls);
@@ -5878,7 +6116,12 @@ fn directory_call_store_replays_the_product_after_process_exit() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-directory-product")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let class_resource = member(&issued, "resource_token").expect("class resource token");
     let class_exchange = ps.handle(&post(
         &signer,
@@ -5892,8 +6135,11 @@ fn directory_call_store_replays_the_product_after_process_exit() {
         String::from_utf8_lossy(class_exchange.body())
     );
     let class_auth = member(&class_exchange, "auth_token").expect("class auth token");
-    let challenge = match resource.authorize(&signed_call("/op/refuse", &class_auth), NOW, "challenge-dir")
-    {
+    let challenge = match resource.authorize(
+        &signed_call("/op/refuse", &class_auth),
+        NOW,
+        "challenge-dir",
+    ) {
         AuthDecision::AuthTokenRequired { resource_token, .. } => resource_token,
         other => panic!("proposal challenge: {other:?}"),
     };
@@ -5902,7 +6148,12 @@ fn directory_call_store_replays_the_product_after_process_exit() {
         &format!("{PS}/token"),
         json!({ "resource_token": challenge, "presented_token": class_auth }),
     ));
-    assert_eq!(approved.status(), 200, "{}", String::from_utf8_lossy(approved.body()));
+    assert_eq!(
+        approved.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(approved.body())
+    );
     assert_eq!(approvals.load(Ordering::SeqCst), 1);
     let per_call_auth = member(&approved, "auth_token").expect("per-call auth token");
     let grant = match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-dir")
@@ -5919,7 +6170,11 @@ fn directory_call_store_replays_the_product_after_process_exit() {
             .unwrap(),
     );
     assert_eq!(stored.body(), b"ran");
-    match resource.authorize(&signed_call("/op/refuse", &per_call_auth), NOW, "run-dir-replay") {
+    match resource.authorize(
+        &signed_call("/op/refuse", &per_call_auth),
+        NOW,
+        "run-dir-replay",
+    ) {
         AuthDecision::Replayed(response) => assert_eq!(response.body(), b"ran"),
         other => panic!("same-process replay: {other:?}"),
     }
@@ -6018,7 +6273,8 @@ fn resource_on_document_directory(
 #[test]
 #[ignore = "subprocess entry; the parent supplies AAUTH_DOC_DIR and AAUTH_CLASS_AUTH"]
 fn directory_document_admits_after_process_exit_worker() {
-    let root = std::path::PathBuf::from(std::env::var_os("AAUTH_DOC_DIR").expect("document directory"));
+    let root =
+        std::path::PathBuf::from(std::env::var_os("AAUTH_DOC_DIR").expect("document directory"));
     let token = std::env::var("AAUTH_CLASS_AUTH").expect("class auth token");
     let documents = Arc::new(DirectoryDocumentStore::open(&root).unwrap());
     let calls = Arc::new(DirectoryCallStore::open(root.join("calls")).unwrap());
@@ -6105,7 +6361,12 @@ fn directory_document_store_admits_the_class_after_process_exit() {
     let issued = resource
         .authorize_endpoint(&authorize, NOW, "rt-directory-document")
         .into_response();
-    assert_eq!(issued.status(), 200, "{}", String::from_utf8_lossy(issued.body()));
+    assert_eq!(
+        issued.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(issued.body())
+    );
     let class_resource = member(&issued, "resource_token").expect("class resource token");
     let class_exchange = ps.handle(&post(
         &signer,

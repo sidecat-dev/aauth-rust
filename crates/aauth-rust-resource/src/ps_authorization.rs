@@ -34,20 +34,20 @@ enum Meter {
 #[path = "resource_revocation.rs"]
 mod revocation;
 
-#[path = "r3_class.rs"]
-mod r3_class;
 #[path = "r3_call_directory.rs"]
 mod r3_call_directory;
+#[path = "r3_class.rs"]
+mod r3_class;
 pub use r3_call_directory::DirectoryCallStore;
 #[path = "r3_document_directory.rs"]
 mod r3_document_directory;
-pub use r3_document_directory::DirectoryDocumentStore;
 pub use r3_class::{
     BoxedR3Describe, BoxedR3Display, BoxedR3OperationMapper, BoxedR3Present, BoxedR3Release,
     R3CallDescription, R3CallResult, R3CallStore, R3CallToken, R3Claim, R3Config, R3DocumentRecord,
     R3DocumentStore, R3Grant, R3HeldRequest, R3HostError, R3PerCallConfig, R3ProposalRecord,
     R3Release, R3StoreError, R3Vocabulary,
 };
+pub use r3_document_directory::DirectoryDocumentStore;
 
 /// Named captured-state policy for a PS-authorized Resource in application state.
 pub type BoxedAuthPolicy = Box<dyn Fn(&VerifiedAuthToken, &Request<Vec<u8>>) -> bool + Send + Sync>;
@@ -423,10 +423,9 @@ impl<T> AuthDecision<T> {
             }
             Self::MethodNotAllowed => {
                 let mut response = refusal(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
-                response.headers_mut().insert(
-                    "allow",
-                    "GET".parse().expect("static allow"),
-                );
+                response
+                    .headers_mut()
+                    .insert("allow", "GET".parse().expect("static allow"));
                 response
             }
             Self::Gone => refusal(StatusCode::GONE, "gone"),
@@ -457,10 +456,9 @@ impl<T> AuthDecision<T> {
             Self::TemporarilyUnavailable => {
                 let mut response =
                     refusal(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
-                response.headers_mut().insert(
-                    "retry-after",
-                    "1".parse().expect("static retry"),
-                );
+                response
+                    .headers_mut()
+                    .insert("retry-after", "1".parse().expect("static retry"));
                 response
             }
             // A hold or an unmetered admission is not an HTTP grant. Mapping it

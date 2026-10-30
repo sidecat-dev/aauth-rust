@@ -1107,12 +1107,7 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
     let calls = Arc::new(AtomicUsize::new(0));
     let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
     let resource = resource(&store, &calls, false)
-        .with_budgets(
-            units.clone(),
-            "https://resource.example/usage",
-            500,
-            500,
-        )
+        .with_budgets(units.clone(), "https://resource.example/usage", 500, 500)
         .unwrap();
     let also = core_resource(&calls)
         .with_budgets(units, "https://resource.example/usage", 1_000, 1_000)
@@ -1133,8 +1128,7 @@ fn r3_and_budgets_issue_a_combined_resource_token() {
     let body: Value = serde_json::from_slice(response.body()).unwrap();
     let compact = body["resource_token"].as_str().unwrap();
     assert!(verify_resource_token(compact, &keys(), NOW).is_err());
-    let (_verified, offer, consumed) =
-        verify_budget_resource_token(compact, &keys(), NOW).unwrap();
+    let (_verified, offer, consumed) = verify_budget_resource_token(compact, &keys(), NOW).unwrap();
     assert!(consumed.is_none());
     assert_eq!(offer.amount(), 500);
     assert_eq!(offer.unit(), "USD");
@@ -1302,16 +1296,24 @@ impl R3CallStore for MemoryCalls {
         Ok(self.records.lock().unwrap().get(uri).cloned())
     }
     fn load_pending(&self, id: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
-        Ok(self.records.lock().unwrap().values().find(|record| {
-            record
-                .held
-                .as_ref()
-                .is_some_and(|held| held.pending_id == id)
-        }).cloned())
+        Ok(self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .find(|record| {
+                record
+                    .held
+                    .as_ref()
+                    .is_some_and(|held| held.pending_id == id)
+            })
+            .cloned())
     }
     fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
         if self.load(uri)?.is_none() {
-            return Err(R3StoreError::Unavailable(R3HostError::new("missing proposal")));
+            return Err(R3StoreError::Unavailable(R3HostError::new(
+                "missing proposal",
+            )));
         }
         if now >= token.retain_until {
             return Ok(R3Claim::Expired);
@@ -1378,22 +1380,28 @@ fn federated_access_server_serves_and_admits_class_and_per_call_r3() {
             })
         },
     );
-    let resource = PsAuthorizationResource::new_federated(config(), AS, federated_keys(), policy(&calls))
-        .unwrap()
-        .with_authorization_endpoint()
-        .with_r3(r3_config(&store, false))
-        .unwrap()
-        .with_r3_per_call(R3PerCallConfig {
-            present,
-            describe,
-            calls: proposals.clone(),
-            hold: false,
-            release: None,
-            held_result_lifetime: 300,
-        })
-        .unwrap();
+    let resource =
+        PsAuthorizationResource::new_federated(config(), AS, federated_keys(), policy(&calls))
+            .unwrap()
+            .with_authorization_endpoint()
+            .with_r3(r3_config(&store, false))
+            .unwrap()
+            .with_r3_per_call(R3PerCallConfig {
+                present,
+                describe,
+                calls: proposals.clone(),
+                hold: false,
+                release: None,
+                held_result_lifetime: 300,
+            })
+            .unwrap();
 
-    let record = issue(&resource, &store, &["records.read", "records.delete"], "rt-as");
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-as",
+    );
     assert_eq!(record.person_server, PS);
     assert_eq!(record.auth_token_issuer, AS);
     assert_eq!(record.auth_token_issuer_document, "aauth-access.json");
@@ -1405,10 +1413,12 @@ fn federated_access_server_serves_and_admits_class_and_per_call_r3() {
     let served = resource.r3_document(&fetch(&record, AS, "aauth-access.json", "as-key", 7), NOW);
     assert_eq!(served.status(), 200);
     assert_eq!(served.body(), &record.exact_json);
-    let person_fetch = resource.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
+    let person_fetch =
+        resource.r3_document(&fetch(&record, PS, "aauth-person.json", "ps-1", 3), NOW);
     assert_eq!(person_fetch.status(), 200);
     assert_eq!(person_fetch.body(), &record.exact_json);
-    let wrong_role = resource.r3_document(&fetch(&record, AS, "aauth-person.json", "as-key", 7), NOW);
+    let wrong_role =
+        resource.r3_document(&fetch(&record, AS, "aauth-person.json", "as-key", 7), NOW);
     assert_eq!(wrong_role.status(), 404);
     assert!(!discloses(&wrong_role, &record));
     let stranger = resource.r3_document(
@@ -1506,7 +1516,10 @@ fn federated_access_server_serves_and_admits_class_and_per_call_r3() {
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let retained = resource.r3_retain(
         &grant,
-        Response::builder().status(200).body(b"deleted".to_vec()).unwrap(),
+        Response::builder()
+            .status(200)
+            .body(b"deleted".to_vec())
+            .unwrap(),
     );
     assert_eq!(retained.body(), b"deleted");
     match resource.authorize(&call("/mcp/records.delete", &completion, 2), NOW, "run-2") {
@@ -1561,12 +1574,7 @@ fn qa_d1_budgeted_mapped_person_challenge_is_unauthorized() {
         String::from_utf8_lossy(proactive.body())
     );
     let issued: Value = serde_json::from_slice(proactive.body()).unwrap();
-    verify_resource_token(
-        issued["resource_token"].as_str().unwrap(),
-        &keys(),
-        NOW,
-    )
-    .unwrap();
+    verify_resource_token(issued["resource_token"].as_str().unwrap(), &keys(), NOW).unwrap();
 }
 
 #[test]
@@ -1619,9 +1627,17 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
             "challenge-hold",
         )
         .into_response();
-    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    assert_eq!(
+        held.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(held.body())
+    );
     let location = held.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.ends_with("/r3/pending/challenge-hold"), "{location}");
+    assert!(
+        location.ends_with("/r3/pending/challenge-hold"),
+        "{location}"
+    );
     let stored = proposals.only();
     let mut claims = auth_claims(None);
     claims.jti = "per-call-1".into();
@@ -1637,12 +1653,24 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
     let pending = "/r3/pending/challenge-hold";
     let before = calls.load(Ordering::SeqCst);
     let posted = resource
-        .authorize(&call_method("POST", pending, &per_call, 2), NOW, "poll-post")
+        .authorize(
+            &call_method("POST", pending, &per_call, 2),
+            NOW,
+            "poll-post",
+        )
         .into_response();
-    assert_eq!(posted.status(), 405, "{}", String::from_utf8_lossy(posted.body()));
+    assert_eq!(
+        posted.status(),
+        405,
+        "{}",
+        String::from_utf8_lossy(posted.body())
+    );
     let posted_body: Value = serde_json::from_slice(posted.body()).unwrap();
     assert_eq!(posted_body["error"], "method_not_allowed");
-    assert_eq!(posted.headers().get("allow").unwrap().to_str().unwrap(), "GET");
+    assert_eq!(
+        posted.headers().get("allow").unwrap().to_str().unwrap(),
+        "GET"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), before);
     let missing = resource
         .authorize(
@@ -1651,7 +1679,12 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
             "poll-missing",
         )
         .into_response();
-    assert_eq!(missing.status(), 410, "{}", String::from_utf8_lossy(missing.body()));
+    assert_eq!(
+        missing.status(),
+        410,
+        "{}",
+        String::from_utf8_lossy(missing.body())
+    );
     let missing_body: Value = serde_json::from_slice(missing.body()).unwrap();
     assert_eq!(missing_body["error"], "gone");
     let grant = match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-get") {
@@ -1660,7 +1693,10 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
     };
     let stored_response = resource.r3_retain(
         &grant,
-        Response::builder().status(200).body(b"held".to_vec()).unwrap(),
+        Response::builder()
+            .status(200)
+            .body(b"held".to_vec())
+            .unwrap(),
     );
     assert_eq!(stored_response.body(), b"held");
     let mut other_claims = claims.clone();
@@ -1679,11 +1715,25 @@ fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
         other => panic!("different token on the pending URL: {other:?}"),
     }
     let replay_post = resource
-        .authorize(&call_method("POST", pending, &per_call, 2), NOW, "poll-post-2")
+        .authorize(
+            &call_method("POST", pending, &per_call, 2),
+            NOW,
+            "poll-post-2",
+        )
         .into_response();
-    assert_eq!(replay_post.status(), 405, "{}", String::from_utf8_lossy(replay_post.body()));
     assert_eq!(
-        replay_post.headers().get("allow").unwrap().to_str().unwrap(),
+        replay_post.status(),
+        405,
+        "{}",
+        String::from_utf8_lossy(replay_post.body())
+    );
+    assert_eq!(
+        replay_post
+            .headers()
+            .get("allow")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "GET"
     );
     match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-replay") {
@@ -1736,9 +1786,18 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
         "ps-1",
     );
     let held = resource
-        .authorize(&call("/mcp/records.delete", &class, 2), NOW, "challenge-live")
+        .authorize(
+            &call("/mcp/records.delete", &class, 2),
+            NOW,
+            "challenge-live",
+        )
         .into_response();
-    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    assert_eq!(
+        held.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(held.body())
+    );
     let stored = proposals.only();
     let mut claims = auth_claims(None);
     claims.jti = "per-call-live".into();
@@ -1759,28 +1818,53 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
     let before = calls.load(Ordering::SeqCst);
     match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-live") {
         AuthDecision::StillPending { location } => {
-            assert_eq!(
-                location,
-                format!("{ORIGIN}/r3/pending/challenge-live")
-            );
+            assert_eq!(location, format!("{ORIGIN}/r3/pending/challenge-live"));
         }
         other => panic!("poll while the grant is held: {other:?}"),
     }
     let response = resource
         .authorize(&call(pending, &per_call, 2), NOW, "poll-live-http")
         .into_response();
-    assert_eq!(response.status(), 202, "{}", String::from_utf8_lossy(response.body()));
     assert_eq!(
-        response.headers().get("location").unwrap().to_str().unwrap(),
+        response.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         format!("{ORIGIN}/r3/pending/challenge-live").as_str()
     );
-    assert_eq!(response.headers().get("retry-after").unwrap().to_str().unwrap(), "1");
     assert_eq!(
-        response.headers().get("cache-control").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("retry-after")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "no-store"
     );
     assert_eq!(
-        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/json"
     );
     assert!(response.headers().get("aauth-requirement").is_none());
@@ -1789,7 +1873,10 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
     assert!(calls.load(Ordering::SeqCst) >= before);
     let retained = resource.r3_retain(
         &grant,
-        Response::builder().status(200).body(b"held-once".to_vec()).unwrap(),
+        Response::builder()
+            .status(200)
+            .body(b"held-once".to_vec())
+            .unwrap(),
     );
     assert_eq!(retained.body(), b"held-once");
     match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-after") {
@@ -1804,7 +1891,12 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
             "challenge-drop",
         )
         .into_response();
-    assert_eq!(dropped.status(), 202, "{}", String::from_utf8_lossy(dropped.body()));
+    assert_eq!(
+        dropped.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(dropped.body())
+    );
     let stored = proposals
         .records
         .lock()
@@ -1830,18 +1922,35 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
     )
     .expect("dropped per-call auth token");
     let dropped_pending = "/r3/pending/challenge-drop";
-    match resource.authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-drop-grant") {
+    match resource.authorize(
+        &call(dropped_pending, &dropped_token, 2),
+        NOW,
+        "poll-drop-grant",
+    ) {
         AuthDecision::Granted(_) => {}
         other => panic!("grant that will be dropped: {other:?}"),
     }
-    match resource.authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-dropped") {
+    match resource.authorize(
+        &call(dropped_pending, &dropped_token, 2),
+        NOW,
+        "poll-dropped",
+    ) {
         AuthDecision::InternalError => {}
         other => panic!("poll after the grant was dropped: {other:?}"),
     }
     let abandoned = resource
-        .authorize(&call(dropped_pending, &dropped_token, 2), NOW, "poll-dropped-http")
+        .authorize(
+            &call(dropped_pending, &dropped_token, 2),
+            NOW,
+            "poll-dropped-http",
+        )
         .into_response();
-    assert_eq!(abandoned.status(), 500, "{}", String::from_utf8_lossy(abandoned.body()));
+    assert_eq!(
+        abandoned.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(abandoned.body())
+    );
     let abandoned_body: Value = serde_json::from_slice(abandoned.body()).unwrap();
     assert_eq!(abandoned_body["error"], "server_error");
     match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-first-intact") {
@@ -1893,7 +2002,11 @@ fn a_retry_while_the_grant_is_unretained_is_unavailable() {
         3,
         "ps-1",
     );
-    match resource.authorize(&call("/mcp/records.delete", &class, 2), NOW, "challenge-retry") {
+    match resource.authorize(
+        &call("/mcp/records.delete", &class, 2),
+        NOW,
+        "challenge-retry",
+    ) {
         AuthDecision::AuthTokenRequired { .. } => {}
         other => panic!("retry challenge: {other:?}"),
     }
@@ -1921,19 +2034,40 @@ fn a_retry_while_the_grant_is_unretained_is_unavailable() {
     let response = resource
         .authorize(&call(route, &per_call, 2), NOW, "run-live-http")
         .into_response();
-    assert_eq!(response.status(), 503, "{}", String::from_utf8_lossy(response.body()));
-    assert_eq!(response.headers().get("retry-after").unwrap().to_str().unwrap(), "1");
+    assert_eq!(
+        response.status(),
+        503,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1"
+    );
     assert!(response.headers().get("location").is_none());
     assert!(response.headers().get("aauth-requirement").is_none());
     assert_eq!(
-        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/problem+json"
     );
     let body: Value = serde_json::from_slice(response.body()).unwrap();
     assert_eq!(body["error"], "temporarily_unavailable");
     let retained = resource.r3_retain(
         &grant,
-        Response::builder().status(200).body(b"ran-once".to_vec()).unwrap(),
+        Response::builder()
+            .status(200)
+            .body(b"ran-once".to_vec())
+            .unwrap(),
     );
     assert_eq!(retained.body(), b"ran-once");
     match resource.authorize(&call(route, &per_call, 2), NOW, "run-after") {
@@ -1975,7 +2109,12 @@ fn a_retry_while_the_grant_is_unretained_is_unavailable() {
     let abandoned = resource
         .authorize(&call(route, &dropped_token, 2), NOW, "run-dropped-http")
         .into_response();
-    assert_eq!(abandoned.status(), 500, "{}", String::from_utf8_lossy(abandoned.body()));
+    assert_eq!(
+        abandoned.status(),
+        500,
+        "{}",
+        String::from_utf8_lossy(abandoned.body())
+    );
     let abandoned_body: Value = serde_json::from_slice(abandoned.body()).unwrap();
     assert_eq!(abandoned_body["error"], "server_error");
     match resource.authorize(&call(route, &per_call, 2), NOW, "run-first-intact") {

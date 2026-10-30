@@ -1300,10 +1300,25 @@ mod tests {
     fn held_proposal_matches_only_the_same_operation_parameters_and_account() {
         let query = operation("records.query");
         let stored = stored_proposal("r-1", Some("account"));
-        assert!(held_proposal_matches(&stored, &query, &presented("r-1"), Some("account")));
+        assert!(held_proposal_matches(
+            &stored,
+            &query,
+            &presented("r-1"),
+            Some("account")
+        ));
         // Changed parameters.
-        assert!(!held_proposal_matches(&stored, &query, &presented("r-2"), Some("account")));
-        assert!(!held_proposal_matches(&stored, &query, &BTreeMap::new(), Some("account")));
+        assert!(!held_proposal_matches(
+            &stored,
+            &query,
+            &presented("r-2"),
+            Some("account")
+        ));
+        assert!(!held_proposal_matches(
+            &stored,
+            &query,
+            &BTreeMap::new(),
+            Some("account")
+        ));
         // Another operation.
         assert!(!held_proposal_matches(
             &stored,
@@ -1312,7 +1327,17 @@ mod tests {
             Some("account")
         ));
         // Account presence and value.
-        assert!(!held_proposal_matches(&stored, &query, &presented("r-1"), None));
-        assert!(!held_proposal_matches(&stored, &query, &presented("r-1"), Some("other-account")));
+        assert!(!held_proposal_matches(
+            &stored,
+            &query,
+            &presented("r-1"),
+            None
+        ));
+        assert!(!held_proposal_matches(
+            &stored,
+            &query,
+            &presented("r-1"),
+            Some("other-account")
+        ));
     }
 }

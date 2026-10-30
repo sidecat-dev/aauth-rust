@@ -23,8 +23,8 @@ use aauth_rust_r3::{
     FetchTransport, GrantedOperations, IssuanceRecord, IssuanceStore, OperationAccess, Proposal,
     Reference, Registry, VerifiedR3AuthToken, VocabularyUri, mint_auth_token as mint_r3_auth_token,
     mint_budget_auth_token, mint_direct_auth_token, mint_per_call_auth_token,
-    validate_document_account, verify_budget_resource_token,
-    validate_proposal_account, verify_auth_token_claims, verify_resource_token,
+    validate_document_account, validate_proposal_account, verify_auth_token_claims,
+    verify_budget_resource_token, verify_resource_token,
 };
 use std::sync::Arc;
 
@@ -373,12 +373,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             offer,
         } = self.prepare_authorization_with(&agent, parameters, verified_at, None, true)?;
         let reference = if offer.is_some() {
-            let (verified, _offer, consumed) = verify_budget_resource_token(
-                &resource_compact,
-                &self.resolver(),
-                verified_at,
-            )
-            .map_err(|_| Failure::parameter("invalid_resource_token"))?;
+            let (verified, _offer, consumed) =
+                verify_budget_resource_token(&resource_compact, &self.resolver(), verified_at)
+                    .map_err(|_| Failure::parameter("invalid_resource_token"))?;
             // Go refuses a consumption record here. The HTTP code is
             // `invalid_resource_token`: this is not a claim-parse error.
             if consumed.is_some() {

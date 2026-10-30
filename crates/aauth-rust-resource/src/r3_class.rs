@@ -688,11 +688,13 @@ where
             Ok(offer) => offer,
             Err(decision) => return Some(decision),
         };
-        Some(match self.issue_r3(profile, &claims, &operations, offer.as_ref()) {
-            Ok(resource_token) => ProactiveDecision::ResourceToken { resource_token },
-            Err(Issue::Host) => ProactiveDecision::InternalError,
-            Err(Issue::Retention) => ProactiveDecision::RetentionFailed,
-        })
+        Some(
+            match self.issue_r3(profile, &claims, &operations, offer.as_ref()) {
+                Ok(resource_token) => ProactiveDecision::ResourceToken { resource_token },
+                Err(Issue::Host) => ProactiveDecision::InternalError,
+                Err(Issue::Retention) => ProactiveDecision::RetentionFailed,
+            },
+        )
     }
 
     /// Person challenge on a mapped R3 route: one class document for that operation.

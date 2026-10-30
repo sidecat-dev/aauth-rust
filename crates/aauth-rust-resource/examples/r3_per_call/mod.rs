@@ -814,9 +814,10 @@ impl R3CallStore for FileCalls {
             || prior.release_until.is_none_or(|until| now >= until)
             || tombstone.exists()
             || self.record_path(record.reference.uri()).exists()
-            || record.held.as_ref().is_some_and(|held| {
-                self.0.join(format!("pending-{}", held.pending_id)).exists()
-            })
+            || record
+                .held
+                .as_ref()
+                .is_some_and(|held| self.0.join(format!("pending-{}", held.pending_id)).exists())
         {
             return Err(R3StoreError::Conflict);
         }
@@ -1412,12 +1413,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         (current.clone(), effects.clone(), control.clone());
     let api = Arc::new(TlsServer::start("records.example", move |request| {
         let resource = serving.read().unwrap().clone();
-        serve(
-            &resource,
-            &serving_effects,
-            serving_control.now(),
-            request,
-        )
+        serve(&resource, &serving_effects, serving_control.now(), request)
     })?);
     trust.discover(&api, RECORDS, "aauth-resource.json")?;
 
@@ -1719,8 +1715,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         let released = api.send(&poll_first)?;
         t.release_superseded_poll_status = released.status().as_u16();
         t.release_superseded_runs_delta = runs() - before_poll;
-        t.release_successor_body_matches_original =
-            query_run_seq(&released) == Some(original_runs);
+        t.release_successor_body_matches_original = query_run_seq(&released) == Some(original_runs);
         t.release_successor_status = released.status().as_u16();
         t.release_successor_runs_delta = runs() - original_runs;
     }
@@ -1803,8 +1798,8 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         let mut poll = get(&location)?;
         completing.sign(&mut poll, control.now())?;
         let released = api.send(&poll)?;
-        t.release_fresh_body_is_new = query_run_seq(&released) != Some(original_runs)
-            && query_run_seq(&released).is_some();
+        t.release_fresh_body_is_new =
+            query_run_seq(&released) != Some(original_runs) && query_run_seq(&released).is_some();
     }
 
     if case == Some(AdmissionCase::ApprovalExpiry) {
@@ -1812,8 +1807,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         //    Agent refreshes top-down and resubmits, PS applies the recorded approval once.
         *current.write().unwrap() = Arc::new(compose(&root, seed, &trust, false, control.clone())?);
         control.next_class_lifetime.store(5, Ordering::SeqCst);
-        let short_class =
-            class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
+        let short_class = class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
         let short_holder = agent.with_token(short_class.clone())?;
         let challenged_1 = api.send(&post_at(
             &short_holder,
@@ -1832,8 +1826,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         )?;
         control.advance_on_approval.store(6, Ordering::SeqCst);
         control.next_proposal_lifetime.store(20, Ordering::SeqCst);
-        let expired_response =
-            approve(&agent, &ps_tls, &proposal_token_1, &short_class, &control)?;
+        let expired_response = approve(&agent, &ps_tls, &proposal_token_1, &short_class, &control)?;
         t.expired_presented_status = expired_response.status().as_u16();
         t.expired_presented_error = member(&expired_response, "error").unwrap_or_default();
 
@@ -1986,8 +1979,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
             &control,
         )?;
         t.release_expired_presented_status = release_expired.status().as_u16();
-        t.release_expired_presented_error =
-            member(&release_expired, "error").unwrap_or_default();
+        t.release_expired_presented_error = member(&release_expired, "error").unwrap_or_default();
 
         let refreshed_release_class =
             class_grant(&agent, &person, &api, &ps_tls, &trust, &registry, &control)?;
@@ -1996,8 +1988,7 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
         // Negative control: polling the original pending URL with the expired or refreshed class token.
         let mut poll_old_expired = get(&old_location)?;
         short_release_holder.sign(&mut poll_old_expired, control.now())?;
-        t.release_old_pending_expired_class_status =
-            api.send(&poll_old_expired)?.status().as_u16();
+        t.release_old_pending_expired_class_status = api.send(&poll_old_expired)?.status().as_u16();
         let mut poll_old_refreshed = get(&old_location)?;
         refreshed_release_holder.sign(&mut poll_old_refreshed, control.now())?;
         t.release_old_pending_refreshed_class_status =
@@ -2290,7 +2281,8 @@ fn custody_record(uri: &str, pending: &str, body: &[u8]) -> R3ProposalRecord {
         auth_token_issuer: "https://ps.example".into(),
         resource_token_jti: pending.into(),
         resource_token: "token".into(),
-        class_reference: Reference::new("https://records.example/r3/c.1", digest(b"class")).unwrap(),
+        class_reference: Reference::new("https://records.example/r3/c.1", digest(b"class"))
+            .unwrap(),
         presented_jti: "ps-1".into(),
         subject: "subject".into(),
         agent_jkt: "jkt".into(),
@@ -2491,7 +2483,11 @@ fn custody_store(name: &str) -> (PathBuf, FileCalls) {
             .unwrap_or_default()
     ));
     fs::create_dir_all(&root).unwrap();
-    let calls = FileCalls(root.clone(), Mutex::new(()), Arc::new(AdmissionControl::default()));
+    let calls = FileCalls(
+        root.clone(),
+        Mutex::new(()),
+        Arc::new(AdmissionControl::default()),
+    );
     (root, calls)
 }
 
@@ -2501,8 +2497,15 @@ fn supersede_keeps_the_prior_when_the_tombstone_cannot_be_written() {
     let prior = custody_record("https://records.example/r3/p.prior", "pend-prior", b"run-1");
     let successor = custody_record("https://records.example/r3/p.next", "pend-next", b"run-1");
     calls.commit(&prior).unwrap();
-    calls.2.fail_supersede_tombstone.store(true, Ordering::SeqCst);
-    assert!(calls.supersede(prior.reference.uri(), &successor, 1_100).is_err());
+    calls
+        .2
+        .fail_supersede_tombstone
+        .store(true, Ordering::SeqCst);
+    assert!(
+        calls
+            .supersede(prior.reference.uri(), &successor, 1_100)
+            .is_err()
+    );
     assert!(!calls.claim_path(prior.reference.uri()).exists());
     assert!(!calls.record_path(successor.reference.uri()).exists());
     let held = calls.held_releases("jkt", "subject", 1_100).unwrap();
@@ -2510,7 +2513,11 @@ fn supersede_keeps_the_prior_when_the_tombstone_cannot_be_written() {
     assert_eq!(held[0].reference.uri(), prior.reference.uri());
     assert_eq!(held[0].released.as_ref().unwrap().body, b"run-1");
     // The same retry then retires the original without recomputing its bytes.
-    assert!(calls.supersede(prior.reference.uri(), &successor, 1_100).is_ok());
+    assert!(
+        calls
+            .supersede(prior.reference.uri(), &successor, 1_100)
+            .is_ok()
+    );
     let held = calls.held_releases("jkt", "subject", 1_100).unwrap();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].reference.uri(), successor.reference.uri());

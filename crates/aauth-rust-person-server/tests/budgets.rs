@@ -10,8 +10,7 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
     AuthorizationRequest, Config, DeferredConfig, Federation, FederationError, FederationFailure,
-    Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError,
-    Store,
+    Grant, MemoryStore, Person, PersonRequest, PersonServer, Policy, PolicyError, Store,
 };
 use http::{Method, Request, Response};
 use serde_json::{Value, json};

@@ -284,7 +284,8 @@ fn alternate_access_token(compact: &str, seed: [u8; 32]) -> Result<String> {
         return Err("held auth token kid cannot be resigned".into());
     }
     header["kid"] = json!("fed-as-2");
-    let resigned = aauth_rust_jose::Jws::sign(&header, parsed.payload(), &SigningKey::from_seed(seed))?;
+    let resigned =
+        aauth_rust_jose::Jws::sign(&header, parsed.payload(), &SigningKey::from_seed(seed))?;
     if resigned == compact {
         return Err("alternate compact auth token matches the original".into());
     }
@@ -475,7 +476,11 @@ impl R3DocumentStore for FileDocuments {
 const SUPERSEDED: &str = "(superseded)";
 
 // The control stays with the store for the same lifetime as the main example.
-struct FileCalls(PathBuf, Mutex<()>, #[allow(dead_code)] Arc<AdmissionControl>);
+struct FileCalls(
+    PathBuf,
+    Mutex<()>,
+    #[allow(dead_code)] Arc<AdmissionControl>,
+);
 impl FileCalls {
     fn record_path(&self, uri: &str) -> PathBuf {
         self.0.join(format!("p-{}.json", digest(uri.as_bytes())))
@@ -729,9 +734,10 @@ impl R3CallStore for FileCalls {
             || prior.release_until.is_none_or(|until| now >= until)
             || tombstone.exists()
             || self.record_path(record.reference.uri()).exists()
-            || record.held.as_ref().is_some_and(|held| {
-                self.0.join(format!("pending-{}", held.pending_id)).exists()
-            })
+            || record
+                .held
+                .as_ref()
+                .is_some_and(|held| self.0.join(format!("pending-{}", held.pending_id)).exists())
         {
             return Err(R3StoreError::Conflict);
         }
@@ -1183,7 +1189,13 @@ fn handle_converse(
         .map_err(|_| "invalid go agent seed length")?;
     let go_agent_token = text(&body, "go_agent_token")?;
 
-    trust.discover_external(go_ap_addr, "go-ap.example", &go_ap_cert, GO_AP, "aauth-agent.json")?;
+    trust.discover_external(
+        go_ap_addr,
+        "go-ap.example",
+        &go_ap_cert,
+        GO_AP,
+        "aauth-agent.json",
+    )?;
     trust.discover_external(
         go_ps_addr,
         "go-ps.example",
@@ -1204,7 +1216,8 @@ fn handle_converse(
         json!({"resource": RECORDS}).to_string().as_bytes(),
         clock,
     )?;
-    let person_resp = TlsServer::send_external(go_ps_addr, "go-ps.example", &go_ps_cert, &person_req)?;
+    let person_resp =
+        TlsServer::send_external(go_ps_addr, "go-ps.example", &go_ps_cert, &person_req)?;
     let person_status = person_resp.status().as_u16();
     let person_token = member(&person_resp, "person_token").ok_or("go ps person token refused")?;
 
@@ -1263,11 +1276,21 @@ fn handle_converse(
     // 4. Rust Agent invokes `records.read` (200) and `records.delete` (403) at Rust Resource.
     let holder = go_agent.with_token(go_class_auth)?;
     let class_read_status = api
-        .send(&post_at(&holder, &format!("{RECORDS}/records/read"), R1, clock)?)?
+        .send(&post_at(
+            &holder,
+            &format!("{RECORDS}/records/read"),
+            R1,
+            clock,
+        )?)?
         .status()
         .as_u16();
     let ungranted_delete_status = api
-        .send(&post_at(&holder, &format!("{RECORDS}/records/delete"), R1, clock)?)?
+        .send(&post_at(
+            &holder,
+            &format!("{RECORDS}/records/delete"),
+            R1,
+            clock,
+        )?)?
         .status()
         .as_u16();
 
@@ -1327,7 +1350,10 @@ fn handle_converse(
     }))
 }
 
-fn http_failure(step: &str, response: &Response<Vec<u8>>) -> Box<dyn std::error::Error + Send + Sync> {
+fn http_failure(
+    step: &str,
+    response: &Response<Vec<u8>>,
+) -> Box<dyn std::error::Error + Send + Sync> {
     format!(
         "{step} failed ({}): {}",
         response.status(),
@@ -1361,7 +1387,13 @@ fn handle_federated_converse(
         .map_err(|_| "invalid alternate access seed length")?;
     let fed_clock_addr = text(&body, "fed_clock_addr")?;
 
-    trust.discover_external(go_ap_addr, "go-ap.example", &go_ap_cert, GO_AP, "aauth-agent.json")?;
+    trust.discover_external(
+        go_ap_addr,
+        "go-ap.example",
+        &go_ap_cert,
+        GO_AP,
+        "aauth-agent.json",
+    )?;
     trust.discover_external(
         fed_ps_addr,
         "fed-ps.example",
@@ -1399,15 +1431,24 @@ fn handle_federated_converse(
         json!({"resource": FED_RECORDS}).to_string().as_bytes(),
         clock,
     )?;
-    let person_resp = TlsServer::send_external(fed_ps_addr, "fed-ps.example", &fed_ps_cert, &person_req)?;
+    let person_resp =
+        TlsServer::send_external(fed_ps_addr, "fed-ps.example", &fed_ps_cert, &person_req)?;
     let person_status = person_resp.status().as_u16();
     if person_status != 200 {
         return Err(http_failure("federated person token", &person_resp));
     }
-    let person_token = member(&person_resp, "person_token").ok_or("federated person token missing")?;
+    let person_token =
+        member(&person_resp, "person_token").ok_or("federated person token missing")?;
 
     let resource_token = agent.r3_authorize(
-        |req| TlsServer::send_external(fed_records_addr, "fed-records.example", &fed_records_cert, &req),
+        |req| {
+            TlsServer::send_external(
+                fed_records_addr,
+                "fed-records.example",
+                &fed_records_cert,
+                &req,
+            )
+        },
         &format!("{FED_RECORDS}/authorize"),
         &person_token,
         &delete_only,
@@ -1456,12 +1497,7 @@ fn handle_federated_converse(
     }
 
     let holder = agent.with_token(class_auth.clone())?;
-    let challenge_req = post_at(
-        &holder,
-        &format!("{FED_RECORDS}/records/r-1"),
-        b"{}",
-        clock,
-    )?;
+    let challenge_req = post_at(&holder, &format!("{FED_RECORDS}/records/r-1"), b"{}", clock)?;
     let challenged = TlsServer::send_external(
         fed_records_addr,
         "fed-records.example",
@@ -1637,8 +1673,7 @@ fn handle_federated_converse(
         trust,
         clock,
     )?;
-    if held_delivered.claims().dwk != "aauth-access.json" || held_delivered.claims().iss != FED_AS
-    {
+    if held_delivered.claims().dwk != "aauth-access.json" || held_delivered.claims().iss != FED_AS {
         return Err("federated held grant was not issued by the access server".into());
     }
     let poll_holder = agent.with_token(held_grant.clone())?;
@@ -1738,7 +1773,10 @@ fn handle_federated_converse(
         &still_req,
     )?;
     if still.status().as_u16() != 200 || still.body() != polled.body() {
-        return Err(http_failure("federated held replay after rejection", &still));
+        return Err(http_failure(
+            "federated held replay after rejection",
+            &still,
+        ));
     }
     // Same claims, different compact bytes. Go binds the completion to the
     // original digest and refuses this one without executing again.
@@ -1959,12 +1997,7 @@ pub fn run() -> Result<InteropTranscript> {
         (current.clone(), effects.clone(), control.clone());
     let api = Arc::new(TlsServer::start("records.example", move |request| {
         let resource = serving_res.read().unwrap().clone();
-        serve(
-            &resource,
-            &serving_effects,
-            serving_control.now(),
-            request,
-        )
+        serve(&resource, &serving_effects, serving_control.now(), request)
     })?);
     trust.discover(&api, RECORDS, "aauth-resource.json")?;
 
@@ -2033,8 +2066,12 @@ pub fn run() -> Result<InteropTranscript> {
                 }),
             ),
             ("POST", "/arm-approval-expiry") => {
-                interop_control.next_class_lifetime.store(30, Ordering::SeqCst);
-                interop_control.advance_on_approval.store(35, Ordering::SeqCst);
+                interop_control
+                    .next_class_lifetime
+                    .store(30, Ordering::SeqCst);
+                interop_control
+                    .advance_on_approval
+                    .store(35, Ordering::SeqCst);
                 json_response(200, json!({"armed": true}))
             }
             ("POST", "/hold-mode") => match compose(
@@ -2050,14 +2087,12 @@ pub fn run() -> Result<InteropTranscript> {
                 }
                 Err(error) => json_response(500, json!({"error": error.to_string()})),
             },
-            ("POST", "/federated-converse") => match handle_federated_converse(
-                &request,
-                &interop_trust,
-                &interop_control,
-            ) {
-                Ok(result) => json_response(200, result),
-                Err(error) => json_response(500, json!({"error": error.to_string()})),
-            },
+            ("POST", "/federated-converse") => {
+                match handle_federated_converse(&request, &interop_trust, &interop_control) {
+                    Ok(result) => json_response(200, result),
+                    Err(error) => json_response(500, json!({"error": error.to_string()})),
+                }
+            }
             ("POST", "/converse") => match handle_converse(
                 &request,
                 &interop_root,
@@ -2135,10 +2170,10 @@ pub fn run() -> Result<InteropTranscript> {
         go_to_rust_class_read_status: number(&raw, "go_to_rust_class_read_status")? as u16,
         go_to_rust_401_challenge_status: number(&raw, "go_to_rust_401_challenge_status")? as u16,
         go_to_rust_approval_expiry_error: text(&raw, "go_to_rust_approval_expiry_error")?,
-        go_to_rust_approval_replacement_reused_without_reprompt: raw
-            ["go_to_rust_approval_replacement_reused_without_reprompt"]
-            .as_bool()
-            .unwrap_or(false),
+        go_to_rust_approval_replacement_reused_without_reprompt:
+            raw["go_to_rust_approval_replacement_reused_without_reprompt"]
+                .as_bool()
+                .unwrap_or(false),
         go_to_rust_substituted_parameters_status: number(
             &raw,
             "go_to_rust_substituted_parameters_status",
@@ -2153,16 +2188,13 @@ pub fn run() -> Result<InteropTranscript> {
             .as_bool()
             .unwrap_or(false),
         go_to_rust_202_held_status: number(&raw, "go_to_rust_202_held_status")? as u16,
-        go_to_rust_202_foreign_token_status: number(
-            &raw,
-            "go_to_rust_202_foreign_token_status",
-        )? as u16,
+        go_to_rust_202_foreign_token_status: number(&raw, "go_to_rust_202_foreign_token_status")?
+            as u16,
         go_to_rust_202_poll_status: number(&raw, "go_to_rust_202_poll_status")? as u16,
         go_to_rust_202_replay_status: number(&raw, "go_to_rust_202_replay_status")? as u16,
         go_to_rust_release_held_status: number(&raw, "go_to_rust_release_held_status")? as u16,
         go_to_rust_release_poll_status: number(&raw, "go_to_rust_release_poll_status")? as u16,
-        go_to_rust_release_replay_status: number(&raw, "go_to_rust_release_replay_status")?
-            as u16,
+        go_to_rust_release_replay_status: number(&raw, "go_to_rust_release_replay_status")? as u16,
         go_to_rust_query_runs: number(&raw, "go_to_rust_query_runs")? as usize,
         release_retry_expiry_error: text(&raw, "release_retry_expiry_error")?,
         release_retry_reused_without_reprompt: raw["release_retry_reused_without_reprompt"]
@@ -2178,8 +2210,7 @@ pub fn run() -> Result<InteropTranscript> {
             .as_bool()
             .unwrap_or(false),
         rust_to_go_person_status: number(&raw, "rust_to_go_person_status")? as u16,
-        rust_to_go_class_exchange_status: number(&raw, "rust_to_go_class_exchange_status")?
-            as u16,
+        rust_to_go_class_exchange_status: number(&raw, "rust_to_go_class_exchange_status")? as u16,
         rust_to_go_ps_fetched_document: raw["rust_to_go_ps_fetched_document"]
             .as_bool()
             .unwrap_or(false),
@@ -2187,22 +2218,16 @@ pub fn run() -> Result<InteropTranscript> {
         rust_to_go_class_read_status: number(&raw, "rust_to_go_class_read_status")? as u16,
         rust_to_go_ungranted_delete_status: number(&raw, "rust_to_go_ungranted_delete_status")?
             as u16,
-        rust_to_go_proposal_exchange_status: number(
-            &raw,
-            "rust_to_go_proposal_exchange_status",
-        )? as u16,
+        rust_to_go_proposal_exchange_status: number(&raw, "rust_to_go_proposal_exchange_status")?
+            as u16,
         rust_to_go_proposal_exchange_error: text(&raw, "rust_to_go_proposal_exchange_error")?,
         federated_person_status: number(&raw, "federated_person_status")? as u16,
         federated_class_exchange_status: number(&raw, "federated_class_exchange_status")? as u16,
         federated_class_verified: raw["federated_class_verified"].as_bool().unwrap_or(false),
-        federated_proposal_challenge_status: number(
-            &raw,
-            "federated_proposal_challenge_status",
-        )? as u16,
-        federated_proposal_exchange_status: number(
-            &raw,
-            "federated_proposal_exchange_status",
-        )? as u16,
+        federated_proposal_challenge_status: number(&raw, "federated_proposal_challenge_status")?
+            as u16,
+        federated_proposal_exchange_status: number(&raw, "federated_proposal_exchange_status")?
+            as u16,
         federated_proposal_verified: raw["federated_proposal_verified"]
             .as_bool()
             .unwrap_or(false),
@@ -2210,10 +2235,8 @@ pub fn run() -> Result<InteropTranscript> {
         federated_ps_proposal_consents: number(&raw, "federated_ps_proposal_consents")? as usize,
         federated_as_class_authorizations: number(&raw, "federated_as_class_authorizations")?
             as usize,
-        federated_as_proposal_authorizations: number(
-            &raw,
-            "federated_as_proposal_authorizations",
-        )? as usize,
+        federated_as_proposal_authorizations: number(&raw, "federated_as_proposal_authorizations")?
+            as usize,
         federated_as_issuances: number(&raw, "federated_as_issuances")? as usize,
         federated_completion_status: number(&raw, "federated_completion_status")? as u16,
         federated_replay_status: number(&raw, "federated_replay_status")? as u16,
@@ -2240,11 +2263,10 @@ pub fn run() -> Result<InteropTranscript> {
         federated_expired_error: text(&raw, "federated_expired_error")?,
         federated_expired_type: text(&raw, "federated_expired_type")?,
         federated_expired_signature_error: text(&raw, "federated_expired_signature_error")?,
-        federated_expired_protected_runs: number(&raw, "federated_expired_protected_runs")? as usize,
+        federated_expired_protected_runs: number(&raw, "federated_expired_protected_runs")?
+            as usize,
         reads: number(&raw, "reads")? as usize,
-        deletes: serde_json::from_value(
-            raw.get("deletes").cloned().ok_or("missing deletes")?,
-        )?,
+        deletes: serde_json::from_value(raw.get("deletes").cloned().ok_or("missing deletes")?)?,
         rust_ps_audit_records: number(&raw, "rust_ps_audit_records")? as usize,
     };
 
