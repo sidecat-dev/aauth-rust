@@ -1,6 +1,8 @@
 //! Host-controlled Agent-token issuance and public discovery documents.
 //! Enrollment and issuance policy are supplied by the application.
+//! The opt-in [`events`] module adds the AAuth Events inbox.
 #![deny(missing_docs)]
+pub mod events;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AgentToken, TokenError, validate_server_identifier,
     verify_subagent,
@@ -13,6 +15,7 @@ pub struct AgentProvider {
     issuer: String,
     kid: String,
     key: SigningKey,
+    event_endpoint: Option<String>,
 }
 impl AgentProvider {
     /// Configure the issuer identity, public JWKS kid and caller-owned signing key.
@@ -28,6 +31,7 @@ impl AgentProvider {
             issuer: issuer.into(),
             kid: kid.into(),
             key,
+            event_endpoint: None,
         })
     }
     /// Issue a top-level Agent token after the host approves enrollment and
@@ -96,11 +100,16 @@ impl AgentProvider {
     }
     /// Public AP metadata bytes with the configured issuer and default JWKS URL.
     /// Serve at `/.well-known/aauth-agent.json` over verified HTTPS.
+    /// `event_endpoint` is present after [`Self::with_event_endpoint`].
     ///
     /// # Errors
     /// Returns `InvalidJwt` if discovery serialization fails.
     pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
-        serde_json::to_vec(&json!({"issuer":self.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.issuer)})).map_err(|_|TokenError::InvalidJwt)
+        let mut metadata = json!({"issuer":self.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.issuer)});
+        if let Some(endpoint) = &self.event_endpoint {
+            metadata["event_endpoint"] = json!(endpoint);
+        }
+        serde_json::to_vec(&metadata).map_err(|_| TokenError::InvalidJwt)
     }
     /// Public JWKS bytes for the configured signing key and kid; no secret bytes.
     ///

@@ -37,6 +37,8 @@ version = "0.1.0-alpha.11"
 dependencies = [
  "aauth-rust-core",
  "aauth-rust-jose",
+ "aauth-rust-signature-key",
+ "http",
  "serde_json",
 ]
 
