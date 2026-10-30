@@ -108,7 +108,14 @@ impl<
                     .map_or(i64::MAX, |child| child.claims().exp),
             )
             .min(input.authorization.resource.claims().exp)
-            .min(presented.exp);
+            .min(presented.exp)
+            .min(
+                input
+                    .authorization
+                    .upstream
+                    .as_ref()
+                    .map_or(i64::MAX, UpstreamToken::expires_at),
+            );
         let released = (self.clock)();
         current(released, &input.authorization, &presented)?;
         if released >= deadline {

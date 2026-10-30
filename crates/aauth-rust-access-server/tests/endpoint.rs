@@ -198,7 +198,7 @@ fn verified_lineage_and_proof_precede_policy() {
         (5, "expired_presented_token"),
         (6, "clock_skew"),
         (7, "invalid_resource_token"),
-        (8, "invalid_request"),
+        (8, "invalid_upstream_token"),
         (9, "invalid_agent_token"),
     ] {
         let mut a = agent_claims();

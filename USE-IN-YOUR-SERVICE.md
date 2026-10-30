@@ -639,7 +639,14 @@ missionless grant's lifetime. The host supplies authorization policy; accepting
 a valid PS proof alone does not grant access. This AS profile additionally requires
 the Agent token's optional `ps` claim to be present and equal to the signing PS.
 Missing/different `ps` is 400 `invalid_agent_token` before policy; this is the named
-`AS-AGENT-PS-PROFILE` limit shared with the Go sibling.
+`AS-AGENT-PS-PROFILE` limit shared with the Go sibling. A call-chaining request
+is the exception: it carries the passed-through `upstream_token`, and the
+intermediary's own `ps`, if any, names its Person Server rather than the person's.
+The AS verifies that token per Upstream Token Verification before policy: a person
+token's `iss` or an auth token's `ps` is the signing PS, its `aud` is the `iss` of
+the intermediary's Agent token, and it is neither expired nor revoked here
+(`invalid_upstream_token`, `expired_upstream_token`, `revoked_upstream_token`).
+Policy sees it as `AuthorizationRequest::upstream`; the grant ends no later than it.
 
 For the PS, construct the ordinary PersonServer then call
 `server.with_federation(adapter)`. Implement `Policy::consent` explicitly; its
@@ -737,8 +744,9 @@ cache. Single terminal delivery applies to each continuation. Hosts own operatio
 replay protection and application idempotency.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
-Missions, AS call chaining and recursive sub-agent delegation remain named gaps
-of this Core-scope profile. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
+Missions and recursive sub-agent delegation remain named gaps of this Core-scope
+profile. The AS verifies chained requests from any PS; this Rust PS does not yet
+relay `upstream_token` through federation and refuses that request. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 

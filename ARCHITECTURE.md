@@ -16,7 +16,7 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
 | `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3 | Core, Signature-Key, Budgets, R3, JOSE |
 | `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance, opt-in direct class R3 issuance | Core, Signature-Key, Budgets, R3, JOSE |
-| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
+| `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; verified call-chaining upstream tokens; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
 Normal role dependencies never import one another; Resource dev-dependencies

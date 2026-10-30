@@ -479,10 +479,10 @@ impl Identity for AuthToken {
     }
 }
 fn revoked_parameter(parameter: &'static str) -> Failure {
-    Failure::parameter(if parameter == "resource" {
-        "revoked_resource_token"
-    } else {
-        "revoked_presented_token"
+    Failure::parameter(match parameter {
+        "resource" => "revoked_resource_token",
+        "upstream" => "revoked_upstream_token",
+        _ => "revoked_presented_token",
     })
 }
 

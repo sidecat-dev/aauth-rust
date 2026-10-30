@@ -5,8 +5,10 @@
 //! transport. Hosts admit issuers before key resolution and bound request collection.
 //! Explicit `with_deferred` adds bounded claims, clarification, interaction,
 //! approval and payment continuations. One-level parent-mediated sub-agents use
-//! the parent's policy identity and the child's credential key. Full R3, missions
-//! and call chaining remain outside this profile and are refused.
+//! the parent's policy identity and the child's credential key. A passed-through
+//! `upstream_token` is verified per Upstream Token Verification before policy and
+//! bounds the issued token. Full R3 and missions remain outside this profile and
+//! are refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
 //!
@@ -44,8 +46,8 @@ use aauth_rust_budgets::{
 };
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, PersonToken, ResourceClaims,
-    ResourceToken, TokenError, VerifiedAgentToken, VerifiedResourceToken, mint_auth_token,
-    validate_server_identifier, verify_subagent,
+    ResourceToken, TokenError, VerifiedAgentToken, VerifiedAuthToken, VerifiedPersonToken,
+    VerifiedResourceToken, mint_auth_token, validate_server_identifier, verify_subagent,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
@@ -109,6 +111,50 @@ pub struct AuthorizationRequest {
     pub scopes: Vec<String>,
     /// Budget the person server asked to grant. `None` means issue no budget claim.
     pub budget: Option<Budget>,
+    /// Verified `upstream_token` when an intermediary chains this request. It
+    /// names the person the intermediary acts for and grants nothing by itself.
+    /// The issued Auth token ends no later than it.
+    pub upstream: Option<UpstreamToken>,
+}
+/// `upstream_token` verified per Upstream Token Verification: signature, `exp`
+/// and revocation; a person token's `iss` or an auth token's `ps` is the signing
+/// Person Server; `aud` is the `iss` of the intermediary's Agent token. Its
+/// confirmation key is the calling Agent's and is not compared with any key here.
+#[derive(Clone, Debug)]
+pub enum UpstreamToken {
+    /// `aa-person+jwt` issued by the signing Person Server.
+    Person(VerifiedPersonToken),
+    /// `aa-auth+jwt` whose `ps` is the signing Person Server.
+    Auth(VerifiedAuthToken),
+}
+impl UpstreamToken {
+    /// Person Server that issued the person token or that the auth token names.
+    pub fn person_server(&self) -> &str {
+        match self {
+            Self::Person(token) => &token.claims().iss,
+            Self::Auth(token) => &token.claims().ps,
+        }
+    }
+    /// The intermediary the calling Agent presented this token to.
+    pub fn audience(&self) -> &str {
+        match self {
+            Self::Person(token) => &token.claims().aud,
+            Self::Auth(token) => &token.claims().aud,
+        }
+    }
+    /// Expiry in Unix seconds.
+    pub fn expires_at(&self) -> i64 {
+        match self {
+            Self::Person(token) => token.claims().exp,
+            Self::Auth(token) => token.claims().exp,
+        }
+    }
+    fn issued_at(&self) -> i64 {
+        match self {
+            Self::Person(token) => token.claims().iat,
+            Self::Auth(token) => token.claims().iat,
+        }
+    }
 }
 /// Resource-policy grant; scopes must be a nonempty subset of the request.
 #[derive(Clone, Debug)]
@@ -338,6 +384,7 @@ impl<
                 "subagent_token",
                 "resource_token",
                 "presented_token",
+                "upstream_token",
             ]
             .contains(&k.as_str());
             let budget = self.budgets.is_some() && k == "budget";
@@ -345,13 +392,27 @@ impl<
         }) {
             return Err(Failure::parameter("invalid_request"));
         }
+        // An intermediary's own `ps`, if any, names its Person Server, not the
+        // person's; a chained request is tied to the signing PS by the upstream
+        // token instead.
+        let chained = object.contains_key("upstream_token");
+        if chained && object.contains_key("subagent_token") {
+            return Err(Failure::parameter("invalid_request"));
+        }
         let agent = AgentToken::parse(required(body, "agent_token")?)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|e| Failure::token(e, "agent", now))?;
         check_iat(agent.claims().iat, now)?;
-        if agent.claims().ps.as_deref() != Some(id) || agent.claims().parent_agent.is_some() {
+        if (!chained && agent.claims().ps.as_deref() != Some(id))
+            || agent.claims().parent_agent.is_some()
+        {
             return Err(Failure::parameter("invalid_agent_token"));
         }
+        let upstream = if chained {
+            Some(self.verify_upstream(required(body, "upstream_token")?, &agent, id, now)?)
+        } else {
+            None
+        };
         let subagent = body
             .get("subagent_token")
             .map(|value| {
@@ -411,8 +472,37 @@ impl<
             resource: resource.clone(),
             scopes: requested_scopes,
             budget: parameter,
+            upstream,
         };
         Ok((context, presented))
+    }
+    /// Upstream Token Verification at an AS: steps 1 to 3.
+    fn verify_upstream(
+        &self,
+        compact: &str,
+        agent: &VerifiedAgentToken,
+        person_server: &str,
+        now: i64,
+    ) -> Result<UpstreamToken, Failure> {
+        self.refuse_revoked_parameter(compact, now, "upstream")?;
+        let upstream = (|| -> Result<UpstreamToken, TokenError> {
+            let jws = Jws::parse(compact)?;
+            match jws.header().get("typ").and_then(Value::as_str) {
+                Some("aa-person+jwt") => Ok(UpstreamToken::Person(
+                    PersonToken::parse(compact)?.verify(&self.resolver(), now)?,
+                )),
+                Some("aa-auth+jwt") => Ok(UpstreamToken::Auth(
+                    AuthToken::parse(compact)?.verify(&self.resolver(), now)?,
+                )),
+                _ => Err(TokenError::UnexpectedTokenType),
+            }
+        })()
+        .map_err(|e| Failure::token(e, "upstream", now))?;
+        check_iat(upstream.issued_at(), now)?;
+        if upstream.person_server() != person_server || upstream.audience() != agent.claims().iss {
+            return Err(Failure::parameter("invalid_upstream_token"));
+        }
+        Ok(upstream)
     }
     fn resource_budget(
         &self,
@@ -492,6 +582,9 @@ impl<
             .min(context.agent.claims().exp)
             .min(holder.claims().exp)
             .min(presented.exp);
+        if let Some(upstream) = &context.upstream {
+            expires_at = expires_at.min(upstream.expires_at());
+        }
         if let Some(end) = self.budgets.as_ref().and_then(|policy| policy.period_end) {
             expires_at = expires_at.min(end);
         }
@@ -635,6 +728,13 @@ fn current(now: i64, context: &AuthorizationRequest, p: &Presented) -> Result<()
     }
     if p.exp <= now {
         return Err(Failure::parameter("expired_presented_token"));
+    }
+    if context
+        .upstream
+        .as_ref()
+        .is_some_and(|upstream| upstream.expires_at() <= now)
+    {
+        return Err(Failure::parameter("expired_upstream_token"));
     }
     Ok(())
 }
