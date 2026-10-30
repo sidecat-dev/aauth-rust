@@ -22,9 +22,11 @@
 //! 3. Federated converse, on servers that do not replace the DirectR3 set:
 //!    the Rust Agent against Go `resource.NewFederatedAuthorization` with R3,
 //!    Go `accessserver` `R3Config`, and Go `personserver.NewFederatedAuthorization`
-//!    with `ConsentDocument` and `ConsentProposal`. One class document and one
-//!    proposal are exchanged. The Rust Agent verifies both access-server grants,
-//!    completes that proposal once, and replays the same auth token.
+//!    with `ConsentDocument` and `ConsentProposal`. One class document covers
+//!    `records.delete`. `POST /records/r-1` stays a `401` completion and exact
+//!    replay. `POST /records/held-1` is the only held-delivery request: the
+//!    Resource returns `202`, and a later `GET` of that pending URL runs the
+//!    protected handler once and replays the same auth token. Budget stays unset.
 #[path = "../support/tls.rs"]
 mod tls;
 
@@ -134,6 +136,11 @@ pub struct InteropTranscript {
     pub federated_replay_status: u16,
     pub federated_replay_matches: bool,
     pub federated_protected_runs: usize,
+    pub federated_held_challenge_status: u16,
+    pub federated_held_poll_status: u16,
+    pub federated_held_replay_status: u16,
+    pub federated_held_replay_matches: bool,
+    pub federated_held_protected_runs: usize,
     pub reads: usize,
     pub deletes: Vec<String>,
     pub rust_ps_audit_records: usize,
@@ -241,6 +248,18 @@ fn post_at(agent: &Agent, uri: &str, body: &[u8], signed_at: i64) -> Result<Requ
         .body(body.to_vec())?;
     agent.sign(&mut request, signed_at)?;
     Ok(request)
+}
+fn signed_get(agent: &Agent, uri: &str, signed_at: i64) -> Result<Request<Vec<u8>>> {
+    let mut request = Request::builder().method("GET").uri(uri).body(Vec::new())?;
+    agent.sign(&mut request, signed_at)?;
+    Ok(request)
+}
+fn held_pending_id_ok(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    (16..=128).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
 }
 fn member(response: &Response<Vec<u8>>, name: &str) -> Option<String> {
     serde_json::from_slice::<Value>(response.body())
@@ -1472,6 +1491,124 @@ fn handle_federated_converse(
         return Err(http_failure("federated proposal replay", &replayed));
     }
 
+    // Go snapshots this challenge before the 202. Connection close is a 500.
+    // The 401 challenge is not snapshotted, so it still uses the existing transport.
+    let held_req = post_at(
+        &holder,
+        &format!("{FED_RECORDS}/records/held-1"),
+        b"{}",
+        clock,
+    )?;
+    let held_challenged = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &held_req,
+    )?;
+    let held_challenge_status = held_challenged.status().as_u16();
+    let held_body: Value = serde_json::from_slice(held_challenged.body()).unwrap_or(Value::Null);
+    if held_challenge_status != 202
+        || held_body.get("status").and_then(Value::as_str) != Some("pending")
+    {
+        return Err(http_failure("federated held challenge", &held_challenged));
+    }
+    if held_challenged
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        != Some("5")
+        || held_challenged
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok())
+            != Some("no-store")
+    {
+        return Err(http_failure(
+            "federated held challenge headers",
+            &held_challenged,
+        ));
+    }
+    let held_location = held_challenged
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .ok_or("federated held challenge missing Location")?;
+    let pending_id = held_location
+        .strip_prefix(&format!("{FED_RECORDS}/pending/"))
+        .ok_or("federated held Location is not the resource pending URL")?;
+    if !held_pending_id_ok(pending_id) {
+        return Err("federated held pending identifier is not URL-safe".into());
+    }
+    let held_rt = challenge(&held_challenged)?;
+    let verified_held = agent.verify_r3_proposal_challenge(
+        &held_rt,
+        FED_RECORDS,
+        FED_PS,
+        &class_auth,
+        trust,
+        clock,
+    )?;
+    if verified_held.claims().aud != FED_AS {
+        return Err("federated held proposal audience is not the access server".into());
+    }
+    let held_exchange_req = post_at(
+        &agent,
+        &format!("{FED_PS}/token"),
+        json!({"resource_token": held_rt, "presented_token": class_auth})
+            .to_string()
+            .as_bytes(),
+        clock,
+    )?;
+    let held_exchange_resp = TlsServer::send_external(
+        fed_ps_addr,
+        "fed-ps.example",
+        &fed_ps_cert,
+        &held_exchange_req,
+    )?;
+    if held_exchange_resp.status().as_u16() != 200 {
+        return Err(http_failure("federated held exchange", &held_exchange_resp));
+    }
+    let held_grant =
+        member(&held_exchange_resp, "auth_token").ok_or("federated held grant missing")?;
+    let held_delivered = agent.verify_r3_per_call_delivery(
+        &held_grant,
+        FED_RECORDS,
+        &verified_held,
+        &class_auth,
+        &registry,
+        trust,
+        clock,
+    )?;
+    if held_delivered.claims().dwk != "aauth-access.json" || held_delivered.claims().iss != FED_AS
+    {
+        return Err("federated held grant was not issued by the access server".into());
+    }
+    let poll_holder = agent.with_token(held_grant)?;
+    let poll_target = held_location.to_owned();
+    let poll_req = signed_get(&poll_holder, &poll_target, clock)?;
+    let polled = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &poll_req,
+    )?;
+    let held_poll_status = polled.status().as_u16();
+    if held_poll_status != 200 || polled.body() != br#"{"deleted":true}"# {
+        return Err(http_failure("federated held poll", &polled));
+    }
+    let replay_poll_req = signed_get(&poll_holder, &poll_target, clock)?;
+    let held_replayed = TlsServer::send_held_external(
+        fed_records_addr,
+        "fed-records.example",
+        &fed_records_cert,
+        &replay_poll_req,
+    )?;
+    let held_replay_status = held_replayed.status().as_u16();
+    let held_replay_matches = held_replay_status == 200 && held_replayed.body() == polled.body();
+    if !held_replay_matches {
+        return Err(http_failure("federated held replay", &held_replayed));
+    }
+
     Ok(json!({
         "person_status": person_status,
         "class_exchange_status": class_exchange_status,
@@ -1482,6 +1619,10 @@ fn handle_federated_converse(
         "completion_status": completion_status,
         "replay_status": replay_status,
         "replay_matches": replay_matches,
+        "held_challenge_status": held_challenge_status,
+        "held_poll_status": held_poll_status,
+        "held_replay_status": held_replay_status,
+        "held_replay_matches": held_replay_matches,
     }))
 }
 
@@ -1807,6 +1948,13 @@ pub fn run() -> Result<InteropTranscript> {
         federated_replay_status: number(&raw, "federated_replay_status")? as u16,
         federated_replay_matches: raw["federated_replay_matches"].as_bool().unwrap_or(false),
         federated_protected_runs: number(&raw, "federated_protected_runs")? as usize,
+        federated_held_challenge_status: number(&raw, "federated_held_challenge_status")? as u16,
+        federated_held_poll_status: number(&raw, "federated_held_poll_status")? as u16,
+        federated_held_replay_status: number(&raw, "federated_held_replay_status")? as u16,
+        federated_held_replay_matches: raw["federated_held_replay_matches"]
+            .as_bool()
+            .unwrap_or(false),
+        federated_held_protected_runs: number(&raw, "federated_held_protected_runs")? as usize,
         reads: number(&raw, "reads")? as usize,
         deletes: serde_json::from_value(
             raw.get("deletes").cloned().ok_or("missing deletes")?,
@@ -1853,14 +2001,19 @@ pub fn run() -> Result<InteropTranscript> {
         || t.federated_proposal_exchange_status != 200
         || !t.federated_proposal_verified
         || t.federated_ps_class_consents != 1
-        || t.federated_ps_proposal_consents != 1
+        || t.federated_ps_proposal_consents != 2
         || t.federated_as_class_authorizations != 1
-        || t.federated_as_proposal_authorizations != 1
-        || t.federated_as_issuances != 2
+        || t.federated_as_proposal_authorizations != 2
+        || t.federated_as_issuances != 3
         || t.federated_completion_status != 200
         || t.federated_replay_status != 200
         || !t.federated_replay_matches
         || t.federated_protected_runs != 1
+        || t.federated_held_challenge_status != 202
+        || t.federated_held_poll_status != 200
+        || t.federated_held_replay_status != 200
+        || !t.federated_held_replay_matches
+        || t.federated_held_protected_runs != 1
         || t.reads != 2
         || t.deletes != vec![r#""r-1""#.to_owned(), r#""r-1""#.to_owned()]
         || t.rust_ps_audit_records != 8

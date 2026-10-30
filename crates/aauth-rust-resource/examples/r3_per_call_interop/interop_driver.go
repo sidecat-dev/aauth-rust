@@ -101,6 +101,10 @@ type federatedConverseResponse struct {
 	CompletionStatus        int  `json:"completion_status"`
 	ReplayStatus            int  `json:"replay_status"`
 	ReplayMatches           bool `json:"replay_matches"`
+	HeldChallengeStatus     int  `json:"held_challenge_status"`
+	HeldPollStatus          int  `json:"held_poll_status"`
+	HeldReplayStatus        int  `json:"held_replay_status"`
+	HeldReplayMatches       bool `json:"held_replay_matches"`
 }
 
 type transcriptOutput struct {
@@ -152,6 +156,11 @@ type transcriptOutput struct {
 	FederatedReplayStatus                       int      `json:"federated_replay_status"`
 	FederatedReplayMatches                      bool     `json:"federated_replay_matches"`
 	FederatedProtectedRuns                      int      `json:"federated_protected_runs"`
+	FederatedHeldChallengeStatus                int      `json:"federated_held_challenge_status"`
+	FederatedHeldPollStatus                     int      `json:"federated_held_poll_status"`
+	FederatedHeldReplayStatus                   int      `json:"federated_held_replay_status"`
+	FederatedHeldReplayMatches                  bool     `json:"federated_held_replay_matches"`
+	FederatedHeldProtectedRuns                  int      `json:"federated_held_protected_runs"`
 	Reads                                       int      `json:"reads"`
 	Deletes                                     []string `json:"deletes"`
 	RustPSAuditRecords                          int      `json:"rust_ps_audit_records"`
@@ -363,6 +372,101 @@ func (s *memoryRetryStore) Retain(_ context.Context, execution resource.R3RetryE
 		Body:       append([]byte(nil), entry.response.Body...),
 		Trailer:    entry.response.Trailer.Clone(),
 	}, nil
+}
+
+// memoryHeldStore follows the pin test store in resource/held_test.go.
+// The pending identifier and fence are store-local. They are not wire fields.
+// One slot is enough: only POST /records/held-1 is selected for held delivery.
+const heldPendingID = "held-call-0123456789abcdef"
+
+type memoryHeldStore struct {
+	mu         sync.Mutex
+	invocation resource.HeldInvocation
+	state      string
+	token      resource.HeldAuthToken
+	response   resource.HeldResponse
+}
+
+func (s *memoryHeldStore) Create(_ context.Context, invocation resource.HeldInvocation) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.invocation = cloneHeldInvocation(invocation)
+	s.state = "pending"
+	return heldPendingID, nil
+}
+
+func (s *memoryHeldStore) Load(_ context.Context, id string) (resource.HeldInvocation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != heldPendingID || s.state == "" {
+		return resource.HeldInvocation{}, resource.ErrHeldInvocationNotFound
+	}
+	return cloneHeldInvocation(s.invocation), nil
+}
+
+func (s *memoryHeldStore) Claim(_ context.Context, id string, token resource.HeldAuthToken) (resource.HeldClaim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != heldPendingID || s.state == "" {
+		return resource.HeldClaim{}, resource.ErrHeldInvocationNotFound
+	}
+	switch s.state {
+	case "pending":
+		if !token.PresentedAt.Before(s.invocation.CompletionUntil) {
+			s.state = "expired"
+			return resource.HeldClaim{}, resource.ErrHeldInvocationExpired
+		}
+		s.state = "executing"
+		s.token = token
+		return resource.NewHeldExecution(resource.HeldExecution{
+			InvocationID: heldPendingID,
+			Fence:        "held-fence-1",
+		}), nil
+	case "executing":
+		return resource.HeldClaim{}, resource.ErrHeldInvocationConflict
+	case "complete":
+		if s.token.SHA256 != token.SHA256 {
+			return resource.HeldClaim{}, resource.ErrHeldAuthTokenMismatch
+		}
+		return resource.NewHeldReplay(s.response), nil
+	case "expired":
+		return resource.HeldClaim{}, resource.ErrHeldInvocationExpired
+	default:
+		return resource.HeldClaim{}, resource.ErrHeldExecutionUnresolved
+	}
+}
+
+func (s *memoryHeldStore) Retain(_ context.Context, execution resource.HeldExecution, response resource.HeldResponse) (resource.HeldResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != "executing" || execution != (resource.HeldExecution{InvocationID: heldPendingID, Fence: "held-fence-1"}) {
+		return resource.HeldResponse{}, resource.ErrHeldCompletionStale
+	}
+	s.response = resource.HeldResponse{
+		StatusCode: response.StatusCode,
+		Header:     response.Header.Clone(),
+		Body:       append([]byte(nil), response.Body...),
+		Trailer:    response.Trailer.Clone(),
+	}
+	s.state = "complete"
+	return resource.HeldResponse{
+		StatusCode: s.response.StatusCode,
+		Header:     s.response.Header.Clone(),
+		Body:       append([]byte(nil), s.response.Body...),
+		Trailer:    s.response.Trailer.Clone(),
+	}, nil
+}
+
+func cloneHeldInvocation(invocation resource.HeldInvocation) resource.HeldInvocation {
+	invocation.Header = invocation.Header.Clone()
+	invocation.Body = append([]byte(nil), invocation.Body...)
+	invocation.RequiredScopes = append([]string(nil), invocation.RequiredScopes...)
+	if invocation.R3PerCall != nil {
+		cloned := *invocation.R3PerCall
+		cloned.ExactProposal = append([]byte(nil), invocation.R3PerCall.ExactProposal...)
+		invocation.R3PerCall = &cloned
+	}
+	return invocation
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1030,6 +1134,11 @@ func main() {
 	out.FederatedReplayStatus = fedOut.ReplayStatus
 	out.FederatedReplayMatches = fedOut.ReplayMatches
 	out.FederatedProtectedRuns = fedCounts.ProtectedRuns
+	out.FederatedHeldChallengeStatus = fedOut.HeldChallengeStatus
+	out.FederatedHeldPollStatus = fedOut.HeldPollStatus
+	out.FederatedHeldReplayStatus = fedOut.HeldReplayStatus
+	out.FederatedHeldReplayMatches = fedOut.HeldReplayMatches
+	out.FederatedHeldProtectedRuns = fedCounts.HeldProtectedRuns
 
 	finalState := fetchState()
 	out.GoToRustQueryRuns = finalState.QueryRuns
@@ -1070,6 +1179,7 @@ type federatedCounts struct {
 	ASProposalAuthorizations int
 	ASIssuances              int
 	ProtectedRuns            int
+	HeldProtectedRuns        int
 }
 
 func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, federatedCounts) {
@@ -1100,6 +1210,7 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 	var asClassAuthorizations atomic.Int32
 	var asProposalAuthorizations atomic.Int32
 	var protectedRuns atomic.Int32
+	var heldRuns atomic.Int32
 	issuances := &memoryIssuanceStore{}
 	admitResource := func(_ context.Context, endpoint string) error {
 		if !strings.HasPrefix(endpoint, fedResourceIssuer+"/r3/") {
@@ -1121,12 +1232,27 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 			}
 			return nil
 		},
-		Protected: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			protectedRuns.Add(1)
+		Protected: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/records/r-1":
+				protectedRuns.Add(1)
+			case "/records/held-1":
+				heldRuns.Add(1)
+			default:
+				http.Error(w, "unexpected protected path", http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"deleted":true}`))
 		}),
+		// Hold only the separate path. A nil selector would hold every request,
+		// including the existing POST /records/r-1 challenge. Budget stays unset:
+		// Go refuses Budget together with HeldInvocations.
+		HeldInvocations: &memoryHeldStore{},
+		HoldAuthTokenRequest: func(request *http.Request) bool {
+			return request.Method == http.MethodPost && request.URL.Path == "/records/held-1"
+		},
 		MaxSignedBodyBytes:           1 << 20,
 		MaxRetainedRequestBodyBytes:  64 << 10,
 		MaxRetainedResponseBodyBytes: 64 << 10,
@@ -1343,5 +1469,6 @@ func federatedExchange(cfg federatedExchangeConfig) (federatedConverseResponse, 
 		ASProposalAuthorizations: int(asProposalAuthorizations.Load()),
 		ASIssuances:              issuances.len(),
 		ProtectedRuns:            int(protectedRuns.Load()),
+		HeldProtectedRuns:        int(heldRuns.Load()),
 	}
 }
