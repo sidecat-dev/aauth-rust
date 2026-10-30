@@ -687,6 +687,38 @@ recorded `CARGO_RC 0` and `QADEFECT01_DONE`. This commit records that receipt
 and does not change behavior. It does not change the DirectR3 interop pin.
 This is not a separate product-QA pass and not power loss.
 
+A second poll of a held invocation stays 202 while its grant is unretained.
+Behavior commit `635b8d80b0e14bb3c2c36df4b97a63a918924a9c` (tree
+`7057a7a8889a54a444da958950575b151a90371b`) keeps that proposal URI while the
+host still holds the cloned execution grant. The poll is 202. `Location` is
+`https://resource.example:8443/r3/pending/challenge-live`. `Retry-After` is
+`1`. `Cache-Control` is `no-store`. The body is `{"status":"pending"}`. The
+response has no `AAuth-Requirement`. Retaining the result then replays
+`held-once`. Dropping that grant without a retained result returns 500
+`server_error`. The first retained result still replays. A second
+presentation of an unretained `/op/refuse` completion stays `InternalError`.
+`HeldInvocations::poll` of the same `jti`, while the handler is still inside
+`execute`, returns `Unfinished` and runs that handler once. A later poll
+replays the finished body. Host3 `aauth-wc07-completion-heldlive01` at that
+source passed `held_poll_while_the_grant_is_unretained_stays_pending` 1/0
+with 15 filtered,
+`qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone` 1/0
+with 15 filtered, `a_poll_during_execution_does_not_run_again` 1/0 with 1
+filtered, `repeated_auth_token_replays_the_held_result` 1/0 with 1 filtered,
+and
+`a_per_call_executes_once_and_the_replay_returns_the_retained_result` 1/0
+with 41 filtered. This unit did not run `r3-per-call-interop`. It did not
+rerun directory reopen or interrupted retain. `query-runs=2` and
+`proposal-err=invalid_resource_token` stay as previously recorded.
+Retained-grant `budget_consumed` stays unresolved. Receipt START
+`2026-10-30T05:39:16.650882627+00:00`, log mtime
+`2026-10-30T05:39:31.493956Z`. systemd-run invocation
+`e8b0f53b660a4c3db27a74abf57ccb7c`. After collect, `systemctl show` reported
+`Result=success`, `ExecMainStatus=0`, and an empty `InvocationID`. The log
+recorded `CARGO_RC 0` and `HELDLIVE01_DONE`. This commit records that receipt
+and does not change behavior. It does not change the DirectR3 interop pin.
+This is not a separate product-QA pass and not power loss.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
