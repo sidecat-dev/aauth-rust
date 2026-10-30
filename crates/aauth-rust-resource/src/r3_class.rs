@@ -715,6 +715,9 @@ where
         claims.scope = profile
             .require_core_scope
             .then(|| self.config.scopes.join(" "));
+        // A reactive challenge has no R3 budget request. The Core idle offer
+        // is not a class-document claim, and the plain mint refuses it.
+        claims.extra.remove("budget");
         Some(match self.issue_r3(profile, &claims, &operations, None) {
             Ok(resource_token) => AuthDecision::AuthTokenRequired {
                 resource_token,
@@ -745,6 +748,10 @@ where
         let claims = token.claims();
         // A 202 held invocation completes only at its pending URL, with an R3 token.
         if let Some(id) = request.uri().path().strip_prefix("/r3/pending/") {
+            // Method before the id and the token, matching held-poll admission.
+            if request.method() != http::Method::GET {
+                return Err(AuthDecision::MethodNotAllowed);
+            }
             if !carries_r3(&claims.extra) || id.is_empty() || id.contains('/') {
                 return Err(forbidden());
             }

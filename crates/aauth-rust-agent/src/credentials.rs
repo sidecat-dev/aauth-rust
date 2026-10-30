@@ -51,6 +51,10 @@ pub(crate) struct ParentContext {
     cnf: Jwk,
     mission: Option<String>,
     tenant: Option<String>,
+    /// Issuer of the presented credential itself. A Person token's issuer is
+    /// `ps`. An Auth token's issuer is its own `iss`, which may be an Access
+    /// Server rather than `ps`.
+    pub(crate) issuer: String,
     /// `dwk` of an Auth parent. A Person token leaves this empty.
     pub(crate) auth_dwk: Option<String>,
 }
@@ -87,6 +91,7 @@ pub(crate) fn verify_parent(
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
                 tenant: claims.tenant.clone(),
+                issuer: claims.iss.clone(),
                 auth_dwk: None,
             })
         }
@@ -118,6 +123,7 @@ pub(crate) fn verify_parent(
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
                 tenant: claims.tenant.clone(),
+                issuer: claims.iss.clone(),
                 auth_dwk: Some(claims.dwk.clone()),
             })
         }

@@ -206,7 +206,12 @@ impl Agent {
         now: i64,
     ) -> Result<VerifiedR3ResourceToken, R3AgentError> {
         validate_server_identifier(person_server)?;
-        let parent = verify_parent(presented_compact, keys, now, PresentedAuthRole::R3Class)?;
+        let parent = verify_parent(
+            presented_compact,
+            keys,
+            now,
+            PresentedAuthRole::PersonServer,
+        )?;
         let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
         let claims = token.claims();
         validate_server_identifier(&claims.aud)?;
@@ -368,7 +373,19 @@ impl Agent {
         now: i64,
         per_call: bool,
     ) -> Result<VerifiedR3AuthToken, R3AgentError> {
-        let parent = verify_parent(presented_compact, keys, now, PresentedAuthRole::R3Class)?;
+        // Class delivery is presented with the Person token. Per-call delivery
+        // is presented with the class Auth token, whose issuer must also issue
+        // the per-call token.
+        let parent = verify_parent(
+            presented_compact,
+            keys,
+            now,
+            if per_call {
+                PresentedAuthRole::R3Class
+            } else {
+                PresentedAuthRole::PersonServer
+            },
+        )?;
         let requested = resource.claims();
         validate_server_identifier(&requested.aud)?;
         challenge_context(
@@ -406,12 +423,14 @@ impl Agent {
             .thumbprint()
             .map_err(|_| R3AgentError::Context)?;
         let same_class_role = !per_call || parent.auth_dwk.as_deref() == Some(claims.dwk.as_str());
+        let class_issuer = !per_call || claims.iss == parent.issuer;
         let issuer_role = match claims.dwk.as_str() {
             "aauth-person.json" => claims.iss == requested.aud && claims.iss == claims.ps,
             "aauth-access.json" => claims.iss == requested.aud,
             _ => false,
         };
         if !same_class_role
+            || !class_issuer
             || !issuer_role
             || claims.aud != intended_resource
             || claims.ps != requested.ps

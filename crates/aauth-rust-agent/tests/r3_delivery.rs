@@ -18,7 +18,7 @@ use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_r3::{
     Grant, GrantedOperations, McpCodec, Operation, Parameter, Parameters, Proposal,
     ProposalOptions, Registry, mint_direct_auth_token, mint_per_call_auth_token,
-    mint_proposal_resource_token, mint_resource_token, standard_registry,
+    mint_proposal_resource_token, mint_resource_token, standard_registry, verify_resource_token,
 };
 use serde_json::json;
 
@@ -26,6 +26,7 @@ const NOW: i64 = 1_700_000_000;
 const RESOURCE: &str = "https://resource.example";
 const PS: &str = "https://ps.example";
 const AS: &str = "https://as.example";
+const OTHER_AS: &str = "https://other-as.example";
 const SUBJECT: &str = "person-1";
 const CLASS_URI: &str = "https://resource.example/r3/class-one";
 const PROPOSAL_URI: &str = "https://resource.example/r3/proposal-one";
@@ -494,6 +495,107 @@ fn shared_identifier_keeps_the_class_tokens_access_document() -> Result<(), Test
         &person_grant,
         RESOURCE,
         &verified,
+        &class,
+        &registry,
+        &world.keys,
+        NOW,
+    )));
+    Ok(())
+}
+
+#[test]
+fn qa_d3_person_parent_and_class_issuer() -> Result<(), TestError> {
+    let mut world = world()?;
+    let other_key = SigningKey::from_seed([8; 32]);
+    world.keys.0.push((
+        OTHER_AS.into(),
+        ACCESS_DOCUMENT.into(),
+        "as-key".into(),
+        other_key.public_jwk(),
+    ));
+    let class = class_grant(&world, AS, ACCESS_DOCUMENT)?;
+    let resource = resource_token(&world, AS, "resource-as")?;
+    assert!(matches!(
+        world.agent.verify_r3_resource_token(
+            &resource,
+            RESOURCE,
+            PS,
+            &class,
+            None,
+            &world.keys,
+            NOW,
+        ),
+        Err(R3AgentError::Token(_))
+    ));
+    let verified = world.agent.verify_r3_resource_token(
+        &resource,
+        RESOURCE,
+        PS,
+        &world.person,
+        None,
+        &world.keys,
+        NOW,
+    )?;
+    assert!(matches!(
+        world.agent.verify_r3_auth_delivery(
+            &class,
+            RESOURCE,
+            &verified,
+            &class,
+            &world.registry,
+            &world.keys,
+            NOW,
+        ),
+        Err(R3AgentError::Token(_))
+    ));
+    world.agent.verify_r3_auth_delivery(
+        &class,
+        RESOURCE,
+        &verified,
+        &world.person,
+        &world.registry,
+        &world.keys,
+        NOW,
+    )?;
+
+    let registry = standard_registry()?;
+    let parameters = Parameters::new(Vec::<(String, Parameter)>::new())?;
+    let exact = serde_json::to_vec(&Proposal::new(
+        &Operation::new(&McpCodec::vocabulary()?, br#"{"tool":"records.delete"}"#)?,
+        &parameters,
+        ProposalOptions {
+            account: None,
+            result: None,
+            display: None,
+        },
+    )?)?;
+    let (proposal_token, reference) = mint_proposal_resource_token(
+        &registry,
+        &world.resource_key,
+        "resource-1",
+        &proposal_claims(&world, OTHER_AS, "class-grant")?,
+        PROPOSAL_URI,
+        &exact,
+    )?;
+    let proposal = verify_resource_token(&proposal_token, &world.keys, NOW)?;
+    let per_call = mint_per_call_auth_token(
+        &registry,
+        &other_key,
+        "as-key",
+        &auth_claims(
+            &world,
+            OTHER_AS,
+            ACCESS_DOCUMENT,
+            "per-call-other",
+            NOW + 600,
+        )?,
+        &reference,
+        &exact,
+    )?;
+    assert!(is_context(world.agent.verify_r3_per_call_delivery(
+        &per_call,
+        RESOURCE,
+        &proposal,
         &class,
         &registry,
         &world.keys,

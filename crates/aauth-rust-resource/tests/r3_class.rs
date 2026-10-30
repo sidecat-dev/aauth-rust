@@ -322,6 +322,21 @@ fn forged(record: &R3DocumentRecord, s256: &str, tools: &[&str], account: Option
 fn call(path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
     call_at(ORIGIN, path, token, seed)
 }
+fn call_method(method: &str, path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(format!("{ORIGIN}{path}"))
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut request,
+        &SigningKey::from_seed([seed; 32]),
+        KeyMaterial::Jwt(token.into()),
+        NOW,
+    )
+    .unwrap();
+    request
+}
 fn call_at(origin: &str, path: &str, token: &str, seed: u8) -> Request<Vec<u8>> {
     let mut request = Request::builder()
         .uri(format!("{origin}{path}"))
@@ -1286,8 +1301,13 @@ impl R3CallStore for MemoryCalls {
     fn load(&self, uri: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
         Ok(self.records.lock().unwrap().get(uri).cloned())
     }
-    fn load_pending(&self, _: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
-        Ok(None)
+    fn load_pending(&self, id: &str) -> Result<Option<R3ProposalRecord>, R3StoreError> {
+        Ok(self.records.lock().unwrap().values().find(|record| {
+            record
+                .held
+                .as_ref()
+                .is_some_and(|held| held.pending_id == id)
+        }).cloned())
     }
     fn claim(&self, uri: &str, token: &R3CallToken, now: i64) -> Result<R3Claim, R3StoreError> {
         if self.load(uri)?.is_none() {
@@ -1492,5 +1512,182 @@ fn federated_access_server_serves_and_admits_class_and_per_call_r3() {
     match resource.authorize(&call("/mcp/records.delete", &completion, 2), NOW, "run-2") {
         AuthDecision::Replayed(response) => assert_eq!(response.body(), b"deleted"),
         other => panic!("replay: {other:?}"),
+    }
+}
+
+#[test]
+fn qa_d1_budgeted_mapped_person_challenge_is_unauthorized() {
+    let store = Arc::new(VolatileTestStore::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let units = vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()];
+    let resource = core_resource(&calls)
+        .with_budgets(units, "https://resource.example/usage", 500, 500)
+        .unwrap()
+        .with_r3(r3_config(&store, false))
+        .unwrap();
+    let response = resource
+        .authorize(&call("/mcp/records.read", &person(), 2), NOW, "rt-reactive")
+        .into_response();
+    assert_eq!(
+        response.status(),
+        401,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(body["error"], "auth_token_required");
+    let compact = response.headers()["aauth-requirement"]
+        .to_str()
+        .unwrap()
+        .strip_prefix("requirement=auth-token;resource-token=\"")
+        .unwrap()
+        .strip_suffix('"')
+        .unwrap();
+    let verified = verify_resource_token(compact, &keys(), NOW).unwrap();
+    assert!(!verified.claims().extra.contains_key("budget"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let proactive = resource
+        .authorize_endpoint(
+            &authorize(json!({ "r3_operations": operations(&["records.read"]) })),
+            NOW,
+            "rt-plain",
+        )
+        .into_response();
+    assert_eq!(
+        proactive.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(proactive.body())
+    );
+    let issued: Value = serde_json::from_slice(proactive.body()).unwrap();
+    verify_resource_token(
+        issued["resource_token"].as_str().unwrap(),
+        &keys(),
+        NOW,
+    )
+    .unwrap();
+}
+
+#[test]
+fn qa_d2_held_pending_post_is_method_not_allowed_and_unknown_id_is_gone() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let resource = PsAuthorizationResource::new(config(), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: true,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-held",
+    );
+    let class = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    let held = resource
+        .authorize(
+            &call("/mcp/records.delete", &class, 2),
+            NOW,
+            "challenge-hold",
+        )
+        .into_response();
+    assert_eq!(held.status(), 202, "{}", String::from_utf8_lossy(held.body()));
+    let location = held.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.ends_with("/r3/pending/challenge-hold"), "{location}");
+    let stored = proposals.only();
+    let mut claims = auth_claims(None);
+    claims.jti = "per-call-1".into();
+    let per_call = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("per-call auth token");
+    let pending = "/r3/pending/challenge-hold";
+    let before = calls.load(Ordering::SeqCst);
+    let posted = resource
+        .authorize(&call_method("POST", pending, &per_call, 2), NOW, "poll-post")
+        .into_response();
+    assert_eq!(posted.status(), 405, "{}", String::from_utf8_lossy(posted.body()));
+    let posted_body: Value = serde_json::from_slice(posted.body()).unwrap();
+    assert_eq!(posted_body["error"], "method_not_allowed");
+    assert_eq!(posted.headers().get("allow").unwrap().to_str().unwrap(), "GET");
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+    let missing = resource
+        .authorize(
+            &call("/r3/pending/not-this-held-call", &per_call, 2),
+            NOW,
+            "poll-missing",
+        )
+        .into_response();
+    assert_eq!(missing.status(), 410, "{}", String::from_utf8_lossy(missing.body()));
+    let missing_body: Value = serde_json::from_slice(missing.body()).unwrap();
+    assert_eq!(missing_body["error"], "gone");
+    let grant = match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-get") {
+        AuthDecision::Granted(admitted) => admitted.r3_grant().expect("held completion").clone(),
+        other => panic!("pending GET: {other:?}"),
+    };
+    let stored_response = resource.r3_retain(
+        &grant,
+        Response::builder().status(200).body(b"held".to_vec()).unwrap(),
+    );
+    assert_eq!(stored_response.body(), b"held");
+    let mut other_claims = claims.clone();
+    other_claims.jti = "per-call-2".into();
+    let other = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &other_claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("different per-call token");
+    match resource.authorize(&call(pending, &other, 2), NOW, "poll-other") {
+        AuthDecision::Forbidden { .. } => {}
+        other => panic!("different token on the pending URL: {other:?}"),
+    }
+    let replay_post = resource
+        .authorize(&call_method("POST", pending, &per_call, 2), NOW, "poll-post-2")
+        .into_response();
+    assert_eq!(replay_post.status(), 405, "{}", String::from_utf8_lossy(replay_post.body()));
+    assert_eq!(
+        replay_post.headers().get("allow").unwrap().to_str().unwrap(),
+        "GET"
+    );
+    match resource.authorize(&call(pending, &per_call, 2), NOW, "poll-replay") {
+        AuthDecision::Replayed(response) => assert_eq!(response.body(), b"held"),
+        other => panic!("GET replay: {other:?}"),
     }
 }

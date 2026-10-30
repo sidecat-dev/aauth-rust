@@ -875,6 +875,9 @@ where
         };
         let record = match record {
             Ok(Some(record)) => record,
+            // A pending URL that names no stored invocation is gone. A miss on
+            // the mapped completion route stays a refusal of that token.
+            Ok(None) if pending_id.is_some() => return Err(AuthDecision::Gone),
             Ok(None) => return Err(forbidden()),
             Err(_) => return Err(AuthDecision::InternalError),
         };

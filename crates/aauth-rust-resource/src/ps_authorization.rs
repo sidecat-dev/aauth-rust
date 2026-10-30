@@ -266,6 +266,10 @@ pub enum AuthDecision<T = ()> {
         /// `AAuth-Budget` when a budgeted auth token was refused without metering.
         budget_header: Option<String>,
     },
+    /// Held-invocation polling accepts only GET.
+    MethodNotAllowed,
+    /// The pending id is not a stored held invocation.
+    Gone,
     /// Host-supplied challenge identifier/time could not produce a valid token.
     InternalError,
     /// Verified Auth token, holder proof, route scopes and host policy admitted it.
@@ -303,6 +307,8 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
                 f.debug_tuple("SignatureFailure").field(error).finish()
             }
             Self::Forbidden { .. } => f.write_str("Forbidden"),
+            Self::MethodNotAllowed => f.write_str("MethodNotAllowed"),
+            Self::Gone => f.write_str("Gone"),
             Self::InternalError => f.write_str("InternalError"),
             Self::Granted(value) => f
                 .debug_struct("Granted")
@@ -401,6 +407,15 @@ impl<T> AuthDecision<T> {
                 insert_budget(&mut response, budget_header);
                 response
             }
+            Self::MethodNotAllowed => {
+                let mut response = refusal(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+                response.headers_mut().insert(
+                    "allow",
+                    "GET".parse().expect("static allow"),
+                );
+                response
+            }
+            Self::Gone => refusal(StatusCode::GONE, "gone"),
             // A hold or an unmetered admission is not an HTTP grant. Mapping it
             // here does not commit the reservation. Dropping the hold releases it.
             Self::Held(_) | Self::Observed(_) => {
