@@ -21,7 +21,7 @@ dependencies are not MIT-only: `ed25519-dalek` 2.2.0 is BSD-3-Clause, `ring`
 0.17.14 is Apache-2.0 AND ISC, and `rustls-webpki` 0.103.15 is ISC.
 
 [CONFORMANCE.md](CONFORMANCE.md) is the behavior record. This tag does not claim
-full R3, Events, Bootstrap, or Supervision. Directory recovery there is a process
+full R3, Bootstrap, or Supervision. Directory recovery there is a process
 exit, not power loss. Person Server, Access Server, budgets, and one-level
 sub-agent guides remain in the sections below.
 

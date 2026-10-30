@@ -893,6 +893,59 @@ threads (739 passed, 0 failed, 9 ignored in 83 targets) and the
 that run. Receipt START `2026-10-30T16:12:00.121592342+00:00`, END
 `2026-10-30T16:18:05.873342882+00:00`, `Result=success`, `ExecMainStatus=0`.
 
+AAuth Events is implemented against all 22 MUST-level rows of the pinned
+Events draft. Commits `6b641d6` through
+`91da08b88e58b35e50b9975e306d1bb1ae1fb5d4` (tree
+`25e669f7ed0d510461e46068dcbec8d680c2cfef`) add the following.
+
+- Core: the subscribe and event tokens. Event tokens are `aa-event+jwt`
+  self-jwt from the Resource. They carry the subscription's `eid`, carry
+  `body_s256` exactly when the delivery has a body, and never carry `cnf`.
+- Agent Provider:
+  - It publishes an HTTPS `event_endpoint` and issues subscribe tokens
+    after storing the subscription.
+  - It validates a delivery in the draft's order. It checks `aud`, and
+    routes by `eid` to the right Resource and Agent, before spending a
+    `max_uses` use.
+  - It answers `202` with `remaining_uses` only after the inbox store
+    reports the write.
+  - `DirectoryEventStore` is a durable, file-backed inbox. Every write is
+    fsynced and renamed before it reports success, an uncertain write is
+    `503` and counts nothing, and a torn subscription file is refused.
+    Accepted events and the `max_uses` count survive a reopen and a process
+    exit. It is one process per directory, with no compaction.
+- Agent:
+  - It signs registrations with the subscribe token.
+  - It verifies `typ`, `dwk`, the Resource signature, `aud` and `exp`,
+    and checks the delivered body against `body_s256`.
+  - It maps `eid` to its own context and ignores a repeated event.
+- Resource:
+  - It verifies subscribe tokens before registering.
+  - It registers public subscriptions, and protected ones through tickets.
+    A ticket is single-use, short-lived and bound to the JWK Thumbprint of
+    the key that established it.
+  - It mints event tokens and signs deliveries, covering `content-digest`
+    and `content-type` when there is a body.
+  - `EventsResource::with_asyncapi` refuses an AsyncAPI JSON document that
+    lacks the `aauth_subscribe` security scheme. A document a host serves
+    by other means is not checked.
+
+AP-to-Agent transport is the host's, as the draft leaves it. The AP hands the
+host's store the exact verified bytes, and the Agent verifies them. The draft
+orders the use count before the `aud` check; this library checks `aud`
+first, so a misaddressed delivery spends nothing. Host3 `aauth-claude-events01`
+at `91da08b` passed:
+
+- rustfmt;
+- library and binary Clippy with `-D warnings`;
+- `cargo test --locked --no-fail-fast` with two harness threads (778 passed,
+  0 failed, 10 ignored in 88 targets);
+- the `r3-per-call-interop` tests.
+
+Each of the 22 rows names a test that passed in that run. Receipt START
+`2026-10-30T17:31:45.479144566+00:00`, END
+`2026-10-30T17:37:45.638537676+00:00`, `Result=success`, `ExecMainStatus=0`.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
@@ -1164,7 +1217,8 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   Resource stays missionless unless `with_mission_context` is set. Other
   unsupported PS parameters are refused explicitly.
 - R3 behavior is limited to the opt-in subsets above; the default Core profile
-  does not negotiate it. Events, Bootstrap and Supervision behavior is absent.
+  does not negotiate it. Events is implemented as recorded above.
+  Bootstrap and Supervision behavior is absent.
   Pinning a document does not imply implementing it. Opt-in budgets are the
   separate row above.
 - Header web keys verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS
