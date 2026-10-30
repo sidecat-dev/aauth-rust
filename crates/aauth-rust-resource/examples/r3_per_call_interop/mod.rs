@@ -1529,8 +1529,9 @@ fn handle_federated_converse(
         .pending()
         .location
         .strip_prefix(&format!("{FED_RECORDS}/pending/"))
-        .ok_or("federated held Location is not the resource pending URL")?;
-    if !held_pending_id_ok(pending_id) {
+        .ok_or("federated held Location is not the resource pending URL")?
+        .to_owned();
+    if !held_pending_id_ok(&pending_id) {
         return Err("federated held pending identifier is not URL-safe".into());
     }
     let held_rt = match &held_poll.pending().requirement {
