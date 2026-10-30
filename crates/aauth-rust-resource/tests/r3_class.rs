@@ -1849,3 +1849,137 @@ fn held_poll_while_the_grant_is_unretained_stays_pending() {
         other => panic!("first result changed: {other:?}"),
     }
 }
+
+#[test]
+fn a_retry_while_the_grant_is_unretained_is_unavailable() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(VolatileTestStore::default());
+    let proposals = Arc::new(MemoryCalls::new());
+    let present: BoxedR3Present =
+        Box::new(|_: &Request<Vec<u8>>, _: &Operation| Ok(BTreeMap::new()));
+    let describe: BoxedR3Describe = Box::new(
+        |_: &Operation, _: &BTreeMap<String, PresentedParameter>, _: Option<&str>| {
+            Ok(aauth_rust_resource::R3CallDescription {
+                parameters: Parameters::new(std::iter::empty()).expect("empty parameters"),
+                display: None,
+            })
+        },
+    );
+    let resource = PsAuthorizationResource::new(config(), keys(), policy(&calls))
+        .unwrap()
+        .with_authorization_endpoint()
+        .with_r3(r3_config(&store, false))
+        .unwrap()
+        .with_r3_per_call(R3PerCallConfig {
+            present,
+            describe,
+            calls: proposals.clone(),
+            hold: false,
+            release: None,
+            held_result_lifetime: 300,
+        })
+        .unwrap();
+    let record = issue(
+        &resource,
+        &store,
+        &["records.read", "records.delete"],
+        "rt-retry",
+    );
+    let class = class_token(
+        &record,
+        &["records.read"],
+        &["records.delete"],
+        &auth_claims(None),
+        3,
+        "ps-1",
+    );
+    match resource.authorize(&call("/mcp/records.delete", &class, 2), NOW, "challenge-retry") {
+        AuthDecision::AuthTokenRequired { .. } => {}
+        other => panic!("retry challenge: {other:?}"),
+    }
+    let stored = proposals.only();
+    let mut claims = auth_claims(None);
+    claims.jti = "per-call-retry".into();
+    let per_call = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("per-call auth token");
+    let route = "/mcp/records.delete";
+    let grant = match resource.authorize(&call(route, &per_call, 2), NOW, "run-grant") {
+        AuthDecision::Granted(admitted) => admitted.r3_grant().expect("retry completion").clone(),
+        other => panic!("first completion: {other:?}"),
+    };
+    match resource.authorize(&call(route, &per_call, 2), NOW, "run-live") {
+        AuthDecision::TemporarilyUnavailable => {}
+        other => panic!("completion while the grant is held: {other:?}"),
+    }
+    let response = resource
+        .authorize(&call(route, &per_call, 2), NOW, "run-live-http")
+        .into_response();
+    assert_eq!(response.status(), 503, "{}", String::from_utf8_lossy(response.body()));
+    assert_eq!(response.headers().get("retry-after").unwrap().to_str().unwrap(), "1");
+    assert!(response.headers().get("location").is_none());
+    assert!(response.headers().get("aauth-requirement").is_none());
+    assert_eq!(
+        response.headers().get("content-type").unwrap().to_str().unwrap(),
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    assert_eq!(body["error"], "temporarily_unavailable");
+    let retained = resource.r3_retain(
+        &grant,
+        Response::builder().status(200).body(b"ran-once".to_vec()).unwrap(),
+    );
+    assert_eq!(retained.body(), b"ran-once");
+    match resource.authorize(&call(route, &per_call, 2), NOW, "run-after") {
+        AuthDecision::Replayed(replay) => assert_eq!(replay.body(), b"ran-once"),
+        other => panic!("replay after retain: {other:?}"),
+    }
+
+    match resource.authorize(&call(route, &class, 2), NOW, "challenge-drop") {
+        AuthDecision::AuthTokenRequired { .. } => {}
+        other => panic!("second challenge: {other:?}"),
+    }
+    let stored = proposals
+        .records
+        .lock()
+        .unwrap()
+        .values()
+        .find(|record| record.resource_token_jti == "challenge-drop")
+        .cloned()
+        .expect("dropped proposal");
+    let mut dropped_claims = auth_claims(None);
+    dropped_claims.jti = "per-call-drop".into();
+    let dropped_token = aauth_rust_r3::mint_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([3; 32]),
+        "ps-1",
+        &dropped_claims,
+        &stored.reference,
+        &stored.exact_json,
+    )
+    .expect("dropped per-call auth token");
+    match resource.authorize(&call(route, &dropped_token, 2), NOW, "run-drop-grant") {
+        AuthDecision::Granted(_) => {}
+        other => panic!("grant that will be dropped: {other:?}"),
+    }
+    match resource.authorize(&call(route, &dropped_token, 2), NOW, "run-dropped") {
+        AuthDecision::InternalError => {}
+        other => panic!("completion after the grant was dropped: {other:?}"),
+    }
+    let abandoned = resource
+        .authorize(&call(route, &dropped_token, 2), NOW, "run-dropped-http")
+        .into_response();
+    assert_eq!(abandoned.status(), 500, "{}", String::from_utf8_lossy(abandoned.body()));
+    let abandoned_body: Value = serde_json::from_slice(abandoned.body()).unwrap();
+    assert_eq!(abandoned_body["error"], "server_error");
+    match resource.authorize(&call(route, &per_call, 2), NOW, "run-first-intact") {
+        AuthDecision::Replayed(replay) => assert_eq!(replay.body(), b"ran-once"),
+        other => panic!("first result changed: {other:?}"),
+    }
+}

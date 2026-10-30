@@ -10,8 +10,10 @@
 //! claims the proposal once: the first exact token gets a fence to execute,
 //! the same token again gets the retained result, and anything uncertain
 //! executes nothing. A second poll of a held invocation, while the host still
-//! holds that grant and has not retained a result, stays `202`. Dropping the
-//! grant without a retained result leaves the next poll `500`.
+//! holds that grant and has not retained a result, stays `202`. A second
+//! presentation of a `401` completion, while that grant is still held, is
+//! `503`. Dropping either grant without a retained result leaves the next
+//! presentation `500`.
 //!
 //! Approving Release Rather Than Execution: under `202` only, a host
 //! [`BoxedR3Release`] may run a side-effect-free call before approval. The
@@ -1070,10 +1072,8 @@ where
                     }
                 } else {
                     completion.fence = Some(fence);
-                    if completion.held.is_some() {
-                        completion.executing =
-                            Some(ExecutingHold::register(&self.executing, &completion.uri));
-                    }
+                    completion.executing =
+                        Some(ExecutingHold::register(&self.executing, &completion.uri));
                     Ok(Some(grant))
                 }
             }
@@ -1081,16 +1081,17 @@ where
             Ok(R3Claim::DifferentToken | R3Claim::Expired) => Err(AuthDecision::Forbidden {
                 budget_header: None,
             }),
-            // The host still holds this held grant. The poll stays pending.
-            // Nothing runs. A `401` retry, a dropped grant, and an uncertain
-            // store stay `500`: there is no second effect.
-            Ok(R3Claim::Unfinished) if completion.held.is_some() => {
-                match completion.pending_id.as_deref() {
-                    Some(id) if ExecutingHold::contains(self.executing.as_ref(), &completion.uri) => {
-                        Err(AuthDecision::StillPending {
-                            location: format!("{}/r3/pending/{id}", self.document_origin()),
-                        })
-                    }
+            // The host still holds this grant. A held poll stays `202`. A
+            // `401` retry is `503` and can be presented again. Nothing runs.
+            // A dropped grant and an uncertain store stay `500`.
+            Ok(R3Claim::Unfinished)
+                if ExecutingHold::contains(self.executing.as_ref(), &completion.uri) =>
+            {
+                match (completion.held.is_some(), completion.pending_id.as_deref()) {
+                    (true, Some(id)) => Err(AuthDecision::StillPending {
+                        location: format!("{}/r3/pending/{id}", self.document_origin()),
+                    }),
+                    (false, None) => Err(AuthDecision::TemporarilyUnavailable),
                     _ => Err(AuthDecision::InternalError),
                 }
             }

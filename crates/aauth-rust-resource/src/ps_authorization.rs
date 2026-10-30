@@ -276,6 +276,9 @@ pub enum AuthDecision<T = ()> {
         /// Pending URL at this Resource's signed origin.
         location: String,
     },
+    /// The host still holds this `401` retry grant and has not retained a result.
+    /// The same token can be presented again. The invocation does not run again.
+    TemporarilyUnavailable,
     /// Host-supplied challenge identifier/time could not produce a valid token.
     InternalError,
     /// Verified Auth token, holder proof, route scopes and host policy admitted it.
@@ -319,6 +322,7 @@ impl<T> std::fmt::Debug for AuthDecision<T> {
                 .debug_struct("StillPending")
                 .field("location", location)
                 .finish(),
+            Self::TemporarilyUnavailable => f.write_str("TemporarilyUnavailable"),
             Self::InternalError => f.write_str("InternalError"),
             Self::Granted(value) => f
                 .debug_struct("Granted")
@@ -444,6 +448,18 @@ impl<T> AuthDecision<T> {
                 headers.insert(
                     "content-type",
                     "application/json".parse().expect("static content type"),
+                );
+                response
+            }
+            // The host still holds the 401 retry. Go's retry conflict is 503
+            // with Retry-After 1. Dropping the grant without a retained result
+            // is 500, not another 503.
+            Self::TemporarilyUnavailable => {
+                let mut response =
+                    refusal(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
+                response.headers_mut().insert(
+                    "retry-after",
+                    "1".parse().expect("static retry"),
                 );
                 response
             }
