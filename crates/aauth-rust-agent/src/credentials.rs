@@ -51,12 +51,26 @@ pub(crate) struct ParentContext {
     cnf: Jwk,
     mission: Option<String>,
     tenant: Option<String>,
+    /// `dwk` of an Auth parent. A Person token leaves this empty.
+    pub(crate) auth_dwk: Option<String>,
 }
+
+/// Auth role accepted for a presented parent credential.
+pub(crate) enum PresentedAuthRole<'a> {
+    /// Person Server grant: `aauth-person.json`.
+    PersonServer,
+    /// Access Server grant: `aauth-access.json` from this issuer.
+    AccessServer(&'a str),
+    /// R3 class grant. The signed `dwk` is `aauth-person.json` or
+    /// `aauth-access.json`. Core still requires `iss == ps` for the former.
+    R3Class,
+}
+
 pub(crate) fn verify_parent(
     compact: &str,
     keys: &dyn AgentKeyResolver,
     now: i64,
-    access_server: Option<&str>,
+    role: PresentedAuthRole<'_>,
 ) -> Result<ParentContext, TokenError> {
     let parsed = Jws::parse(compact)?;
     match parsed.header().get("typ").and_then(|value| value.as_str()) {
@@ -73,14 +87,23 @@ pub(crate) fn verify_parent(
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
                 tenant: claims.tenant.clone(),
+                auth_dwk: None,
             })
         }
         Some("aa-auth+jwt") => {
             let token = AuthToken::parse(compact)?.verify(keys, now)?;
             let claims = token.claims();
-            let valid = match access_server {
-                Some(issuer) => claims.dwk == "aauth-access.json" && claims.iss == issuer,
-                None => claims.dwk == "aauth-person.json",
+            let valid = match role {
+                PresentedAuthRole::PersonServer => claims.dwk == "aauth-person.json",
+                PresentedAuthRole::AccessServer(issuer) => {
+                    claims.dwk == "aauth-access.json" && claims.iss == issuer
+                }
+                PresentedAuthRole::R3Class => {
+                    matches!(
+                        claims.dwk.as_str(),
+                        "aauth-person.json" | "aauth-access.json"
+                    )
+                }
             };
             if !valid {
                 return Err(TokenError::InvalidJwt);
@@ -95,6 +118,7 @@ pub(crate) fn verify_parent(
                 cnf: claims.cnf.jwk.clone(),
                 mission: claims.mission_s256.clone(),
                 tenant: claims.tenant.clone(),
+                auth_dwk: Some(claims.dwk.clone()),
             })
         }
         _ => Err(TokenError::UnexpectedTokenType),
@@ -143,7 +167,12 @@ impl CredentialVerifier<'_> {
         now: i64,
     ) -> Result<VerifiedResourceToken, TokenError> {
         validate_server_identifier(person_server)?;
-        let parent = verify_parent(presented_compact, keys, now, None)?;
+        let parent = verify_parent(
+            presented_compact,
+            keys,
+            now,
+            PresentedAuthRole::PersonServer,
+        )?;
         let token = ResourceToken::parse(compact)?.verify(keys, now)?;
         challenge_context(
             token.claims(),
@@ -176,7 +205,12 @@ impl CredentialVerifier<'_> {
         keys: &dyn AgentKeyResolver,
         now: i64,
     ) -> Result<VerifiedAuthToken, TokenError> {
-        let parent = verify_parent(presented_compact, keys, now, None)?;
+        let parent = verify_parent(
+            presented_compact,
+            keys,
+            now,
+            PresentedAuthRole::PersonServer,
+        )?;
         let requested = resource.claims();
         challenge_context(
             requested,
@@ -246,7 +280,7 @@ impl CredentialVerifier<'_> {
             context.presented_token,
             keys,
             now,
-            Some(context.access_server),
+            PresentedAuthRole::AccessServer(context.access_server),
         )?;
         let token = ResourceToken::parse(compact)?.verify(keys, now)?;
         challenge_context(
@@ -281,7 +315,7 @@ impl CredentialVerifier<'_> {
             context.presented_token,
             keys,
             now,
-            Some(context.access_server),
+            PresentedAuthRole::AccessServer(context.access_server),
         )?;
         let requested = resource.claims();
         challenge_context(

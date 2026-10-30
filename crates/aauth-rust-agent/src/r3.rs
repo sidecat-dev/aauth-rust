@@ -1,4 +1,4 @@
-//! Immediate class R3 with a direct Person Server.
+//! Immediate class R3 with a Person Server or an Access Server.
 //!
 //! `draft-hardt-aauth-r3`: Authorization Endpoint Extensions, Resource Token
 //! Extensions, Auth Token Extensions and Per-Call Proposals. This module
@@ -6,10 +6,16 @@
 //! before use: the class Resource token, the class grant, a per-call proposal
 //! challenge and its single-operation grant. The host supplies transport,
 //! trust snapshots and the clock, and re-sends the call (`401`) or presents
-//! the per-call token at the pending URL (`202`). Budgets, missions and AS
-//! federation are not handled here.
+//! the per-call token at the pending URL (`202`).
+//!
+//! The Resource token's `aud` names the server that issues the grant. That
+//! server signs `aauth-person.json` on the direct path and `aauth-access.json`
+//! when it is an Access Server. The signed `dwk` selects the role, including
+//! when the Person Server and Access Server identifiers are the same. A
+//! per-call grant uses the class grant's `dwk`. Budgets and missions are not
+//! handled here.
 use crate::Agent;
-use crate::credentials::{challenge_context, narrowed_scope, verify_parent};
+use crate::credentials::{PresentedAuthRole, challenge_context, narrowed_scope, verify_parent};
 use aauth_rust_core::{AgentKeyResolver, AuthToken, TokenError, validate_server_identifier};
 use aauth_rust_r3::{
     OperationSet, R3TokenError, Registry, VerifiedR3AuthToken, VerifiedR3ResourceToken,
@@ -176,10 +182,12 @@ impl Agent {
     /// Verify an R3 Resource token from `/authorize` before using it.
     ///
     /// Core trust and both `r3_uri` and `r3_s256` must verify. The token must
-    /// be issued by `intended_resource` to `person_server`, carry the presented
-    /// Person token's subject, tenant, mission and `jti`, bind this Agent's key,
-    /// be issued inside that Person token's validity, carry no `interaction`
-    /// or `account`, and carry `scope` only within `requested_scope`. With no
+    /// be issued by `intended_resource`. Its `aud` is the Person Server or
+    /// Access Server that must later issue the grant; that audience is not
+    /// required to be `person_server`. It must carry the presented Person
+    /// token's subject, tenant, mission and `jti`, bind this Agent's key, be
+    /// issued inside that Person token's validity, carry no `interaction` or
+    /// `account`, and carry `scope` only within `requested_scope`. With no
     /// requested scope, any `scope` is refused. The document is not fetched:
     /// Agents are not entitled to read it.
     ///
@@ -198,15 +206,16 @@ impl Agent {
         now: i64,
     ) -> Result<VerifiedR3ResourceToken, R3AgentError> {
         validate_server_identifier(person_server)?;
-        let parent = verify_parent(presented_compact, keys, now, None)?;
+        let parent = verify_parent(presented_compact, keys, now, PresentedAuthRole::R3Class)?;
         let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
         let claims = token.claims();
+        validate_server_identifier(&claims.aud)?;
         challenge_context(
             claims,
             intended_resource,
             &parent,
             &self.public_jwk(),
-            &parent.ps,
+            &claims.aud,
         )
         .map_err(|_| R3AgentError::Context)?;
         if parent.ps != person_server
@@ -221,11 +230,14 @@ impl Agent {
         Ok(token)
     }
 
-    /// Verify a direct PS class grant against the verified R3 Resource token.
+    /// Verify a class grant against the verified R3 Resource token.
     ///
-    /// Core checks match [`Self::verify_auth_delivery`]: PS role and issuer,
-    /// audience, subject, tenant, mission, account, holder key, and expiry no
-    /// later than the presented credential. A granted `scope` must be within the
+    /// The Auth token's `dwk` selects the issuer role. `aauth-person.json`
+    /// requires `iss == ps`. `aauth-access.json` is an Access Server. In both
+    /// cases `iss` is the Resource token's `aud`, `aud` is `intended_resource`,
+    /// and `ps` is the Resource token's `ps`. The same checks cover subject,
+    /// tenant, mission, account, holder key, and expiry no later than the
+    /// presented credential. A granted `scope` must be within the
     /// requested scope; an absent `scope` grants no Core scope and is accepted
     /// even when scope was requested. The R3 reference must equal the Resource
     /// token's. `r3_granted` and a disjoint `r3_per_call` are read from the
@@ -262,11 +274,14 @@ impl Agent {
     /// Verify a per-call challenge: an R3 Resource token referencing one
     /// proposal, issued on a call made with the class Auth token `class_compact`.
     ///
-    /// The token must come from `intended_resource` for `person_server`, name
-    /// the class token's `jti` as `presented_jti`, carry its subject, tenant,
-    /// mission and account, bind this Agent's key, be issued and expire within
-    /// the class token's lifetime, carry no `interaction`, and carry `scope`
-    /// only within the class token's scope. The proposal is not fetched.
+    /// The token must come from `intended_resource`, name `person_server` as
+    /// `ps`, and name the class token's issuer as `aud`. That issuer is the
+    /// Person Server on the direct path and the Access Server when the class
+    /// grant uses `aauth-access.json`. It must name the class token's `jti` as
+    /// `presented_jti`, carry its subject, tenant, mission and account, bind
+    /// this Agent's key, be issued and expire within the class token's
+    /// lifetime, carry no `interaction`, and carry `scope` only within the
+    /// class token's scope. The proposal is not fetched.
     ///
     /// # Errors
     /// [`R3AgentError::Token`] or [`R3AgentError::R3`] for verification
@@ -281,21 +296,20 @@ impl Agent {
         now: i64,
     ) -> Result<VerifiedR3ResourceToken, R3AgentError> {
         validate_server_identifier(person_server)?;
-        let parent = verify_parent(class_compact, keys, now, None)?;
+        let parent = verify_parent(class_compact, keys, now, PresentedAuthRole::R3Class)?;
         let class = AuthToken::parse(class_compact)?.verify(keys, now)?;
         let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
         let claims = token.claims();
+        let class_claims = class.claims();
         challenge_context(
             claims,
             intended_resource,
             &parent,
             &self.public_jwk(),
-            &parent.ps,
+            &class_claims.iss,
         )
         .map_err(|_| R3AgentError::Context)?;
-        let class_claims = class.claims();
         if parent.ps != person_server
-            || class_claims.iss != person_server
             || claims.iat < parent.iat
             || claims.iat >= parent.exp
             || claims.exp > parent.exp
@@ -312,8 +326,9 @@ impl Agent {
     ///
     /// The checks of [`Self::verify_r3_auth_delivery`] apply with the class
     /// Auth token as the presented credential, so the per-call token expires no
-    /// later than it. The token must echo the proposal reference, grant exactly
-    /// one operation, and carry no `r3_per_call`.
+    /// later than it and uses that class token's `dwk`. The token must echo
+    /// the proposal reference, grant exactly one operation, and carry no
+    /// `r3_per_call`.
     ///
     /// # Errors
     /// [`R3AgentError::R3`] for invalid R3 claims,
@@ -353,14 +368,15 @@ impl Agent {
         now: i64,
         per_call: bool,
     ) -> Result<VerifiedR3AuthToken, R3AgentError> {
-        let parent = verify_parent(presented_compact, keys, now, None)?;
+        let parent = verify_parent(presented_compact, keys, now, PresentedAuthRole::R3Class)?;
         let requested = resource.claims();
+        validate_server_identifier(&requested.aud)?;
         challenge_context(
             requested,
             intended_resource,
             &parent,
             &self.public_jwk(),
-            &parent.ps,
+            &requested.aud,
         )
         .map_err(|_| R3AgentError::Context)?;
         let token =
@@ -389,8 +405,14 @@ impl Agent {
             .public_jwk()
             .thumbprint()
             .map_err(|_| R3AgentError::Context)?;
-        if claims.dwk != "aauth-person.json"
-            || claims.iss != requested.aud
+        let same_class_role = !per_call || parent.auth_dwk.as_deref() == Some(claims.dwk.as_str());
+        let issuer_role = match claims.dwk.as_str() {
+            "aauth-person.json" => claims.iss == requested.aud && claims.iss == claims.ps,
+            "aauth-access.json" => claims.iss == requested.aud,
+            _ => false,
+        };
+        if !same_class_role
+            || !issuer_role
             || claims.aud != intended_resource
             || claims.ps != requested.ps
             || claims.sub != parent.sub
