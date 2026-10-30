@@ -40,13 +40,15 @@ fn record(jti: &str, person: &str) -> TokenRecord {
         retain_until: 5260,
         presented: None,
         upstream: None,
+        r3: None,
     }
 }
 
 /// Check namespacing, round-trip, exact replay, conflicting commits, binding
 /// revocation, directed identity consistency, fully populated Auth lineage,
-/// malformed identity/parent refusal without state changes, and concurrent
-/// first-claim / same-token retry atomicity.
+/// R3 audit entries committed with their issuance, malformed identity/parent
+/// refusal without state changes, and concurrent first-claim / same-token
+/// retry atomicity.
 /// `factory` must return a fresh empty store every time; no cleanup is performed.
 ///
 /// # Errors
@@ -208,6 +210,7 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
     }
     issuance::check_complete_auth_records(factory())?;
     issuance::check_concurrent_token_commit(factory())?;
+    issuance::check_r3_audit(factory())?;
     persistence::check_refusal_atomicity(&factory(), "logical")?;
     validation::check_invalid_records(factory)?;
     Ok(())

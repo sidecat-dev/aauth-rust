@@ -29,5 +29,6 @@ pub fn record(jti: &str) -> TokenRecord {
         retain_until: 5260,
         presented: None,
         upstream: None,
+        r3: None,
     }
 }

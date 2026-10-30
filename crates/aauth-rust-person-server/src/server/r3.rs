@@ -11,7 +11,8 @@
 //! Auth token, and yields one single-operation Auth token. A proposal carrying
 //! `result` (release gating) is release consent and goes only through
 //! [`R3Policy::authorize_release`]; the token shape is the same. Either way the
-//! R3 audit record and the exact issuance commit before release.
+//! exact issuance commits with its R3 audit entry in one store write before
+//! release.
 //! A class document may carry a budget offer when budgets are enabled. The
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
 //! A Person token's approved mission composes with a direct class document:
@@ -184,8 +185,10 @@ pub struct R3IssuerConfig {
     pub limits: FetchLimits,
     /// Grant decision. There is no default grant.
     pub policy: BoxedR3Policy,
-    /// Durable, confidential R3 audit log. Its record is committed before the
-    /// issuance record, and the token is withheld unless both commit.
+    /// Durable, confidential host R3 audit log. The entry is first committed
+    /// atomically with the issuance as [`crate::TokenRecord::r3`]; this log then
+    /// receives the same facts, and the token is withheld unless both commit.
+    /// A failed issuance commit writes no entry to either.
     pub audit: Arc<dyn IssuanceStore>,
 }
 
@@ -766,7 +769,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             extra: std::collections::BTreeMap::new(),
         };
         let compact = mint(&claims)?;
-        let record = self.record(
+        let mut record = self.record(
             &compact,
             &agent,
             &retained.principal,
@@ -799,11 +802,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             agent: agent.claims().sub.clone(),
             parent_agent: None,
         };
-        // Audit first: an audit row may outlive an unreleased token, but no
-        // token is released without one. Any failure withholds the token. A
-        // mission-bound token commits against the unchanged active mission.
-        r3.audit.commit(&audit).map_err(|_| Failure::internal())?;
+        // The audit entry is part of the issuance record, so one store commit
+        // writes both or neither (Audit Log Integrity). A mission-bound token
+        // commits against the unchanged active mission. The host audit log
+        // then receives the committed entry; any failure withholds the token.
+        record.r3 = Some(R3IssuanceAudit {
+            r3_uri: audit.r3_reference.uri().to_owned(),
+            r3_s256: audit.r3_reference.digest().to_owned(),
+            vocabulary: audit.vocabulary.as_str().to_owned(),
+            person_server: audit.person_server.clone(),
+            subject: audit.subject.clone(),
+            account: audit.account.clone(),
+            presented_jti: audit.presented_jti.clone(),
+            agent_jkt: audit.agent_jkt.clone(),
+            agent: audit.agent.clone(),
+            parent_agent: audit.parent_agent.clone(),
+        });
         self.commit_issuance(record, false, mission, binding_context)?;
+        r3.audit.commit(&audit).map_err(|_| Failure::internal())?;
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();

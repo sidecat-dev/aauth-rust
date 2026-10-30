@@ -437,7 +437,9 @@ guarantees, plus Rust's atomic binding/directed-identity rules. Run
 the shared `TokenRecord::validate_for_commit` shape checks in custom adapters,
 after the existing-record comparison. They check identifier syntax, nonempty
 references/digests and Person/Auth parent shape; credential verification remains
-the PS role's duty. Run
+the PS role's duty. An R3 Auth issuance carries its R3 audit entry in
+`TokenRecord.r3`: committing the record writes the entry atomically with the
+issuance, so adapters persist that field with the rest of the record. Run
 `storetest::check_persistence_contract` separately with a consuming callback
 that drops the sole handle before reopening the same storage. Returning a live
 object or leaving a clone open does not test persistence. Both contracts mutate

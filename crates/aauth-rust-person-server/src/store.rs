@@ -2,6 +2,7 @@ use crate::{
     MissionAudit, MissionAuditError, MissionEdit, MissionRecord, MissionState, MissionStore,
     MissionStoreError,
 };
+use aauth_rust_r3::{IssuanceRecord, Reference, VocabularyUri};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -97,9 +98,69 @@ pub struct TokenRecord {
     pub presented: Option<TokenTie>,
     /// Exact original caller credential required at both chained stages.
     pub upstream: Option<TokenTie>,
+    /// R3 audit entry of an Auth token this PS issued for an R3 reference. It
+    /// is part of the record, so committing the record writes the entry
+    /// atomically with the issuance. Older rows decode as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r3: Option<R3IssuanceAudit>,
+}
+
+/// R3 facts an issuer records with one Auth-token issuance
+/// (`draft-hardt-aauth-r3`, Issuer Processing step 4). The issuer, `jti`,
+/// Resource and issuance time are the enclosing record's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct R3IssuanceAudit {
+    /// `r3_uri` of the document or proposal.
+    pub r3_uri: String,
+    /// `r3_s256` of the document or proposal.
+    pub r3_s256: String,
+    /// Vocabulary URI selected while parsing that artifact.
+    pub vocabulary: String,
+    /// `ps` from the Resource token.
+    pub person_server: String,
+    /// `sub` from the Resource token.
+    pub subject: String,
+    /// `account` from the Resource token. `Some("")` is present and empty.
+    pub account: Option<String>,
+    /// `presented_jti` from the Resource token.
+    pub presented_jti: String,
+    /// `agent_jkt` from the Resource token.
+    pub agent_jkt: String,
+    /// `sub` of the Agent token the Auth token is bound to.
+    pub agent: String,
+    /// `sub` of the parent Agent token when a sub-agent token was presented.
+    pub parent_agent: Option<String>,
 }
 
 impl TokenRecord {
+    /// The R3 audit entry with this record's issuer, `jti`, Resource and
+    /// issuance time, as the R3 crate's [`IssuanceRecord`]. `None` when the
+    /// record carries no R3 facts.
+    ///
+    /// # Errors
+    /// [`StoreError::InvalidRecord`] for a malformed reference or vocabulary.
+    pub fn r3_issuance(&self) -> Result<Option<IssuanceRecord>, StoreError> {
+        let Some(r3) = &self.r3 else {
+            return Ok(None);
+        };
+        Ok(Some(IssuanceRecord {
+            auth_token_issuer: self.token.reference.issuer.clone(),
+            auth_token_jti: self.token.reference.jti.clone(),
+            resource: self.resource.clone(),
+            r3_reference: Reference::new(&r3.r3_uri, &r3.r3_s256)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            vocabulary: VocabularyUri::parse(&r3.vocabulary)
+                .map_err(|_| StoreError::InvalidRecord)?,
+            issued_at: self.issued_at,
+            person_server: r3.person_server.clone(),
+            subject: r3.subject.clone(),
+            account: r3.account.clone(),
+            presented_jti: r3.presented_jti.clone(),
+            agent_jkt: r3.agent_jkt.clone(),
+            agent: r3.agent.clone(),
+            parent_agent: r3.parent_agent.clone(),
+        }))
+    }
     /// Namespace owning this credential's Agent/person binding and directed identity.
     pub fn binding_issuer(&self) -> &str {
         self.person_server
@@ -185,6 +246,19 @@ impl TokenRecord {
                 && (self.kind != TokenKind::Person
                     || (self.agent != self.principal && self.parent_agent.is_none())
                     || self.upstream.is_some()))
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        if let Some(r3) = &self.r3
+            && (self.kind != TokenKind::Auth
+                || self.person_server.is_some()
+                || r3.person_server != self.token.reference.issuer
+                || r3.subject != self.subject
+                || r3.agent_jkt != self.agent_jkt
+                || r3.agent != self.agent.subject
+                || r3.parent_agent.as_ref() != self.parent_agent.as_ref().map(|p| &p.subject)
+                || r3.presented_jti.is_empty()
+                || self.r3_issuance().is_err())
         {
             return Err(StoreError::InvalidRecord);
         }

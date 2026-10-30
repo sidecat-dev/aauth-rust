@@ -213,6 +213,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .saturating_add(3660),
             presented: issuance.presented,
             upstream: issuance.upstream,
+            r3: None,
         })
     }
 }

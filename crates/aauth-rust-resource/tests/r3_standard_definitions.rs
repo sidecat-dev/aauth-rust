@@ -3105,7 +3105,7 @@ fn failed_document_commit_withholds_the_budgeted_class_token() {
 }
 
 #[test]
-fn class_audit_survives_when_issuance_commit_fails() {
+fn failed_issuance_commit_writes_no_class_audit() {
     let profile = profiles().into_iter().next().expect("one parser profile");
     let (resource, _, _) = resource_for(&profile, true);
     let signer = agent();
@@ -3185,8 +3185,8 @@ fn class_audit_survives_when_issuance_commit_fails() {
     assert!(member(&withheld, "auth_token").is_none());
     assert_eq!(
         audits.load(Ordering::SeqCst),
-        1,
-        "the audit row outlives the token"
+        0,
+        "the audit entry commits with its issuance or not at all"
     );
     assert_eq!(ps.budget_accounted(), Some(0));
     let released = exchange_budget_auth(
@@ -3205,7 +3205,7 @@ fn class_audit_survives_when_issuance_commit_fails() {
         .and_then(|budget| budget.get("amount"))
         .and_then(Value::as_i64);
     assert_eq!(amount, Some(500));
-    assert_eq!(audits.load(Ordering::SeqCst), 2);
+    assert_eq!(audits.load(Ordering::SeqCst), 1);
     assert_eq!(ps.budget_accounted(), Some(500));
 }
 

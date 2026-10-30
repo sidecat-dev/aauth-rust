@@ -17,8 +17,9 @@ mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
 
 use crate::{
-    AgentIdentity, AuthorizationRequest, Grant, Person, PersonRequest, Policy, PolicyError, Store,
-    StoreError, TokenKind, TokenRecord, TokenReference, TokenTie, UpstreamContext,
+    AgentIdentity, AuthorizationRequest, Grant, Person, PersonRequest, Policy, PolicyError,
+    R3IssuanceAudit, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie,
+    UpstreamContext,
 };
 use aauth_rust_budgets::{
     AllocationBook, Budget, ConsentFigure, IssuerPolicy, MAX_AMOUNT, check_declared, narrow_to,

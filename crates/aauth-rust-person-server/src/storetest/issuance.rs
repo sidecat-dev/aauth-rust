@@ -1,6 +1,7 @@
 use super::{
     AgentIdentity, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie, record,
 };
+use crate::R3IssuanceAudit;
 use std::sync::Arc;
 
 pub(super) fn auth_record(jti: &str, parent: &TokenRecord) -> TokenRecord {
@@ -207,6 +208,97 @@ pub(super) fn check_concurrent_token_commit<S: Store + 'static>(store: S) -> Res
                 "concurrent identical winner retry / conflicting loser did not linearize".into(),
             );
         }
+    }
+    Ok(())
+}
+
+/// An R3 audit entry commits in the same write as its issuance: it round-trips
+/// with the record, an entry inconsistent with the issuance leaves neither,
+/// and the retained issuance cannot be replaced with or without another entry.
+pub(super) fn check_r3_audit(store: impl Store) -> Result<(), String> {
+    let parent = record("person-r3", "internal-person");
+    store
+        .commit(parent.clone(), true)
+        .map_err(|e| format!("R3 parent Person: {e}"))?;
+    let mut auth = parent.clone();
+    auth.token.reference.jti = "auth-r3".into();
+    auth.token.compact_sha256 = "r3-auth-compact-digest".into();
+    auth.kind = TokenKind::Auth;
+    auth.presented = Some(parent.token.clone());
+    auth.r3 = Some(R3IssuanceAudit {
+        r3_uri: "https://resource.example/r3/class".into(),
+        r3_s256: aauth_rust_r3::digest(b"class document"),
+        vocabulary: "urn:aauth:vocabulary:mcp".into(),
+        person_server: auth.token.reference.issuer.clone(),
+        subject: auth.subject.clone(),
+        account: Some(String::new()),
+        presented_jti: parent.token.reference.jti.clone(),
+        agent_jkt: auth.agent_jkt.clone(),
+        agent: auth.agent.subject.clone(),
+        parent_agent: None,
+    });
+    let inconsistent: &[Mutation] = &[
+        ("subject", |r| r.r3.as_mut().unwrap().subject.push('x')),
+        ("Agent", |r| r.r3.as_mut().unwrap().agent.push('x')),
+        ("Agent thumbprint", |r| {
+            r.r3.as_mut().unwrap().agent_jkt.push('x')
+        }),
+        ("Person Server", |r| {
+            r.r3.as_mut().unwrap().person_server = "https://other-ps.example".into()
+        }),
+        ("digest", |r| {
+            r.r3.as_mut().unwrap().r3_s256 = "not-a-digest".into()
+        }),
+        ("kind", |r| {
+            r.kind = TokenKind::Person;
+            r.presented = None;
+        }),
+    ];
+    for (name, mutate) in inconsistent {
+        let mut refused = auth.clone();
+        mutate(&mut refused);
+        if store.commit(refused, false) != Err(StoreError::InvalidRecord) {
+            return Err(format!(
+                "R3 audit entry with another {name} was not refused"
+            ));
+        }
+        if store
+            .token(&auth.token.reference)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Err(format!("refused R3 audit entry ({name}) left an issuance"));
+        }
+    }
+    store
+        .commit(auth.clone(), false)
+        .map_err(|e| format!("R3 Auth issuance: {e}"))?;
+    let retained = store
+        .token(&auth.token.reference)
+        .map_err(|e| e.to_string())?;
+    if retained != Some(auth.clone()) {
+        return Err("R3 audit entry did not round-trip with its issuance".into());
+    }
+    let changed: &[Mutation] = &[
+        ("absent", |r| r.r3 = None),
+        ("digest", |r| {
+            r.r3.as_mut().unwrap().r3_s256 = aauth_rust_r3::digest(b"other document")
+        }),
+        ("account", |r| r.r3.as_mut().unwrap().account = None),
+    ];
+    for (name, mutate) in changed {
+        let mut conflicting = auth.clone();
+        mutate(&mut conflicting);
+        if store.commit(conflicting, false) != Err(StoreError::Conflict) {
+            return Err(format!("changed R3 audit entry ({name}) was not refused"));
+        }
+    }
+    if store
+        .token(&auth.token.reference)
+        .map_err(|e| e.to_string())?
+        != Some(auth)
+    {
+        return Err("refused R3 audit change altered the retained entry".into());
     }
     Ok(())
 }

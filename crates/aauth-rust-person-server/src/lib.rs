@@ -73,6 +73,6 @@ pub use server::{
     R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision, R3ProposalRequest,
 };
 pub use store::{
-    AgentIdentity, Binding, MemoryStore, Store, StoreError, TokenKind, TokenRecord, TokenReference,
-    TokenTie,
+    AgentIdentity, Binding, MemoryStore, R3IssuanceAudit, Store, StoreError, TokenKind,
+    TokenRecord, TokenReference, TokenTie,
 };

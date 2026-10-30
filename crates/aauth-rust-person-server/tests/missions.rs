@@ -449,6 +449,7 @@ fn empty_termination_reason_leaves_the_active_mission_unchanged() {
                 retain_until: 3000,
                 presented: None,
                 upstream: None,
+                r3: None,
             },
             true,
         )

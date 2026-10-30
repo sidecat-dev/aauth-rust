@@ -135,6 +135,7 @@ fn record() -> TokenRecord {
         retain_until: 5260,
         presented: Some(tie.clone()),
         upstream: Some(tie),
+        r3: None,
     }
 }
 
