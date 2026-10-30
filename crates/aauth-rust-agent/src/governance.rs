@@ -17,6 +17,10 @@ pub enum ChannelError {
     /// The Signature-Key proof could not be attached.
     #[error("could not sign governance request")]
     Signing,
+    /// The Person Server reported this mission terminated. The agent stops
+    /// acting on it; propose a new mission instead.
+    #[error("mission is terminated; stop acting on it")]
+    MissionTerminated,
 }
 
 /// Whether the person allowed an action that no resource governs.
@@ -155,9 +159,14 @@ impl Agent {
 
     /// Signed `jwt` POST recording an action against a mission.
     ///
+    /// Pass the Person Server's answer to [`crate::Missions::observe`] on
+    /// [`Agent::missions`]. Once it reports the mission terminated, no further
+    /// audit is built for it.
+    ///
     /// # Errors
     ///
-    /// An empty mission digest or action is [`ChannelError::Incomplete`].
+    /// An empty mission digest or action is [`ChannelError::Incomplete`]. A
+    /// mission recorded as terminated is [`ChannelError::MissionTerminated`].
     pub fn post_audit(
         &self,
         endpoint: &str,
@@ -167,6 +176,9 @@ impl Agent {
     ) -> Result<Request<Vec<u8>>, ChannelError> {
         if mission_s256.is_empty() || action.is_empty() {
             return Err(ChannelError::Incomplete);
+        }
+        if !self.missions().is_active(mission_s256) {
+            return Err(ChannelError::MissionTerminated);
         }
         self.post_json(
             endpoint,

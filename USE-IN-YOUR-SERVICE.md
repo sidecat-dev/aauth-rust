@@ -1258,6 +1258,20 @@ is a buffered enrollment example, not a remote provider integration. Memory
 continuations have no restart recovery; issuance storage and continuation
 durability are separate host concerns.
 
+## Stop acting on a terminated mission
+
+A Person Server answers a request that names an ended mission with `403` and
+`error` `mission_terminated`. Pass each answer to a request that named a mission
+to `agent.missions().observe(mission_s256, &response)`. It returns the
+termination, with `termination_reason` when present: `expired` invites proposing
+a new mission, `revoked` does not. From then on the mission is ended for every
+Agent derived from this one (`with_token`, `with_additional_signature_components`),
+and `post_audit` refuses it with `ChannelError::MissionTerminated`. Use
+`missions().is_active(s256)` before your own mission work and
+`missions().may_present(credential)` before presenting a mission-bound Person,
+Auth or Resource token. `with_missions` shares one tracker across Agents you build
+separately for the same agent. Nothing here contacts the Person Server.
+
 ## Prepare explicit Agent polls
 
 `aauth_rust_agent::PollSession::new(endpoint, &response, now, deadline)` parses

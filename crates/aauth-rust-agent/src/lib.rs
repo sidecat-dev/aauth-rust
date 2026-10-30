@@ -17,6 +17,7 @@ mod r3;
 pub use r3::{R3AgentError, R3TransportError};
 mod attempts;
 mod governance;
+mod missions;
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
@@ -27,6 +28,7 @@ pub use access::AccessSession;
 pub use attempts::ResourceTokenAttempts;
 pub use governance::{ChannelError, InteractionCompletion, PermissionDecision};
 use http::Request;
+pub use missions::{MissionTerminated, Missions};
 pub use requirements::{Requirement, RequirementError};
 use std::sync::Arc;
 
@@ -35,6 +37,7 @@ pub struct Agent {
     key: Arc<SigningKey>,
     token: String,
     components: Vec<String>,
+    missions: Missions,
 }
 impl Agent {
     /// Retain exact issuer-provided bytes and ensure the local proof key matches.
@@ -63,6 +66,7 @@ impl Agent {
             key: self.key.clone(),
             token,
             components: self.components.clone(),
+            missions: self.missions.clone(),
         })
     }
     /// Cover a Resource's `additional_signature_components` on every request
@@ -87,6 +91,24 @@ impl Agent {
                 .into_iter()
                 .map(|component| component.as_ref().to_owned())
                 .collect(),
+            missions: self.missions.clone(),
+        }
+    }
+    /// Missions the Person Server reported terminated, shared by every Agent
+    /// derived from this one. Feed it each response to a request that named
+    /// a mission; [`Self::post_audit`] then refuses a terminated mission.
+    pub fn missions(&self) -> &Missions {
+        &self.missions
+    }
+    /// Share `missions` with this Agent, for example across Agents built
+    /// separately for the same agent identity. Earlier state on this Agent is
+    /// replaced by the given handle.
+    pub fn with_missions(&self, missions: Missions) -> Self {
+        Self {
+            key: self.key.clone(),
+            token: self.token.clone(),
+            components: self.components.clone(),
+            missions,
         }
     }
     fn from_shared_key(key: Arc<SigningKey>, token: String) -> Result<Self, TokenError> {
@@ -98,6 +120,7 @@ impl Agent {
             key,
             token,
             components: Vec::new(),
+            missions: Missions::new(),
         })
     }
     /// Return an owned copy of the retained proof key's public JWK.

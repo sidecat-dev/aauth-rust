@@ -645,3 +645,47 @@ fn child_agent_token_does_not_post_an_interaction() {
     assert_eq!(response.status(), 401, "{}", error_of(&response));
     assert_eq!(error_of(&response), "invalid_jwt");
 }
+
+#[test]
+fn the_agent_stops_acting_on_a_mission_the_person_server_terminated() {
+    let fixture = fixture(true);
+    let mission = approve_mission(&fixture);
+    let other = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let audit = |s256: &str| {
+        fixture
+            .owner
+            .post_audit("https://ps.example/audit", s256, "WebSearch", 1000)
+    };
+    let recorded = fixture.server.handle(&audit(&mission).unwrap());
+    assert_eq!(recorded.status(), 201);
+    assert_eq!(fixture.owner.missions().observe(&mission, &recorded), None);
+
+    let completed = fixture.server.handle(&raw_post(
+        &fixture.owner,
+        &format!("/mission/{mission}"),
+        json!({ "action": "completion", "summary": "the note is filed" }),
+    ));
+    assert_eq!(completed.status(), 200, "{}", error_of(&completed));
+    let refused = fixture.server.handle(&audit(&mission).unwrap());
+    assert_eq!(refused.status(), 403);
+    let ended = fixture
+        .owner
+        .missions()
+        .observe(&mission, &refused)
+        .expect("mission_terminated ends the mission");
+    assert_eq!(ended.mission_s256, mission);
+    assert_eq!(ended.reason.as_deref(), Some("completed"));
+
+    // Every Agent derived from this one shares the record, and no further
+    // audit is built for the ended mission. Another mission is unaffected.
+    let derived = fixture
+        .owner
+        .with_additional_signature_components(["content-type"]);
+    assert!(matches!(
+        derived.post_audit("https://ps.example/audit", &mission, "WebSearch", 1000),
+        Err(aauth_rust_agent::ChannelError::MissionTerminated)
+    ));
+    assert!(!fixture.owner.missions().is_active(&mission));
+    assert!(fixture.owner.missions().is_active(other));
+    assert!(audit(other).is_ok());
+}
