@@ -25,6 +25,67 @@ pub struct Binding {
     pub person_id: String,
     /// A revoked binding cannot be reclaimed through the token endpoints.
     pub revoked: bool,
+    /// How many times [`Store::replace_binding`] replaced this Agent's binding.
+    /// The first binding is generation 0; older rows decode as 0. Credentials
+    /// carry the generation they were issued under, so a replacement never
+    /// revives them, even when it binds the same person again.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub generation: u64,
+}
+
+impl Binding {
+    /// A first, active binding for `person_id`.
+    pub fn new(person_id: &str) -> Self {
+        Self {
+            person_id: person_id.to_owned(),
+            revoked: false,
+            generation: 0,
+        }
+    }
+    /// Whether `record` may be committed under this binding. Adapters call
+    /// this inside the commit transaction.
+    ///
+    /// # Errors
+    /// [`StoreError::RevokedBinding`] when the binding is revoked or `record`
+    /// was issued under an earlier generation, and [`StoreError::Conflict`]
+    /// when it names another person.
+    pub fn admits(&self, record: &TokenRecord) -> Result<(), StoreError> {
+        if self.revoked || self.generation != record.binding_generation {
+            return Err(StoreError::RevokedBinding);
+        }
+        if self.person_id != record.person_id {
+            return Err(StoreError::Conflict);
+        }
+        Ok(())
+    }
+    /// The new binding that replaces this revoked one
+    /// (`draft-hardt-oauth-aauth-protocol`, Agent-Person Binding): active,
+    /// for `person_id`, one generation later.
+    ///
+    /// # Errors
+    /// [`StoreError::Conflict`] while this binding is still active: revoke it
+    /// first. [`StoreError::InvalidRecord`] for an empty `person_id` or a
+    /// generation count that cannot grow.
+    pub fn replacement(&self, person_id: &str) -> Result<Self, StoreError> {
+        if !self.revoked {
+            return Err(StoreError::Conflict);
+        }
+        if person_id.is_empty() {
+            return Err(StoreError::InvalidRecord);
+        }
+        Ok(Self {
+            person_id: person_id.to_owned(),
+            revoked: false,
+            generation: self
+                .generation
+                .checked_add(1)
+                .ok_or(StoreError::InvalidRecord)?,
+        })
+    }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Issuer-qualified token identifier; JTI alone is not globally unique.
@@ -84,6 +145,10 @@ pub struct TokenRecord {
     pub agent: AgentIdentity,
     /// Top-level Agent whose person binding authorizes this credential or chain.
     pub principal: AgentIdentity,
+    /// [`Binding::generation`] of the principal's binding at issuance. A
+    /// replaced binding leaves this credential revoked. Older rows decode as 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub binding_generation: u64,
     /// JTI of the holder's Agent token used to obtain this credential.
     pub agent_token_jti: String,
     /// Thumbprint of the recipient Agent's confirmation key.
@@ -177,6 +242,7 @@ impl TokenRecord {
             || self.presented.as_ref() != Some(&parent.token)
             || self.binding_issuer() != parent.binding_issuer()
             || self.person_id != parent.person_id
+            || self.binding_generation != parent.binding_generation
             || self.principal != parent.principal
             || self.agent != parent.agent
             || self.parent_agent != parent.parent_agent
@@ -312,6 +378,26 @@ pub trait Store: Send + Sync {
     fn commit(&self, record: TokenRecord, establish_binding: bool) -> Result<(), StoreError>;
     /// Revoke the original Agent's binding, immediately preventing new issuance.
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError>;
+    /// Establish a new binding for an Agent whose binding was revoked, for
+    /// example when its person leaves an organization. Apply
+    /// [`Binding::replacement`] to the stored binding in one atomic step and
+    /// return the new binding. Credentials issued under the revoked binding
+    /// stay revoked. This is host administration, never a token request.
+    ///
+    /// # Errors
+    /// [`StoreError::MissingBinding`] when the Agent has no binding, and the
+    /// errors of [`Binding::replacement`]. The default refuses with
+    /// [`StoreError::Unavailable`], so a store that does not implement it
+    /// cannot replace a binding.
+    fn replace_binding(
+        &self,
+        issuer: &str,
+        agent: &AgentIdentity,
+        person_id: &str,
+    ) -> Result<Binding, StoreError> {
+        let _ = (issuer, agent, person_id);
+        Err(StoreError::Unavailable)
+    }
     /// Every retained issuance. The default is empty, so a store that does not
     /// offer a scan cannot drive a revocation cascade. Adapters that retain
     /// tokens override it.
@@ -379,6 +465,14 @@ impl<T: Store + ?Sized> Store for Arc<T> {
     }
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         (**self).revoke_binding(issuer, agent)
+    }
+    fn replace_binding(
+        &self,
+        issuer: &str,
+        agent: &AgentIdentity,
+        person_id: &str,
+    ) -> Result<Binding, StoreError> {
+        (**self).replace_binding(issuer, agent, person_id)
     }
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         (**self).retained()
@@ -462,10 +556,7 @@ impl MemoryStore {
         state
             .bindings
             .entry(binding_key)
-            .or_insert_with(|| Binding {
-                person_id: record.person_id.clone(),
-                revoked: false,
-            });
+            .or_insert_with(|| Binding::new(&record.person_id));
         state.missions.insert(key, record);
         Ok(())
     }
@@ -609,6 +700,20 @@ impl Store for MemoryStore {
         binding.revoked = true;
         Ok(())
     }
+    fn replace_binding(
+        &self,
+        issuer: &str,
+        agent: &AgentIdentity,
+        person_id: &str,
+    ) -> Result<Binding, StoreError> {
+        let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
+        let binding = state
+            .bindings
+            .get_mut(&(issuer.into(), agent.clone()))
+            .ok_or(StoreError::MissingBinding)?;
+        *binding = binding.replacement(person_id)?;
+        Ok(binding.clone())
+    }
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         Ok(self
             .0
@@ -719,12 +824,10 @@ fn commit_locked(
     let issuer = record.binding_issuer();
     let binding_key = (issuer.to_owned(), record.principal.clone());
     match state.bindings.get(&binding_key) {
-        Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
-        Some(binding) if binding.person_id != record.person_id => {
-            return Err(StoreError::Conflict);
-        }
+        Some(binding) => binding.admits(&record)?,
         None if !establish_binding => return Err(StoreError::MissingBinding),
-        _ => {}
+        None if record.binding_generation != 0 => return Err(StoreError::InvalidRecord),
+        None => {}
     }
     let directed_key = (
         issuer.to_owned(),
@@ -751,10 +854,7 @@ fn commit_locked(
     state
         .bindings
         .entry(binding_key)
-        .or_insert_with(|| Binding {
-            person_id: record.person_id.clone(),
-            revoked: false,
-        });
+        .or_insert_with(|| Binding::new(&record.person_id));
     state.directed.insert(directed_key, identity);
     state.subjects.insert(subject_key, record.person_id.clone());
     state.tokens.insert(record.token.reference.clone(), record);

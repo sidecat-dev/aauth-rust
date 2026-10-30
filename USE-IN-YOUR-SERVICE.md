@@ -343,6 +343,11 @@ Resource. Do not publish the internal identifier or reuse the public subject at
 another Resource. Tenant is organization context and may change without changing
 the person. One Agent issuer/subject tuple binds to one accountable person;
 conflicting or revoked bindings cannot be overwritten by policy.
+`PersonRequest::enrolls_agent()` is true when the request would bind the agent
+for the first time. Present that consent as a new-agent enrollment, with the
+agent provider's `name` and `logo_uri` from its metadata
+(`MetadataDisplay::from_metadata`) beside the agent-asserted `platform` and
+`device` parameters.
 
 This subset has no interaction endpoint or deferred login channel. Person
 authentication therefore comes from evidence the host already has. Two patterns
@@ -384,6 +389,19 @@ credential returns `400 revoked_presented_token`, including revocation during
 policy or commit. Chained requests instead use `revoked_upstream_token`. This
 does not deliver revocations to Resources: already issued Auth tokens remain
 valid there until expiry unless the host supplies additional revocation state.
+
+When an agent's association has to change, for example because its person left
+the organization, revoke the binding and then establish the new one as host
+administration: `store.replace_binding(issuer, &agent, new_person_id)`. It
+refuses an active binding with `Conflict` and a missing one with
+`MissingBinding`, and returns the new active binding. Each replacement starts a
+new binding generation, which every issued record carries as
+`binding_generation`. Credentials issued under an earlier generation stay
+revoked (`revoked_presented_token`, `revoked_upstream_token`), even when the
+replacement binds the same person again. The token endpoints never replace a
+binding themselves. A durable store implements `Store::replace_binding`; the
+default refuses with `Unavailable`, and `storetest::check_store_contract`
+checks it.
 
 Use a durable `Store` in a running service. Run
 `storetest::check_store_contract(|| new_disposable_store())` against your adapter.

@@ -49,6 +49,19 @@ pub struct PersonRequest {
     pub parameters: Value,
 }
 
+impl PersonRequest {
+    /// Whether this request would bind the agent to a person for the first
+    /// time (`draft-hardt-oauth-aauth-protocol`, Agent-Person Binding). The
+    /// consent screen should then present it as a new-agent enrollment,
+    /// showing the agent provider's `name` and `logo_uri`, read from its
+    /// metadata with [`aauth_rust_core::MetadataDisplay::from_metadata`],
+    /// beside the agent-asserted `platform` and `device` in
+    /// [`Self::parameters`]. A chained request never enrolls.
+    pub fn enrolls_agent(&self) -> bool {
+        self.binding.is_none() && self.upstream.is_none()
+    }
+}
+
 /// Complete verified exchange context, before any Auth credential is released.
 pub struct AuthorizationRequest {
     /// Verified active host-approved mission, matched to presented context.

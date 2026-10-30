@@ -22,6 +22,7 @@ pub fn record(jti: &str) -> TokenRecord {
         tenant: Some("tenant".into()),
         agent: agent.clone(),
         principal: agent,
+        binding_generation: 0,
         agent_token_jti: "agent-token".into(),
         agent_jkt: "thumbprint".into(),
         issued_at: 1000,

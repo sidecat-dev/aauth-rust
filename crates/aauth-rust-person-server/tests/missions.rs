@@ -442,6 +442,7 @@ fn empty_termination_reason_leaves_the_active_mission_unchanged() {
                 tenant: None,
                 agent: owner.clone(),
                 principal: owner.clone(),
+                binding_generation: 0,
                 agent_token_jti: "agent".into(),
                 agent_jkt: "thumbprint".into(),
                 issued_at: 1000,

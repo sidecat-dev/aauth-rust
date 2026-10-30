@@ -290,6 +290,7 @@ fn empty_binding_identity_is_unavailable_for_read_commit_and_revoke() {
         let bytes = serde_json::to_vec(&Binding {
             person_id: String::new(),
             revoked,
+            generation: 0,
         })
         .unwrap();
         transaction

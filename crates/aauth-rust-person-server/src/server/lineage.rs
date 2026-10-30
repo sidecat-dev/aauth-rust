@@ -198,6 +198,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             tenant: issuance.tenant,
             agent: Self::identity(agent),
             principal: principal.clone(),
+            binding_generation: issuance.binding_generation,
             agent_token_jti: agent.claims().jti.clone(),
             agent_jkt: agent
                 .claims()

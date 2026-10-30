@@ -645,7 +645,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     let binding = self
                         .binding(&retained.principal, binding_context)?
                         .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
-                    if binding.person_id != retained.person_id {
+                    if binding.person_id != retained.person_id
+                        || binding.generation != retained.binding_generation
+                    {
                         return Err(binding_context.revoked());
                     }
                     if presented.exp <= approved_at && presented.exp <= r.exp {
@@ -727,7 +729,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
-        if binding.person_id != retained.person_id {
+        if binding.person_id != retained.person_id
+            || binding.generation != retained.binding_generation
+        {
             return Err(binding_context.revoked());
         }
         // A per-call token never outlives the class Auth token it was presented with
@@ -776,6 +780,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             &retained.person_id,
             Issuance {
                 parent_agent: None,
+                binding_generation: retained.binding_generation,
                 kind: TokenKind::Auth,
                 jti: &claims.jti,
                 resource: &claims.aud,

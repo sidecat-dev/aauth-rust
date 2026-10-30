@@ -2,6 +2,7 @@
 //! Each invocation uses fresh disposable stores; never run on production state.
 use crate::{AgentIdentity, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie};
 use std::sync::Arc;
+mod binding;
 mod federation;
 mod issuance;
 mod persistence;
@@ -33,6 +34,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
             issuer: "https://ap.example".into(),
             subject: "aauth:Agent@ap.example".into(),
         },
+        binding_generation: 0,
         agent_token_jti: "agent-token-1".into(),
         agent_jkt: "agent-thumbprint".into(),
         issued_at: 1000,
@@ -45,7 +47,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 }
 
 /// Check namespacing, round-trip, exact replay, conflicting commits, binding
-/// revocation, directed identity consistency, fully populated Auth lineage,
+/// revocation and replacement, directed identity consistency, fully populated Auth lineage,
 /// R3 audit entries committed with their issuance, malformed identity/parent
 /// refusal without state changes, and concurrent first-claim / same-token
 /// retry atomicity.
@@ -56,6 +58,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Result<(), String> {
     subagents::check_subagents(factory())?;
     federation::check_federation(factory())?;
+    binding::check_binding_replacement(factory())?;
     let store = factory();
     let original = record("person-1", "internal-person");
     store
@@ -80,6 +83,7 @@ pub fn check_store_contract<S: Store + 'static>(factory: impl Fn() -> S) -> Resu
         |r| r.tenant = None,
         |r| r.agent.subject = "aauth:Other@ap.example".into(),
         |r| r.principal.subject = "aauth:Other@ap.example".into(),
+        |r| r.binding_generation = 1,
         |r| r.agent_token_jti = "replacement".into(),
         |r| r.agent_jkt = "replacement".into(),
         |r| r.issued_at += 1,

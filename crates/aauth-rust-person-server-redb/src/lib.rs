@@ -282,12 +282,10 @@ fn stage_issuance(
         .map(|v| decode_binding(&v))
         .transpose()?;
     match &binding {
-        Some(binding) if binding.revoked => return Err(StoreError::RevokedBinding),
-        Some(binding) if binding.person_id != record.person_id => {
-            return Err(StoreError::Conflict);
-        }
+        Some(binding) => binding.admits(record)?,
         None if !establish_binding => return Err(StoreError::MissingBinding),
-        _ => {}
+        None if record.binding_generation != 0 => return Err(StoreError::InvalidRecord),
+        None => {}
     }
     let directed_key = key(&(issuer, &record.person_id, &record.resource))?;
     let subject_key = key(&(issuer, &record.resource, &record.subject))?;
@@ -302,11 +300,7 @@ fn stage_issuance(
             .map_err(unavailable)?
             .insert(
                 binding_key.as_str(),
-                encode(&Binding {
-                    person_id: record.person_id.clone(),
-                    revoked: false,
-                })?
-                .as_slice(),
+                encode(&Binding::new(&record.person_id))?.as_slice(),
             )
             .map_err(unavailable)?;
     }
@@ -373,6 +367,30 @@ impl Store for RedbStore {
             .insert(binding_key.as_str(), encode(&binding)?.as_slice())
             .map_err(unavailable)?;
         transaction.commit().map_err(unavailable)
+    }
+    fn replace_binding(
+        &self,
+        issuer: &str,
+        agent: &AgentIdentity,
+        person_id: &str,
+    ) -> Result<Binding, StoreError> {
+        let binding_key = key(&(issuer, &agent.issuer, &agent.subject))?;
+        let mut transaction = self.database.begin_write().map_err(unavailable)?;
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(unavailable)?;
+        let replacement = get_bytes(&transaction, BINDINGS, &binding_key)?
+            .map(|v| decode_binding(&v))
+            .transpose()?
+            .ok_or(StoreError::MissingBinding)?
+            .replacement(person_id)?;
+        transaction
+            .open_table(BINDINGS)
+            .map_err(unavailable)?
+            .insert(binding_key.as_str(), encode(&replacement)?.as_slice())
+            .map_err(unavailable)?;
+        transaction.commit().map_err(unavailable)?;
+        Ok(replacement)
     }
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         let read = self.database.begin_read().map_err(unavailable)?;

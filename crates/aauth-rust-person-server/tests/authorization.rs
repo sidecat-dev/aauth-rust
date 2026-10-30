@@ -105,6 +105,14 @@ impl Store for TestStore {
     fn revoke_binding(&self, issuer: &str, agent: &AgentIdentity) -> Result<(), StoreError> {
         self.inner.revoke_binding(issuer, agent)
     }
+    fn replace_binding(
+        &self,
+        issuer: &str,
+        agent: &AgentIdentity,
+        person_id: &str,
+    ) -> Result<Binding, StoreError> {
+        self.inner.replace_binding(issuer, agent, person_id)
+    }
     fn commit(&self, record: TokenRecord, establish: bool) -> Result<(), StoreError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(StoreError::Unavailable);
@@ -618,6 +626,48 @@ fn direct_binding_revocation_prevents_rebinding_and_exchange() {
     assert!(!revoked.headers().contains_key("signature-error"));
     assert_eq!(f.host.bind_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.host.auth_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_replacement_binding_serves_new_requests_and_leaves_earlier_credentials_revoked() {
+    let f = Fixture::new();
+    let s = f.server(900);
+    let a = agent(false);
+    let caller = AgentIdentity {
+        issuer: "https://ap.example".into(),
+        subject: "aauth:Caller@ap.example".into(),
+    };
+    let earlier = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    assert_eq!(
+        f.store.replace_binding(PS, &caller, "internal-person"),
+        Err(StoreError::Conflict)
+    );
+    f.store.revoke_binding(PS, &caller).unwrap();
+    // The host binds the agent again, here to the same person, after its own
+    // administrative decision. The token endpoints never do this themselves.
+    let replaced = f
+        .store
+        .replace_binding(PS, &caller, "internal-person")
+        .unwrap();
+    assert_eq!(replaced.generation, 1);
+    let current = compact(&f.person(&s, &a, ORDERS, None), "person_token");
+    let granted = f.exchange(
+        &s,
+        &a,
+        &resource(&a, &current, "orders.read", |_| {}),
+        &current,
+        None,
+    );
+    assert_eq!(granted.status(), 200, "{}", output(&granted));
+    let stale = f.exchange(
+        &s,
+        &a,
+        &resource(&a, &earlier, "orders.read", |_| {}),
+        &earlier,
+        None,
+    );
+    assert_eq!(stale.status(), 400);
+    assert_eq!(output(&stale)["error"], "revoked_presented_token");
 }
 
 #[test]

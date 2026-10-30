@@ -355,6 +355,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             &retained.person_id,
             Issuance {
                 parent_agent: context.subagent.as_ref().map(|_| Self::identity(agent)),
+                binding_generation: retained.binding_generation,
                 kind: TokenKind::Auth,
                 jti: &c.jti,
                 resource: &c.aud,

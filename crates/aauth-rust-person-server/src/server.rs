@@ -146,6 +146,8 @@ struct PreparedAuthorization {
 }
 struct Issuance<'a> {
     parent_agent: Option<AgentIdentity>,
+    /// Generation of the principal's binding this credential is issued under.
+    binding_generation: u64,
     kind: TokenKind,
     jti: &'a str,
     resource: &'a str,
@@ -559,6 +561,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let binding = self
             .binding(&record.principal, BindingContext::Upstream)?
             .ok_or_else(|| Failure::parameter("invalid_upstream_token"))?;
+        if binding.generation != record.binding_generation {
+            return Err(BindingContext::Upstream.revoked());
+        }
         if binding.person_id != record.person_id {
             return Err(Failure::parameter("invalid_upstream_token"));
         }
@@ -622,7 +627,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         .map_err(Failure::policy)?;
         validate_person(&person)?;
         if mission.as_ref().is_some_and(|m| m.person_id != person.id)
-            || binding.is_some_and(|binding| binding.person_id != person.id)
+            || binding
+                .as_ref()
+                .is_some_and(|binding| binding.person_id != person.id)
             || upstream
                 .as_ref()
                 .is_some_and(|up| up.context.record.person_id != person.id)
@@ -679,6 +686,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .subagent
                     .as_ref()
                     .map(|_| Self::identity(&agent)),
+                binding_generation: match (&upstream, &binding) {
+                    (Some(up), _) => up.context.record.binding_generation,
+                    (None, Some(binding)) => binding.generation,
+                    (None, None) => 0,
+                },
                 kind: TokenKind::Person,
                 jti: &claims.jti,
                 resource: &claims.aud,
@@ -851,7 +863,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
-        if binding.person_id != retained.person_id {
+        if binding.person_id != retained.person_id
+            || binding.generation != retained.binding_generation
+        {
             return Err(binding_context.revoked());
         }
         if r.login_hint
@@ -981,6 +995,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             &retained.person_id,
             Issuance {
                 parent_agent: context.subagent.as_ref().map(|_| Self::identity(&agent)),
+                binding_generation: retained.binding_generation,
                 kind: TokenKind::Auth,
                 jti: &claims.jti,
                 resource: &claims.aud,
