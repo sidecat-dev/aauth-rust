@@ -2,11 +2,11 @@
 
 MIT-licensed Rust libraries for [AAuth](https://github.com/dickhardt/AAuth),
 alongside [aauth-go](https://gitlab.com/sidecat-dev/aauth-go).
-Showcase tag `v0.1.0-alpha.10`. The crates are not on crates.io.
+Showcase tag `v0.1.0-alpha.11`. The crates are not on crates.io.
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
-git checkout v0.1.0-alpha.10
+git checkout v0.1.0-alpha.11
 cargo run --locked -p aauth-rust-resource --example direct-identity
 ```
 
@@ -222,11 +222,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-agent = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
 TOML
 cd ../aauth-service
@@ -263,8 +263,8 @@ federated Person Server and Access Server, add these entries to the same
 `[dependencies]` table:
 
 ```toml
-aauth-rust-person-server = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-person-server" }
-aauth-rust-access-server = { version = "0.1.0-alpha.10", path = "../aauth-rust/crates/aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-person-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.11", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
 Use `SigningKey::generate()` for fresh keys. `from_seed` imports caller-owned
