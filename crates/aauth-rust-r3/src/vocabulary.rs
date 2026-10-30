@@ -44,7 +44,9 @@ pub trait Codec: Send + Sync {
     /// Codec-owned operation set. The vocabulary root stores canonical JSON, not this type.
     type Set: Clone + Send + Sync;
 
-    /// Vocabulary URI this codec parses.
+    /// Vocabulary URI this codec parses. `urn:aauth:vocabulary:` holds only
+    /// the standard vocabularies; a proprietary vocabulary uses a URI in its
+    /// owner's namespace.
     fn uri(&self) -> VocabularyUri;
 
     /// Annotation mechanism, or [`AnnotationEncoding::UNAVAILABLE`].
@@ -229,13 +231,16 @@ impl Vocabulary {
     /// Erase one codec. The codec value is retained only behind the registration.
     ///
     /// # Errors
-    /// Returns [`Error`] when the URI or annotation encoding is not allowed.
+    /// Returns [`Error`] when the URI or annotation encoding is not allowed,
+    /// including a URI in the `urn:aauth:vocabulary:` namespace that is not one
+    /// of the seven standard vocabularies.
     pub fn new<C>(codec: C) -> Result<Self, Error>
     where
         C: Codec + 'static,
     {
         let uri = codec.uri();
         uri::validate(uri.as_str())?;
+        crate::standard::validate_namespace(&uri)?;
         let annotation = codec.annotation_encoding();
         annotation
             .validate()

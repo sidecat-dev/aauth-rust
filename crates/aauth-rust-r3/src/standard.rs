@@ -35,6 +35,39 @@ pub fn standard_vocabularies() -> Result<Vec<Vocabulary>, Error> {
     ])
 }
 
+/// The namespace of the standard vocabularies this document defines.
+const STANDARD_NAMESPACE: &str = "urn:aauth:vocabulary:";
+
+/// The seven standard vocabulary URIs, in draft order.
+const STANDARD_URIS: [&str; 7] = [
+    McpCodec::URI,
+    OpenApiCodec::URI,
+    GrpcCodec::URI,
+    GraphQlCodec::URI,
+    AsyncApiCodec::URI,
+    WsdlCodec::URI,
+    ODataCodec::URI,
+];
+
+/// Refuse a URI in the `urn:aauth:vocabulary:` namespace that names no
+/// standard vocabulary. A proprietary vocabulary uses a third-party URI
+/// namespace (`draft-hardt-aauth-r3`, Resource Metadata Extensions). The
+/// namespace is matched without regard to case, so a case variant cannot pass
+/// for a standard URI or claim the namespace.
+pub(crate) fn validate_namespace(uri: &VocabularyUri) -> Result<(), Error> {
+    let text = uri.as_str();
+    let in_namespace = text
+        .get(..STANDARD_NAMESPACE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(STANDARD_NAMESPACE));
+    if in_namespace && !STANDARD_URIS.contains(&text) {
+        return Err(Error::new(format!(
+            "r3: vocabulary URI \"{text}\" is in the {STANDARD_NAMESPACE} namespace but is not a \
+             standard vocabulary; a proprietary vocabulary uses its own URI namespace"
+        )));
+    }
+    Ok(())
+}
+
 /// A new allowlist holding all seven [`standard_vocabularies`].
 ///
 /// # Errors

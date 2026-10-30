@@ -253,6 +253,53 @@ fn vocabulary_accepts_a_namespaced_third_party_annotation_encoding() -> Result<(
     Ok(())
 }
 
+// Resource Metadata Extensions: `r3_vocabularies` keys are standard URIs from
+// `urn:aauth:vocabulary:` or third-party URIs for proprietary vocabularies.
+// Metadata keys are registered vocabulary URIs, so registration keeps a
+// proprietary vocabulary out of the standard namespace.
+#[test]
+fn only_standard_vocabularies_register_in_the_standard_namespace() -> Result<(), Error> {
+    for uri in [
+        "urn:aauth:vocabulary:widgets",
+        "urn:aauth:vocabulary:soap",
+        "urn:aauth:vocabulary:mcp:v2",
+        "urn:aauth:vocabulary:MCP",
+        "urn:aauth:vocabulary:",
+        "URN:AAUTH:VOCABULARY:mcp",
+        "urn:AAuth:vocabulary:widgets",
+        "urn:aauth:Vocabulary:widgets",
+    ] {
+        match Vocabulary::new(test_codec(uri)) {
+            Ok(_) => panic!("{uri} registered in the standard namespace"),
+            Err(err) => assert!(
+                err.to_string().contains("is not a standard vocabulary"),
+                "{uri}: {err}"
+            ),
+        }
+    }
+    // The seven standard URIs stay registrable, including by a host's own codec.
+    for uri in [
+        "urn:aauth:vocabulary:mcp",
+        "urn:aauth:vocabulary:openapi",
+        "urn:aauth:vocabulary:grpc",
+        "urn:aauth:vocabulary:graphql",
+        "urn:aauth:vocabulary:asyncapi",
+        "urn:aauth:vocabulary:wsdl",
+        "urn:aauth:vocabulary:odata",
+    ] {
+        assert_eq!(Vocabulary::new(test_codec(uri))?.uri().as_str(), uri);
+    }
+    // A proprietary vocabulary registers in its owner's namespace.
+    for uri in [
+        "https://vocabulary.example/widgets",
+        "urn:example:vocabulary:widgets",
+        "tag:example.com,2026:widgets",
+    ] {
+        assert_eq!(Vocabulary::new(test_codec(uri))?.uri().as_str(), uri);
+    }
+    Ok(())
+}
+
 #[test]
 fn vocabulary_delegates_discovery_endpoint_validation_to_codec() -> Result<(), Error> {
     let mut codec = test_codec("https://example.test/vocabulary/custom-discovery");
