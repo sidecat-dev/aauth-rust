@@ -1444,7 +1444,7 @@ fn handle_federated_converse(
         b"{}",
         clock,
     )?;
-    let completed = TlsServer::send_external(
+    let completed = TlsServer::send_held_external(
         fed_records_addr,
         "fed-records.example",
         &fed_records_cert,
@@ -1460,7 +1460,7 @@ fn handle_federated_converse(
         b"{}",
         clock,
     )?;
-    let replayed = TlsServer::send_external(
+    let replayed = TlsServer::send_held_external(
         fed_records_addr,
         "fed-records.example",
         &fed_records_cert,

@@ -220,6 +220,25 @@ impl TlsServer {
         cert_der: &[u8],
         request: &Request<Vec<u8>>,
     ) -> Result<Response<Vec<u8>>> {
+        Self::send_external_with(address, host, cert_der, request, true)
+    }
+    /// Go retains a per-call completion only when the request has no
+    /// connection-close semantics. The caller still drops the socket.
+    pub fn send_held_external(
+        address: SocketAddr,
+        host: &'static str,
+        cert_der: &[u8],
+        request: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>> {
+        Self::send_external_with(address, host, cert_der, request, false)
+    }
+    fn send_external_with(
+        address: SocketAddr,
+        host: &'static str,
+        cert_der: &[u8],
+        request: &Request<Vec<u8>>,
+        close: bool,
+    ) -> Result<Response<Vec<u8>>> {
         if request.uri().scheme_str() != Some("https")
             || request.uri().authority().map(|a| a.as_str()) != Some(host)
         {
@@ -230,18 +249,33 @@ impl TlsServer {
         let config = Arc::new(client_config(roots)?);
         let conn = rustls::ClientConnection::new(config, ServerName::try_from(host)?)?;
         let mut stream = StreamOwned::new(conn, socket(address)?);
-        write!(
-            stream,
-            "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-            request.method(),
-            request
-                .uri()
-                .path_and_query()
-                .map(|p| p.as_str())
-                .unwrap_or("/"),
-            host,
-            request.body().len()
-        )?;
+        if close {
+            write!(
+                stream,
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                request.method(),
+                request
+                    .uri()
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/"),
+                host,
+                request.body().len()
+            )?;
+        } else {
+            write!(
+                stream,
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n",
+                request.method(),
+                request
+                    .uri()
+                    .path_and_query()
+                    .map(|p| p.as_str())
+                    .unwrap_or("/"),
+                host,
+                request.body().len()
+            )?;
+        }
         for (name, value) in request.headers() {
             if name == "host" || name == "content-length" || name == "connection" {
                 continue;
