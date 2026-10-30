@@ -343,13 +343,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         for record in records.iter().filter(|record| {
             record.presented.as_ref().map(|tie| &tie.reference) == Some(&reference)
         }) {
-            if record.token.reference.issuer == self.config.issuer {
-                self.remember(
-                    &self.config.issuer,
-                    &record.token.reference.jti,
-                    record.expires_at,
-                );
-            }
+            // Every retained child, including an Auth token an Access Server
+            // issued through federation, is revoked here: such a token can
+            // still be presented to this Person Server as upstream evidence.
+            self.remember(
+                &record.token.reference.issuer,
+                &record.token.reference.jti,
+                record.expires_at,
+            );
             if record.person_server.is_some() {
                 if access_servers.insert(record.token.reference.issuer.clone()) {
                     targets.push(Target {
@@ -388,13 +389,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 && record.agent.subject == subject
                 && record.binding_issuer() == self.config.issuer
         }) {
-            if record.token.reference.issuer == self.config.issuer {
-                self.remember(
-                    &self.config.issuer,
-                    &record.token.reference.jti,
-                    record.expires_at,
-                );
-            }
+            // Every retained child, including an Auth token an Access Server
+            // issued through federation, is revoked here: such a token can
+            // still be presented to this Person Server as upstream evidence.
+            self.remember(
+                &record.token.reference.issuer,
+                &record.token.reference.jti,
+                record.expires_at,
+            );
             if record.kind == TokenKind::Person
                 && record.token.reference.issuer == self.config.issuer
             {
