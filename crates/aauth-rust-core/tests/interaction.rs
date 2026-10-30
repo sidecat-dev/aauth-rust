@@ -1,3 +1,4 @@
+use aauth_rust_core::capabilities::{Capabilities, Capability};
 use aauth_rust_core::continuation::{PendingResponse, Requirement};
 use aauth_rust_core::interaction::{
     CallbackError, CallbackReceipt, ChainedInteraction, InteractionOutcome, completion_redirect,
@@ -95,6 +96,7 @@ fn resource_callback_redirects_and_an_error_does_not_complete() {
 
 #[test]
 fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
+    let interactive = Capabilities::none().with(Capability::Interaction);
     let downstream = PendingResponse::new(
         "https://down.example/token",
         "/pending/down",
@@ -115,6 +117,38 @@ fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
     assert!(
         ChainedInteraction::open(
             &approval,
+            &interactive,
+            "https://resource.example/api",
+            "/pending",
+            "https://resource.example/interact",
+            "thumb-owner",
+            2000,
+        )
+        .is_err()
+    );
+    // The opener's request declared nothing, or only other capabilities:
+    // there is no one to send to a URL, so nothing is raised.
+    let mut headers = http::HeaderMap::new();
+    assert!(
+        ChainedInteraction::open(
+            &downstream,
+            &Capabilities::from_headers(&headers),
+            "https://resource.example/api",
+            "/pending",
+            "https://resource.example/interact",
+            "thumb-owner",
+            2000,
+        )
+        .is_err()
+    );
+    headers.insert(
+        "aauth-capabilities",
+        "payment, clarification".parse().unwrap(),
+    );
+    assert!(
+        ChainedInteraction::open(
+            &downstream,
+            &Capabilities::from_headers(&headers),
             "https://resource.example/api",
             "/pending",
             "https://resource.example/interact",
@@ -125,6 +159,7 @@ fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
     );
     let mut chain = ChainedInteraction::open(
         &downstream,
+        &interactive,
         "https://resource.example/api",
         "/pending",
         "https://resource.example/interact",
@@ -150,6 +185,7 @@ fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
     assert_eq!(own_code.as_bytes()[4], b'-');
     let other = ChainedInteraction::open(
         &downstream,
+        &interactive,
         "https://resource.example/api",
         "/pending",
         "https://resource.example/interact",
@@ -202,6 +238,7 @@ fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
     assert!(again.body().is_empty());
     let mut expired = ChainedInteraction::open(
         &downstream,
+        &interactive,
         "https://resource.example/api",
         "/pending",
         "https://resource.example/interact",

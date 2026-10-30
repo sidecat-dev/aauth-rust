@@ -2,6 +2,7 @@
 //! Events subscribe and event tokens in [`events`].
 //! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
+pub mod capabilities;
 pub mod continuation;
 mod discovery;
 pub mod events;

@@ -8,6 +8,7 @@
 
 use http::{Response, StatusCode, Uri};
 
+use crate::capabilities::{Capabilities, Capability};
 use crate::continuation::{
     PendingResponse, Requirement, canonical_interaction_code, generate_interaction_code,
     generate_pending_id, is_emitted_interaction_code,
@@ -241,16 +242,22 @@ impl ChainedInteraction {
     /// Read them back with [`Self::location`] and [`Self::code`] to route polls
     /// and check the code at `interaction_url`.
     ///
+    /// `declared` is what the opener's original request declared in
+    /// `AAuth-Capabilities`, read with [`Capabilities::from_headers`]. An
+    /// opener that did not declare `interaction` cannot be sent to a URL, so
+    /// no interaction is raised to it.
+    ///
     /// # Errors
     /// Returns [`InteractionError`] when `downstream` is not
-    /// `requirement=interaction`, when `caller` is empty or not a single token,
-    /// when `expires_at` is negative, or when this resource's URL or pending
-    /// location cannot be emitted.
+    /// `requirement=interaction`, when `declared` lacks `interaction`, when
+    /// `caller` is empty or not a single token, when `expires_at` is negative,
+    /// or when this resource's URL or pending location cannot be emitted.
     ///
     /// `caller` is the opener's key thumbprint or the `jti` of an auth token
     /// the host already verified. This ledger does not verify that token.
     pub fn open(
         downstream: &PendingResponse,
+        declared: &Capabilities,
         endpoint: &str,
         pending_path: &str,
         interaction_url: &str,
@@ -264,6 +271,9 @@ impl ChainedInteraction {
         else {
             return Err(InteractionError);
         };
+        if !declared.contains(Capability::Interaction) {
+            return Err(InteractionError);
+        }
         bound_caller(caller)?;
         if expires_at < 0 {
             return Err(InteractionError);

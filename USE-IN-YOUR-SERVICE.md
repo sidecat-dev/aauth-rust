@@ -235,6 +235,24 @@ instead publish separately admitted JWKS URLs in its owned role metadata; the
 default helpers use the shared URL. Do not accept arbitrary external JWKS input
 through this composition path.
 
+## Read declared capabilities
+
+An agent lists the requirements it can handle in `AAuth-Capabilities`.
+`aauth_rust_core::capabilities::Capabilities::from_headers(request.headers())`
+reads every field line as one List of Tokens. Unrecognized values and all
+parameters are ignored. An absent field, or one that does not parse, declares
+nothing: never assume a capability the agent did not state. Before raising a
+requirement, check `capabilities.allows(&requirement)`. `interaction` needs the
+`interaction` capability, `clarification` needs `clarification`, and payment
+needs `payment`. `ChainedInteraction::open` takes the opener's declared
+capabilities and refuses to raise an interaction to a caller that cannot reach a
+person.
+
+An agent builds its own declaration with `Capabilities::none().with(...)`, unions
+it with the capabilities its Person Server returned at mission approval, and
+writes it on each signed request to a resource with `insert_into`. Person Server
+endpoints take the `capabilities` body parameter instead of the header.
+
 ## Replay and application effects
 
 **Identical signed bytes can be accepted twice within the validity window.**
