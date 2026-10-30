@@ -787,6 +787,38 @@ and failed at `0c86939`. Independent consumer QA of the earlier candidate
 `0d62470` found the release-gated and `*`/bare-host gaps that `db8af21`
 closes. These are engineering checks, not product QA, and not power loss.
 
+An approved mission composes with direct class R3. Behavior commit
+`b32b6b03bfcfb46174c4e6ace85b8c789a209fed` (tree
+`43ac440afb3649a5e2dbc10faff3ca69bf013377`) lets a Resource with
+`with_mission_context` and `with_r3` issue a class document for a mission-bound
+Person token. `R3DocumentRecord` and `DirectoryDocumentStore` keep its
+`mission_s256`. Admission requires the Auth token's `mission_s256` to equal the
+document's: a missionless token, another mission, or a mission-bound token on a
+missionless document is `403` and does not reach host policy. The Person Server
+grants under an active mission it holds. R3 policy sees the mission. The
+grant ends no later than the mission's `expires_at`, the Auth token names
+`mission_s256`, and after the R3 audit record the issuance commits through
+`MissionStore::commit_mission_token` against the unchanged active mission. A
+terminated mission issues no further token. As in aauth-go's direct R3
+profile, missions do not compose with per-call proposals: the Resource refuses
+`with_r3_per_call` with mission context as `InvalidR3Profile`, a proposal under
+a mission is `invalid_resource_token`, and a class decision that leaves
+operations per call under a mission is `500`. Missions with an access server,
+sub-agents and call chaining stay refused. The Agent refuses a mission-bound R3
+Resource token that outlives its Person token.
+`a_mission_class_document_admits_only_an_auth_token_for_that_mission`,
+`a_mission_class_grant_names_the_mission_and_ends_with_it` (Agent, Resource and
+Person Server in process, with a 300-second mission against a 600-second
+decision), `a_mission_resource_token_never_outlives_its_person_token`, and the
+updated `per_call_and_unsupported_compositions_are_refused_explicitly` pin this.
+Host3 `aauth-claude-missions01` at that commit passed rustfmt, library and
+binary Clippy with `-D warnings`, `cargo test --locked --no-fail-fast` with two
+harness threads (705 passed, 0 failed, 9 ignored in 78 targets) and the
+`r3-per-call-interop` tests. Receipt START
+`2026-10-30T11:34:14.247067716+00:00`, END
+`2026-10-30T11:37:26.652223103+00:00`, `Result=success`, `ExecMainStatus=0`.
+These are engineering checks, not product QA.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
