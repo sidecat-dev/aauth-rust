@@ -244,6 +244,7 @@ fn existing_child_auth_expires_normally(federated: bool) {
         kid: "resource".into(),
         signing_key: SigningKey::from_seed([4; 32]),
         scopes: vec![SCOPE.into()],
+        scope_descriptions: BTreeMap::from([(SCOPE.into(), "Read records".into())]),
     };
     let resource = if federated {
         PsAuthorizationResource::new_federated(config, AS, keys.clone(), policy).unwrap()

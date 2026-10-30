@@ -415,6 +415,7 @@ fn run_flow(deferred: bool) -> Result<Transcript> {
             kid: "orders-1".into(),
             signing_key: SigningKey::generate(),
             scopes: vec!["orders.write".into()],
+            scope_descriptions: BTreeMap::from([("orders.write".into(), "Place orders".into())]),
         },
         AS,
         trust.clone(),

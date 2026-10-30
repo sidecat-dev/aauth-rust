@@ -320,6 +320,10 @@ fn run_requests(authorized_requests: usize) -> Result<Transcript> {
             kid: "inventory-resource-1".into(),
             signing_key: SigningKey::generate(),
             scopes: vec!["inventory.reserve".into()],
+            scope_descriptions: BTreeMap::from([(
+                "inventory.reserve".into(),
+                "Reserve inventory".into(),
+            )]),
         },
         trust.clone(),
         |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true,
@@ -375,6 +379,7 @@ fn run_requests(authorized_requests: usize) -> Result<Transcript> {
             kid: "orders-resource-1".into(),
             signing_key: SigningKey::generate(),
             scopes: vec!["orders.write".into()],
+            scope_descriptions: BTreeMap::from([("orders.write".into(), "Place orders".into())]),
         },
         trust.clone(),
         |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true,

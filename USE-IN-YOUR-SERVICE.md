@@ -461,8 +461,11 @@ outside the supported PS profile; persistence does not add those roles.
 ## Protect a Resource with PS authorization
 
 Use `PsAuthorizationResource` with a `PsAuthorizationConfig`: published Resource
-issuer, independently configured signed origin, signing key/kid and a nonempty
-scope list. Serve its metadata and JWKS through the host. One value serves paths
+issuer, independently configured signed origin, signing key/kid, a nonempty
+scope list and a description of each scope in `scope_descriptions`. The metadata
+publishes those descriptions, and a Resource token carries only scopes described
+there; a description missing, blank or for another scope is a configuration
+error. Serve its metadata and JWKS through the host. One value serves paths
 under that origin with one fixed scope profile; the router chooses which paths
 use it. Use separate values for routes requiring different scopes. The host
 resolver admits PS issuers and their `aauth-person.json` keys; a valid signature

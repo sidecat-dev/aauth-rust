@@ -69,6 +69,10 @@ pub struct PsAuthorizationConfig {
     pub signing_key: SigningKey,
     /// Nonempty unique scope values required by every route using this value.
     pub scopes: Vec<String>,
+    /// Host-authored Markdown description of each value in `scopes`, published
+    /// as `scope_descriptions`. It must name exactly `scopes`: a Resource token
+    /// carries only scopes the Resource has defined there.
+    pub scope_descriptions: BTreeMap<String, String>,
 }
 
 /// Local configuration failure, separate from request authentication failures.
@@ -80,7 +84,7 @@ pub enum PsConfigurationError {
     InvalidOrigin,
     /// The signing key identifier is empty.
     InvalidKeyId,
-    /// Scope profile is empty, duplicated or contains malformed values.
+    /// Scope profile is empty, duplicated, malformed, or not described exactly.
     InvalidScopes,
     /// Expected Access Server identifier is malformed.
     InvalidAccessServer,
@@ -102,7 +106,9 @@ impl std::fmt::Display for PsConfigurationError {
                 "signed_origin must be an absolute HTTPS origin without path, query or fragment"
             }
             Self::InvalidKeyId => "Resource kid must name its published signing key",
-            Self::InvalidScopes => "Resource scopes must be nonempty unique RFC 6749 scope values",
+            Self::InvalidScopes => {
+                "Resource scopes must be nonempty unique RFC 6749 scope values, each with a description"
+            }
             Self::InvalidBudgetProfile => {
                 "budget profile needs declared units, a finite bound, and an HTTPS usage endpoint"
             }
@@ -672,7 +678,6 @@ pub struct PsAuthorizationResource<K, P> {
     keys: K,
     policy: P,
     access_server: Option<String>,
-    scope_descriptions: Option<std::collections::BTreeMap<String, String>>,
     mission_context: bool,
     authorization_endpoint: bool,
     revocation: Option<revocation::Gate>,
@@ -690,7 +695,9 @@ where
     /// Bind a published identity, separately configured signed origin, keys and policy.
     ///
     /// # Errors
-    /// Rejects invalid identifiers/origins, empty kid and invalid scope profiles.
+    /// Rejects invalid identifiers/origins, empty kid and invalid scope
+    /// profiles, including a scope without a nonblank description or a
+    /// description for a scope outside the profile.
     pub fn new(
         config: PsAuthorizationConfig,
         keys: K,
@@ -722,13 +729,24 @@ where
         {
             return Err(PsConfigurationError::InvalidScopes);
         }
+        // Every scope a Resource token may carry is defined in the published
+        // `scope_descriptions`, and nothing else is described there.
+        if config.scope_descriptions.len() != config.scopes.len()
+            || config.scopes.iter().any(|scope| {
+                config
+                    .scope_descriptions
+                    .get(scope)
+                    .is_none_or(|description| description.trim().is_empty())
+            })
+        {
+            return Err(PsConfigurationError::InvalidScopes);
+        }
         Ok(Self {
             config,
             authority,
             keys,
             policy,
             access_server: None,
-            scope_descriptions: None,
             mission_context: false,
             authorization_endpoint: false,
             revocation: None,
@@ -755,29 +773,6 @@ where
         let mut resource = Self::new(config, keys, policy)?;
         resource.access_server = Some(access_server.into());
         Ok(resource)
-    }
-    /// Publish host-authored Markdown descriptions for this exact scope profile.
-    /// This adds no authorization endpoint or scope. [`Self::with_authorization_endpoint`]
-    /// publishes that endpoint separately. Host routing and actual
-    /// revision/payload policy must implement the advertised meaning.
-    ///
-    /// # Errors
-    /// Rejects missing/extra scope names and empty descriptions.
-    pub fn with_scope_descriptions(
-        mut self,
-        descriptions: std::collections::BTreeMap<String, String>,
-    ) -> Result<Self, PsConfigurationError> {
-        if descriptions.len() != self.config.scopes.len()
-            || self
-                .config
-                .scopes
-                .iter()
-                .any(|s| descriptions.get(s).is_none_or(|d| d.is_empty()))
-        {
-            return Err(PsConfigurationError::InvalidScopes);
-        }
-        self.scope_descriptions = Some(descriptions);
-        Ok(self)
     }
     /// Accept signed mission context on the direct PS path.
     ///
@@ -919,6 +914,9 @@ where
         self
     }
     /// Accurate public metadata; serve at the published Resource well-known path.
+    /// `scope_descriptions` is always present and names exactly the configured
+    /// scopes. It adds no authorization endpoint; host routing and actual
+    /// revision/payload policy must implement the advertised meaning.
     /// `revocation_endpoint` is present only after [`Self::with_revocation`].
     /// `authorization_endpoint` is present only after [`Self::with_authorization_endpoint`].
     /// `r3_vocabularies` is present only after [`Self::with_r3`] and names each
@@ -929,6 +927,7 @@ where
     /// Returns a serialization error as InvalidJwt.
     pub fn metadata(&self) -> Result<Vec<u8>, TokenError> {
         let mut metadata = json!({"issuer":self.config.issuer,"jwks_uri":format!("{}/.well-known/jwks.json",self.config.issuer),"access_mode":"auth-token","signature_window":60});
+        metadata["scope_descriptions"] = json!(self.config.scope_descriptions);
         if self.revocation.is_some() {
             metadata["revocation_endpoint"] = json!(format!("{}/revoke", self.config.issuer));
         }
@@ -944,9 +943,6 @@ where
         if let Some(gate) = &self.budgets {
             metadata["budget_units"] = metadata_units(&gate.declarations());
             metadata["usage_endpoint"] = json!(gate.usage_endpoint);
-        }
-        if let Some(descriptions) = &self.scope_descriptions {
-            metadata["scope_descriptions"] = json!(descriptions);
         }
         if let Some(vocabularies) = self.r3_metadata() {
             metadata["r3_vocabularies"] = vocabularies;

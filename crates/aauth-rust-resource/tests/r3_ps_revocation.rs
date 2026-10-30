@@ -113,6 +113,10 @@ fn resource(require_core_scope: bool) -> Arc<Resource> {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true) as BoxedAuthPolicy,

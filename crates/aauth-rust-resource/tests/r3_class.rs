@@ -154,6 +154,7 @@ fn config_at(signed_origin: &str) -> PsAuthorizationConfig {
         kid: "resource-1".into(),
         signing_key: SigningKey::from_seed([4; 32]),
         scopes: vec!["records.read".into()],
+        scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
     }
 }
 type Policy = BoxedAuthAdmissionPolicy<String>;

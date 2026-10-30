@@ -1,4 +1,5 @@
 //! Resource metering and the four-party narrowing chain.
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -62,6 +63,10 @@ fn resource() -> PsAuthorizationResource<Keys, Admit> {
             kid: "resource".into(),
             signing_key: SigningKey::from_seed([5; 32]),
             scopes: vec!["read".into()],
+            scope_descriptions: BTreeMap::from([(
+                "read".into(),
+                "Read the metered records".into(),
+            )]),
         },
         Keys,
         admit as Admit,
@@ -426,6 +431,10 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
             kid: "resource".into(),
             signing_key: SigningKey::from_seed([5; 32]),
             scopes: vec!["read".into()],
+            scope_descriptions: BTreeMap::from([(
+                "read".into(),
+                "Read the metered records".into(),
+            )]),
         },
         AS,
         Keys,

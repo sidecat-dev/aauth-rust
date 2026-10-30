@@ -1136,6 +1136,7 @@ fn compose(
             kid: "records-1".into(),
             signing_key: SigningKey::from_seed(seed),
             scopes: vec!["records.read".into()],
+            scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
         },
         trust.clone(),
         Box::new(

@@ -7,11 +7,12 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_resource::{
     AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, Deny, ProactiveDecision,
-    PsAuthorizationConfig, PsAuthorizationResource,
+    PsAuthorizationConfig, PsAuthorizationResource, PsConfigurationError,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -127,6 +128,7 @@ fn config() -> PsAuthorizationConfig {
         kid: "resource-1".into(),
         signing_key: SigningKey::from_seed([4; 32]),
         scopes: vec!["records.read".into()],
+        scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
     }
 }
 type Policy = BoxedAuthAdmissionPolicy<String>;
@@ -356,9 +358,18 @@ fn resource_metadata_and_config_advertise_only_the_implemented_role() {
         |c: &mut PsAuthorizationConfig| c.issuer = format!("{RESOURCE}:8443"),
         |c: &mut PsAuthorizationConfig| c.signed_origin = format!("{ORIGIN}/records"),
         |c: &mut PsAuthorizationConfig| c.kid = String::new(),
-        |c: &mut PsAuthorizationConfig| c.scopes.clear(),
-        |c: &mut PsAuthorizationConfig| c.scopes = vec!["read".into(), "read".into()],
-        |c: &mut PsAuthorizationConfig| c.scopes = vec!["read write".into()],
+        |c: &mut PsAuthorizationConfig| {
+            c.scopes.clear();
+            c.scope_descriptions.clear();
+        },
+        |c: &mut PsAuthorizationConfig| {
+            c.scopes = vec!["read".into(), "read".into()];
+            c.scope_descriptions = BTreeMap::from([("read".into(), "Read".into())]);
+        },
+        |c: &mut PsAuthorizationConfig| {
+            c.scopes = vec!["read write".into()];
+            c.scope_descriptions = BTreeMap::from([("read write".into(), "Read".into())]);
+        },
     ] {
         let mut config = config();
         mutate(&mut config);
@@ -375,28 +386,136 @@ fn resource_metadata_and_config_advertise_only_the_implemented_role() {
 
 #[test]
 fn configured_scope_descriptions_are_published_without_an_invented_endpoint() {
-    use std::collections::BTreeMap;
-    let resource = resource(Arc::new(AtomicUsize::new(0)), true)
-        .with_scope_descriptions(BTreeMap::from([(
-            "records.read".into(),
-            "Read the frozen revision".into(),
-        )]))
-        .unwrap();
+    let resource = resource(Arc::new(AtomicUsize::new(0)), true);
     let metadata: Value = serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
     assert_eq!(
-        metadata["scope_descriptions"]["records.read"],
-        "Read the frozen revision"
+        metadata["scope_descriptions"],
+        json!({ "records.read": "Read records" })
     );
     assert!(metadata.get("authorization_endpoint").is_none());
-    assert!(superfluous_scope_descriptions_are_refused());
 }
-fn superfluous_scope_descriptions_are_refused() -> bool {
-    resource(Arc::new(AtomicUsize::new(0)), true)
-        .with_scope_descriptions(std::collections::BTreeMap::from([(
-            "admin".into(),
-            "Unconfigured privilege".into(),
-        )]))
-        .is_err()
+
+fn read_write_config() -> PsAuthorizationConfig {
+    let mut profile = config();
+    profile.scopes = vec!["records.read".into(), "records.write".into()];
+    profile
+        .scope_descriptions
+        .insert("records.write".into(), "Change records".into());
+    profile
+}
+
+fn scope_values(compact: &str) -> Vec<String> {
+    let verified = ResourceToken::parse(compact)
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    let scope = verified
+        .claims()
+        .scope
+        .clone()
+        .expect("resource token scope");
+    scope.split(' ').map(str::to_owned).collect()
+}
+
+// Core Scopes: a resource token includes only resource scopes the Resource
+// has defined in its `scope_descriptions` metadata. The Resource issues no
+// identity scopes.
+#[test]
+fn resource_tokens_carry_only_scopes_defined_in_scope_descriptions() {
+    let read = || ("records.read".to_owned(), "Read records".to_owned());
+    let write = || ("records.write".to_owned(), "Change records".to_owned());
+    for descriptions in [
+        BTreeMap::new(),
+        BTreeMap::from([read()]),
+        BTreeMap::from([read(), ("records.write".into(), " ".into())]),
+        BTreeMap::from([read(), write(), ("admin".into(), "Administer".into())]),
+        BTreeMap::from([read(), ("admin".into(), "Administer".into())]),
+    ] {
+        let mut profile = read_write_config();
+        profile.scope_descriptions = descriptions;
+        assert!(matches!(
+            PsAuthorizationResource::new(
+                profile,
+                keys(),
+                |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true
+            ),
+            Err(PsConfigurationError::InvalidScopes)
+        ));
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_policy = calls.clone();
+    let resource = PsAuthorizationResource::new(
+        read_write_config(),
+        keys(),
+        Box::new(
+            move |_token: &VerifiedAuthToken, _request: &Request<Vec<u8>>| {
+                calls_for_policy.fetch_add(1, Ordering::SeqCst);
+                Ok("host-context".into())
+            },
+        ) as Policy,
+    )
+    .unwrap()
+    .with_authorization_endpoint();
+    let metadata: Value = serde_json::from_slice(&resource.metadata().unwrap()).unwrap();
+    let defined: BTreeSet<String> = metadata["scope_descriptions"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        defined,
+        BTreeSet::from(["records.read".into(), "records.write".into()])
+    );
+
+    // The reactive challenge on a verified Person token.
+    let challenged = resource
+        .authorize(&signed(&person()), NOW, "challenge-defined")
+        .into_response();
+    let reactive = scope_values(challenge_token(&challenged));
+    assert_eq!(reactive, ["records.read", "records.write"]);
+    assert!(reactive.iter().all(|scope| defined.contains(scope)));
+
+    // A proactive request names a defined subset, and an undefined scope
+    // gets no resource token.
+    let response = resource
+        .authorize_endpoint(
+            &authorize_body(Some(&person()), Some("records.write")),
+            NOW,
+            "proactive-defined",
+        )
+        .into_response();
+    assert_eq!(response.status(), 200);
+    let body: Value = serde_json::from_slice(response.body()).unwrap();
+    let proactive = scope_values(body["resource_token"].as_str().unwrap());
+    assert_eq!(proactive, ["records.write"]);
+    assert!(proactive.iter().all(|scope| defined.contains(scope)));
+    for undefined in ["admin", "records.read admin", "openid"] {
+        let refused = resource
+            .authorize_endpoint(
+                &authorize_body(Some(&person()), Some(undefined)),
+                NOW,
+                "proactive-undefined",
+            )
+            .into_response();
+        assert_eq!(refused.status(), 400, "{undefined}");
+        assert!(
+            refused
+                .body()
+                .windows(13)
+                .any(|bytes| bytes == b"invalid_scope"),
+            "{undefined}"
+        );
+        assert!(
+            !refused
+                .body()
+                .windows(14)
+                .any(|bytes| bytes == b"resource_token"),
+            "{undefined}"
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 // Core70d6737: the Resource consumes authenticated mission context, not the
@@ -1298,11 +1417,9 @@ fn proactive_authorization_verifies_the_person_token_and_requires_scope() {
 #[test]
 fn proactive_scope_may_be_a_subset_while_an_auth_token_must_name_every_scope() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut profile = config();
-    profile.scopes = vec!["records.read".into(), "records.write".into()];
     let calls_for_policy = calls.clone();
     let resource = PsAuthorizationResource::new(
-        profile,
+        read_write_config(),
         keys(),
         Box::new(
             move |_token: &VerifiedAuthToken, _request: &Request<Vec<u8>>| {

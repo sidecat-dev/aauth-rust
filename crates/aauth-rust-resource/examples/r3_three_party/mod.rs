@@ -486,6 +486,10 @@ pub fn run() -> Result<Transcript> {
                 kid: "records-1".into(),
                 signing_key: SigningKey::generate(),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             trust.clone(),
             |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| token.claims().ps == PS,

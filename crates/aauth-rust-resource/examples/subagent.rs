@@ -451,6 +451,7 @@ fn run_scene(mode: Mode) -> Result<Transcript> {
         kid: "resource".into(),
         signing_key: SigningKey::generate(),
         scopes: vec![SCOPE.into()],
+        scope_descriptions: BTreeMap::from([(SCOPE.into(), "Read records".into())]),
     };
     let policy = |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| true;
     let resource = if mode == Mode::Direct {

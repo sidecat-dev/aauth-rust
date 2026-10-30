@@ -352,6 +352,7 @@ fn resource_with_ledger(
             kid: "resource-1".into(),
             signing_key: SigningKey::from_seed([4; 32]),
             scopes: vec!["records.read".into()],
+            scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
         },
         keys(),
         policy,
@@ -1794,6 +1795,10 @@ fn proposal_with_a_budget_offer_is_refused_before_approval() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             admission,
@@ -3667,6 +3672,10 @@ fn failed_proposal_commit_withholds_the_challenge() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             admission,
@@ -3836,6 +3845,10 @@ fn a_per_call_executes_once_and_the_replay_returns_the_retained_result() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -4092,6 +4105,10 @@ fn a_held_per_call_is_accepted_and_completes_only_at_its_pending_url() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -4345,6 +4362,10 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -4565,6 +4586,10 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -5996,6 +6021,10 @@ fn resource_on_call_directory(calls: Arc<dyn R3CallStore>) -> Arc<Resource> {
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -6239,6 +6268,10 @@ fn resource_on_document_directory(
                 kid: "resource-1".into(),
                 signing_key: SigningKey::from_seed([4; 32]),
                 scopes: vec!["records.read".into()],
+                scope_descriptions: BTreeMap::from([(
+                    "records.read".into(),
+                    "Read records".into(),
+                )]),
             },
             keys(),
             Box::new(|_: &VerifiedAuthToken, _: &Request<Vec<u8>>| Ok("receipt".to_owned()))
@@ -6451,6 +6484,7 @@ fn mission_resource(
             kid: "resource-1".into(),
             signing_key: SigningKey::from_seed([4; 32]),
             scopes: vec!["records.read".into()],
+            scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
         },
         keys(),
         policy,

@@ -10,6 +10,7 @@ use aauth_rust_resource::{
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::sync::{
     Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicUsize, Ordering},
@@ -60,6 +61,7 @@ fn config() -> PsAuthorizationConfig {
         kid: "resource-1".into(),
         signing_key: SigningKey::from_seed([4; 32]),
         scopes: vec!["records.read".into()],
+        scope_descriptions: BTreeMap::from([("records.read".into(), "Read records".into())]),
     }
 }
 fn resource(
