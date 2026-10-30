@@ -804,6 +804,14 @@ where
 
     /// Person challenge on a mapped R3 route: one class document for that operation.
     /// `None` keeps the Core challenge for an unmapped route.
+    /// Whether the host maps `request` to an R3 operation. A mapping failure
+    /// counts as mapped, so the caller refuses rather than issue a Core challenge.
+    pub(super) fn maps_r3_operation(&self, request: &Request<Vec<u8>>) -> bool {
+        self.r3
+            .as_ref()
+            .is_some_and(|profile| !matches!(profile.route(request), Ok(None)))
+    }
+
     pub(super) fn r3_challenge(
         &self,
         request: &Request<Vec<u8>>,

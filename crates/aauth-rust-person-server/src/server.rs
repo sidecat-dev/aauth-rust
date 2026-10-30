@@ -8,9 +8,14 @@ pub use governance::{Governance, GovernanceError, InteractionDecision, OpenedInt
 mod lineage;
 mod missions;
 mod r3;
+mod resource_interaction;
 pub use r3::{
     BoxedR3Policy, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy,
     R3ProposalDecision, R3ProposalRequest,
+};
+pub use resource_interaction::{
+    BoxedEgress, PendingResourceInteraction, ResourceInteractionCallback,
+    ResourceInteractionConfig, ResourceInteractionError,
 };
 mod subagents;
 mod usage;
@@ -26,6 +31,7 @@ use aauth_rust_budgets::{
     AllocationBook, Budget, ConsentFigure, IssuerPolicy, MAX_AMOUNT, check_declared, narrow_to,
     parse_budget, parse_resource_claims, read_granted, verify_delivered,
 };
+use aauth_rust_core::interaction::ResourceInteraction;
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, MetadataDisplay,
     PersonClaims, PersonToken, ResourceToken, TokenError, VerifiedAgentToken,
@@ -102,6 +108,7 @@ pub struct PersonServer<K, S, P, C, I> {
     r3: Option<Box<R3IssuerConfig>>,
     r3_approvals: Mutex<Vec<r3::RecordedApproval>>,
     display: MetadataDisplay,
+    resource_interaction: Option<resource_interaction::Gate>,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -225,6 +232,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             r3: None,
             r3_approvals: Mutex::new(Vec::new()),
             display: MetadataDisplay::new(),
+            resource_interaction: None,
         })
     }
     /// Publish `name`, `description`, `logo_uri` and the other display
@@ -354,6 +362,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         if self.deferred.is_some() && request.uri().path().starts_with("/token/pending/") {
             return self.pending(request, now);
+        }
+        if self.resource_interaction.is_some()
+            && request.uri().path().starts_with("/token/interaction/")
+        {
+            return self.resource_interaction_poll(request, now);
         }
         if let Some(response) = self.route_revocation(request, now)? {
             return Ok(response);
@@ -825,7 +838,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             };
             (offer, scopes)
         } else {
-            let offer = self.admit_resource_budget(&r.extra, &r.presented_jti)?;
+            // The claim is read after verification, by the flow that resolves it.
+            let mut core = r.extra.clone();
+            if self.resource_interaction_enabled() {
+                core.remove("interaction");
+            }
+            let offer = self.admit_resource_budget(&core, &r.presented_jti)?;
             let scopes = parse_scopes(
                 r.scope
                     .as_deref()
@@ -922,6 +940,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
             return self.federate(&agent, &prepared);
         }
+        if let Some(interaction) = ResourceInteraction::from_claims(prepared.resource.claims())
+            .map_err(|_| Failure::parameter("invalid_resource_token"))?
+        {
+            if upstream.is_some() || prepared.context.subagent.is_some() || prepared.offer.is_some()
+            {
+                return Err(Failure::parameter("invalid_request"));
+            }
+            return self.open_resource_interaction(&agent, &prepared, interaction);
+        }
+        self.grant_auth(&agent, prepared, upstream.as_ref())
+    }
+    /// Policy, issuance, commit and release of one prepared direct Auth grant.
+    fn grant_auth(
+        &self,
+        agent: &VerifiedAgentToken,
+        prepared: PreparedAuthorization,
+        upstream: Option<&Upstream>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
             presented,
@@ -940,17 +976,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         validate_grant(&grant, &context.scopes)?;
         let mission = context.mission.as_ref();
         let now = (self.clock)();
-        self.recheck_mission(&agent, mission, now, binding_context)?;
-        self.inputs_current(&agent, &resource, &presented, now)?;
-        self.subagent_current(&agent, context.subagent.as_ref(), now)?;
-        check_upstream_current(upstream.as_ref(), now)?;
+        self.recheck_mission(agent, mission, now, binding_context)?;
+        self.inputs_current(agent, &resource, &presented, now)?;
+        self.subagent_current(agent, context.subagent.as_ref(), now)?;
+        check_upstream_current(upstream, now)?;
         let mut expires_at = now
             .saturating_add(grant.lifetime)
             .min(agent.claims().exp)
             .min(presented.exp);
-        let holder = context.subagent.as_ref().unwrap_or(&agent);
+        let holder = context.subagent.as_ref().unwrap_or(agent);
         expires_at = expires_at.min(holder.claims().exp);
-        if let Some(up) = &upstream {
+        if let Some(up) = upstream {
             expires_at = expires_at.min(up.token.exp);
         }
         if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
@@ -995,7 +1031,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             &retained.principal,
             &retained.person_id,
             Issuance {
-                parent_agent: context.subagent.as_ref().map(|_| Self::identity(&agent)),
+                parent_agent: context.subagent.as_ref().map(|_| Self::identity(agent)),
                 binding_generation: retained.binding_generation,
                 kind: TokenKind::Auth,
                 jti: &claims.jti,
@@ -1005,18 +1041,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 issued_at: now,
                 expires_at,
                 presented: Some(retained.token),
-                upstream: upstream.as_ref().map(|up| up.context.record.token.clone()),
+                upstream: upstream.map(|up| up.context.record.token.clone()),
             },
         )?;
         self.commit_issuance(record, false, mission, binding_context)?;
-        self.subagent_current(&agent, context.subagent.as_ref(), (self.clock)())?;
+        self.subagent_current(agent, context.subagent.as_ref(), (self.clock)())?;
         self.binding(&retained.principal, binding_context)?
             .ok_or_else(Failure::internal)?;
         let released_at = (self.clock)();
-        self.inputs_current(&agent, &resource, &presented, released_at)?;
+        self.inputs_current(agent, &resource, &presented, released_at)?;
         check_subagent_current(context.subagent.as_ref(), released_at)?;
-        check_upstream_current(upstream.as_ref(), released_at)?;
-        self.recheck_mission(&agent, mission, released_at, binding_context)?;
+        check_upstream_current(upstream, released_at)?;
+        self.recheck_mission(agent, mission, released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }

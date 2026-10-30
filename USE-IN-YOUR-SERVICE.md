@@ -349,7 +349,8 @@ agent provider's `name` and `logo_uri` from its metadata
 (`MetadataDisplay::from_metadata`) beside the agent-asserted `platform` and
 `device` parameters.
 
-This subset has no interaction endpoint or deferred login channel. Person
+Apart from the opt-in [resource interaction](#resolve-a-resources-own-interaction)
+flow, this subset has no interaction endpoint or deferred login channel. Person
 authentication therefore comes from evidence the host already has. Two patterns
 are a prelinked directory entry for the exact verified Agent `(iss, sub)` tuple,
 established through the person's existing authenticated account/onboarding flow;
@@ -606,6 +607,63 @@ application state. Wrong-audience Person/Auth tokens return local
 `TokenError::AudienceMismatch` and a Problem Details audience diagnosis before
 policy. Their wire code remains the pinned draft's `invalid_jwt`; obtain a
 credential for the intended Resource instead of refreshing an otherwise valid JWT.
+
+## Resolve a Resource's own interaction
+
+A Resource that needs its own user-facing flow before the Person Server can
+issue, typically an OAuth authorization at a third-party service, names it in
+the resource token's `interaction` claim. Open the claim for your interaction
+endpoint and challenge with it:
+
+```rust
+use aauth_rust_core::interaction::ResourceInteraction;
+let interaction = ResourceInteraction::open("https://calendar.example/connect")?;
+let decision = resource.authorize_with_interaction(&request, now, &challenge_jti, &interaction);
+```
+
+Keep `interaction.code()` for that endpoint: single use, until the resource token
+expires. Only a Person-token challenge carries the claim. The endpoint reads
+`?code=...&callback=...` with `parse_interaction_query`, the same way whether an
+agent or a Person Server sent the person. When the flow ends, successfully or not,
+redirect with `completion_redirect(callback, outcome)`: an unfinished flow adds
+`error` (`access_denied`, `user_abandoned`, `server_error`,
+`temporarily_unavailable` or `interaction_expired`).
+
+The Person Server resolves that flow before its own consent after
+`with_resource_interaction(ResourceInteractionConfig::new(store, interaction_base,
+callback_base, admit))`. `store` is a `ContinuationStore` of its own. The two bases
+are HTTPS URLs your host routes, and `admit` is your egress admission for a
+resource's interaction URL. The agent's `/token` request must list `interaction`
+in `capabilities`, or the answer is `403 user_unreachable`. The request is then
+answered `202` with `requirement=interaction`, the URL
+`{interaction_base}/{id}`, a fresh code, and a pending URL under
+`/token/interaction/` that the agent polls through `PersonServer::handle`. Your
+host serves four steps:
+
+1. At `{interaction_base}/{id}`, authenticate the person and show an interstitial
+   saying the resource requires additional permissions.
+   `resource_interaction(id)` returns the resource, agent, scopes and the
+   agent-asserted justification to show.
+2. Call `redirect_to_resource(id, query)` with the page's query. It checks and
+   consumes the code (three mismatches end the request), checks the resource's
+   URL is HTTPS, applies `admit`, and returns the `302` to
+   `{interaction.url}?code={interaction.code}&callback={callback_base}/{flow}`.
+   The per-flow `flow` is fresh and never shown to the agent.
+3. At `{callback_base}/{flow}`, call `resource_interaction_callback(flow, query)`.
+   A callback with `error` is never completable. The request ends, and the
+   agent's next poll receives the mapped polling error: `access_denied` as
+   `denied`, `user_abandoned` as `abandoned`, `interaction_expired` as `expired`,
+   and the other two as `server_error`. Without `error` you get `Consent { id }`.
+4. Show your consent and call `decide_resource_interaction(id, approved)` with the
+   authenticated person's decision. Approval re-verifies the stored tokens and
+   runs `Policy::authorize` and issuance as an immediate `/token` request does.
+
+The agent's next poll receives the token or the refusal once, and `410` after
+that. When the agent appended its own `callback` to the interaction URL, steps 3
+and 4 return the redirect back to it, with `error` when the request did not
+complete. This flow is three-party only: with AS federation the claim is still
+refused as `invalid_resource_token`, and it refuses call chaining, sub-agents and
+budget offers with `invalid_request`.
 
 ## Compose one R3 document across definitions
 

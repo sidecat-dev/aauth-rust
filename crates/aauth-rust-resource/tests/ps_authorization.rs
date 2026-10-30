@@ -1,5 +1,6 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::interaction::ResourceInteraction;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthClaims, Confirmation, PersonClaims, ResourceToken,
     TokenError, TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
@@ -230,6 +231,51 @@ fn verified_person_challenges_without_admission_and_copies_exact_lineage() {
         .verify_resource_challenge(compact, RESOURCE, PS, &person(), &keys(), NOW)
         .unwrap();
     assert_eq!(validated.compact(), compact);
+}
+
+#[test]
+fn a_resource_that_needs_its_own_flow_names_it_in_the_person_challenge() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let resource = resource(calls.clone(), true);
+    let interaction = ResourceInteraction::open("https://resource.example/connect").unwrap();
+    assert!(ResourceInteraction::open("https://resource.example/connect?x=1").is_err());
+    let response = resource
+        .authorize_with_interaction(&signed(&person()), NOW, "challenge-1", &interaction)
+        .into_response();
+    let compact = challenge_token(&response);
+    let verified = ResourceToken::parse(compact)
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    let carried = ResourceInteraction::from_claims(verified.claims())
+        .unwrap()
+        .expect("the challenge carries the interaction claim");
+    assert_eq!(carried, interaction);
+    assert_eq!(carried.url(), "https://resource.example/connect");
+    // The agent passes the challenge on unchanged; its lineage still verifies.
+    agent()
+        .verify_resource_challenge(compact, RESOURCE, PS, &person(), &keys(), NOW)
+        .unwrap();
+    // A plain challenge carries no claim, and an Auth token is judged as usual.
+    let plain = resource
+        .authorize(&signed(&person()), NOW, "challenge-2")
+        .into_response();
+    let plain = ResourceToken::parse(challenge_token(&plain))
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(
+        ResourceInteraction::from_claims(plain.claims()).unwrap(),
+        None
+    );
+    let admitted = resource.authorize_with_interaction(
+        &signed(&auth(&auth_claims())),
+        NOW,
+        "challenge-3",
+        &interaction,
+    );
+    assert!(matches!(admitted, AuthDecision::Granted(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 /// Verified challenge claims, without the identifiers that differ per presentation.

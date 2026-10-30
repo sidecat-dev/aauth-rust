@@ -13,6 +13,7 @@ use aauth_rust_budgets::{
     UnitDeclaration, answer_usage, metered_access_mode, parse_budget, parse_usage_query,
     read_granted, sender_field, sign_usage_response, validate_endpoint_url,
 };
+use aauth_rust_core::interaction::ResourceInteraction;
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthToken, MetadataDisplay, PersonToken, ResourceClaims,
     TokenError, VerifiedAuthToken, mint_resource_token, validate_server_identifier,
@@ -1025,7 +1026,7 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti, None, Meter::Buffered) {
+        match self.authorize_proved(request, now, challenge_jti, None, None, Meter::Buffered) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -1042,7 +1043,7 @@ where
         now: i64,
         challenge_jti: &str,
     ) -> AuthDecision<O::Context> {
-        self.authorize_with(request, now, challenge_jti, Meter::Reserve)
+        self.authorize_with(request, now, challenge_jti, Meter::Reserve, None)
     }
     /// Verify the request and do not meter it.
     ///
@@ -1057,7 +1058,41 @@ where
         now: i64,
         challenge_jti: &str,
     ) -> AuthDecision<O::Context> {
-        self.authorize_with(request, now, challenge_jti, Meter::Observe)
+        self.authorize_with(request, now, challenge_jti, Meter::Observe, None)
+    }
+    /// Verify one request like [`Self::authorize`], and put `interaction` in
+    /// a Person-token challenge (`draft-hardt-oauth-aauth-protocol`,
+    /// Resource-Initiated Interaction).
+    ///
+    /// Use it when this Resource needs its own user-facing flow, such as an
+    /// OAuth authorization at a third-party service, before the Person Server
+    /// can issue. Open the claim with [`ResourceInteraction::open`] for the
+    /// Resource's interaction endpoint and keep its code. The Person Server
+    /// resolves that flow before its own consent: it sends the person to
+    /// `{url}?code={code}&callback={ps_callback_url}`, and the endpoint reads
+    /// that query with [`aauth_rust_core::interaction::parse_interaction_query`],
+    /// whether an agent or a Person Server sent the person. When the flow
+    /// ends, successfully or not, the endpoint redirects to `callback` with
+    /// [`aauth_rust_core::interaction::completion_redirect`].
+    ///
+    /// Only the first challenge of a grant, against a Person token, carries the
+    /// claim; an Auth token is judged as by [`Self::authorize`]. A request this
+    /// Resource maps to an R3 operation is a host error, as R3 does not carry
+    /// the claim here.
+    pub fn authorize_with_interaction(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        challenge_jti: &str,
+        interaction: &ResourceInteraction,
+    ) -> AuthDecision<O::Context> {
+        self.authorize_with(
+            request,
+            now,
+            challenge_jti,
+            Meter::Buffered,
+            Some(interaction),
+        )
     }
     fn authorize_with(
         &self,
@@ -1065,6 +1100,7 @@ where
         now: i64,
         challenge_jti: &str,
         meter: Meter,
+        interaction: Option<&ResourceInteraction>,
     ) -> AuthDecision<O::Context> {
         let authority = match canonical_authority(request.uri()) {
             Ok(value) => value,
@@ -1082,7 +1118,7 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti, None, meter) {
+        match self.authorize_proved(request, now, challenge_jti, None, interaction, meter) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -1124,7 +1160,14 @@ where
         {
             return AuthDecision::PersonTokenRequired;
         }
-        match self.authorize_proved(request, now, challenge_jti, Some(asked), Meter::Buffered) {
+        match self.authorize_proved(
+            request,
+            now,
+            challenge_jti,
+            Some(asked),
+            None,
+            Meter::Buffered,
+        ) {
             Ok(decision) => decision,
             Err(error) => AuthDecision::SignatureFailure(error),
         }
@@ -1135,6 +1178,7 @@ where
         now: i64,
         challenge_jti: &str,
         asked: Option<&AuthorizationAsk>,
+        interaction: Option<&ResourceInteraction>,
         meter: Meter,
     ) -> Result<AuthDecision<O::Context>, SignatureFailure> {
         if self.r3_composition_refused() {
@@ -1215,7 +1259,7 @@ where
                     Ok(extra) => extra,
                     Err(()) => return Ok(AuthDecision::InternalError),
                 };
-                let challenge = ResourceClaims {
+                let mut challenge = ResourceClaims {
                     iss: self.config.issuer.clone(),
                     dwk: "aauth-resource.json".into(),
                     aud: self
@@ -1249,6 +1293,12 @@ where
                     },
                     extra,
                 };
+                if let Some(interaction) = interaction {
+                    if self.maps_r3_operation(request) {
+                        return Ok(AuthDecision::InternalError);
+                    }
+                    interaction.insert_into(&mut challenge);
+                }
                 if let Some(decision) = self.r3_challenge(request, &challenge) {
                     return Ok(decision);
                 }

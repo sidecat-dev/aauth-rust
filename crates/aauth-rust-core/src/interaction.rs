@@ -2,11 +2,14 @@
 //!
 //! The resource accepts `code` and `callback` without recording whether an agent
 //! or a Person Server sent them. When the flow ends it sends the browser to
-//! `callback`. [`person_server_redirect`] and [`receive_callback`] are helpers;
-//! no Person Server route calls them. Targets must be HTTPS without a query or
-//! fragment. `http://localhost` and `http://127.0.0.1` are refused.
+//! `callback`. A resource that needs its own flow before a Person Server can
+//! issue puts a [`ResourceInteraction`] in its resource token; the Person
+//! Server's resource-interaction flow uses [`person_server_redirect`] and
+//! [`receive_callback`]. Targets must be HTTPS without a query or fragment.
+//! `http://localhost` and `http://127.0.0.1` are refused.
 
 use http::{Response, StatusCode, Uri};
+use serde_json::{Value, json};
 
 use crate::capabilities::{Capabilities, Capability};
 use crate::continuation::{
@@ -26,6 +29,80 @@ impl std::fmt::Display for InteractionError {
 }
 
 impl std::error::Error for InteractionError {}
+
+/// The `interaction` claim of a resource token
+/// (`draft-hardt-oauth-aauth-protocol`, Resource Token Structure and
+/// Resource-Initiated Interaction).
+///
+/// The resource needs its own user-facing flow, such as an OAuth
+/// authorization at a third-party service, before the Person Server can
+/// issue. `url` is the resource's interaction endpoint and `code` the
+/// interaction code to present there. The Person Server sends the person to
+/// `{url}?code={code}&callback={ps_callback_url}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceInteraction {
+    url: String,
+    code: String,
+}
+
+impl ResourceInteraction {
+    /// Draw a fresh code, from [`generate_interaction_code`], for the
+    /// resource's interaction endpoint `url`. The resource keeps the code to
+    /// check it when the person arrives, single use and until the resource
+    /// token expires.
+    ///
+    /// # Errors
+    /// [`InteractionError`] unless `url` is an HTTPS URL without a query or fragment.
+    pub fn open(url: &str) -> Result<Self, InteractionError> {
+        https_target(url)?;
+        Ok(Self {
+            url: url.to_owned(),
+            code: generate_interaction_code(),
+        })
+    }
+
+    /// The resource's interaction endpoint.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// The interaction code to present at [`Self::url`].
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Read the claim from resource-token claims. `Ok(None)` when absent.
+    ///
+    /// # Errors
+    /// [`InteractionError`] when the claim is not an object whose `url` is an
+    /// HTTPS URL without a query or fragment and whose `code` is an emittable
+    /// interaction code. Other members are ignored.
+    pub fn from_claims(claims: &crate::ResourceClaims) -> Result<Option<Self>, InteractionError> {
+        let Some(value) = claims.extra.get("interaction") else {
+            return Ok(None);
+        };
+        let member = |name: &str| value.get(name).and_then(Value::as_str);
+        let (Some(url), Some(code)) = (member("url"), member("code")) else {
+            return Err(InteractionError);
+        };
+        https_target(url)?;
+        if !is_emitted_interaction_code(code) {
+            return Err(InteractionError);
+        }
+        Ok(Some(Self {
+            url: url.to_owned(),
+            code: code.to_owned(),
+        }))
+    }
+
+    /// Write the claim into resource-token claims before minting.
+    pub fn insert_into(&self, claims: &mut crate::ResourceClaims) {
+        claims.extra.insert(
+            "interaction".into(),
+            json!({"url": self.url, "code": self.code}),
+        );
+    }
+}
 
 /// `error` query value from an interaction callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +128,19 @@ impl CallbackError {
             Self::InteractionExpired => "expired",
             Self::ServerError | Self::TemporarilyUnavailable => "server_error",
         }
+    }
+
+    /// The callback `error` value for a polling error, the reverse of
+    /// [`Self::polling_error`]. `server_error` stands for both
+    /// `server_error` and `temporarily_unavailable`.
+    pub fn from_polling_error(polling_error: &str) -> Option<Self> {
+        Some(match polling_error {
+            "denied" => Self::AccessDenied,
+            "abandoned" => Self::UserAbandoned,
+            "expired" => Self::InteractionExpired,
+            "server_error" => Self::ServerError,
+            _ => return None,
+        })
     }
 
     fn query_value(self) -> &'static str {
