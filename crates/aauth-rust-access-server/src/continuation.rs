@@ -1,5 +1,7 @@
 use super::*;
-use aauth_rust_core::continuation::{ContinuationStore, PendingResponse, Requirement};
+use aauth_rust_core::continuation::{
+    ContinuationStore, PendingResponse, Requirement, generate_interaction_code, generate_pending_id,
+};
 use serde_json::Map;
 use std::sync::Arc;
 
@@ -34,6 +36,11 @@ pub struct DeferredContext {
     pub claims: Map<String, Value>,
     /// Accepted clarification_response Markdown strings, bounded to five rounds.
     pub clarifications: Vec<String>,
+    /// Interaction code this AS drew for the pending request: 40 bits from the
+    /// operating system's secure random source, unchanged for its lifetime. A
+    /// returned `Requirement::Interaction` carries exactly this code; any other
+    /// code is a host error (`500`) and nothing is emitted.
+    pub interaction_code: String,
 }
 type DeferredPolicy =
     Box<dyn Fn(&DeferredContext) -> Result<Option<Requirement>, PolicyError> + Send + Sync>;
@@ -52,6 +59,9 @@ impl<
     /// waits; None invokes the existing grant policy. The callback must not settle
     /// payments or consume an interaction code implicitly: hosts establish those
     /// decisions independently, then the authenticated PS explicitly polls.
+    /// An interaction requirement uses [`DeferredContext::interaction_code`].
+    /// Pending URLs end in an identifier from
+    /// [`aauth_rust_core::continuation::generate_pending_id`].
     pub fn with_deferred(
         mut self,
         config: DeferredConfig,
@@ -81,10 +91,12 @@ impl<
             authorization: context,
             claims: Map::new(),
             clarifications: Vec::new(),
+            interaction_code: generate_interaction_code(),
         };
         let Some(requirement) = (d.policy)(&input).map_err(Failure::policy)? else {
             return self.issue(input.authorization, presented);
         };
+        drawn_code(&requirement, &input.interaction_code)?;
         let deadline = now
             .saturating_add(d.config.lifetime)
             .min(input.authorization.agent.claims().exp)
@@ -102,10 +114,7 @@ impl<
         if released >= deadline {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
-        let id = (self.ids)();
-        if !safe_id(&id) {
-            return Err(Failure::internal());
-        }
+        let id = generate_pending_id();
         let location = format!("{}/token/pending/{id}", self.config.signed_origin);
         let pending = PendingResponse::new(
             &self.config.signed_origin,
@@ -114,7 +123,7 @@ impl<
             requirement,
         )
         .map_err(|_| Failure::internal())?;
-        let value = json!({"state":"waiting","request":body,"person_server":input.authorization.person_server,"deadline":deadline,"next":released.saturating_add(d.config.retry_after as i64),"claims":{},"clarifications":[],"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,released),"pending":pending});
+        let value = json!({"state":"waiting","request":body,"person_server":input.authorization.person_server,"deadline":deadline,"next":released.saturating_add(d.config.retry_after as i64),"claims":{},"clarifications":[],"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,released),"interaction_code":input.interaction_code,"pending":pending});
         d.config
             .store
             .insert(&id, value.clone())
@@ -292,6 +301,9 @@ impl<
             // remains bounded by the overall request, not its old question.
             value["question_deadline"] = Value::Null;
         }
+        if value["interaction_code"].as_str().is_none() {
+            value["interaction_code"] = json!(generate_interaction_code());
+        }
         value["state"] = json!("busy");
         if !d
             .config
@@ -309,6 +321,10 @@ impl<
                     .map_err(|_| Failure::internal())?,
                 clarifications: serde_json::from_value(value["clarifications"].clone())
                     .map_err(|_| Failure::internal())?,
+                interaction_code: value["interaction_code"]
+                    .as_str()
+                    .ok_or_else(Failure::internal)?
+                    .to_owned(),
             };
             let requirement = (d.policy)(&input).map_err(|e| match e {
                 PolicyError::Denied => Failure::status(StatusCode::FORBIDDEN, "denied"),
@@ -320,6 +336,7 @@ impl<
             match requirement {
                 None => self.issue(input.authorization, presented),
                 Some(requirement) => {
+                    drawn_code(&requirement, &input.interaction_code)?;
                     let pending = PendingResponse::new(
                         &self.config.signed_origin,
                         &previous.location,
@@ -513,6 +530,13 @@ fn throttled(retry_after: u64) -> Response<Vec<u8>> {
     r
 }
 
+/// A policy emits only the interaction code this AS drew for the request.
+fn drawn_code(requirement: &Requirement, drawn: &str) -> Result<(), Failure> {
+    match requirement {
+        Requirement::Interaction { code, .. } if code != drawn => Err(Failure::internal()),
+        _ => Ok(()),
+    }
+}
 fn same_question(left: &Requirement, right: &Requirement) -> bool {
     matches!((left,right), (Requirement::Clarification{question:a,options:ao,..}, Requirement::Clarification{question:b,options:bo,..}) if a==b && ao==bo)
 }

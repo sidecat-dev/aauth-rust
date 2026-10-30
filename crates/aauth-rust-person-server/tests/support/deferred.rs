@@ -82,7 +82,7 @@ impl aauth_rust_person_server::Federation for NativeTransport {
                     }),
                     6 => Some(Requirement::Interaction {
                         url: "https://as.example/consent".into(),
-                        code: "C0DE8X42".into(),
+                        code: c.interaction_code.clone(),
                     }),
                     _ => None,
                 })
@@ -160,11 +160,20 @@ fn native_payment_approval_delivery_recomposes_without_replaying_post() {
     );
     let pending = PendingResponse::parse(&format!("{PS}/token"), &response).unwrap();
     assert!(pending.location.starts_with(PS));
+    // Both pending URLs carry 128 random bits, not the hosts' token-ID sources.
+    let as_pending = server.federation_pending(&pending.location).unwrap();
+    for (location, origin) in [
+        (&pending.location, PS),
+        (&as_pending.location, "https://as.example"),
+    ] {
+        let id = location
+            .strip_prefix(&format!("{origin}/token/pending/"))
+            .unwrap();
+        assert_eq!(id.len(), 22, "{location}");
+        assert!(!id.starts_with("token-") && !id.starts_with("as-"));
+    }
     assert!(matches!(
-        server
-            .federation_pending(&pending.location)
-            .unwrap()
-            .requirement,
+        as_pending.requirement,
         Requirement::Payment { .. }
     ));
     assert_eq!(

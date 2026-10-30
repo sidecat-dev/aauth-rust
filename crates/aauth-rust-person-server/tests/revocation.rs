@@ -538,12 +538,13 @@ fn deferred_revocation_poll_is_limited_to_the_caller() {
         String::from_utf8_lossy(pending.body())
     );
     assert_eq!(value(&pending)["status"], "pending");
-    assert!(
-        pending.headers()["location"]
-            .to_str()
-            .unwrap()
-            .contains("/revoke/pending/")
-    );
+    let pending_location = pending.headers()["location"].to_str().unwrap();
+    let pending_id = pending_location
+        .strip_prefix(&format!("{PS}/revoke/pending/"))
+        .unwrap();
+    // 128 random bits, not the host's sequential token-ID source.
+    assert_eq!(pending_id.len(), 22, "{pending_location}");
+    assert!(!pending_id.starts_with("issued-"));
     assert_eq!(pending.headers()["retry-after"], "5");
     assert_eq!(pending.headers()["cache-control"], "no-store");
     assert!(!pending.headers().contains_key("aauth-requirement"));

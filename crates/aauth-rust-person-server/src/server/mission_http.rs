@@ -122,10 +122,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if aauth_rust_core::validate_agent_identifier(&owner.sub).is_err() {
             return Err(Failure::parameter("invalid_request"));
         }
-        let id = (self.ids)();
-        if !path_token(&id) {
-            return Err(Failure::internal());
-        }
+        let id = aauth_rust_core::continuation::generate_pending_id();
         self.insert_proposal(
             id.clone(),
             Proposal {

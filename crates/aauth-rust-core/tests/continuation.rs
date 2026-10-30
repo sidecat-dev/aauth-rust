@@ -1,9 +1,12 @@
 use aauth_rust_core::continuation::{
     ContinuationStore, MemoryContinuations, PendingResponse, Requirement, StoreError,
-    canonical_interaction_code,
+    canonical_interaction_code, generate_interaction_code, generate_pending_id,
+    is_emitted_interaction_code,
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::Response;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 fn response(status: u16, requirement: &str, body: serde_json::Value) -> Response<Vec<u8>> {
@@ -375,4 +378,69 @@ fn canonical_interaction_code_strips_hyphens_and_folds_aliases() {
     );
     assert!(canonical_interaction_code("short").is_none());
     assert!(canonical_interaction_code("C0DE8X4U").is_none());
+}
+
+#[test]
+fn generated_interaction_codes_carry_forty_random_bits() {
+    const ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    let mut seen = BTreeSet::new();
+    let mut symbols = vec![BTreeSet::new(); 8];
+    for _ in 0..2048 {
+        let code = generate_interaction_code();
+        assert_eq!(code.len(), 9, "{code}");
+        assert_eq!(code.as_bytes()[4], b'-', "{code}");
+        assert!(is_emitted_interaction_code(&code), "{code}");
+        let canonical = canonical_interaction_code(&code).unwrap();
+        assert_eq!(canonical.len(), 8);
+        assert_eq!(canonical, code.replace('-', ""));
+        for (position, symbol) in canonical.chars().enumerate() {
+            assert!(ALPHABET.contains(symbol), "{code}");
+            symbols[position].insert(symbol);
+        }
+        assert!(seen.insert(canonical), "a 40-bit code repeated: {code}");
+    }
+    // Each of the eight symbols takes all 32 values, so all 40 bits vary.
+    assert!(symbols.iter().all(|position| position.len() == 32));
+    let pending = PendingResponse::new(
+        "https://resource.example/api",
+        "/pending/job",
+        5,
+        Requirement::Interaction {
+            url: "https://resource.example/consent".into(),
+            code: generate_interaction_code(),
+        },
+    )
+    .unwrap();
+    pending.response().unwrap();
+}
+
+#[test]
+fn generated_pending_ids_carry_128_random_bits() {
+    let mut seen = BTreeSet::new();
+    let mut ones = [0_u32; 128];
+    let draws = 2048;
+    for _ in 0..draws {
+        let id = generate_pending_id();
+        assert_eq!(id.len(), 22, "{id}");
+        let bytes = URL_SAFE_NO_PAD.decode(&id).unwrap();
+        assert_eq!(bytes.len(), 16);
+        for (bit, count) in ones.iter_mut().enumerate() {
+            *count += u32::from((bytes[bit / 8] >> (bit % 8)) & 1);
+        }
+        let location = format!("/token/pending/{id}");
+        let pending = PendingResponse::new(
+            "https://as.example/token",
+            &location,
+            5,
+            Requirement::Approval,
+        )
+        .unwrap();
+        assert_eq!(
+            pending.location,
+            format!("https://as.example/token/pending/{id}")
+        );
+        assert!(seen.insert(id), "a 128-bit pending id repeated");
+    }
+    // Every bit position is set in some identifiers and clear in others.
+    assert!(ones.iter().all(|count| (1..draws).contains(count)));
 }

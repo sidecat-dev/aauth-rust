@@ -18,6 +18,7 @@ base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 http.workspace = true
+rand_core.workspace = true
 thiserror.workspace = true
 sfv.workspace = true
 sha2.workspace = true

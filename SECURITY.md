@@ -130,7 +130,8 @@ within the accepted 60-second proof window can consume the single terminal
 response, leaving the legitimate Agent with `410 Gone`. The token remains
 proof-of-possession bound to that Agent's key; a captured GET alone does not let
 another holder use it. Enforce any required replay refusal before the pending
-handler consumes custody. Use unpredictable unique pending IDs, protect the
+handler consumes custody. Pending IDs and interaction codes come from the
+operating system's secure random source (128 and 40 bits). Protect the
 continuation store's compact credentials, and reconcile uncertain transitions
 without blindly retrying settlement or delivery. Memory continuation stores
 provide neither process restart durability nor automatic recovery.

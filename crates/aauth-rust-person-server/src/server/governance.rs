@@ -1,5 +1,7 @@
 use super::*;
-use aauth_rust_core::continuation::{canonical_interaction_code, is_emitted_interaction_code};
+use aauth_rust_core::continuation::{
+    canonical_interaction_code, generate_interaction_code, generate_pending_id,
+};
 use aauth_rust_jose::strict_json;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -32,12 +34,23 @@ pub enum GovernanceError {
     /// `with_governance` was not called.
     #[error("governance endpoints are not enabled")]
     Disabled,
-    /// The code is not safe to emit, or the expiry is negative.
+    /// The expiry is negative.
     #[error("interaction code cannot be emitted")]
     Code,
-    /// The host id source or the in-memory table could not record the code.
+    /// The in-memory table could not record the code.
     #[error("interaction code could not be stored")]
     Unavailable,
+}
+
+/// An interaction code this server drew, and the pending id that redeems it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenedInteraction {
+    /// Redemption path segment under `/interaction/pending/`: 128 random bits
+    /// from [`aauth_rust_core::continuation::generate_pending_id`].
+    pub id: String,
+    /// Code for the person: 40 random bits from
+    /// [`aauth_rust_core::continuation::generate_interaction_code`].
+    pub code: String,
 }
 
 pub(super) struct Gate {
@@ -100,27 +113,23 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self
     }
 
-    /// Remember an emittable interaction code until `expires_at` (Unix seconds).
-    /// The returned id is the redemption path segment. The host supplies the
-    /// code; this library does not draw the random symbols.
+    /// Draw a fresh interaction code and remember it until `expires_at` (Unix
+    /// seconds). The code carries 40 bits and the redemption id 128 bits, both
+    /// from the operating system's cryptographically secure random source.
     ///
     /// # Errors
     ///
-    /// Disabled governance, a code this server must not emit, a negative expiry,
-    /// or an unusable host identifier.
+    /// Disabled governance, a negative expiry, or an unusable code table.
     pub fn open_interaction_code(
         &self,
-        code: &str,
         expires_at: i64,
-    ) -> Result<String, GovernanceError> {
-        if expires_at < 0 || !is_emitted_interaction_code(code) {
+    ) -> Result<OpenedInteraction, GovernanceError> {
+        if expires_at < 0 {
             return Err(GovernanceError::Code);
         }
-        let canonical = canonical_interaction_code(code).ok_or(GovernanceError::Code)?;
-        let id = (self.ids)();
-        if !path_token(&id) {
-            return Err(GovernanceError::Unavailable);
-        }
+        let code = generate_interaction_code();
+        let canonical = canonical_interaction_code(&code).ok_or(GovernanceError::Code)?;
+        let id = generate_pending_id();
         let gate = self.governance.as_ref().ok_or(GovernanceError::Disabled)?;
         let mut codes = gate
             .codes
@@ -140,7 +149,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 decision: None,
             },
         );
-        Ok(id)
+        Ok(OpenedInteraction { id, code })
     }
 
     /// Decision stored for `id` after a consumed code was signed as this server.

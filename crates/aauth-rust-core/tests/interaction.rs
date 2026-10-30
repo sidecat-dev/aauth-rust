@@ -94,7 +94,7 @@ fn resource_callback_redirects_and_an_error_does_not_complete() {
 }
 
 #[test]
-fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
+fn chained_interaction_draws_the_resources_own_code_and_pending_url() {
     let downstream = PendingResponse::new(
         "https://down.example/token",
         "/pending/down",
@@ -116,9 +116,8 @@ fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
         ChainedInteraction::open(
             &approval,
             "https://resource.example/api",
-            "/pending/job",
+            "/pending",
             "https://resource.example/interact",
-            "C0DE8X42",
             "thumb-owner",
             2000,
         )
@@ -127,9 +126,8 @@ fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
     let mut chain = ChainedInteraction::open(
         &downstream,
         "https://resource.example/api",
-        "/pending/job",
+        "/pending",
         "https://resource.example/interact",
-        "C0DE8X42",
         "thumb-owner",
         2000,
     )
@@ -138,17 +136,40 @@ fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
         chain.downstream(),
         ("https://down.example/consent", "DNST1234")
     );
+    let own_code = chain.code().to_owned();
+    let own_location = chain.location().to_owned();
+    let id = own_location
+        .strip_prefix("https://resource.example/pending/")
+        .expect("pending URL under the given path");
+    assert_eq!(id.len(), 22);
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    );
+    assert_eq!(own_code.len(), 9);
+    assert_eq!(own_code.as_bytes()[4], b'-');
+    let other = ChainedInteraction::open(
+        &downstream,
+        "https://resource.example/api",
+        "/pending",
+        "https://resource.example/interact",
+        "thumb-owner",
+        2000,
+    )
+    .unwrap();
+    assert_ne!(other.code(), own_code);
+    assert_ne!(other.location(), own_location);
     let stranger = chain.poll("thumb-other", 1000).unwrap();
     assert_eq!(stranger.status(), 404);
     assert!(stranger.body().is_empty());
     let propagated = chain.poll("thumb-owner", 1000).unwrap();
     assert_eq!(propagated.status(), 202);
     let pending = PendingResponse::parse("https://resource.example/api", &propagated).unwrap();
-    assert_eq!(pending.location, "https://resource.example/pending/job");
+    assert_eq!(pending.location, own_location);
     match pending.requirement {
         Requirement::Interaction { url, code } => {
             assert_eq!(url, "https://resource.example/interact");
-            assert_eq!(code, "C0DE8X42");
+            assert_eq!(code, own_code);
             assert_ne!(code, "DNST1234");
         }
         other => panic!("expected interaction, got {other:?}"),
@@ -182,9 +203,8 @@ fn chained_interaction_uses_the_resources_own_code_and_pending_url() {
     let mut expired = ChainedInteraction::open(
         &downstream,
         "https://resource.example/api",
-        "/pending/job",
+        "/pending",
         "https://resource.example/interact",
-        "C0DE8X42",
         "thumb-owner",
         1500,
     )

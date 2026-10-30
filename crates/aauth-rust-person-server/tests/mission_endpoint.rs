@@ -234,14 +234,17 @@ fn agent_proposal_requires_a_signed_jwt_post() {
         Some(serde_json::json!({ "description": "draft the note" })),
     ));
     assert_eq!(created.status(), 202, "{}", error_of(&created));
-    assert_eq!(
-        created.headers()["location"].to_str().unwrap(),
-        "https://ps.example/mission/proposal/proposal-0"
-    );
+    let location = created.headers()["location"].to_str().unwrap();
+    let id = location
+        .strip_prefix("https://ps.example/mission/proposal/")
+        .unwrap();
+    // A pending URL carries 128 random bits, not the host's token-ID source.
+    assert_eq!(id.len(), 22, "{location}");
+    assert!(!id.starts_with("proposal-"));
     let waiting = fixture.server.handle(&signed(
         &fixture.owner,
         "GET",
-        "/mission/proposal/proposal-0",
+        &format!("/mission/proposal/{id}"),
         None,
     ));
     assert_eq!(waiting.status(), 202);
@@ -500,7 +503,7 @@ fn child_agent_token_does_not_open_a_mission() {
     ));
     assert_eq!(response.status(), 401, "{}", error_of(&response));
     assert_eq!(error_of(&response), "invalid_jwt");
-    assert_eq!(propose(&fixture, "the parent still proposes"), "proposal-0");
+    assert_eq!(propose(&fixture, "the parent still proposes").len(), 22);
 }
 
 struct PauseStore {

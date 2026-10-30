@@ -234,7 +234,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             true
         }) && states.iter().any(|state| state.deferred)
         {
-            let id = self.pending_id();
+            let id = aauth_rust_core::continuation::generate_pending_id();
             if let Ok(mut pending) = gate.pending.lock() {
                 pending.insert(
                     id.clone(),
@@ -418,18 +418,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     fn remember(&self, issuer: &str, jti: &str, exp: i64) {
         if let Some(gate) = &self.revocation {
             gate.ledger.remember(issuer, jti, exp);
-        }
-    }
-    fn pending_id(&self) -> String {
-        let raw = (self.ids)();
-        let safe: String = raw
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect();
-        if safe.is_empty() {
-            "pending".into()
-        } else {
-            safe
         }
     }
     fn verify_revocation_caller(

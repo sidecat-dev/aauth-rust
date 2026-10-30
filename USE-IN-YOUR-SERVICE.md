@@ -1256,9 +1256,12 @@ For a PS, first configure its existing `Federation` adapter, then call
 `people.with_deferred(aauth_rust_person_server::DeferredConfig::new(store))?`.
 Use separate AS and PS stores or namespaces. Both configs expose `lifetime`
 (default 300 seconds) and `retry_after` (default 5 seconds); zero interval is
-useful only in controlled fixtures. Pending URLs use the existing host ID
-source: provide unique, unpredictable URL-safe IDs, not a production counter.
-The TLS example includes fresh random material in every pending ID.
+useful only in controlled fixtures. Every pending URL ends in 128 random bits
+from the operating system's secure source
+(`aauth_rust_core::continuation::generate_pending_id`); the host ID source names
+issued tokens only. An AS interaction requirement uses the code the AS drew for
+that pending request, `DeferredContext::interaction_code`: 40 random bits from
+`generate_interaction_code`. A policy that returns any other code gets `500`.
 
 ### Approval without payment
 

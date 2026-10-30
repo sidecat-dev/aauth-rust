@@ -4,7 +4,7 @@ use schedule::{agent_delay, throttled_for};
 mod wire;
 use super::*;
 use aauth_rust_core::continuation::{
-    ContinuationStore, PendingResponse, Requirement, same_origin_location,
+    ContinuationStore, PendingResponse, Requirement, generate_pending_id, same_origin_location,
 };
 use aauth_rust_signature_key::sign_request;
 use std::sync::Arc;
@@ -123,10 +123,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if now >= deadline {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
-        let id = (self.ids)();
-        if !safe_id(&id) {
-            return Err(Failure::internal());
-        }
+        let id = generate_pending_id();
         let location = format!("{}/token/pending/{id}", self.config.signed_origin);
         let ps_pending = self.agent_pending(&location, &pending)?;
         let interval = d.retry_after.max(pending.retry_after);

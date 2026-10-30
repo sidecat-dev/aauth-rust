@@ -4,7 +4,7 @@ mod governance;
 mod mission_http;
 mod revocation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
-pub use governance::{Governance, GovernanceError, InteractionDecision};
+pub use governance::{Governance, GovernanceError, InteractionDecision, OpenedInteraction};
 mod lineage;
 mod missions;
 mod r3;

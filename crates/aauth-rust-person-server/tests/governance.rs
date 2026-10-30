@@ -1,14 +1,16 @@
 use aauth_rust_agent::{Agent, PermissionDecision};
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::continuation::{canonical_interaction_code, is_emitted_interaction_code};
 use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_person_server::{
-    AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Governance, Grant, MemoryStore,
-    Person, PersonRequest, PersonServer, Policy, PolicyError,
+    AuthorizationRequest, BoxedClock, BoxedTokenIds, Config, Governance, GovernanceError, Grant,
+    MemoryStore, OpenedInteraction, Person, PersonRequest, PersonServer, Policy, PolicyError,
 };
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -341,51 +343,91 @@ fn signed_audit_requires_mission_and_action() {
     assert_eq!(error_of(&unknown), "mission_not_found");
 }
 
+/// A drawn code holding `symbol`. Each draw holds a given symbol with
+/// probability above one in five, so 512 draws all missing it do not happen.
+fn open_with(fixture: &Fixture, symbol: char) -> OpenedInteraction {
+    (0..512)
+        .map(|_| fixture.server.open_interaction_code(2000).unwrap())
+        .find(|opened| opened.code.contains(symbol))
+        .expect("a drawn code holds the symbol")
+}
+
+/// `code` as a person may type it: lowercase, regrouped, with `i` for `1`
+/// and `o` for `0`.
+fn as_typed(code: &str) -> String {
+    let typed: String = code
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| match c {
+            '1' => 'i',
+            '0' => 'o',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect();
+    format!("{}-{}-{}", &typed[..2], &typed[2..5], &typed[5..])
+}
+
+#[test]
+fn opened_codes_and_redemption_ids_are_drawn_by_the_server() {
+    let disabled = fixture(false);
+    let fixture = fixture(true);
+    let mut codes = BTreeSet::new();
+    let mut ids = BTreeSet::new();
+    for _ in 0..256 {
+        let opened = fixture.server.open_interaction_code(2000).unwrap();
+        assert_eq!(opened.code.len(), 9, "{}", opened.code);
+        assert_eq!(opened.code.as_bytes()[4], b'-');
+        assert!(is_emitted_interaction_code(&opened.code));
+        assert_eq!(canonical_interaction_code(&opened.code).unwrap().len(), 8);
+        // 128 random bits, not the host's sequential token-ID source.
+        assert_eq!(opened.id.len(), 22, "{}", opened.id);
+        assert!(!opened.id.starts_with("id-"));
+        assert!(codes.insert(opened.code));
+        assert!(ids.insert(opened.id));
+    }
+    assert_eq!(
+        fixture.server.open_interaction_code(-1),
+        Err(GovernanceError::Code)
+    );
+    assert_eq!(
+        disabled.server.open_interaction_code(2000),
+        Err(GovernanceError::Disabled)
+    );
+}
+
 #[test]
 fn hyphen_case_and_aliases_compare_as_one_code() {
     let fixture = fixture(true);
-    let id = fixture
-        .server
-        .open_interaction_code("A1B2-C3D4", 2000)
-        .unwrap();
-    let response = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &format!("/interaction/pending/{id}"),
-        json!({ "code": "ai-b2-c3d4" }),
-    ));
-    assert_eq!(response.status(), 200, "{}", error_of(&response));
-    assert_eq!(body_of(&response), json!({ "correlated": true }));
-    let zero = fixture
-        .server
-        .open_interaction_code("A0B2C3D4", 2000)
-        .unwrap();
-    let response = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &format!("/interaction/pending/{zero}"),
-        json!({ "code": "ao-b2-c3d4" }),
-    ));
-    assert_eq!(response.status(), 200, "{}", error_of(&response));
+    for symbol in ['1', '0'] {
+        let opened = open_with(&fixture, symbol);
+        let typed = as_typed(&opened.code);
+        assert_ne!(typed, opened.code);
+        let response = fixture.server.handle(&raw_post(
+            &fixture.owner,
+            &format!("/interaction/pending/{}", opened.id),
+            json!({ "code": typed }),
+        ));
+        assert_eq!(response.status(), 200, "{}", error_of(&response));
+        assert_eq!(body_of(&response), json!({ "correlated": true }));
+    }
 }
 
 #[test]
 fn code_presentation_does_not_authorize() {
     let fixture = fixture(true);
-    let id = fixture
-        .server
-        .open_interaction_code("A1B2C3D4", 2000)
-        .unwrap();
+    let OpenedInteraction { id, code } = fixture.server.open_interaction_code(2000).unwrap();
     let path = format!("/interaction/pending/{id}");
-    let browser_id = fixture
-        .server
-        .open_interaction_code("ABCD5678", 2000)
-        .unwrap();
+    let OpenedInteraction {
+        id: browser_id,
+        code: browser_code,
+    } = fixture.server.open_interaction_code(2000).unwrap();
     let browser = Request::builder()
         .method("POST")
         .uri(format!(
             "https://ps.example/interaction/pending/{browser_id}"
         ))
         .header("content-type", "application/json")
-        .body(serde_json::to_vec(&json!({ "code": "ABCD5678" })).unwrap())
+        .body(serde_json::to_vec(&json!({ "code": browser_code })).unwrap())
         .unwrap();
     let browser = fixture.server.handle(&browser);
     assert_eq!(browser.status(), 200, "{}", error_of(&browser));
@@ -417,11 +459,10 @@ fn code_presentation_does_not_authorize() {
             .unwrap()
             .is_none()
     );
-    let correlated = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &path,
-        json!({ "code": "A1B2C3D4" }),
-    ));
+    let correlated =
+        fixture
+            .server
+            .handle(&raw_post(&fixture.owner, &path, json!({ "code": code })));
     assert_eq!(body_of(&correlated), json!({ "correlated": true }));
     assert!(body_of(&correlated).get("decision").is_none());
     assert!(body_of(&correlated).get("permission").is_none());
@@ -457,22 +498,15 @@ fn code_presentation_does_not_authorize() {
 #[test]
 fn consumed_code_is_invalid() {
     let fixture = fixture(true);
-    let id = fixture
-        .server
-        .open_interaction_code("ABCD1234", 2000)
-        .unwrap();
+    let OpenedInteraction { id, code } = fixture.server.open_interaction_code(2000).unwrap();
     let path = format!("/interaction/pending/{id}");
-    let first = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &path,
-        json!({ "code": "ABCD1234" }),
-    ));
+    let first = fixture
+        .server
+        .handle(&raw_post(&fixture.owner, &path, json!({ "code": code })));
     assert_eq!(first.status(), 200);
-    let second = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &path,
-        json!({ "code": "ABCD1234" }),
-    ));
+    let second = fixture
+        .server
+        .handle(&raw_post(&fixture.owner, &path, json!({ "code": code })));
     assert_eq!(second.status(), 410);
     assert_eq!(error_of(&second), "invalid_code");
 }
@@ -480,10 +514,7 @@ fn consumed_code_is_invalid() {
 #[test]
 fn failed_attempts_terminally_invalidate_the_code() {
     let fixture = fixture(true);
-    let id = fixture
-        .server
-        .open_interaction_code("ABCD1234", 2000)
-        .unwrap();
+    let OpenedInteraction { id, code } = fixture.server.open_interaction_code(2000).unwrap();
     let path = format!("/interaction/pending/{id}");
     for _ in 0..3 {
         let wrong = fixture.server.handle(&raw_post(
@@ -494,11 +525,9 @@ fn failed_attempts_terminally_invalidate_the_code() {
         assert_eq!(wrong.status(), 410);
         assert_eq!(error_of(&wrong), "invalid_code");
     }
-    let right = fixture.server.handle(&raw_post(
-        &fixture.owner,
-        &path,
-        json!({ "code": "ABCD1234" }),
-    ));
+    let right = fixture
+        .server
+        .handle(&raw_post(&fixture.owner, &path, json!({ "code": code })));
     assert_eq!(right.status(), 410);
     assert_eq!(error_of(&right), "invalid_code");
 }
@@ -506,14 +535,11 @@ fn failed_attempts_terminally_invalidate_the_code() {
 #[test]
 fn expired_pending_interaction_rejects_the_code() {
     let fixture = fixture(true);
-    let id = fixture
-        .server
-        .open_interaction_code("ABCD1234", 1000)
-        .unwrap();
+    let OpenedInteraction { id, code } = fixture.server.open_interaction_code(1000).unwrap();
     let response = fixture.server.handle(&raw_post(
         &fixture.owner,
         &format!("/interaction/pending/{id}"),
-        json!({ "code": "ABCD1234" }),
+        json!({ "code": code }),
     ));
     assert_eq!(response.status(), 408);
     assert_eq!(error_of(&response), "expired");

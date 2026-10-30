@@ -42,6 +42,12 @@ impl RevocationDirectory for Recording {
         CallOutcome::Recorded
     }
 }
+struct Deferring;
+impl RevocationDirectory for Deferring {
+    fn revoke(&self, _: &str, _: &str, _: i64) -> CallOutcome {
+        CallOutcome::Deferred
+    }
+}
 fn agent_claims() -> AgentClaims {
     AgentClaims {
         iss: "https://ap.example".into(),
@@ -272,4 +278,53 @@ fn resource_token_revocation_does_not_defer_and_refuses_the_challenge() {
     );
     assert_eq!(value(refused.body())["error"], "revoked_resource_token");
     assert_eq!(seen.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn deferred_downstream_revocation_pending_url_carries_random_bits() {
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |_: &aauth_rust_access_server::AuthorizationRequest| {
+            Ok(Decision {
+                scopes: vec!["read".into()],
+                lifetime: 3600,
+            })
+        },
+        || 1000,
+        || "auth-1".into(),
+    )
+    .unwrap()
+    .with_revocation_directory(Arc::new(Deferring));
+    let granted = server.handle(&token_request(token_body(1200), 1000));
+    assert_eq!(
+        granted.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(granted.body())
+    );
+    let pending = server.handle(&revoke(
+        3,
+        PS,
+        "aauth-person.json",
+        "ps",
+        json!({"jti":"person","exp":1200}),
+    ));
+    assert_eq!(
+        pending.status(),
+        202,
+        "{}",
+        String::from_utf8_lossy(pending.body())
+    );
+    let location = pending.headers()["location"].to_str().unwrap();
+    let id = location
+        .strip_prefix(&format!("{AS}/revoke/pending/"))
+        .unwrap();
+    // 128 random bits, not the host's token-ID source.
+    assert_eq!(id.len(), 22, "{location}");
+    assert_ne!(id, "auth-1");
+    assert!(
+        id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    );
 }

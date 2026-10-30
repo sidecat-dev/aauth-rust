@@ -8,7 +8,10 @@
 
 use http::{Response, StatusCode, Uri};
 
-use crate::continuation::{PendingResponse, Requirement, is_emitted_interaction_code};
+use crate::continuation::{
+    PendingResponse, Requirement, generate_interaction_code, generate_pending_id,
+    is_emitted_interaction_code,
+};
 
 /// The interaction URL or callback is not an HTTPS URL without a query or fragment,
 /// the code cannot be emitted, or the host refused egress.
@@ -208,12 +211,14 @@ pub fn receive_callback(query: Option<&str>) -> CallbackReceipt {
 
 /// One interaction propagated to the caller that started this resource.
 ///
-/// The caller's pending response uses this resource's location and code.
+/// The caller's pending response uses this resource's own pending URL and
+/// interaction code, both drawn when the interaction opens.
 /// [`ChainedInteraction::poll`] returns the stored result once to the opener,
 /// at or before `exp`, and answers `410` after that. A different caller receives
 /// an empty `404`.
 pub struct ChainedInteraction {
     shown: PendingResponse,
+    code: String,
     caller: String,
     expires_at: i64,
     downstream_url: String,
@@ -230,20 +235,24 @@ struct StoredResult {
 impl ChainedInteraction {
     /// Propagate a downstream interaction as this resource's own `202`.
     ///
+    /// The pending URL is `pending_path` followed by `/` and an identifier from
+    /// [`generate_pending_id`]. The code is drawn by [`generate_interaction_code`].
+    /// Read them back with [`Self::location`] and [`Self::code`] to route polls
+    /// and check the code at `interaction_url`.
+    ///
     /// # Errors
     /// Returns [`InteractionError`] when `downstream` is not
     /// `requirement=interaction`, when `caller` is empty or not a single token,
-    /// when `expires_at` is negative, or when this resource's URL, code, or
-    /// pending location cannot be emitted.
+    /// when `expires_at` is negative, or when this resource's URL or pending
+    /// location cannot be emitted.
     ///
     /// `caller` is the opener's key thumbprint or the `jti` of an auth token
     /// the host already verified. This ledger does not verify that token.
     pub fn open(
         downstream: &PendingResponse,
         endpoint: &str,
-        location: &str,
+        pending_path: &str,
         interaction_url: &str,
-        code: &str,
         caller: &str,
         expires_at: i64,
     ) -> Result<Self, InteractionError> {
@@ -259,21 +268,21 @@ impl ChainedInteraction {
             return Err(InteractionError);
         }
         https_target(interaction_url)?;
-        if !is_emitted_interaction_code(code) {
-            return Err(InteractionError);
-        }
+        let code = generate_interaction_code();
+        let location = format!("{pending_path}/{}", generate_pending_id());
         let shown = PendingResponse::new(
             endpoint,
-            location,
+            &location,
             downstream.retry_after,
             Requirement::Interaction {
                 url: interaction_url.to_owned(),
-                code: code.to_owned(),
+                code: code.clone(),
             },
         )
         .map_err(|_| InteractionError)?;
         Ok(Self {
             shown,
+            code,
             caller: caller.to_owned(),
             expires_at,
             downstream_url: downstream_url.clone(),
@@ -286,6 +295,16 @@ impl ChainedInteraction {
     /// Downstream interaction URL and code retained from `open`.
     pub fn downstream(&self) -> (&str, &str) {
         (&self.downstream_url, &self.downstream_code)
+    }
+
+    /// This resource's absolute pending URL, which the opener polls.
+    pub fn location(&self) -> &str {
+        &self.shown.location
+    }
+
+    /// This resource's own interaction code, shown to the opener.
+    pub fn code(&self) -> &str {
+        &self.code
     }
 
     /// The opener's next poll.

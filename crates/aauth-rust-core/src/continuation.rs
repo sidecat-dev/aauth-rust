@@ -1,10 +1,14 @@
 //! Bounded deferred wire messages and atomic, role-local continuation storage.
 //! These values do not authenticate a peer or authorize network access. Hosts
-//! admit endpoints, authenticate each poll and supply unpredictable unique IDs.
+//! admit endpoints and authenticate each poll. [`generate_pending_id`] and
+//! [`generate_interaction_code`] draw pending URL identifiers and interaction
+//! codes from the operating system's secure random source.
 mod payment;
 pub use payment::{PaymentChallenge, PaymentChallengeError};
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{Response, StatusCode, Uri};
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sfv::{BareItem, Dictionary, ListEntry, Parser};
@@ -34,7 +38,8 @@ pub enum Requirement {
         /// HTTPS interaction target without a query or fragment; never fetched.
         url: String,
         /// At least eight case-insensitive Crockford Base32 symbols, optionally
-        /// hyphenated. The host manages unpredictability and single use.
+        /// hyphenated. A server emits one from [`generate_interaction_code`];
+        /// the host manages single use.
         code: String,
     },
     /// Host is obtaining approval without directing the person at the Agent.
@@ -351,6 +356,37 @@ pub fn canonical_interaction_code(code: &str) -> Option<String> {
 /// Hyphens are allowed and do not count as symbols.
 pub fn is_emitted_interaction_code(code: &str) -> bool {
     valid_interaction_code(code)
+}
+
+const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/// A fresh interaction code: 40 bits from the operating system's
+/// cryptographically secure random source, written as eight Crockford base32
+/// symbols grouped `XXXX-XXXX`. The hyphen carries no entropy.
+pub fn generate_interaction_code() -> String {
+    let mut random = [0_u8; 5];
+    OsRng.fill_bytes(&mut random);
+    let bits = random
+        .iter()
+        .fold(0_u64, |bits, byte| (bits << 8) | u64::from(*byte));
+    let mut code = String::with_capacity(9);
+    for index in 0..8 {
+        if index == 4 {
+            code.push('-');
+        }
+        let symbol = (bits >> (35 - 5 * index)) & 31;
+        code.push(char::from(CROCKFORD[symbol as usize]));
+    }
+    code
+}
+
+/// A fresh pending URL identifier: 128 bits from the operating system's
+/// cryptographically secure random source, as 22 unpadded base64url characters.
+/// Servers build every pending URL they issue from one of these.
+pub fn generate_pending_id() -> String {
+    let mut random = [0_u8; 16];
+    OsRng.fill_bytes(&mut random);
+    URL_SAFE_NO_PAD.encode(random)
 }
 fn sf_string(value: &str) -> Result<String, PendingError> {
     if !value.bytes().all(|v| (0x20..=0x7e).contains(&v)) {

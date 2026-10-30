@@ -289,7 +289,7 @@ impl<
             attempts.insert(key.clone(), states.clone());
         }
         if states.iter().any(|state| state.deferred) {
-            let id = pending_id(&self.ids);
+            let id = aauth_rust_core::continuation::generate_pending_id();
             if let Ok(mut pending) = gate.pending.lock() {
                 pending.insert(
                     id.clone(),
@@ -484,18 +484,6 @@ fn revoked_parameter(parameter: &'static str) -> Failure {
     } else {
         "revoked_presented_token"
     })
-}
-fn pending_id(ids: &impl Fn() -> String) -> String {
-    let raw = ids();
-    let safe: String = raw
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    if safe.is_empty() {
-        "pending".into()
-    } else {
-        safe
-    }
 }
 
 impl Clone for Issued {

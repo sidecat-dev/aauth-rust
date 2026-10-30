@@ -2,6 +2,7 @@ use super::*;
 use aauth_rust_access_server::{DeferredConfig, DeferredContext};
 use aauth_rust_core::continuation::{
     ContinuationStore, MemoryContinuations, PendingResponse, Requirement,
+    is_emitted_interaction_code,
 };
 fn poll(location: &str, method: &str, value: Option<Value>, now: i64) -> Request<Vec<u8>> {
     poll_as(location, method, value, now, PS, 3)
@@ -43,6 +44,10 @@ fn grant(_: &aauth_rust_access_server::AuthorizationRequest) -> Result<Decision,
         scopes: vec!["read".into()],
         lifetime: 3600,
     })
+}
+/// The store key of a pending URL this AS issued: its last path segment.
+fn pending_id(location: &str) -> &str {
+    location.rsplit('/').next().unwrap()
 }
 fn config(store: Arc<MemoryContinuations>) -> DeferredConfig {
     let mut c = DeferredConfig::new(store);
@@ -93,7 +98,11 @@ fn subagent_payment_approval_retains_exact_tokens_and_recomposes_child_grant() {
     );
     let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
     assert_eq!(
-        store.load("child-pending").unwrap().unwrap().value["request"],
+        store
+            .load(pending_id(&pending.location))
+            .unwrap()
+            .unwrap()
+            .value["request"],
         original
     );
     for method in ["GET", "DELETE"] {
@@ -124,7 +133,11 @@ fn subagent_payment_approval_retains_exact_tokens_and_recomposes_child_grant() {
         202
     );
     assert_eq!(
-        store.load("child-pending").unwrap().unwrap().value["request"],
+        store
+            .load(pending_id(&pending.location))
+            .unwrap()
+            .unwrap()
+            .value["request"],
         original
     );
     stage.store(2, Ordering::SeqCst);
@@ -173,7 +186,7 @@ fn subagent_claims_cannot_replace_the_original_credentials() {
     let response = server.handle(&request(original));
     assert_eq!(response.status(), 202);
     let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
-    let original = store.load("child-pending").unwrap();
+    let original = store.load(pending_id(&pending.location)).unwrap();
     for name in [
         "agent_token",
         "subagent_token",
@@ -188,7 +201,7 @@ fn subagent_claims_cannot_replace_the_original_credentials() {
             serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
             "invalid_request"
         );
-        assert_eq!(store.load("child-pending").unwrap(), original);
+        assert_eq!(store.load(pending_id(&pending.location)).unwrap(), original);
     }
 }
 #[test]
@@ -197,6 +210,7 @@ fn subagent_pending_release_rechecks_expiry_after_initial_waiting_and_terminal_s
         inner: MemoryContinuations,
         now: Arc<AtomicI64>,
         phase: &'static str,
+        inserted: std::sync::Mutex<Vec<String>>,
     }
     impl ContinuationStore for PersistClock {
         fn insert(
@@ -205,6 +219,7 @@ fn subagent_pending_release_rechecks_expiry_after_initial_waiting_and_terminal_s
             value: Value,
         ) -> Result<(), aauth_rust_core::continuation::StoreError> {
             self.inner.insert(id, value)?;
+            self.inserted.lock().unwrap().push(id.to_owned());
             if self.phase == "initial" {
                 self.now.store(1010, Ordering::SeqCst);
             }
@@ -249,6 +264,7 @@ fn subagent_pending_release_rechecks_expiry_after_initial_waiting_and_terminal_s
             inner: MemoryContinuations::new(4),
             now,
             phase,
+            inserted: std::sync::Mutex::new(Vec::new()),
         });
         let mut cfg = DeferredConfig::new(store.clone());
         cfg.retry_after = 0;
@@ -293,10 +309,9 @@ fn subagent_pending_release_rechecks_expiry_after_initial_waiting_and_terminal_s
         };
         assert_eq!(response.status(), 408, "phase={phase}");
         assert!(!String::from_utf8_lossy(response.body()).contains("auth_token"));
-        assert!(
-            store.load("child-pending").unwrap().is_none(),
-            "phase={phase}"
-        );
+        let inserted = store.inserted.lock().unwrap().clone();
+        assert_eq!(inserted.len(), 1, "phase={phase}");
+        assert!(store.load(&inserted[0]).unwrap().is_none(), "phase={phase}");
     }
 }
 #[test]
@@ -328,14 +343,18 @@ fn subagent_pending_deadline_is_capped_by_parent_and_child_expiry() {
         assert_eq!(first.status(), 202);
         let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
         assert_eq!(
-            store.load("child-pending").unwrap().unwrap().value["deadline"],
+            store
+                .load(pending_id(&pending.location))
+                .unwrap()
+                .unwrap()
+                .value["deadline"],
             1010
         );
         now.store(1010, Ordering::SeqCst);
         let response = server.handle(&poll(&pending.location, "GET", None, 1010));
         assert_eq!(response.status(), 408);
         assert!(!String::from_utf8_lossy(response.body()).contains("auth_token"));
-        assert!(store.load("child-pending").unwrap().is_none());
+        assert!(store.load(pending_id(&pending.location)).unwrap().is_none());
     }
 }
 #[test]
@@ -433,7 +452,7 @@ fn subagent_child_trust_is_refreshed_on_each_poll_and_after_final_custody() {
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"], "invalid_subagent_token");
         assert!(body.get("auth_token").is_none());
-        assert!(store.load("child-pending").unwrap().is_none());
+        assert!(store.load(pending_id(&p.location)).unwrap().is_none());
     }
 }
 #[test]
@@ -483,7 +502,7 @@ fn subagent_early_poll_refreshes_child_trust_and_consumes_invalid_custody() {
         serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
         "invalid_subagent_token"
     );
-    assert!(store.load("child-pending").unwrap().is_none());
+    assert!(store.load(pending_id(&pending.location)).unwrap().is_none());
 }
 #[test]
 fn payment_approval_grant_is_authenticated_and_consumed_once() {
@@ -534,7 +553,7 @@ fn payment_approval_grant_is_authenticated_and_consumed_once() {
             .status(),
         410
     );
-    assert!(store.load("opaque-pending").unwrap().is_none());
+    assert!(store.load(pending_id(&pending.location)).unwrap().is_none());
 }
 #[test]
 fn claims_and_clarification_are_signed_inputs_to_policy() {
@@ -616,11 +635,11 @@ fn unsigned_or_tampered_polls_never_advance_policy_and_cancel_is_terminal() {
     .unwrap()
     .with_deferred(
         config(Arc::new(MemoryContinuations::new(4))),
-        move |_: &DeferredContext| {
+        move |context: &DeferredContext| {
             seen.fetch_add(1, Ordering::SeqCst);
             Ok(Some(Requirement::Interaction {
                 url: format!("{AS}/consent"),
-                code: "C0DE8X42".into(),
+                code: context.interaction_code.clone(),
             }))
         },
     )
@@ -680,7 +699,7 @@ fn authenticated_foreign_ps_cannot_advance_or_cancel_the_owners_pending_request(
     .unwrap();
     let response = server.handle(&request(good()));
     let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
-    let original = store.load("opaque").unwrap();
+    let original = store.load(pending_id(&pending.location)).unwrap();
     for method in ["GET", "POST", "DELETE"] {
         let value = (method == "POST").then(|| json!({"email":"foreign@example"}));
         let response = server.handle(&poll_as(
@@ -695,7 +714,7 @@ fn authenticated_foreign_ps_cannot_advance_or_cancel_the_owners_pending_request(
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"], "wrong_poller", "{method}");
         assert!(body.get("auth_token").is_none());
-        assert_eq!(store.load("opaque").unwrap(), original);
+        assert_eq!(store.load(pending_id(&pending.location)).unwrap(), original);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
     assert_eq!(
@@ -924,7 +943,7 @@ fn cancellation_winning_final_cas_refuses_prepared_grants_and_pending_responses(
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"], "gone");
         assert!(body.get("auth_token").is_none());
-        assert!(store.load("opaque").unwrap().is_none());
+        assert!(store.load(pending_id(&pending.location)).unwrap().is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
             server
@@ -1019,7 +1038,7 @@ fn final_custody_persistence_failure_remains_500_and_withholds_the_grant() {
     let body: Value = serde_json::from_slice(response.body()).unwrap();
     assert_eq!(body["error"], "server_error");
     assert!(body.get("auth_token").is_none());
-    assert!(store.load("opaque").unwrap().is_some());
+    assert!(store.load(pending_id(&pending.location)).unwrap().is_some());
 }
 #[test]
 fn refreshed_trust_failure_is_terminal_for_a_pending_request() {
@@ -1119,7 +1138,7 @@ fn early_get_advertises_remaining_wait_without_advancing_or_renewing() {
     .unwrap();
     let first = server.handle(&request(good()));
     let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
-    let original = store.load("opaque").unwrap();
+    let original = store.load(pending_id(&pending.location)).unwrap();
     assert_eq!(first.headers()["retry-after"], "10");
     for (time, retry) in [(1003, "7"), (1009, "1")] {
         now.store(time, Ordering::SeqCst);
@@ -1129,7 +1148,7 @@ fn early_get_advertises_remaining_wait_without_advancing_or_renewing() {
         let body: Value = serde_json::from_slice(response.body()).unwrap();
         assert_eq!(body["error"], "slow_down");
         assert!(body.get("auth_token").is_none());
-        assert_eq!(store.load("opaque").unwrap(), original);
+        assert_eq!(store.load(pending_id(&pending.location)).unwrap(), original);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
     now.store(1010, Ordering::SeqCst);
@@ -1139,7 +1158,7 @@ fn early_get_advertises_remaining_wait_without_advancing_or_renewing() {
             .status(),
         202
     );
-    let renewed = store.load("opaque").unwrap().unwrap();
+    let renewed = store.load(pending_id(&pending.location)).unwrap().unwrap();
     assert_eq!(renewed.value["next"], 1020);
     assert_eq!(renewed.value["deadline"], 1011);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -1151,7 +1170,7 @@ fn early_get_advertises_remaining_wait_without_advancing_or_renewing() {
         serde_json::from_slice::<Value>(response.body()).unwrap()["error"],
         "expired"
     );
-    assert!(store.load("opaque").unwrap().is_none());
+    assert!(store.load(pending_id(&pending.location)).unwrap().is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         server
@@ -1423,7 +1442,11 @@ fn updated_request_verifies_the_pair_before_replacing_the_pending_request() {
     assert_eq!(response.status(), 202);
     let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
     let stored = || {
-        store.load("opaque").unwrap().unwrap().value["request"]["resource_token"]
+        store
+            .load(pending_id(&pending.location))
+            .unwrap()
+            .unwrap()
+            .value["request"]["resource_token"]
             .as_str()
             .unwrap()
             .to_owned()
@@ -1592,4 +1615,113 @@ fn updated_request_verifies_the_pair_before_replacing_the_pending_request() {
     .verify(&Keys, 1000)
     .unwrap();
     assert_eq!(token.claims().account.as_deref(), Some("reduced"));
+}
+#[test]
+fn interaction_codes_and_pending_urls_are_drawn_by_the_access_server() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let codes = seen.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        || 1000,
+        || "opaque".into(),
+    )
+    .unwrap()
+    .with_deferred(
+        config(Arc::new(MemoryContinuations::new(4))),
+        move |context: &DeferredContext| {
+            codes.lock().unwrap().push(context.interaction_code.clone());
+            Ok(Some(Requirement::Interaction {
+                url: format!("{AS}/consent"),
+                code: context.interaction_code.clone(),
+            }))
+        },
+    )
+    .unwrap();
+    let mut shown = Vec::new();
+    for _ in 0..2 {
+        let response = server.handle(&request(good()));
+        assert_eq!(
+            response.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(response.body())
+        );
+        let pending = PendingResponse::parse(&format!("{AS}/token"), &response).unwrap();
+        let id = pending_id(&pending.location);
+        // 128 random bits, never the host's token-ID source.
+        assert_eq!(id.len(), 22, "{}", pending.location);
+        assert_ne!(id, "opaque");
+        let Requirement::Interaction { code, .. } = &pending.requirement else {
+            panic!("expected interaction, got {:?}", pending.requirement);
+        };
+        assert_eq!(code.len(), 9, "{code}");
+        assert!(is_emitted_interaction_code(code));
+        // A later poll keeps the code bound to its pending request.
+        let again = server.handle(&poll(&pending.location, "GET", None, 1000));
+        assert_eq!(again.status(), 202);
+        let again = PendingResponse::parse(&format!("{AS}/token"), &again).unwrap();
+        assert_eq!(again.requirement, pending.requirement);
+        shown.push((pending.location.clone(), code.clone()));
+    }
+    assert_ne!(shown[0].0, shown[1].0);
+    assert_ne!(shown[0].1, shown[1].1);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [
+            shown[0].1.clone(),
+            shown[0].1.clone(),
+            shown[1].1.clone(),
+            shown[1].1.clone()
+        ]
+    );
+}
+#[test]
+fn deferred_policy_cannot_emit_an_interaction_code_the_access_server_did_not_draw() {
+    let foreign = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let choice = foreign.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        grant,
+        || 1000,
+        || "opaque".into(),
+    )
+    .unwrap()
+    .with_deferred(
+        config(Arc::new(MemoryContinuations::new(1))),
+        move |context: &DeferredContext| {
+            Ok(Some(Requirement::Interaction {
+                url: format!("{AS}/consent"),
+                code: if choice.load(Ordering::SeqCst) {
+                    "C0DE8X42".into()
+                } else {
+                    context.interaction_code.clone()
+                },
+            }))
+        },
+    )
+    .unwrap();
+    let refused = server.handle(&request(good()));
+    assert_eq!(refused.status(), 500);
+    let body: Value = serde_json::from_slice(refused.body()).unwrap();
+    assert_eq!(body["error"], "server_error");
+    assert!(!refused.headers().contains_key("location"));
+    assert!(!refused.headers().contains_key("aauth-requirement"));
+    // Nothing was retained: the one-record store still accepts a request.
+    foreign.store(false, Ordering::SeqCst);
+    let accepted = server.handle(&request(good()));
+    assert_eq!(accepted.status(), 202);
+    // A later policy answer with another code is refused and ends the request.
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &accepted).unwrap();
+    foreign.store(true, Ordering::SeqCst);
+    let changed = server.handle(&poll(&pending.location, "GET", None, 1000));
+    assert_eq!(changed.status(), 500);
+    assert_eq!(
+        server
+            .handle(&poll(&pending.location, "GET", None, 1000))
+            .status(),
+        410
+    );
 }
