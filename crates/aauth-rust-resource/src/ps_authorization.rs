@@ -1672,9 +1672,9 @@ where
     }
     /// Give a refusal of a budgeted auth token that carries no `AAuth-Budget`
     /// the figure its grant has left. Release any hold first. A per-call
-    /// challenge, hold or completion never answers a budgeted token: the
-    /// class-R3 Budget profile refuses `r3_per_call`, and a per-call token
-    /// carries no budget.
+    /// challenge or hold never answers a budgeted token, since the class-R3
+    /// Budget profile refuses `r3_per_call`. The completion of a metered
+    /// release does: its per-call token carries the release budget.
     fn with_budget(
         &self,
         decision: AuthDecision<O::Context>,
