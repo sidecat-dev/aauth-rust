@@ -78,17 +78,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.deferred = Some(config);
         Ok(self)
     }
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn defer_federation(
         &self,
         response: &Response<Vec<u8>>,
         agent: &VerifiedAgentToken,
-        resource: &VerifiedResourceToken,
-        presented: &Presented,
-        context: &AuthorizationRequest,
+        prepared: &PreparedAuthorization,
         endpoint: &str,
         sent: Option<Budget>,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        let PreparedAuthorization {
+            resource,
+            presented,
+            context,
+            ..
+        } = prepared;
         let d = self.deferred.as_ref().ok_or_else(Failure::internal)?;
         let pending = PendingResponse::parse(endpoint, response).map_err(|_| {
             super::federation::unreachable(
@@ -119,7 +122,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .map_or(i64::MAX, |child| child.claims().exp),
             )
             .min(resource.claims().exp)
-            .min(presented.exp);
+            .min(presented.exp)
+            // A chained request ends with `expired` once its upstream token does.
+            .min(
+                context
+                    .upstream
+                    .as_ref()
+                    .map_or(i64::MAX, |up| up.record.expires_at),
+            );
         if now >= deadline {
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
@@ -220,14 +230,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let auth = AuthToken::parse(required_string(&body, "auth_token")?)
             .and_then(|t| t.verify(&self.resolver(), now))
             .map_err(|_| Failure::internal())?;
-        let prepared =
-            self.prepare_authorization(&original, value["parameters"].clone(), now, None)?;
+        let prepared = self.prepare_stored(&original, value["parameters"].clone(), now)?;
         self.subagent_current(
             &original,
             prepared.context.subagent.as_ref(),
             (self.clock)(),
         )?;
-        self.binding(&prepared.retained.principal, BindingContext::Presented)?
+        self.binding(&prepared.retained.principal, prepared.binding_context)?
             .ok_or_else(Failure::internal)?;
         let released = (self.clock)();
         // Custody's deadline is capped by the original child's expiry. This
@@ -237,6 +246,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
         }
         self.inputs_current(&original, &prepared.resource, &prepared.presented, released)?;
+        check_upstream_current(prepared.context.upstream.as_ref(), released)?;
         if auth.claims().exp <= released {
             return Err(Failure::internal());
         }
@@ -269,10 +279,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let original = AgentToken::parse(required_string(&value, "agent_token")?)
             .map_err(Failure::credential)?;
         let original = original.unverified_claims();
+        // An intermediary's own `ps`, if any, names its Person Server, not the
+        // person's: a chained request is tied to this PS by its upstream token.
+        let chained = value["parameters"].get("upstream_token").is_some();
         if caller.claims().iss != original.iss
             || caller.claims().sub != original.sub
             || caller.claims().cnf.jwk.thumbprint().ok() != original.cnf.jwk.thumbprint().ok()
-            || caller.claims().ps.as_deref() != Some(&self.config.issuer)
+            || (!chained && caller.claims().ps.as_deref() != Some(&self.config.issuer))
             || caller.claims().parent_agent.is_some()
         {
             return Err(Failure::status(StatusCode::FORBIDDEN, "wrong_poller"));
@@ -296,8 +309,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let original = AgentToken::parse(required_string(&value, "agent_token")?)
                 .and_then(|t| t.verify(&self.resolver(), now))
                 .map_err(Failure::credential)?;
-            let prepared =
-                self.prepare_authorization(&original, value["parameters"].clone(), now, None)?;
+            let prepared = self.prepare_stored(&original, value["parameters"].clone(), now)?;
             Ok::<_, Failure>((original, prepared))
         })();
         let (original_agent, prepared) = match prepared {
@@ -450,6 +462,25 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         pending_wire(&pending, &value, (self.clock)(), d.retry_after)
     }
 
+    /// Prepare a stored exchange again. A chained request's `upstream_token` is
+    /// verified anew, since it can expire or be revoked while the request waits.
+    fn prepare_stored(
+        &self,
+        agent: &VerifiedAgentToken,
+        parameters: Value,
+        now: i64,
+    ) -> Result<PreparedAuthorization, Failure> {
+        let upstream = match parameters.get("upstream_token") {
+            Some(_) => Some(self.verify_upstream(
+                required_string(&parameters, "upstream_token")?,
+                agent,
+                now,
+            )?),
+            None => None,
+        };
+        self.prepare_authorization(agent, parameters, now, upstream.as_ref())
+    }
+
     /// Verify the replacement pair before any custody write.
     fn queue_updated_request(
         &self,
@@ -490,12 +521,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
         parameters["resource_token"] = json!(resource_token);
         parameters["presented_token"] = json!(presented_token);
-        let updated = self.prepare_authorization(agent, parameters.clone(), now, None)?;
+        let updated = self.prepare_stored(agent, parameters.clone(), now)?;
         if !same_updated_resource(original, &updated.resource) {
             return Err(Failure::parameter("invalid_resource_token"));
         }
-        self.policy
-            .consent(&updated.context)
+        self.federation_consent(&updated.context)
             .map_err(Failure::policy)?;
         value["parameters"] = parameters;
         value["updated_request"] = Value::Object(object.clone());

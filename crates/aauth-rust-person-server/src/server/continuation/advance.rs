@@ -112,8 +112,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let agent = AgentToken::parse(required_string(&value, "agent_token")?)
                 .and_then(|t| t.verify(&self.resolver(), now))
                 .map_err(Failure::credential)?;
-            let prepared =
-                self.prepare_authorization(&agent, value["parameters"].clone(), now, None)?;
+            let prepared = self.prepare_stored(&agent, value["parameters"].clone(), now)?;
             let adapter = self.federation.as_ref().ok_or_else(Failure::internal)?;
             let endpoint = required_string(&value, "endpoint")?;
             if adapter
@@ -157,6 +156,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let current = (self.clock)();
             self.inputs_current(&agent, &prepared.resource, &prepared.presented, current)?;
             self.subagent_current(&agent, prepared.context.subagent.as_ref(), current)?;
+            check_upstream_current(prepared.context.upstream.as_ref(), current)?;
             if cancel {
                 if response.status() != StatusCode::OK && response.status() != StatusCode::GONE {
                     return Err(super::federation::unreachable(

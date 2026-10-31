@@ -73,10 +73,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return Err(super::revocation::revoked_parameter(parameter));
                 }
                 let c = token.claims();
-                let valid_role = if self.federation.is_some() {
-                    c.dwk == "aauth-access.json" && c.ps == self.config.issuer
-                } else {
-                    c.dwk == "aauth-person.json"
+                let valid_role = match c.dwk.as_str() {
+                    // Upstream Token Verification step 2: an upstream Auth
+                    // token's `iss` is this PS or an AS this PS federated with.
+                    // The retained record, which the caller loads, shows which.
+                    "aauth-person.json" if parameter == "upstream" => c.iss == self.config.issuer,
+                    "aauth-access.json" if parameter == "upstream" => true,
+                    dwk if self.federation.is_some() => {
+                        dwk == "aauth-access.json" && c.ps == self.config.issuer
+                    }
+                    dwk => dwk == "aauth-person.json",
                 };
                 let allow_budget = self.budgets.is_some();
                 let mut core = c.extra.clone();
@@ -116,7 +122,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
         };
         check_parameter_iat(value.iat, now)?;
-        if value.mission.is_some() && (parameter == "upstream" || self.federation.is_some()) {
+        // Missions are a direct-issuance feature here: under federation no
+        // mission-bound token is issued, so none can be presented or chained.
+        if value.mission.is_some() && self.federation.is_some() {
             return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
         }
         Ok(value)

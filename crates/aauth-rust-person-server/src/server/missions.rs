@@ -4,14 +4,16 @@ use crate::{MissionRecord, MissionState, MissionStoreError};
 impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
     PersonServer<K, S, P, C, I>
 {
+    /// Load `owner`'s active mission. The owner is the requesting Agent, or on
+    /// a chained request the calling Agent the upstream token was issued to.
     pub(super) fn load_mission(
         &self,
-        agent: &VerifiedAgentToken,
+        owner: &AgentIdentity,
         s256: &str,
         at: i64,
         context: BindingContext,
     ) -> Result<MissionRecord, Failure> {
-        if self.federation.is_some() || agent.claims().parent_agent.is_some() {
+        if self.federation.is_some() {
             return Err(Failure::parameter("invalid_request"));
         }
         let bytes = URL_SAFE_NO_PAD
@@ -20,16 +22,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if bytes.len() != 32 || URL_SAFE_NO_PAD.encode(&bytes) != s256 {
             return Err(Failure::parameter("invalid_request"));
         }
-        let owner = Self::identity(agent);
         let record = self
             .store
             .missions()
             .ok_or_else(|| Failure::parameter("invalid_request"))?
-            .load_mission(&self.config.issuer, &owner, s256, at)
+            .load_mission(&self.config.issuer, owner, s256, at)
             .map_err(|e| mission_failure(e, context))?;
         record.validate().map_err(|_| Failure::internal())?;
         if record.person_server != self.config.issuer
-            || record.owner != owner
+            || &record.owner != owner
             || record.document.s256() != s256
         {
             return Err(Failure::internal());
@@ -44,13 +45,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
     pub(super) fn recheck_mission(
         &self,
-        agent: &VerifiedAgentToken,
         expected: Option<&MissionRecord>,
         at: i64,
         context: BindingContext,
     ) -> Result<(), Failure> {
         if let Some(expected) = expected {
-            let current = self.load_mission(agent, expected.document.s256(), at, context)?;
+            let current =
+                self.load_mission(&expected.owner, expected.document.s256(), at, context)?;
             if &current != expected {
                 return Err(Failure::internal());
             }
@@ -79,7 +80,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 }
 fn mission_failure(error: MissionStoreError, context: BindingContext) -> Failure {
     match error {
-        MissionStoreError::NotFound => Failure::parameter("invalid_request"),
+        // On a chained request the mission comes from the upstream token,
+        // not from a parameter the intermediary sent.
+        MissionStoreError::NotFound => match context {
+            BindingContext::Upstream => Failure::parameter("invalid_upstream_token"),
+            _ => Failure::parameter("invalid_request"),
+        },
         MissionStoreError::Terminated(reason) => Failure::mission_terminated(&reason),
         MissionStoreError::Storage(error) => store_issuance_failure(error, context),
         MissionStoreError::Conflict => Failure::internal(),

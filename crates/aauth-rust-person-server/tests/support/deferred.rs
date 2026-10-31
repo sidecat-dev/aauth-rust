@@ -11,7 +11,7 @@ pub(super) struct NativeTransport {
     ids: Arc<AtomicUsize>,
     now: Arc<AtomicI64>,
     calls: Arc<AtomicUsize>,
-    original: Arc<Mutex<Vec<Value>>>,
+    pub(super) original: Arc<Mutex<Vec<Value>>>,
     fault: usize,
 }
 impl NativeTransport {

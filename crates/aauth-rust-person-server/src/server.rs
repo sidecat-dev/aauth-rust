@@ -572,6 +572,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         // token to for its `aud` and `sub`: only then does this PS hold its
         // record, retained on issuance or on federated delivery.
         let record = self.load_record(&token, compact, now, "upstream")?;
+        // Step 4: the calling Agent is the one this record names. Its revoked
+        // Agent token refuses the chain even where no cascade reached this token.
+        if self.token_revoked(&record.agent.issuer, &record.agent_token_jti, now) {
+            return Err(BindingContext::Upstream.revoked());
+        }
         let binding = self
             .binding(&record.principal, BindingContext::Upstream)?
             .ok_or_else(|| Failure::parameter("invalid_upstream_token"))?;
@@ -616,8 +621,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(Failure::parameter("invalid_request"));
             }
             Some(self.load_mission(
-                &agent,
+                &Self::identity(&agent),
                 required_string(&parameters, "mission_s256")?,
+                (self.clock)(),
+                binding_context,
+            )?)
+        } else if let Some(up) = &upstream
+            && let Some(s256) = &up.token.mission
+        {
+            // The upstream token carries the calling Agent's mission. The
+            // request is evaluated against it, and the downstream Person token
+            // carries it on, so its expiry and termination reach the chain.
+            Some(self.load_mission(
+                &up.context.record.principal,
+                s256,
                 (self.clock)(),
                 binding_context,
             )?)
@@ -659,8 +676,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let now = (self.clock)();
         check_agent_current(&agent, now)?;
         self.subagent_current(&agent, policy_request.subagent.as_ref(), now)?;
-        check_upstream_current(upstream.as_ref(), now)?;
-        self.recheck_mission(&agent, mission.as_ref(), now, binding_context)?;
+        check_upstream_current(policy_request.upstream.as_ref(), now)?;
+        self.recheck_mission(mission.as_ref(), now, binding_context)?;
         let mut expires_at = now
             .saturating_add(self.config.person_lifetime)
             .min(agent.claims().exp);
@@ -728,8 +745,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let released_at = (self.clock)();
         check_agent_current(&agent, released_at)?;
         check_subagent_current(policy_request.subagent.as_ref(), released_at)?;
-        check_upstream_current(upstream.as_ref(), released_at)?;
-        self.recheck_mission(&agent, mission.as_ref(), released_at, binding_context)?;
+        check_upstream_current(policy_request.upstream.as_ref(), released_at)?;
+        self.recheck_mission(mission.as_ref(), released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
@@ -801,8 +818,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .jwk
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
-            || (r.mission_s256.is_some()
-                && (self.federation.is_some() || upstream.is_some() || subagent.is_some()))
+            || (r.mission_s256.is_some() && (self.federation.is_some() || subagent.is_some()))
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
@@ -893,8 +909,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::parameter("invalid_request"));
         }
+        // The mission's owner is the presented record's principal: the
+        // requesting Agent, or on a chained request the calling Agent.
         let mission = if let Some(s256) = &r.mission_s256 {
-            let mission = self.load_mission(agent, s256, verified_at, binding_context)?;
+            let mission =
+                self.load_mission(&retained.principal, s256, verified_at, binding_context)?;
             if mission.person_id != retained.person_id {
                 return Err(Failure::parameter("invalid_presented_token"));
             }
@@ -935,9 +954,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let prepared =
             self.prepare_authorization(&agent, parameters, verified_at, upstream.as_ref())?;
         if self.federation.is_some() {
-            if upstream.is_some() {
-                return Err(Failure::parameter("invalid_request"));
-            }
             return self.federate(&agent, &prepared);
         }
         if let Some(interaction) = ResourceInteraction::from_claims(prepared.resource.claims())
@@ -949,14 +965,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
             return self.open_resource_interaction(&agent, &prepared, interaction);
         }
-        self.grant_auth(&agent, prepared, upstream.as_ref())
+        self.grant_auth(&agent, prepared)
     }
     /// Policy, issuance, commit and release of one prepared direct Auth grant.
     fn grant_auth(
         &self,
         agent: &VerifiedAgentToken,
         prepared: PreparedAuthorization,
-        upstream: Option<&Upstream>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -967,6 +982,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             offer,
         } = prepared;
         let r = resource.claims();
+        let upstream = context.upstream.as_ref();
         let grant = if upstream.is_some() {
             self.policy.authorize_upstream(&context)
         } else {
@@ -976,7 +992,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         validate_grant(&grant, &context.scopes)?;
         let mission = context.mission.as_ref();
         let now = (self.clock)();
-        self.recheck_mission(agent, mission, now, binding_context)?;
+        self.recheck_mission(mission, now, binding_context)?;
         self.inputs_current(agent, &resource, &presented, now)?;
         self.subagent_current(agent, context.subagent.as_ref(), now)?;
         check_upstream_current(upstream, now)?;
@@ -987,7 +1003,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let holder = context.subagent.as_ref().unwrap_or(agent);
         expires_at = expires_at.min(holder.claims().exp);
         if let Some(up) = upstream {
-            expires_at = expires_at.min(up.token.exp);
+            expires_at = expires_at.min(up.record.expires_at);
         }
         if let Some(exp) = mission.and_then(|m| m.document.expires_at()) {
             expires_at = expires_at.min(exp);
@@ -1041,7 +1057,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 issued_at: now,
                 expires_at,
                 presented: Some(retained.token),
-                upstream: upstream.map(|up| up.context.record.token.clone()),
+                upstream: upstream.map(|up| up.record.token.clone()),
             },
         )?;
         self.commit_issuance(record, false, mission, binding_context)?;
@@ -1052,7 +1068,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.inputs_current(agent, &resource, &presented, released_at)?;
         check_subagent_current(context.subagent.as_ref(), released_at)?;
         check_upstream_current(upstream, released_at)?;
-        self.recheck_mission(agent, mission, released_at, binding_context)?;
+        self.recheck_mission(mission, released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
@@ -1241,8 +1257,9 @@ fn store_issuance_failure(error: StoreError, context: BindingContext) -> Failure
         _ => Failure::internal(),
     }
 }
-fn check_upstream_current(upstream: Option<&Upstream>, now: i64) -> Result<(), Failure> {
-    if upstream.is_some_and(|up| up.token.exp <= now) {
+/// The retained record's `expires_at` is the upstream token's verified `exp`.
+fn check_upstream_current(upstream: Option<&UpstreamContext>, now: i64) -> Result<(), Failure> {
+    if upstream.is_some_and(|up| up.record.expires_at <= now) {
         return Err(Failure::parameter("expired_upstream_token"));
     }
     Ok(())

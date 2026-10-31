@@ -732,6 +732,23 @@ scope names across Resources need not form a syntactic subset. Credential expiry
 cannot outlive upstream authority. Omitting, replacing or adding an inconsistent
 upstream tie fails, including when an Auth token is presented for step-up.
 
+The upstream token is the Person token or Auth token the calling Agent
+presented. An Auth token may come from this PS or from an AS it federated with;
+either way the PS accepts it only with its own retained record of that exact
+token. It refuses the chain with `revoked_upstream_token` when it has revoked
+the calling Agent's binding, its Agent token, or the upstream token itself.
+
+When the upstream token carries `mission_s256`, the PS loads that mission for
+the calling Agent, the upstream record's `principal`, not for the intermediary.
+`bind_upstream` and `authorize_upstream` receive it as `mission`. The downstream
+Person token and Auth token carry the same `mission_s256`, and their expiry is
+capped at the mission's `expires_at`. The intermediary sends no `mission_s256`
+of its own; a request that does is `invalid_request`. Once the mission is
+terminated or expired, both endpoints refuse the chain with `403
+mission_terminated`. A `MissionStore` commits these records with the
+intermediary as holder and the mission owner as principal. Missions need a
+direct PS: a federated PS refuses mission-bound tokens, chained or not.
+
 Route both downstream token requests to the PS named by the **verified upstream
 credential**: `iss` for a Person token, `ps` for an Auth token. Read that PS's
 admitted endpoint metadata. Never use the intermediary's own Agent-token `ps`
@@ -757,9 +774,8 @@ from host policy; the PS refuses copying the immediate upstream subject with
 `403 access_denied` through the typed policy-denial path. It
 does not derive pairwise IDs or prevent every cross-Resource reuse for the host.
 
-The scoped, missionless profile requires a nonempty Core scope string and
-rejects mission-bearing PS inputs and known companion authority claims. It does
-not accept a companion claim in place of scope. First-use Resource metadata
+The scoped profile requires a nonempty Core scope string and rejects known
+companion authority claims. It does not accept a companion claim in place of scope. First-use Resource metadata
 presentation and distinct-resource-per-Agent rate limits belong to host policy.
 If displaying `justification` or other Agent-provided Markdown, sanitize it and
 label it as Agent-asserted content.
@@ -898,8 +914,11 @@ Federated retention uses `TokenRecord.person_server=Some(PS)` to separate the
 AS token's issuer/JTI from the PS binding namespace. None retains old local
 behavior; old schema 1 JSON rows decode unchanged. MemoryStore and RedbStore
 validate the exact retained presented parent and commit the receipt atomically
-before release. Custom adapters must honor this field and the updated storetest
-contract; an older adapter is not federation-qualified. The PS's internal
+before release. A receipt for a chained request also keeps `upstream`, equal to
+that of the Person token presented for it; `TokenRecord::validate_federated_parent`
+refuses one that drops or changes the tie. Custom adapters must honor these
+fields and the updated storetest contract; an older adapter is not
+federation-qualified. The PS's internal
 accountable person and directed identity remain stable across this exchange.
 If an AS reuses an issuer/JTI whose retained receipt names a different Person
 parent, the PS refuses the conflicting answer with `502 as_unreachable` and a
@@ -912,11 +931,24 @@ replay protection and application idempotency.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
 Missions and recursive sub-agent delegation remain named gaps of this Core-scope
-profile. The AS verifies chained requests from any PS; this Rust PS does not yet
-relay `upstream_token` through federation and refuses that request. It does accept
-an Auth token its AS issued, which it retained on delivery, as `upstream_token` at
-`/person`. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
+profile. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
+
+A federated PS chains calls through its AS. It verifies `upstream_token` exactly
+as a direct PS does, then asks `Policy::consent_upstream` rather than
+`Policy::consent`. That hook defaults to denial, so a policy that consents to
+direct federation does not consent to delegation through it; implement it
+explicitly. The PS passes `upstream_token` through in its PS-to-AS request,
+whose `agent_token` is then the intermediary's. It refuses a returned Auth token
+that outlives the upstream token with `502 as_unreachable`, and retains the
+receipt with the upstream tie described above. A step-up repeats the same
+`upstream_token`. With deferred federation, the intermediary that started the
+request polls it; its Agent token need not name this PS. The request ends with
+`408 expired` no later than the upstream token's `exp`, and with
+`revoked_upstream_token` once that token is revoked. An AS
+`requirement=interaction` reaches the intermediary unchanged; the intermediary
+raises it to its own caller with `aauth_rust_core::interaction::ChainedInteraction`,
+under its own code and pending URL.
 
 
 ## Serve direct and federated grants from one Person Server origin

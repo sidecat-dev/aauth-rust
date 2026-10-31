@@ -21,6 +21,8 @@ use std::sync::{
 
 const PS: &str = "https://ps.example";
 const RESOURCE: &str = "https://resource.example";
+/// Reached by `RESOURCE` acting as an intermediary.
+const DOWNSTREAM: &str = "https://downstream.example";
 fn owner() -> AgentIdentity {
     AgentIdentity {
         issuer: "https://ap.example".into(),
@@ -49,6 +51,8 @@ impl AgentKeyResolver for Keys {
             ("https://ap.example", "aauth-agent.json", "ap") => 1,
             (PS, "aauth-person.json", "ps") => 3,
             (RESOURCE, "aauth-resource.json", "resource") => 4,
+            (RESOURCE, "aauth-agent.json", "resource-agent") => 6,
+            (DOWNSTREAM, "aauth-resource.json", "downstream") => 8,
             _ => return Err(TokenError::UntrustedIssuer),
         };
         Ok(SigningKey::from_seed([seed; 32]).public_jwk())
@@ -69,6 +73,29 @@ fn agent(ps: &str) -> Agent {
                 jwk: key.public_jwk(),
             },
             ps: Some(ps.into()),
+            parent_agent: None,
+            nbf: None,
+            extra: Default::default(),
+        })
+        .unwrap();
+    Agent::new(key, compact).unwrap()
+}
+/// `RESOURCE` as its own Agent Provider, signing downstream requests.
+fn intermediary() -> Agent {
+    let key = SigningKey::from_seed([7; 32]);
+    let compact = AgentProvider::new(RESOURCE, "resource-agent", SigningKey::from_seed([6; 32]))
+        .unwrap()
+        .issue(&AgentClaims {
+            iss: RESOURCE.into(),
+            dwk: "aauth-agent.json".into(),
+            sub: "aauth:Chain@resource.example".into(),
+            jti: "chain".into(),
+            iat: 1000,
+            exp: 2000,
+            cnf: Confirmation {
+                jwk: key.public_jwk(),
+            },
+            ps: None,
             parent_agent: None,
             nbf: None,
             extra: Default::default(),
@@ -189,6 +216,17 @@ impl Policy for Host {
             lifetime: 600,
         })
     }
+    fn bind_upstream(&self, r: &PersonRequest) -> Result<Person, PolicyError> {
+        self.race(r.mission.as_ref().expect("the upstream token's mission"));
+        Ok(Person {
+            id: "private-person".into(),
+            subject: "downstream-person".into(),
+            tenant: None,
+        })
+    }
+    fn authorize_upstream(&self, r: &AuthorizationRequest) -> Result<Grant, PolicyError> {
+        self.authorize(r)
+    }
 }
 type Server = PersonServer<
     Keys,
@@ -263,6 +301,101 @@ fn auth(server: &Server, a: &Agent, p: &str, r: &str) -> Response<Vec<u8>> {
         "/token",
         json!({"presented_token":p,"resource_token":r}),
     ))
+}
+
+#[test]
+fn an_upstream_tokens_mission_is_carried_down_the_chain_and_ends_it() {
+    let (s, store, calls, m) = fixture();
+    let upstream = value(&person(&s, &agent(PS), &m))["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let chain = intermediary();
+    // The upstream token carries the mission; the intermediary sends none.
+    let own =
+        json!({"resource":DOWNSTREAM,"upstream_token":upstream,"mission_s256":m.document.s256()});
+    assert_eq!(
+        value(&s.handle(&request(&chain, "/person", own)))["error"],
+        "invalid_request"
+    );
+    let chained = json!({"resource":DOWNSTREAM,"upstream_token":upstream});
+    let response = s.handle(&request(&chain, "/person", chained.clone()));
+    assert_eq!(response.status(), 200, "{:?}", value(&response));
+    let downstream = value(&response)["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claims = PersonToken::parse(&downstream)
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap()
+        .claims()
+        .clone();
+    assert_eq!(claims.mission_s256.as_deref(), Some(m.document.s256()));
+    assert_eq!(
+        (claims.sub.as_str(), claims.exp),
+        ("downstream-person", 1045)
+    );
+    let retained = store
+        .inner
+        .token(&TokenReference {
+            issuer: PS.into(),
+            jti: claims.jti.clone(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.principal, owner());
+    assert_eq!(retained.agent.subject, "aauth:Chain@resource.example");
+    let challenge = mint_resource_token(
+        &SigningKey::from_seed([8; 32]),
+        "downstream",
+        &ResourceClaims {
+            iss: DOWNSTREAM.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: PS.into(),
+            ps: PS.into(),
+            sub: claims.sub.clone(),
+            jti: "downstream".into(),
+            presented_jti: claims.jti.clone(),
+            agent_jkt: chain.public_jwk().thumbprint().unwrap(),
+            iat: 1000,
+            exp: 1300,
+            scope: Some("stock.read".into()),
+            mission_s256: claims.mission_s256.clone(),
+            account: None,
+            login_hint: None,
+            nbf: None,
+            tenant: None,
+            extra: Default::default(),
+        },
+    )
+    .unwrap();
+    let exchange =
+        json!({"resource_token":challenge,"presented_token":downstream,"upstream_token":upstream});
+    let response = s.handle(&request(&chain, "/token", exchange.clone()));
+    assert_eq!(response.status(), 200, "{:?}", value(&response));
+    let auth = AuthToken::parse(value(&response)["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(
+        auth.claims().mission_s256.as_deref(),
+        Some(m.document.s256())
+    );
+    assert_eq!(auth.claims().exp, 1045);
+    // The caller's Person token, then bind_upstream and authorize_upstream.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // Terminating the calling Agent's mission ends the chain at both endpoints.
+    store
+        .inner
+        .terminate_mission(PS, &owner(), m.document.s256(), "revoked")
+        .unwrap();
+    for (path, body) in [("/person", chained), ("/token", exchange)] {
+        let refused = value(&s.handle(&request(&chain, path, body)));
+        assert_eq!(refused["error"], "mission_terminated", "{path}");
+        assert_eq!(refused["termination_reason"], "revoked", "{path}");
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]

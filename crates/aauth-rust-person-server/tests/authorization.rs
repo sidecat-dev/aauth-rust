@@ -226,6 +226,14 @@ impl Policy for Host {
         );
         self.grant(request)
     }
+    fn consent_upstream(&self, request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        self.chain_calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            request.upstream.as_ref().unwrap().record.principal.subject,
+            "aauth:Caller@ap.example"
+        );
+        self.grant(request).map(|_| ())
+    }
 }
 struct Fixture {
     store: TestStore,
@@ -333,6 +341,20 @@ fn compact(response: &Response<Vec<u8>>, field: &str) -> String {
         String::from_utf8_lossy(response.body())
     );
     output(response)[field].as_str().unwrap().into()
+}
+fn payload(compact: &str) -> Value {
+    serde_json::from_slice(aauth_rust_jose::Jws::parse(compact).unwrap().payload()).unwrap()
+}
+/// The `(iss, jti)` a retained record is keyed by.
+fn reference(compact: &str) -> TokenReference {
+    let claims = payload(compact);
+    TokenReference {
+        issuer: claims["iss"].as_str().unwrap().into(),
+        jti: claims["jti"].as_str().unwrap().into(),
+    }
+}
+fn expiry(compact: &str) -> i64 {
+    payload(compact)["exp"].as_i64().unwrap()
 }
 fn resource(
     holder: &Agent,
@@ -1269,7 +1291,7 @@ fn federated_delivery_verifies_as_result_and_retains_exact_step_up_ancestry() {
     );
 }
 #[test]
-fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint_until_revoked() {
+fn federated_auth_token_is_upstream_evidence_at_both_endpoints_until_revoked() {
     // Core upstream-token-verification: an Auth token's iss may be an AS this
     // PS presented a person token to for that token's aud and sub. Revoking
     // that person token, or the agent token it was issued to, revokes the AS
@@ -1297,12 +1319,25 @@ fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint_until_revoke
             &f.person(&server, &agent(true), INVENTORY, Some(&upstream)),
             "person_token",
         );
-        let downstream = PersonToken::parse(&downstream)
+        let verified = PersonToken::parse(&downstream)
             .unwrap()
             .verify(&Keys, 1000)
             .unwrap();
-        assert_eq!(downstream.claims().sub, "inventory-person");
-        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(verified.claims().sub, "inventory-person");
+        let inventory = resource(&agent(true), &downstream, "read", |r| {
+            r.aud = "https://as.example".into()
+        });
+        compact(
+            &f.exchange(
+                &server,
+                &agent(true),
+                &inventory,
+                &downstream,
+                Some(&upstream),
+            ),
+            "auth_token",
+        );
+        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 2);
         let revoked = if revoke_agent {
             let mut request = Request::builder()
                 .method("POST")
@@ -1332,10 +1367,20 @@ fn federated_auth_token_is_upstream_evidence_at_the_person_endpoint_until_revoke
             "{}",
             String::from_utf8_lossy(revoked.body())
         );
-        let refused = f.person(&server, &agent(true), INVENTORY, Some(&upstream));
-        assert_eq!(refused.status(), 400, "revoke_agent={revoke_agent}");
-        assert_eq!(output(&refused)["error"], "revoked_upstream_token");
-        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 1);
+        for refused in [
+            f.person(&server, &agent(true), INVENTORY, Some(&upstream)),
+            f.exchange(
+                &server,
+                &agent(true),
+                &inventory,
+                &downstream,
+                Some(&upstream),
+            ),
+        ] {
+            assert_eq!(refused.status(), 400, "revoke_agent={revoke_agent}");
+            assert_eq!(output(&refused)["error"], "revoked_upstream_token");
+        }
+        assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 2);
     }
 }
 #[test]
@@ -1703,3 +1748,6 @@ mod subagents;
 
 #[path = "support/release_fences.rs"]
 mod release_fences;
+
+#[path = "support/chaining.rs"]
+mod chaining;

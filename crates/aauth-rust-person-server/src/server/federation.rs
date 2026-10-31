@@ -18,6 +18,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.federate_with(agent, prepared, true, None)
     }
 
+    /// Consent before the PS contacts the AS. A request that chains an
+    /// `upstream_token` asks the chained hook, so consent to direct federation
+    /// is not consent to delegation.
+    pub(super) fn federation_consent(
+        &self,
+        context: &AuthorizationRequest,
+    ) -> Result<(), PolicyError> {
+        if context.upstream.is_some() {
+            self.policy.consent_upstream(context)
+        } else {
+            self.policy.consent(context)
+        }
+    }
+
     /// Relay after R3 document consent. Core consent is not called again.
     /// The access server's Auth token must name the fetched class document.
     pub(super) fn federate_r3(
@@ -64,6 +78,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             presented,
             retained,
             context,
+            binding_context,
             ..
         } = prepared;
         let r = resource.claims();
@@ -71,7 +86,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::parameter("invalid_presented_token"));
         }
         if core_consent {
-            self.policy.consent(context).map_err(|error| {
+            self.federation_consent(context).map_err(|error| {
                 Failure::policy(error).with_federation(FederationFailure {
                     access_server: r.aud.clone(),
                     status: None,
@@ -82,7 +97,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let now = (self.clock)();
         self.inputs_current(agent, resource, presented, now)?;
         self.subagent_current(agent, context.subagent.as_ref(), now)?;
-        self.binding(&retained.principal, BindingContext::Presented)?
+        check_upstream_current(context.upstream.as_ref(), now)?;
+        self.binding(&retained.principal, *binding_context)?
             .ok_or_else(Failure::internal)?;
         let adapter = self.federation.as_ref().ok_or_else(Failure::internal)?;
         let endpoint = adapter
@@ -99,6 +115,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let mut body = json!({"agent_token":agent.compact(),"resource_token":resource_compact,"presented_token":presented_compact});
         if let Some(child) = &context.subagent {
             body["subagent_token"] = json!(child.compact());
+        }
+        // PS-to-AS Token Request: the upstream token is passed through, and
+        // `agent_token` is then the intermediary's.
+        if context.upstream.is_some() {
+            body["upstream_token"] = json!(required_string(&context.parameters, "upstream_token")?);
         }
         let sent = self.narrow_offer(prepared.offer.as_ref(), &r.sub, &r.iss, true)?;
         if let Some(sent) = &sent {
@@ -140,9 +161,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             presented,
             retained,
             context,
+            binding_context,
             ..
         } = prepared;
         let r = resource.claims();
+        let upstream = context.upstream.as_ref();
         if self.deferred.is_some()
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
@@ -153,19 +176,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             if relay.is_some() || prepared.offer.is_some() {
                 return Err(Failure::internal());
             }
-            return self.defer_federation(
-                &response,
-                agent,
-                resource,
-                presented,
-                context,
-                endpoint,
-                sent.clone(),
-            );
+            return self.defer_federation(&response, agent, prepared, endpoint, sent.clone());
         }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
         self.subagent_current(agent, context.subagent.as_ref(), current)?;
+        check_upstream_current(upstream, current)?;
         let holder = context.subagent.as_ref().unwrap_or(agent);
         let failed = |reason| unreachable(&r.aud, Some(response.status()), reason);
         if response.body().len() > MAX_BODY_BYTES {
@@ -291,6 +307,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.exp > agent.claims().exp
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
+            || upstream.is_some_and(|up| c.exp > up.record.expires_at)
             || c.iat > current.saturating_add(60)
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
@@ -364,21 +381,22 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 issued_at: c.iat,
                 expires_at: c.exp,
                 presented: Some(retained.token.clone()),
-                upstream: None,
+                upstream: upstream.map(|up| up.record.token.clone()),
             },
         )?;
         record.token.reference.issuer = c.iss.clone();
         record.person_server = Some(self.config.issuer.clone());
         self.store.commit(record, false).map_err(|e| match e {
             StoreError::Conflict => failed(Reason::InvalidGrant),
-            other => store_issuance_failure(other, BindingContext::Presented),
+            other => store_issuance_failure(other, *binding_context),
         })?;
         self.subagent_current(agent, context.subagent.as_ref(), (self.clock)())?;
-        self.binding(&retained.principal, BindingContext::Presented)?
+        self.binding(&retained.principal, *binding_context)?
             .ok_or_else(Failure::internal)?;
         let released = (self.clock)();
         self.inputs_current(agent, resource, presented, released)?;
         check_subagent_current(context.subagent.as_ref(), released)?;
+        check_upstream_current(upstream, released)?;
         if c.exp <= released {
             return Err(Failure::internal().with_federation(FederationFailure {
                 access_server: r.aud.clone(),

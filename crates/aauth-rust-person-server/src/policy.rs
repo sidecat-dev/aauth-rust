@@ -33,7 +33,9 @@ pub struct UpstreamContext {
 
 /// Verified context passed to person binding or explicit downstream policy.
 pub struct PersonRequest {
-    /// Verified active host-approved mission, never a raw Agent assertion.
+    /// Verified active host-approved mission, never a raw Agent assertion. On a
+    /// chained request it is the calling Agent's mission named by the upstream
+    /// token, and the issued Person token carries it.
     pub mission: Option<crate::MissionRecord>,
     /// Authenticated requesting Agent, whose HTTP proof also verified.
     pub agent: VerifiedAgentToken,
@@ -64,7 +66,8 @@ impl PersonRequest {
 
 /// Complete verified exchange context, before any Auth credential is released.
 pub struct AuthorizationRequest {
-    /// Verified active host-approved mission, matched to presented context.
+    /// Verified active host-approved mission, matched to presented context. On
+    /// a chained request it is owned by the calling Agent, not the intermediary.
     pub mission: Option<crate::MissionRecord>,
     /// Authenticated requesting Agent and verified HTTP proof holder.
     pub agent: VerifiedAgentToken,
@@ -124,6 +127,13 @@ pub trait Policy: Send + Sync {
     fn authorize_upstream(&self, _request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
         Err(PolicyError::Denied)
     }
+    /// Consent to a verified four-party exchange that chains an `upstream_token`,
+    /// before the PS passes it to the AS. [`AuthorizationRequest::upstream`] is
+    /// set; the AS decides scope. Default refusal keeps policies that consent to
+    /// direct federation from consenting to federated delegation.
+    fn consent_upstream(&self, _request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        Err(PolicyError::Denied)
+    }
 }
 
 impl<P: Policy + ?Sized> Policy for Box<P> {
@@ -141,5 +151,8 @@ impl<P: Policy + ?Sized> Policy for Box<P> {
     }
     fn authorize_upstream(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError> {
         (**self).authorize_upstream(request)
+    }
+    fn consent_upstream(&self, request: &AuthorizationRequest) -> Result<(), PolicyError> {
+        (**self).consent_upstream(request)
     }
 }

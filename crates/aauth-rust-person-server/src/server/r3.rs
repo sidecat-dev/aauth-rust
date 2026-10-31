@@ -725,7 +725,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         // here. Known revocation precedes expiry, as at request verification.
         self.inputs_unrevoked(&agent, &resource, &presented, now)?;
         self.inputs_current(&agent, &resource, &presented, now)?;
-        self.recheck_mission(&agent, mission, now, binding_context)?;
+        self.recheck_mission(mission, now, binding_context)?;
         let binding = self
             .binding(&retained.principal, binding_context)?
             .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
@@ -835,7 +835,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         // Known revocation precedes expiry.
         self.inputs_unrevoked(&agent, &resource, &presented, released_at)?;
         self.inputs_current(&agent, &resource, &presented, released_at)?;
-        self.recheck_mission(&agent, mission, released_at, binding_context)?;
+        self.recheck_mission(mission, released_at, binding_context)?;
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
