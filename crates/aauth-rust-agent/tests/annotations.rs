@@ -149,7 +149,7 @@ fn call(signer: &Agent, tool: &str) -> String {
     signer.sign(&mut request, NOW).unwrap();
     let proof = PreparedRequest::prepare(&request, "sig", NOW, 60).unwrap();
     proof.verify(&signer.public_jwk()).unwrap();
-    let KeyMaterial::Jwt(token) = proof.key() else {
+    let KeyMaterial::Jwt { jwt: token, .. } = proof.key() else {
         panic!("jwt credential expected");
     };
     token.clone()

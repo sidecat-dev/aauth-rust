@@ -42,7 +42,10 @@ impl Agent {
             &[RequestSignature {
                 label: "sig",
                 key: &self.key,
-                material: KeyMaterial::Jwt(subscribe_token.to_owned()),
+                material: KeyMaterial::Jwt {
+                    jwt: subscribe_token.to_owned(),
+                    cache: false,
+                },
             }],
             &components,
             now,

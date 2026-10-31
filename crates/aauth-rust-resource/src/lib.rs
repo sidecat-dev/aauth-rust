@@ -540,10 +540,10 @@ where
             }
             Err(e) => return Decision::SignatureFailure(SignatureFailure::Proof(e)),
         };
-        if !matches!(proof.key(), KeyMaterial::Jwt(_)) {
+        if !matches!(proof.key(), KeyMaterial::Jwt { .. }) {
             return Decision::OtherScheme(Box::new(proof));
         }
-        let KeyMaterial::Jwt(compact) = proof.key() else {
+        let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
             return Decision::SignatureFailure(SignatureFailure::UnsupportedScheme(accepted));
         };
         let token = match AgentToken::parse(compact).and_then(|t| t.verify(&self.keys, now)) {

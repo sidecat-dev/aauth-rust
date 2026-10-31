@@ -483,7 +483,16 @@ fn keyid_must_equal_the_kid_carried_by_signature_key() {
     )
     .unwrap();
     let mut req = request();
-    sign_request(&mut req, &key, KeyMaterial::Jwt(token), 1000).unwrap();
+    sign_request(
+        &mut req,
+        &key,
+        KeyMaterial::Jwt {
+            jwt: token,
+            cache: false,
+        },
+        1000,
+    )
+    .unwrap();
     let base = req.headers()["signature-input"]
         .to_str()
         .unwrap()
@@ -4080,9 +4089,41 @@ fn assertion_cache_resolves_a_sealed_identifier_and_keeps_misses_distinct() {
     )
     .unwrap();
     let without_jti = Jws::sign(&jose, br#"{"exp":5000}"#, &key).unwrap();
-    let cached_jwt = x509_request(&format!(r#"sig=jwt;jwt="{with_jti}";cache"#), &[1u8; 64]);
+    let mut cached_jwt = request();
+    sign_request(
+        &mut cached_jwt,
+        &key,
+        KeyMaterial::Jwt {
+            jwt: with_jti.clone(),
+            cache: true,
+        },
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(
+        cached_jwt.headers()["signature-key"].to_str().unwrap(),
+        format!(r#"sig=jwt;jwt="{with_jti}";cache"#)
+    );
     let prepared_jwt = PreparedRequest::prepare(&cached_jwt, "sig", 1_000, 60).unwrap();
     assert!(prepared_jwt.cache_requested());
+    assert!(matches!(
+        prepared_jwt.key(),
+        KeyMaterial::Jwt { jwt, cache: true } if *jwt == with_jti
+    ));
+    prepared_jwt.verify(&public).unwrap();
+    assert_eq!(
+        sign_request(
+            &mut request(),
+            &key,
+            KeyMaterial::Jwt {
+                jwt: without_jti.clone(),
+                cache: true,
+            },
+            1_000,
+        )
+        .unwrap_err(),
+        Error::InvalidJwt
+    );
     assert_eq!(
         PreparedRequest::prepare(
             &x509_request(&format!(r#"sig=jwt;jwt="{without_jti}";cache"#), &[1u8; 64]),

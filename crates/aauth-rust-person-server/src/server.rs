@@ -445,7 +445,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::proof(ProofError::InvalidInput, request, now));
         }
-        let KeyMaterial::Jwt(compact) = proof.key() else {
+        let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
             return Err(Failure::proof(ProofError::UnsupportedScheme, request, now));
         };
         let parsed = AgentToken::parse(compact).map_err(Failure::credential)?;

@@ -456,7 +456,10 @@ fn the_ap_validates_the_event_token_and_the_http_signature_with_one_key() {
     sign_request(
         &mut request,
         &SigningKey::from_seed([5; 32]),
-        KeyMaterial::Jwt(event(&claims(eid, PAYLOAD))),
+        KeyMaterial::Jwt {
+            jwt: event(&claims(eid, PAYLOAD)),
+            cache: false,
+        },
         1000,
     )
     .unwrap();

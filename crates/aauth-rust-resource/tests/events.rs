@@ -142,7 +142,10 @@ fn signed_registration(path: &str, token: &str, seed: u8, now: i64) -> Request<V
     sign_request(
         &mut request,
         &SigningKey::from_seed([seed; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         now,
     )
     .unwrap();

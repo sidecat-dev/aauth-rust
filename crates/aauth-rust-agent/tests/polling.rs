@@ -39,7 +39,7 @@ fn polls_use_signed_get_without_replaying_the_original_body() {
     assert_eq!(request.uri(), "https://ps.example/pending/opaque");
     assert!(request.body().is_empty());
     let proof = PreparedRequest::prepare(&request, "sig", 1005, 60).unwrap();
-    assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == a.token()));
+    assert!(matches!(proof.key(), KeyMaterial::Jwt { jwt: token, .. } if token == a.token()));
     proof.verify(&a.public_jwk()).unwrap();
 }
 #[test]
@@ -353,7 +353,9 @@ fn a_held_invocation_is_polled_with_the_auth_token() {
     let presenting = a.with_token(auth).unwrap();
     let request = session.request(&presenting, 1005).unwrap();
     let proof = PreparedRequest::prepare(&request, "sig", 1005, 60).unwrap();
-    assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == presenting.token()));
+    assert!(
+        matches!(proof.key(), KeyMaterial::Jwt { jwt: token, .. } if token == presenting.token())
+    );
     proof.verify(&presenting.public_jwk()).unwrap();
     assert_ne!(presenting.token(), a.token());
 }

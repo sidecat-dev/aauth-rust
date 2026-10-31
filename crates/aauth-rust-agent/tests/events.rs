@@ -281,7 +281,7 @@ fn a_subscription_request_presents_the_subscribe_token_with_the_agent_key() {
         .sign_subscription(&mut request, &subscribe, 1000)
         .unwrap();
     let proof = PreparedRequest::prepare_with_schemes(&request, "sig", 1000, 60, &["jwt"]).unwrap();
-    let KeyMaterial::Jwt(presented) = proof.key() else {
+    let KeyMaterial::Jwt { jwt: presented, .. } = proof.key() else {
         panic!("subscribe token is not the Signature-Key JWT")
     };
     assert_eq!(*presented, subscribe);

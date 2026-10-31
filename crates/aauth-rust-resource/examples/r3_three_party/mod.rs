@@ -729,7 +729,10 @@ pub fn run() -> Result<Transcript> {
     sign_request(
         &mut stolen,
         &SigningKey::generate(),
-        KeyMaterial::Jwt(auth.clone()),
+        KeyMaterial::Jwt {
+            jwt: auth.clone(),
+            cache: false,
+        },
         now(),
     )?;
     let wrong_holder_status = api_tls.send(&stolen)?.status().as_u16();

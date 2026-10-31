@@ -5720,7 +5720,10 @@ fn signed_call_cost(path: &str, token: &str, cost: i64) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -5735,7 +5738,10 @@ fn signed_call_at(path: &str, token: &str, now: i64) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         now,
     )
     .unwrap();

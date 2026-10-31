@@ -160,7 +160,13 @@ pub enum KeyMaterial {
     /// Header Web Key: inline public key, sufficient for pseudonymous proof only.
     Hwk(Jwk),
     /// Compact JWT carrying a confirmation key; the accepting role verifies it.
-    Jwt(String),
+    /// `cache` is the bare `cache` flag; it requires `jti` and `exp`.
+    Jwt {
+        /// Compact JWT.
+        jwt: String,
+        /// Caller asked for a cache identifier. Issuance is a separate step.
+        cache: bool,
+    },
     /// Unverified service identity/key reference. Host must admit the identity
     /// before resolving metadata/JWKS; this value alone grants no authority.
     JwksUri {
@@ -311,7 +317,7 @@ fn parse_key(entry: &ListEntry, header: &str, label: &str) -> Result<(KeyMateria
             if cache {
                 cache::require_cacheable_jwt(&jwt)?;
             }
-            Ok((KeyMaterial::Jwt(jwt), cache))
+            Ok((KeyMaterial::Jwt { jwt, cache }, cache))
         }
         "jkt-jwt" => {
             let jwt = text(&item.params, "jwt")?.to_owned();
@@ -368,7 +374,7 @@ fn key_identifier(key: &KeyMaterial) -> Result<Option<String>, Error> {
     match key {
         KeyMaterial::Hwk(_) | KeyMaterial::X509 { .. } | KeyMaterial::Cached { .. } => Ok(None),
         KeyMaterial::JwksUri { kid, .. } | KeyMaterial::Jwks { kid, .. } => Ok(Some(kid.clone())),
-        KeyMaterial::Jwt(compact)
+        KeyMaterial::Jwt { jwt: compact, .. }
         | KeyMaterial::JktJwt { jwt: compact, .. }
         | KeyMaterial::SelfJwt { jwt: compact } => {
             let header = aauth_rust_jose::Jws::parse(compact)
@@ -755,12 +761,15 @@ pub struct RequestSignature<'a> {
 /// signature headers; call after URI and
 /// other headers are final.
 ///
+/// A `jwt` or `jkt-jwt` member with `cache` set ends in the bare `;cache` flag.
+///
 /// # Errors
 /// Computes and covers SHA-256 Content-Digest on nonempty content or when a
 /// digest field was supplied; covers Content-Type when present on nonempty content.
 /// Existing digest bytes are replaced from actual content before signing.
 /// Rejects bodies over 1 MiB, non-HTTPS/invalid targets, invalid clocks, malformed
-/// JWT/key material or an inline public key that differs from the signer.
+/// JWT/key material, an inline public key that differs from the signer, or
+/// `cache` on an assertion without `jti` and `exp` (`invalid_jwt`).
 pub fn sign_request(
     req: &mut Request<Vec<u8>>,
     key: &SigningKey,
@@ -939,9 +948,14 @@ fn signature_member(part: &RequestSignature<'_>) -> Result<String, Error> {
             jwks::validate(url, kid)?;
             format!("jwks;url={};kid={}", quoted(url)?, quoted(kid)?)
         }
-        KeyMaterial::Jwt(jwt) => {
+        KeyMaterial::Jwt { jwt, cache } => {
             aauth_rust_jose::Jws::parse(jwt).map_err(|_| Error::InvalidKey)?;
-            format!("jwt;jwt=\"{jwt}\"")
+            let mut header = format!("jwt;jwt=\"{jwt}\"");
+            if *cache {
+                cache::require_cacheable_jwt(jwt)?;
+                header.push_str(";cache");
+            }
+            header
         }
         KeyMaterial::JktJwt { jwt, cache } => {
             let delegation = jkt::parse_jkt(jwt, *cache)?;
@@ -975,7 +989,7 @@ impl std::fmt::Debug for PreparedRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let scheme = match &self.key {
             KeyMaterial::Hwk(_) => "hwk",
-            KeyMaterial::Jwt(_) => "jwt",
+            KeyMaterial::Jwt { .. } => "jwt",
             KeyMaterial::JwksUri { .. } => "jwks_uri",
             KeyMaterial::Jwks { .. } => "jwks",
             KeyMaterial::JktJwt { .. } => "jkt-jwt",

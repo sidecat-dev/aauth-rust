@@ -346,7 +346,9 @@ fn request_builders_preserve_exact_child_credentials_and_use_parent_proof() {
     );
     for request in [person_request, auth_request] {
         let proof = PreparedRequest::prepare(&request, "sig", 1000, 60).unwrap();
-        assert!(matches!(proof.key(), KeyMaterial::Jwt(token) if token == parent.token()));
+        assert!(
+            matches!(proof.key(), KeyMaterial::Jwt { jwt: token, .. } if token == parent.token())
+        );
         proof.verify(&parent.public_jwk()).unwrap();
         assert!(proof.verify(&child.token().claims().cnf.jwk).is_err());
     }

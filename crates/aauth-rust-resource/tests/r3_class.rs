@@ -253,7 +253,10 @@ fn authorize_as(origin: &str, person: String, body: Value) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person),
+        KeyMaterial::Jwt {
+            jwt: person,
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -344,7 +347,10 @@ fn call_method(method: &str, path: &str, token: &str, seed: u8) -> Request<Vec<u
     sign_request(
         &mut request,
         &SigningKey::from_seed([seed; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -358,7 +364,10 @@ fn call_at(origin: &str, path: &str, token: &str, seed: u8) -> Request<Vec<u8>> 
     sign_request(
         &mut request,
         &SigningKey::from_seed([seed; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -742,7 +751,10 @@ fn signed_fetch_serves_exact_bytes_only_to_the_entitled_person_server() {
     sign_request(
         &mut agent_signed,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person()),
+        KeyMaterial::Jwt {
+            jwt: person(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();

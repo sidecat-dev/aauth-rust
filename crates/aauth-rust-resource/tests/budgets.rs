@@ -123,7 +123,10 @@ fn present(token: &str, max_cost: Option<i64>) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -590,7 +593,10 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
     sign_request(
         &mut high,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person_token.clone()),
+        KeyMaterial::Jwt {
+            jwt: person_token.clone(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -628,7 +634,10 @@ fn four_party_chain_narrows_at_each_stage_and_a_figure_replaces_the_assumption()
     sign_request(
         &mut unknown,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person_token.clone()),
+        KeyMaterial::Jwt {
+            jwt: person_token.clone(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -951,7 +960,10 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
     sign_request(
         &mut wrong_scheme,
         &SigningKey::from_seed([3; 32]),
-        KeyMaterial::Jwt(auth("usage", Some(2_000), "read")),
+        KeyMaterial::Jwt {
+            jwt: auth("usage", Some(2_000), "read"),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();

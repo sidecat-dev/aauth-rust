@@ -120,7 +120,10 @@ fn subagent_payment_approval_retains_exact_tokens_and_recomposes_child_grant() {
     sign_request(
         &mut child_poll,
         &SigningKey::from_seed([7; 32]),
-        KeyMaterial::Jwt(original["subagent_token"].as_str().unwrap().into()),
+        KeyMaterial::Jwt {
+            jwt: original["subagent_token"].as_str().unwrap().into(),
+            cache: false,
+        },
         1000,
     )
     .unwrap();

@@ -270,7 +270,10 @@ fn token_cannot_be_reused_with_a_different_request_key() {
     sign_request(
         &mut req,
         &SigningKey::from_seed([3; 32]),
-        KeyMaterial::Jwt(agent.token().into()),
+        KeyMaterial::Jwt {
+            jwt: agent.token().into(),
+            cache: false,
+        },
         1000,
     )
     .unwrap();

@@ -268,6 +268,19 @@ convert that decision to a response unhandled, it is refused with `403`. Every
 `unsupported_scheme` refusal lists `jwt` first, then the further schemes in the
 order you gave them.
 
+## Request a Signature-Key cache identifier
+
+A `jwt` member asks the verifier to cache its assertion with
+`KeyMaterial::Jwt { jwt, cache: true }`, as `KeyMaterial::JktJwt` does for
+`jkt-jwt`. The member ends in the bare flag, `jwt;jwt="...";cache`, and the
+request signature covers it. The assertion must carry `jti` and `exp`; without
+them signing returns `InvalidJwt` before anything is sent, which is what the
+verifier would answer. A verifier reads the flag with `proof.cache_requested()`
+and may issue an identifier through `AssertionCache`. Until a
+`Signature-Key-Cache` response names one, the client keeps sending the full
+`jwt`; afterwards it presents that identifier unchanged with
+`KeyMaterial::Cached { cid }`, and on `cache_miss` it resends the assertion.
+
 ## Replay and application effects
 
 **Identical signed bytes can be accepted twice within the validity window.**

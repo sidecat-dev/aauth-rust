@@ -1553,7 +1553,10 @@ fn run_case(case: Option<AdmissionCase>) -> Result<Transcript> {
     sign_request(
         &mut stolen,
         &SigningKey::generate(),
-        KeyMaterial::Jwt(per_call.clone()),
+        KeyMaterial::Jwt {
+            jwt: per_call.clone(),
+            cache: false,
+        },
         now(),
     )?;
     t.wrong_holder_status = api.send(&stolen)?.status().as_u16();

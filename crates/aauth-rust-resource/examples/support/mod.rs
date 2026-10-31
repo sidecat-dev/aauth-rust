@@ -169,7 +169,10 @@ pub fn run() -> Result<Vec<Observation>> {
     sign_request(
         &mut req,
         &SigningKey::generate(),
-        KeyMaterial::Jwt(valid.token().into()),
+        KeyMaterial::Jwt {
+            jwt: valid.token().into(),
+            cache: false,
+        },
         1000,
     )?;
     observations.push(send("wrong-confirmation-key", &req)?);

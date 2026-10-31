@@ -1190,7 +1190,7 @@ where
                 Error::InvalidInput => SignatureFailure::Input(required_components(request)),
                 other => SignatureFailure::Proof(other),
             })?;
-        let KeyMaterial::Jwt(compact) = proof.key() else {
+        let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
             return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
         };
         let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;
@@ -1512,7 +1512,7 @@ where
                 Error::InvalidInput => SignatureFailure::Input(required_components(request)),
                 other => SignatureFailure::Proof(other),
             })?;
-        let KeyMaterial::Jwt(compact) = proof.key() else {
+        let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
             return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
         };
         let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;

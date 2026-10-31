@@ -151,7 +151,10 @@ impl Agent {
             &[RequestSignature {
                 label: "sig",
                 key: &self.key,
-                material: KeyMaterial::Jwt(self.token.clone()),
+                material: KeyMaterial::Jwt {
+                    jwt: self.token.clone(),
+                    cache: false,
+                },
             }],
             &components,
             now,

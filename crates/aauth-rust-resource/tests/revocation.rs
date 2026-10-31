@@ -135,7 +135,10 @@ fn present(token: &str, seed: u8) -> Request<Vec<u8>> {
     sign_request(
         &mut request,
         &SigningKey::from_seed([seed; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -216,7 +219,10 @@ fn revoked_person_token_is_refused_without_a_resource_token() {
         sign_request(
             &mut request,
             &SigningKey::from_seed([9; 32]),
-            KeyMaterial::Jwt(live),
+            KeyMaterial::Jwt {
+                jwt: live,
+                cache: false,
+            },
             NOW,
         )
         .unwrap();

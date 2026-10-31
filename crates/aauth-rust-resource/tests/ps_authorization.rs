@@ -164,7 +164,10 @@ fn signed(token: &str) -> Request<Vec<u8>> {
     sign_request(
         &mut req,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(token.into()),
+        KeyMaterial::Jwt {
+            jwt: token.into(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();
@@ -1326,7 +1329,10 @@ fn authorize_json(token: Option<&str>, body: Value) -> Request<Vec<u8>> {
         sign_request(
             &mut request,
             &SigningKey::from_seed([2; 32]),
-            KeyMaterial::Jwt(token.into()),
+            KeyMaterial::Jwt {
+                jwt: token.into(),
+                cache: false,
+            },
             NOW,
         )
         .unwrap();
@@ -1627,7 +1633,10 @@ fn proactive_scope_may_be_a_subset_while_an_auth_token_must_name_every_scope() {
     sign_request(
         &mut repeated_member,
         &SigningKey::from_seed([2; 32]),
-        KeyMaterial::Jwt(person()),
+        KeyMaterial::Jwt {
+            jwt: person(),
+            cache: false,
+        },
         NOW,
     )
     .unwrap();

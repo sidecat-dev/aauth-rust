@@ -806,7 +806,7 @@ impl<K: AgentKeyResolver, S: SubscriptionStore> EventsResource<K, S> {
             }
             Err(error) => return Err(SignatureFailure::Proof(error)),
         };
-        let KeyMaterial::Jwt(compact) = proof.key() else {
+        let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
             return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
         };
         let token = SubscribeToken::parse(compact)
