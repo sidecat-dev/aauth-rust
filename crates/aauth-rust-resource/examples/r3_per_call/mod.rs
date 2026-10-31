@@ -397,7 +397,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
             sync_parent(path)?;
             Ok(true)
         }
-        Err(error) if path.exists() => Ok(false),
+        Err(_) if path.exists() => Ok(false),
         Err(error) => Err(error),
     }
 }
