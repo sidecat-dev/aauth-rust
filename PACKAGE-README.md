@@ -1,7 +1,7 @@
 # AAuth for Rust crates
 
 Development libraries for [AAuth](https://github.com/dickhardt/AAuth), version
-`0.1.0-alpha.16`, licensed under the included [MIT license](LICENSE).
+`0.1.0-alpha.17`, licensed under the included [MIT license](LICENSE).
 The [canonical project](https://gitlab.com/sidecat-dev/aauth-rust) is the project
 home and issue tracker. An archive verification run is not a release or registry
 publication; APIs and package names may change during the alpha series.
@@ -33,13 +33,13 @@ implementation, not a full-profile conformance claim.
 
 ## Use and verify development sources
 
-Internal dependencies declare version `0.1.0-alpha.16`. Until the sibling packages
+Internal dependencies declare version `0.1.0-alpha.17`. Until the sibling packages
 are available in a registry, use versioned path dependencies from a complete
 checkout. For example, in an application next to an `aauth-rust` checkout:
 
 ```toml
 [dependencies]
-aauth-rust-resource = { version = "0.1.0-alpha.16", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-resource = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-resource" }
 ```
 
 Adjust the path to your checkout. A single archive cannot supply its unpublished
