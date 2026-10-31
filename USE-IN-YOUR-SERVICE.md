@@ -1561,6 +1561,14 @@ issued tokens only. An AS interaction requirement uses the code the AS drew for
 that pending request, `DeferredContext::interaction_code`: 40 random bits from
 `generate_interaction_code`. A policy that returns any other code gets `500`.
 
+Both roles check a waiting request's stored inputs again on every poll, and the
+PS also on every host advance. When the Resource has since withdrawn the
+resource token the request was started for, or a chained request's upstream
+token is revoked, the request ends with the polling error `403 revoked`, whose
+`detail` names the token. A request that sends a revoked token, including an
+`updated_request`, is refused with `revoked_resource_token` or
+`revoked_upstream_token` instead.
+
 ### Approval without payment
 
 Use the same deferred constructors for an approval-only application. The AS

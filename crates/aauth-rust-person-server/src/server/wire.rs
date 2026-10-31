@@ -139,17 +139,22 @@ impl Failure {
         self
     }
     /// The answer to a poll, host advance or release of a pending request.
-    /// `revoked_upstream_token` names a request parameter; a chained request
-    /// that is already waiting ends instead with the polling error `revoked`,
-    /// whose `detail` says which token (Presenting a Revoked Token).
+    /// `revoked_resource_token` and `revoked_upstream_token` name request
+    /// parameters; a request that is already waiting ends instead with the
+    /// polling error `revoked`, whose `detail` says which token (Presenting a
+    /// Revoked Token).
     pub(super) fn while_pending(self) -> Self {
-        if self.code != "revoked_upstream_token" {
-            return self;
-        }
+        let detail = match self.code.as_str() {
+            "revoked_resource_token" => {
+                "The resource token this request was started for was revoked."
+            }
+            "revoked_upstream_token" => {
+                "The upstream token of this chained request, or its calling agent's agent token or binding, was revoked."
+            }
+            _ => return self,
+        };
         let mut revoked = Self::status(StatusCode::FORBIDDEN, "revoked");
-        revoked.detail = Some(
-            "The upstream token of this chained request, or its calling agent's agent token or binding, was revoked.",
-        );
+        revoked.detail = Some(detail);
         revoked.federation = self.federation;
         revoked
     }

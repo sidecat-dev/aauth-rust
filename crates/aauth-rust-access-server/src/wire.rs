@@ -103,16 +103,20 @@ impl Failure {
             detail: None,
         }
     }
-    /// The answer to a poll of a pending request. `revoked_upstream_token`
-    /// names a request parameter; a chained request that is already waiting
-    /// ends instead with the polling error `revoked`, whose `detail` says which
-    /// token (Presenting a Revoked Token).
+    /// The answer to a poll of a pending request. `revoked_resource_token` and
+    /// `revoked_upstream_token` name request parameters; a request that is
+    /// already waiting ends instead with the polling error `revoked`, whose
+    /// `detail` says which token (Presenting a Revoked Token).
     pub(crate) fn while_pending(self) -> Self {
-        if self.code != "revoked_upstream_token" {
-            return self;
-        }
+        let detail = match self.code {
+            "revoked_resource_token" => {
+                "The resource token this request was started for was revoked."
+            }
+            "revoked_upstream_token" => "The upstream token of this chained request was revoked.",
+            _ => return self,
+        };
         let mut revoked = Self::status(StatusCode::FORBIDDEN, "revoked");
-        revoked.detail = Some("The upstream token of this chained request was revoked.");
+        revoked.detail = Some(detail);
         revoked
     }
     pub(crate) fn response(self) -> Response<Vec<u8>> {

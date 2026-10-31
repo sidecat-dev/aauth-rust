@@ -1,6 +1,7 @@
 //! Access Server revocation, cascade, and pre-policy refusal.
-use aauth_rust_access_server::{AccessServer, Config, Decision};
+use aauth_rust_access_server::{AccessServer, Config, Decision, DeferredConfig, DeferredContext};
 use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse, Requirement};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthToken, CallOutcome, Confirmation, PersonClaims,
     ResourceClaims, RevocationDirectory, TokenError, mint_person_token, mint_resource_token,
@@ -239,8 +240,29 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
     assert_eq!(seen.load(Ordering::SeqCst), 1);
 }
 
+/// The PS's signed poll of an AS pending URL.
+fn poll(location: &str) -> Request<Vec<u8>> {
+    let mut request = Request::builder()
+        .method("GET")
+        .uri(location)
+        .body(Vec::new())
+        .unwrap();
+    sign_request(
+        &mut request,
+        &SigningKey::from_seed([3; 32]),
+        KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps".into(),
+        },
+        1000,
+    )
+    .unwrap();
+    request
+}
+
 #[test]
-fn resource_token_revocation_does_not_defer_and_refuses_the_challenge() {
+fn resource_token_revocation_does_not_defer_ends_waiting_requests_and_refuses_the_challenge() {
     let seen = Arc::new(AtomicUsize::new(0));
     let count = seen.clone();
     let server = AccessServer::new(
@@ -257,7 +279,20 @@ fn resource_token_revocation_does_not_defer_and_refuses_the_challenge() {
         || "auth-1".into(),
     )
     .unwrap()
-    .with_revocation();
+    .with_revocation()
+    .with_deferred(
+        {
+            let mut config = DeferredConfig::new(MemoryContinuations::new(4));
+            config.retry_after = 0;
+            config
+        },
+        |_: &DeferredContext| Ok(Some(Requirement::Approval)),
+    )
+    .unwrap();
+    // A request started before the Resource withdraws its challenge.
+    let started = server.handle(&token_request(token_body(2000), 1000));
+    assert_eq!(started.status(), 202);
+    let pending = PendingResponse::parse(&format!("{AS}/token"), &started).unwrap();
     let mut request = revoke(
         5,
         RESOURCE,
@@ -273,6 +308,19 @@ fn resource_token_revocation_does_not_defer_and_refuses_the_challenge() {
     assert!(recorded.body().is_empty());
     assert!(!recorded.headers().contains_key("content-type"));
     assert!(!recorded.headers().contains_key("location"));
+    // Presenting a Revoked Token: the waiting request ends at its next poll
+    // with the polling error `revoked`, with detail naming the resource token.
+    let ended = server.handle(&poll(&pending.location));
+    assert_eq!(ended.status(), 403);
+    assert_eq!(value(ended.body())["error"], "revoked");
+    assert!(
+        value(ended.body())["detail"]
+            .as_str()
+            .unwrap()
+            .contains("resource token")
+    );
+    assert_eq!(server.handle(&poll(&pending.location)).status(), 410);
+    // A new request naming the challenge gets the parameter error.
     let refused = server.handle(&token_request(token_body(2000), 1000));
     assert_eq!(
         refused.status(),

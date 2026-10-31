@@ -394,35 +394,74 @@ fn another_agent_or_key_cannot_poll_and_cancellation_consumes_both_roles() {
 }
 
 #[test]
-fn revoked_binding_terminates_a_waiting_agent_poll_without_as_io() {
-    let f = Fixture::new();
-    let transport = NativeTransport::new(&f, 1, 0);
-    let server = f
-        .server(2000)
-        .with_federation(transport.clone())
-        .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
-        .unwrap();
-    let holder = agent(false);
-    let (_, _, response) = initial(&f, &server, &holder);
-    let pending = PendingResponse::parse(&format!("{PS}/token"), &response).unwrap();
-    f.store
-        .inner
-        .revoke_binding(
-            PS,
-            &AgentIdentity {
-                issuer: "https://ap.example".into(),
-                subject: "aauth:Caller@ap.example".into(),
-            },
-        )
-        .unwrap();
-    let result = poll(&server, &holder, &pending.location, "GET", None, 1000);
-    assert_eq!(result.status(), 400);
-    assert_eq!(output(&result)["error"], "revoked_presented_token");
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        poll(&server, &holder, &pending.location, "GET", None, 1000).status(),
-        410
-    );
+fn a_revoked_binding_or_resource_token_ends_a_waiting_agent_poll_without_as_io() {
+    for revoked in ["binding", "resource token"] {
+        let f = Fixture::new();
+        let transport = NativeTransport::new(&f, 1, 0);
+        let server = f
+            .server(2000)
+            .with_revocation()
+            .with_federation(transport.clone())
+            .with_deferred(config(Arc::new(MemoryContinuations::new(16))))
+            .unwrap();
+        let holder = agent(false);
+        let (_, _, response) = initial(&f, &server, &holder);
+        let pending = PendingResponse::parse(&format!("{PS}/token"), &response).unwrap();
+        let (status, error) = if revoked == "binding" {
+            f.store
+                .inner
+                .revoke_binding(
+                    PS,
+                    &AgentIdentity {
+                        issuer: "https://ap.example".into(),
+                        subject: "aauth:Caller@ap.example".into(),
+                    },
+                )
+                .unwrap();
+            (400, "revoked_presented_token")
+        } else {
+            // The Resource withdraws the challenge the request was started for.
+            let mut withdraw = Request::builder()
+                .method("POST")
+                .uri(format!("{PS}/revoke"))
+                .header("content-type", "application/json")
+                .body(
+                    serde_json::to_vec(&json!({"jti": "resource-challenge", "exp": 1300})).unwrap(),
+                )
+                .unwrap();
+            sign_request(
+                &mut withdraw,
+                &SigningKey::from_seed([4; 32]),
+                KeyMaterial::JwksUri {
+                    id: ORDERS.into(),
+                    dwk: "aauth-resource.json".into(),
+                    kid: "orders-key".into(),
+                },
+                1000,
+            )
+            .unwrap();
+            assert_eq!(server.handle(&withdraw).status(), 200);
+            // Presenting a Revoked Token: the waiting request ends with the
+            // polling error `revoked`, with detail naming the resource token.
+            (403, "revoked")
+        };
+        let result = poll(&server, &holder, &pending.location, "GET", None, 1000);
+        assert_eq!(result.status(), status, "{revoked}");
+        assert_eq!(output(&result)["error"], error, "{revoked}");
+        if revoked == "resource token" {
+            assert!(
+                output(&result)["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("resource token")
+            );
+        }
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            poll(&server, &holder, &pending.location, "GET", None, 1000).status(),
+            410
+        );
+    }
 }
 #[test]
 fn expiry_during_as_call_is_reported_consistently_to_host_and_agent() {

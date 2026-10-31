@@ -361,7 +361,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::proof(ProofError::TargetMismatch, request, now));
         }
         if self.deferred.is_some() && request.uri().path().starts_with("/token/pending/") {
-            return self.pending(request, now).map_err(Failure::while_pending);
+            return self.pending(request, now);
         }
         if self.resource_interaction.is_some()
             && request.uri().path().starts_with("/token/interaction/")

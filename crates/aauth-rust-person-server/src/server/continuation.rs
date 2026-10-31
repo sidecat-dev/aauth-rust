@@ -67,9 +67,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 {
     /// Enable deferred AS exchanges after `with_federation`. Payment settlement,
     /// billing caches, identity-claim sources and interaction/code lifecycle stay
-    /// with host policy. Normal Agent GETs never contact the AS. A chained
-    /// request whose upstream token is revoked while it waits ends at the next
-    /// poll or advance with the polling error `revoked` (403).
+    /// with host policy. Normal Agent GETs never contact the AS. A request
+    /// whose resource token, or upstream token when chained, is revoked while
+    /// it waits ends at the next poll or advance with the polling error
+    /// `revoked` (403).
     pub fn with_deferred(mut self, config: DeferredConfig) -> Result<Self, ConfigurationError> {
         if self.federation.is_none()
             || !(1..=3600).contains(&config.lifetime)
@@ -314,6 +315,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let prepared = self.prepare_stored(&original, value["parameters"].clone(), now)?;
             Ok::<_, Failure>((original, prepared))
         })();
+        // A stored input revoked while the request waits ends it with the
+        // polling error `revoked`. A token the Agent sends now, such as an
+        // updated request's, is refused with its parameter code instead.
         let (original_agent, prepared) = match prepared {
             Ok(result) => result,
             Err(error) => {
@@ -324,7 +328,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 {
                     return throttled_for(&value, (self.clock)());
                 }
-                return Err(error);
+                return Err(error.while_pending());
             }
         };
         if request.method() == "DELETE" {
@@ -443,8 +447,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(Failure::internal());
             }
-            let mut response = result?;
-            self.check_release(&value, &mut response)?;
+            let mut response = result.map_err(Failure::while_pending)?;
+            self.check_release(&value, &mut response)
+                .map_err(Failure::while_pending)?;
             return Ok(response);
         }
         if now < number(&value, "next_agent")? {

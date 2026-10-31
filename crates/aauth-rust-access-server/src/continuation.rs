@@ -221,10 +221,14 @@ impl<
         if value["state"] != "waiting" {
             return Ok(throttled(1));
         }
+        // A stored input revoked while the request waits ends it with the
+        // polling error `revoked`. A token the PS sends now, such as an
+        // updated request's, is refused with its parameter code instead.
         if !post {
             let next = number(&value, "next")?;
             if now < next {
-                self.pending_current(id, &value, &owner)?;
+                self.pending_current(id, &value, &owner)
+                    .map_err(Failure::while_pending)?;
                 return Ok(throttled(next.saturating_sub(now) as u64));
             }
         }
@@ -416,9 +420,10 @@ impl<
             }
             return Err(Failure::internal());
         }
-        let mut response = result?;
+        let mut response = result.map_err(Failure::while_pending)?;
         if waiting {
-            self.pending_current(id, &value, &owner)?;
+            self.pending_current(id, &value, &owner)
+                .map_err(Failure::while_pending)?;
         }
         if response.status() == StatusCode::OK {
             // Custody removal can perform host I/O. Revalidate after it, before
@@ -427,7 +432,9 @@ impl<
             if pending_expired(&value, now)? {
                 return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
             }
-            let (context, presented) = self.authorize_body(&value["request"], &owner, now)?;
+            let (context, presented) = self
+                .authorize_body(&value["request"], &owner, now)
+                .map_err(Failure::while_pending)?;
             let mut body = strict_json(response.body()).map_err(|_| Failure::internal())?;
             let token = AuthToken::parse(required(&body, "auth_token")?)
                 .map_err(|_| Failure::internal())?;
