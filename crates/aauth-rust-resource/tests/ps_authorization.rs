@@ -744,39 +744,79 @@ fn current_mission_auth_digest_reaches_host_policy() {
 }
 
 #[test]
-fn federated_resource_refuses_a_mission_even_when_direct_context_is_enabled() {
+fn federated_resource_carries_mission_context_to_its_access_server() {
+    const AS: &str = "https://as.example";
     let calls = Arc::new(AtomicUsize::new(0));
-    let observed = calls.clone();
-    let mut snapshots = keys().0;
-    snapshots.push(issuer_key(PS, "aauth-access.json", 3, "ps-1"));
-    let resource = PsAuthorizationResource::new_federated(
-        config(),
-        PS,
-        Keys(snapshots),
-        Box::new(move |_: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok("should-not-run".to_owned())
-        }) as Policy,
-    )
-    .unwrap()
-    .with_mission_context();
+    let federated = |mission_context: bool| {
+        let observed = calls.clone();
+        let mut snapshots = keys().0;
+        snapshots.push(issuer_key(AS, "aauth-access.json", 7, "as-1"));
+        let resource = PsAuthorizationResource::new_federated(
+            config(),
+            AS,
+            Keys(snapshots),
+            Box::new(move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                token
+                    .claims()
+                    .mission_s256
+                    .clone()
+                    .ok_or(Deny)
+                    .map(|mission| format!("admitted {mission}"))
+            }) as Policy,
+        )
+        .unwrap();
+        if mission_context {
+            resource.with_mission_context()
+        } else {
+            resource
+        }
+    };
     let mut person = person_claims();
     person.mission_s256 = Some(CURRENT_MISSION.into());
     let person = mint_person_token(&SigningKey::from_seed([3; 32]), "ps-1", &person).unwrap();
-    let challenged = resource
+    let mut claims = auth_claims();
+    claims.iss = AS.into();
+    claims.dwk = "aauth-access.json".into();
+    claims.mission_s256 = Some(CURRENT_MISSION.into());
+    let as_auth = mint_auth_token(&SigningKey::from_seed([7; 32]), "as-1", &claims).unwrap();
+
+    // The default profile stays missionless with an access server too.
+    let missionless = federated(false);
+    let refused = missionless
         .authorize(&signed(&person), NOW, "mission-challenge")
         .into_response();
-    assert_eq!(challenged.status(), 401);
-    assert!(!challenged.headers().contains_key("aauth-requirement"));
-    let mut auth_claims = auth_claims();
-    auth_claims.mission_s256 = Some(CURRENT_MISSION.into());
-    auth_claims.iss = PS.into();
-    auth_claims.dwk = "aauth-access.json".into();
-    let admitted = resource
-        .authorize(&signed(&auth(&auth_claims)), NOW, "unused")
-        .into_result();
-    assert!(admitted.is_err());
+    assert_eq!(refused.status(), 401);
+    assert!(!refused.headers().contains_key("aauth-requirement"));
+    assert!(
+        missionless
+            .authorize(&signed(&as_auth), NOW, "unused")
+            .into_result()
+            .is_err()
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    let resource = federated(true);
+    let response = resource
+        .authorize(&signed(&person), NOW, "mission-challenge")
+        .into_response();
+    let challenge = ResourceToken::parse(challenge_token(&response))
+        .unwrap()
+        .verify(&keys(), NOW)
+        .unwrap();
+    assert_eq!(challenge.claims().aud, AS);
+    assert_eq!(challenge.claims().ps, PS);
+    assert_eq!(
+        challenge.claims().mission_s256.as_deref(),
+        Some(CURRENT_MISSION)
+    );
+    let (verified, admitted) = resource
+        .authorize(&signed(&as_auth), NOW, "unused")
+        .into_result()
+        .expect("an AS Auth token for the mission reaches host admission");
+    assert_eq!(verified.claims().iss, AS);
+    assert_eq!(admitted, format!("admitted {CURRENT_MISSION}"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]

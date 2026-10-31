@@ -808,14 +808,17 @@ where
         resource.access_server = Some(access_server.into());
         Ok(resource)
     }
-    /// Accept signed mission context on the direct PS path.
+    /// Accept signed mission context.
     ///
-    /// A Person token's `mission_s256` is copied into the Resource challenge.
-    /// A PS Auth token carrying one reaches host policy instead of being refused
-    /// as an unknown profile. Federated AS Auth remains missionless. The digest
-    /// is not a grant: policy must still compare it with the mission it asked for.
-    /// With [`Self::with_r3`], a class document records the mission and admits
-    /// only an Auth token for it; per-call proposals stay missionless.
+    /// A Person token's `mission_s256` is copied into the Resource challenge,
+    /// which after [`Self::new_federated`] is addressed to the access server.
+    /// An Auth token carrying one, from the Person Server or from that access
+    /// server, reaches host policy instead of being refused as an unknown
+    /// profile. The digest is not a grant: policy must still compare it with
+    /// the mission it asked for. With [`Self::with_r3`] on the direct path, a
+    /// class document records the mission and admits only an Auth token for
+    /// it. R3 behind an access server, or with per-call proposals, does not
+    /// compose with mission context ([`PsConfigurationError::InvalidR3Profile`]).
     pub fn with_mission_context(mut self) -> Self {
         self.mission_context = true;
         self
@@ -1002,7 +1005,7 @@ where
     /// coverage/body bounds follow Signature-Key's 1 MiB buffered profile and
     /// 60-second window. Direct mode accepts PS Auth; new_federated accepts only
     /// its configured AS issuer and discovery role. Missions are refused unless
-    /// `with_mission_context` is set, and AS missions stay refused either way.
+    /// `with_mission_context` is set.
     /// Known companion authority claims are refused by this immediate Core-scope profile.
     pub fn authorize(
         &self,
@@ -1615,7 +1618,7 @@ where
         }
     }
     fn mission_refused(&self, present: bool) -> bool {
-        present && (!self.mission_context || self.access_server.is_some())
+        present && !self.mission_context
     }
     fn idle_offer(&self) -> Result<BTreeMap<String, Value>, ()> {
         match &self.budgets {

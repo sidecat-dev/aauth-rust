@@ -68,6 +68,8 @@ impl PersonRequest {
 pub struct AuthorizationRequest {
     /// Verified active host-approved mission, matched to presented context. On
     /// a chained request it is owned by the calling Agent, not the intermediary.
+    /// Under federation the consent hooks receive it; the AS sees only the
+    /// `mission_s256` in the Resource and presented tokens.
     pub mission: Option<crate::MissionRecord>,
     /// Authenticated requesting Agent and verified HTTP proof holder.
     pub agent: VerifiedAgentToken,
@@ -114,6 +116,8 @@ pub trait Policy: Send + Sync {
     fn authorize(&self, request: &AuthorizationRequest) -> Result<Grant, PolicyError>;
     /// Consent to an already verified four-party exchange before the PS contacts
     /// the AS. Default denial keeps existing direct policies closed to federation.
+    /// A mission-bound exchange is evaluated here against
+    /// [`AuthorizationRequest::mission`].
     fn consent(&self, _request: &AuthorizationRequest) -> Result<(), PolicyError> {
         Err(PolicyError::Denied)
     }

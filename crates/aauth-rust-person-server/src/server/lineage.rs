@@ -122,11 +122,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             }
         };
         check_parameter_iat(value.iat, now)?;
-        // Missions are a direct-issuance feature here: under federation no
-        // mission-bound token is issued, so none can be presented or chained.
-        if value.mission.is_some() && self.federation.is_some() {
-            return Err(Failure::token(TokenError::InvalidJwt, parameter, now));
-        }
         Ok(value)
     }
     pub(super) fn match_resource(

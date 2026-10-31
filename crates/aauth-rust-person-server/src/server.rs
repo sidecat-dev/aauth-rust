@@ -244,6 +244,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// Enable AS federation for every /token request, including
     /// collocated PS=AS. No direct-issuance fallback; consent defaults denied.
     /// Host adapter owns discovery, safe HTTPS, bounds, deadlines and egress.
+    /// A mission-bound exchange is consented with its mission, which must still
+    /// be active when the AS is contacted. The AS's Auth token must carry the
+    /// same `mission_s256` and end by the mission's `expires_at`, and is
+    /// retained through [`crate::MissionStore::commit_mission_token`].
     pub fn with_federation(mut self, adapter: impl crate::Federation + 'static) -> Self {
         self.federation = Some(Box::new(adapter));
         self
@@ -818,7 +822,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .jwk
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
-            || (r.mission_s256.is_some() && (self.federation.is_some() || subagent.is_some()))
+            || (r.mission_s256.is_some() && subagent.is_some())
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
@@ -826,8 +830,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let mut core = r.extra.clone();
             core.remove("r3_uri");
             core.remove("r3_s256");
-            // A mission composes with direct class R3 only. Federation, chaining
-            // and sub-agents were refused above; proposals are refused after fetch.
+            // A mission composes with class R3 only, issued here or relayed.
+            // Sub-agents were refused above and chaining by the R3 path;
+            // proposals are refused after fetch.
             let scopes = match r.scope.as_deref() {
                 Some(scope) => parse_scopes(scope)
                     .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,

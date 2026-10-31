@@ -1,5 +1,5 @@
 use super::*;
-use crate::{FederationFailure, FederationFailureReason as Reason};
+use crate::{FederationFailure, FederationFailureReason as Reason, MissionStoreError};
 use aauth_rust_signature_key::{MAX_BODY_BYTES, sign_request};
 
 pub(super) enum RelayR3<'a> {
@@ -98,6 +98,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.inputs_current(agent, resource, presented, now)?;
         self.subagent_current(agent, context.subagent.as_ref(), now)?;
         check_upstream_current(context.upstream.as_ref(), now)?;
+        // Consent may have waited on the person; a mission ended meanwhile
+        // ends the request before the AS is contacted.
+        self.recheck_mission(context.mission.as_ref(), now, *binding_context)?;
         self.binding(&retained.principal, *binding_context)?
             .ok_or_else(Failure::internal)?;
         let adapter = self.federation.as_ref().ok_or_else(Failure::internal)?;
@@ -166,13 +169,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         } = prepared;
         let r = resource.claims();
         let upstream = context.upstream.as_ref();
+        let mission = context.mission.as_ref();
         if self.deferred.is_some()
             && [StatusCode::ACCEPTED, StatusCode::PAYMENT_REQUIRED].contains(&response.status())
         {
-            // Go keeps deferred custody for a missionless Core grant. An R3
-            // class or proposal, and a resource token that carries a budget
-            // offer, are refused after the access server answers and are not
-            // written to the continuation store.
+            // Deferred custody holds a Core grant, mission-bound or not: every
+            // poll loads the mission again. An R3 class or proposal, and a
+            // resource token that carries a budget offer, are refused after
+            // the access server answers and are not written to the
+            // continuation store.
             if relay.is_some() || prepared.offer.is_some() {
                 return Err(Failure::internal());
             }
@@ -308,6 +313,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             || c.exp > holder.claims().exp
             || c.exp > presented.exp
             || upstream.is_some_and(|up| c.exp > up.record.expires_at)
+            || mission
+                .and_then(|m| m.document.expires_at())
+                .is_some_and(|end| c.exp > end)
             || c.iat > current.saturating_add(60)
             || granted.iter().any(|s| !context.scopes.contains(s))
         {
@@ -386,9 +394,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         )?;
         record.token.reference.issuer = c.iss.clone();
         record.person_server = Some(self.config.issuer.clone());
-        self.store.commit(record, false).map_err(|e| match e {
-            StoreError::Conflict => failed(Reason::InvalidGrant),
-            other => store_issuance_failure(other, *binding_context),
+        // A mission-bound receipt commits against the unchanged active mission.
+        self.retain(record, false, mission).map_err(|e| match e {
+            MissionStoreError::Storage(StoreError::Conflict) => failed(Reason::InvalidGrant),
+            other => super::missions::mission_failure(other, *binding_context),
         })?;
         self.subagent_current(agent, context.subagent.as_ref(), (self.clock)())?;
         self.binding(&retained.principal, *binding_context)?
@@ -397,6 +406,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         self.inputs_current(agent, resource, presented, released)?;
         check_subagent_current(context.subagent.as_ref(), released)?;
         check_upstream_current(upstream, released)?;
+        self.recheck_mission(mission, released, *binding_context)?;
         if c.exp <= released {
             return Err(Failure::internal().with_federation(FederationFailure {
                 access_server: r.aud.clone(),

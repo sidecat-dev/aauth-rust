@@ -68,9 +68,13 @@ pub trait MissionStore: Send + Sync {
     ) -> Result<MissionRecord, MissionStoreError>;
     /// Atomically compare every expected field, materialize expiry, check active
     /// binding and retain the complete issuance. The record must have this PS,
-    /// the owner as principal, private person, mission ceiling and no child or
-    /// federation. Its holder is the owner, except on a chained record (with an
-    /// `upstream` tie), which the intermediary holds under the calling Agent's mission.
+    /// the owner as principal, private person, mission ceiling and no child.
+    /// Its holder is the owner, except on a chained record (with an `upstream`
+    /// tie), which the intermediary holds under the calling Agent's mission.
+    /// A federated receipt (`person_server` set) is an Access Server's Auth
+    /// token retained in this PS's namespace. Its `issued_at` is the Access
+    /// Server's clock, and its retained parent is checked as for
+    /// [`crate::Store::commit`] ([`TokenRecord::validate_federated_parent`]).
     /// Logical refusals leave token/binding/index state unchanged. Operational
     /// failure may leave a complete commit's outcome uncertain, never partial.
     fn commit_mission_token(

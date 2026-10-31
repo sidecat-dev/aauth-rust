@@ -53,6 +53,7 @@ impl AgentKeyResolver for Keys {
             (RESOURCE, "aauth-resource.json", "resource") => 4,
             (RESOURCE, "aauth-agent.json", "resource-agent") => 6,
             (DOWNSTREAM, "aauth-resource.json", "downstream") => 8,
+            ("https://as.example", "aauth-access.json", "as") => 9,
             _ => return Err(TokenError::UntrustedIssuer),
         };
         Ok(SigningKey::from_seed([seed; 32]).public_jwk())
@@ -138,6 +139,9 @@ impl Store for RacingStore {
     }
     fn revoke_binding(&self, ps: &str, a: &AgentIdentity) -> Result<(), StoreError> {
         self.inner.revoke_binding(ps, a)
+    }
+    fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
+        self.inner.retained()
     }
 }
 impl MissionStore for RacingStore {
@@ -226,6 +230,12 @@ impl Policy for Host {
     }
     fn authorize_upstream(&self, r: &AuthorizationRequest) -> Result<Grant, PolicyError> {
         self.authorize(r)
+    }
+    fn consent(&self, r: &AuthorizationRequest) -> Result<(), PolicyError> {
+        self.authorize(r).map(|_| ())
+    }
+    fn consent_upstream(&self, r: &AuthorizationRequest) -> Result<(), PolicyError> {
+        self.authorize(r).map(|_| ())
     }
 }
 type Server = PersonServer<
@@ -727,3 +737,6 @@ fn install_rejects_a_mission_that_is_not_active_before_writing_a_binding() {
     assert_eq!(binding.person_id, "private-person");
     assert!(!binding.revoked);
 }
+
+#[path = "support/federated_missions.rs"]
+mod federated_missions;

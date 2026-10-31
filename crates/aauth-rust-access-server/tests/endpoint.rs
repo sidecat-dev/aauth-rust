@@ -172,6 +172,65 @@ fn core_four_party_grant_is_bound_and_challenge_expiry_does_not_cap_it() {
     assert_eq!(c.account, Some("".into()));
 }
 #[test]
+fn a_mission_bound_grant_carries_the_mission_its_presented_token_names() {
+    // Core ps-to-as-token-request and auth-token-structure: the presented
+    // token carries the mission and its bound; the AS copies `mission_s256`.
+    const MISSION: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const OTHER: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let seen = Arc::new(AtomicUsize::new(0));
+    let count = seen.clone();
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        move |r: &aauth_rust_access_server::AuthorizationRequest| {
+            count.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(r.resource.claims().mission_s256.as_deref(), Some(MISSION));
+            Ok(Decision {
+                scopes: vec!["read".into()],
+                lifetime: 3600,
+            })
+        },
+        || 1000,
+        || "auth-1".into(),
+    )
+    .unwrap();
+    let bound = |presented: Option<&str>, challenge: Option<&str>| {
+        let mut p = person_claims();
+        // The Person Server capped this token at the mission's expiry.
+        p.exp = 1500;
+        p.mission_s256 = presented.map(str::to_owned);
+        let mut r = resource_claims();
+        r.mission_s256 = challenge.map(str::to_owned);
+        server.handle(&request(body(agent_claims(), p, r)))
+    };
+    for (presented, challenge) in [
+        (None, Some(MISSION)),
+        (Some(MISSION), None),
+        (Some(OTHER), Some(MISSION)),
+    ] {
+        let response = bound(presented, challenge);
+        let value: Value = serde_json::from_slice(response.body()).unwrap();
+        assert_eq!(response.status(), 400);
+        assert_eq!(value["error"], "invalid_resource_token");
+    }
+    assert_eq!(seen.load(Ordering::SeqCst), 0);
+    let response = bound(Some(MISSION), Some(MISSION));
+    assert_eq!(
+        response.status(),
+        200,
+        "{:?}",
+        String::from_utf8_lossy(response.body())
+    );
+    let value: Value = serde_json::from_slice(response.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().mission_s256.as_deref(), Some(MISSION));
+    assert_eq!(token.claims().exp, 1500);
+    assert_eq!(seen.load(Ordering::SeqCst), 1);
+}
+#[test]
 fn verified_lineage_and_proof_precede_policy() {
     let seen = Arc::new(AtomicUsize::new(0));
     let count = seen.clone();

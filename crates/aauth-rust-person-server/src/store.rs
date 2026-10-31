@@ -650,15 +650,16 @@ impl MissionStore for MemoryStore {
             at,
         )?;
         // A chained record is held by the intermediary; its principal is still
-        // the mission's owner, the calling Agent the upstream token names.
+        // the mission's owner, the calling Agent the upstream token names. A
+        // federated receipt was issued on the Access Server's clock, which
+        // the Person Server bounded before commit.
         if &current != expected
             || record.binding_issuer() != expected.person_server
             || record.person_id != expected.person_id
             || record.principal != expected.owner
             || (record.agent != expected.owner && record.upstream.is_none())
             || record.parent_agent.is_some()
-            || record.person_server.is_some()
-            || record.issued_at > at
+            || (record.person_server.is_none() && record.issued_at > at)
             || record.expires_at <= at
             || expected
                 .document

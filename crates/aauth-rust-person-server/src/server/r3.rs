@@ -15,12 +15,12 @@
 //! release.
 //! A class document may carry a budget offer when budgets are enabled. The
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
-//! A Person token's approved mission composes with a direct class document:
-//! the grant ends no later than the mission and commits against the unchanged
-//! active mission. Missions with proposals or federation, sub-agents, and call
-//! chaining are refused. With federation enabled, a class document or a
-//! person-presented proposal is consented and the exact tokens are relayed to
-//! the access server.
+//! A Person token's approved mission composes with a class document: the grant
+//! ends no later than the mission and commits against the unchanged active
+//! mission, whether this PS signs it or relays it. Missions with proposals,
+//! sub-agents, and call chaining are refused. With federation enabled, a class
+//! document or a person-presented proposal is consented and the exact tokens
+//! are relayed to the access server.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,

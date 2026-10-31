@@ -9,8 +9,11 @@
 //! `upstream_token` is verified per Upstream Token Verification before policy and
 //! bounds the issued token. A deferred request whose resource token, or upstream
 //! token when chained, is revoked while it waits ends with the polling error
-//! `revoked`. Full R3 and missions remain outside this profile and
-//! are refused.
+//! `revoked`. A mission-bound request is evaluated against its mission by the
+//! Person Server; this AS copies the `mission_s256` it verified on the Resource
+//! and presented tokens into the Auth token. The presented token, which the
+//! Person Server capped at the mission's expiry, bounds that token. Full R3
+//! remains outside this profile and is refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
 //!
@@ -110,6 +113,9 @@ pub struct AuthorizationRequest {
     /// Policy evaluates the parent; issued credentials belong to this child's key.
     pub subagent: Option<VerifiedAgentToken>,
     /// Verified Resource challenge, matched to the actual presented credential.
+    /// Its `mission_s256`, when present, is the Person Server's mission
+    /// identifier and equals the presented token's. The issued Auth token
+    /// carries it. Mission content and history stay with the Person Server.
     pub resource: VerifiedResourceToken,
     /// Nonempty distinct requested Core scope values.
     pub scopes: Vec<String>,
@@ -463,7 +469,6 @@ impl<
                     .jwk
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
-            || r.mission_s256.is_some()
             || extra_blocks(&r.extra, self.budgets.is_some(), self.budgets.is_some())
         {
             return Err(Failure::parameter("invalid_resource_token"));
@@ -619,7 +624,7 @@ impl<
             scope: Some(decision.scopes.join(" ")),
             account: r.account.clone(),
             tenant: r.tenant.clone(),
-            mission_s256: None,
+            mission_s256: r.mission_s256.clone(),
             nbf: None,
             extra: self.issued_extra(&context)?,
         };

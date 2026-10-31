@@ -791,8 +791,9 @@ capped at the mission's `expires_at`. The intermediary sends no `mission_s256`
 of its own; a request that does is `invalid_request`. Once the mission is
 terminated or expired, both endpoints refuse the chain with `403
 mission_terminated`. A `MissionStore` commits these records with the
-intermediary as holder and the mission owner as principal. Missions need a
-direct PS: a federated PS refuses mission-bound tokens, chained or not.
+intermediary as holder and the mission owner as principal. A federated PS
+chains missions the same way, through its AS; see
+[the federated section](#run-an-access-server-and-federated-person-server).
 
 Revoking a Person token with `PersonServer::revoke_person_token`, or an Agent
 token at `/revoke`, walks the chain. Every token obtained from the revoked one
@@ -869,8 +870,8 @@ the helper does not turn a partial grant into a new challenge automatically.
 Denied is 403,
 Unavailable or an invalid grant is 500. Issued Auth uses `aauth-access.json`, is
 bound to the intended Resource/person/Agent key and cannot outlive the Agent or
-presented credential. The challenge must be current but does not cap a
-missionless grant's lifetime. The host supplies authorization policy; accepting
+presented credential. The challenge must be current but does not cap the
+grant's lifetime, mission-bound or not. The host supplies authorization policy; accepting
 a valid PS proof alone does not grant access. This AS profile additionally requires
 the Agent token's optional `ps` claim to be present and equal to the signing PS.
 Missing/different `ps` is 400 `invalid_agent_token` before policy; this is the named
@@ -985,8 +986,8 @@ cache. Single terminal delivery applies to each continuation. Hosts own operatio
 replay protection and application idempotency.
 Full R3 compliance remains a named vocabulary gap: general media/service
 vocabularies grow in R3 and both libraries on demand, one test at a time.
-Missions and recursive sub-agent delegation remain named gaps of this Core-scope
-profile. One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
+Recursive sub-agent delegation remains a named gap of this Core-scope profile.
+One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 A federated PS chains calls through its AS. It verifies `upstream_token` exactly
@@ -1007,6 +1008,29 @@ error `revoked_upstream_token`. An AS
 `requirement=interaction` reaches the intermediary unchanged; the intermediary
 raises it to its own caller with `aauth_rust_core::interaction::ChainedInteraction`,
 under its own code and pending URL.
+
+Missions work through federation, chained or not. The PS loads the mission the
+presented token names, or on a chained request the one the upstream token
+names, and passes it to `Policy::consent` or `Policy::consent_upstream` as
+`AuthorizationRequest::mission`. It checks again that the mission is active
+before contacting the AS. The PS-to-AS request gains no member: the AS reads
+`mission_s256` from the Resource token and the presented token, refuses them
+with `invalid_resource_token` unless they match, and copies it into its Auth
+token. AS policy sees it on `AuthorizationRequest::resource`. The presented
+token, which the PS capped at the mission's `expires_at`, bounds that Auth
+token. The PS refuses an Auth token that carries another `mission_s256` or
+outlives the mission with `502 as_unreachable`. It retains a good one through
+`MissionStore::commit_mission_token`, which checks the unchanged active mission
+atomically with the write; `MemoryStore` implements it. A mission terminated
+while consent waits or while the AS decides ends the request with
+`403 mission_terminated`, and nothing is retained. One terminated after
+retention but before release ends it the same way. A deferred request loads
+its mission again on every poll and host advance, so a terminated mission ends
+it with `403 mission_terminated`, then `410`. At the Resource, call
+`with_mission_context` after `new_federated`: its AS-addressed challenge then
+carries the Person token's mission, and an AS Auth token carrying one reaches
+host policy, which must compare it with the mission it asked for. Mission
+context does not compose with R3 behind an access server (`InvalidR3Profile`).
 
 
 ## Serve direct and federated grants from one Person Server origin
@@ -1796,8 +1820,8 @@ can still pass ordinary token validation and host policy. The Resource host
 owns replay and idempotency decisions and must couple a one-effect operation
 with its own effect storage; continuation custody does not provide that guarantee.
 
-This missionless Core-scope profile supports top-level Agents and one-level
-parent-mediated children. Deadlines are capped by all original credentials,
+This Core-scope profile supports top-level Agents, with or without a mission,
+and missionless one-level parent-mediated children. Deadlines are capped by all original credentials,
 including both Agent tokens for a child and the Resource challenge. Long-wait refresh needs a later profile; submit a fresh original
 request after expiry. A clarification `updated_request` replaces the pending
 resource and presented tokens after the pair verifies and the new resource

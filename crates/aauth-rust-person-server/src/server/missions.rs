@@ -13,9 +13,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         at: i64,
         context: BindingContext,
     ) -> Result<MissionRecord, Failure> {
-        if self.federation.is_some() {
-            return Err(Failure::parameter("invalid_request"));
-        }
         let bytes = URL_SAFE_NO_PAD
             .decode(s256)
             .map_err(|_| Failure::parameter("invalid_request"))?;
@@ -65,20 +62,29 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         mission: Option<&MissionRecord>,
         context: BindingContext,
     ) -> Result<(), Failure> {
-        if let Some(mission) = mission {
-            self.store
+        self.retain(record, establish, mission)
+            .map_err(|e| mission_failure(e, context))
+    }
+    /// Retain `record`, through the mission boundary when a mission bounds it,
+    /// so the store checks the unchanged active mission atomically with the
+    /// write. A federated receipt goes the same way.
+    pub(super) fn retain(
+        &self,
+        record: TokenRecord,
+        establish: bool,
+        mission: Option<&MissionRecord>,
+    ) -> Result<(), MissionStoreError> {
+        match mission {
+            Some(mission) => self
+                .store
                 .missions()
-                .ok_or_else(Failure::internal)?
-                .commit_mission_token(mission, (self.clock)(), record, establish)
-                .map_err(|e| mission_failure(e, context))
-        } else {
-            self.store
-                .commit(record, establish)
-                .map_err(|e| store_issuance_failure(e, context))
+                .ok_or(StoreError::Unavailable)?
+                .commit_mission_token(mission, (self.clock)(), record, establish),
+            None => Ok(self.store.commit(record, establish)?),
         }
     }
 }
-fn mission_failure(error: MissionStoreError, context: BindingContext) -> Failure {
+pub(super) fn mission_failure(error: MissionStoreError, context: BindingContext) -> Failure {
     match error {
         // On a chained request the mission comes from the upstream token,
         // not from a parameter the intermediary sent.
