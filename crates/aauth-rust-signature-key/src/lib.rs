@@ -59,7 +59,7 @@ pub enum Error {
     /// Signature creation is too far ahead of the verifier clock.
     ClockSkew,
     #[error(
-        "invalid Signature-Key: check the selected scheme's parameter types, public-only OKP/Ed25519 key, and that the signer owns that key"
+        "invalid Signature-Key: check the selected scheme's parameter types, a public-only key whose kty and crv match its alg, and that the signer owns that key"
     )]
     /// Selected key material is malformed, private or inconsistent.
     InvalidKey,
@@ -158,6 +158,7 @@ impl Error {
 /// Unverified selected key conveyance; extraction alone establishes no identity.
 pub enum KeyMaterial {
     /// Header Web Key: inline public key, sufficient for pseudonymous proof only.
+    /// To sign, pass the signing key's own [`SigningKey::public_jwk`].
     Hwk(Jwk),
     /// Compact JWT carrying a confirmation key; the accepting role verifies it.
     /// `cache` is the bare `cache` flag; it requires `jti` and `exp`.
@@ -761,15 +762,17 @@ pub struct RequestSignature<'a> {
 /// signature headers; call after URI and
 /// other headers are final.
 ///
-/// A `jwt` or `jkt-jwt` member with `cache` set ends in the bare `;cache` flag.
+/// The signature uses `key`'s own algorithm. An `hwk` member carries that
+/// key's public JWK, for any algorithm in [`ACCEPTED_SIGNATURE_ALGS`]. A `jwt`
+/// or `jkt-jwt` member with `cache` set ends in the bare `;cache` flag.
 ///
 /// # Errors
 /// Computes and covers SHA-256 Content-Digest on nonempty content or when a
 /// digest field was supplied; covers Content-Type when present on nonempty content.
 /// Existing digest bytes are replaced from actual content before signing.
 /// Rejects bodies over 1 MiB, non-HTTPS/invalid targets, invalid clocks, malformed
-/// JWT/key material, an inline public key that differs from the signer, or
-/// `cache` on an assertion without `jti` and `exp` (`invalid_jwt`).
+/// JWT/key material, an inline public key that differs from the signer's key or
+/// algorithm, or `cache` on an assertion without `jti` and `exp` (`invalid_jwt`).
 pub fn sign_request(
     req: &mut Request<Vec<u8>>,
     key: &SigningKey,
@@ -926,14 +929,12 @@ fn signature_member(part: &RequestSignature<'_>) -> Result<String, Error> {
     cache::token(part.label)?;
     let body = match &part.material {
         KeyMaterial::Hwk(jwk) => {
-            jwk.validate().map_err(|_| Error::InvalidKey)?;
-            if jwk.thumbprint().ok() != part.key.public_jwk().thumbprint().ok() {
+            let signer = part.key.public_jwk();
+            let thumbprint = |key: &Jwk| key.thumbprint().map_err(|_| Error::InvalidKey);
+            if jwk.alg != signer.alg || thumbprint(jwk)? != thumbprint(&signer)? {
                 return Err(Error::InvalidKey);
             }
-            format!(
-                "hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"{}\";alg=\"Ed25519\"",
-                jwk.x
-            )
+            hwk_member(jwk)
         }
         KeyMaterial::JwksUri { id, dwk, kid } => {
             validate_reference(id, dwk, kid)?;
@@ -983,6 +984,25 @@ fn signature_member(part: &RequestSignature<'_>) -> Result<String, Error> {
         }
     };
     Ok(format!("{}={body}", part.label))
+}
+
+/// `hwk` member for a validated key: the JWK members its key type requires,
+/// in the draft's order, and never `kid`. Validated values need no escaping.
+fn hwk_member(jwk: &Jwk) -> String {
+    match jwk.kty.as_str() {
+        "EC" => format!(
+            "hwk;kty=\"EC\";crv=\"{}\";x=\"{}\";y=\"{}\";alg=\"{}\"",
+            jwk.crv, jwk.x, jwk.y, jwk.alg
+        ),
+        "RSA" => format!(
+            "hwk;kty=\"RSA\";n=\"{}\";e=\"{}\";alg=\"{}\"",
+            jwk.n, jwk.e, jwk.alg
+        ),
+        _ => format!(
+            "hwk;kty=\"OKP\";crv=\"{}\";x=\"{}\";alg=\"{}\"",
+            jwk.crv, jwk.x, jwk.alg
+        ),
+    }
 }
 
 impl std::fmt::Debug for PreparedRequest {

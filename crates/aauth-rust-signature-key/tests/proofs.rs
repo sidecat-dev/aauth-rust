@@ -2331,6 +2331,116 @@ fn ec_and_rsa_header_keys_require_their_parameters_and_verify() {
 }
 
 #[test]
+fn hwk_requests_sign_with_every_accepted_algorithm() {
+    let rng = ring::rand::SystemRandom::new();
+    let p256 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let p384 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P384_SHA384_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let rsa = rsa_pkcs8(include_bytes!("fixtures/rsa-2048.der"));
+    let ed25519 = ed25519_pkcs8(&[9; 32]);
+    let rsa_1024 = rsa_pkcs8(include_bytes!("fixtures/rsa-1024.der"));
+    for alg in ["RS256", "PS256"] {
+        assert!(matches!(
+            SigningKey::from_pkcs8_der(alg, &rsa_1024),
+            Err(aauth_rust_jose::Error::InvalidKey)
+        ));
+    }
+    for (alg, der) in [
+        ("Ed25519", ed25519.as_slice()),
+        ("ES256", p256.as_ref()),
+        ("ES384", p384.as_ref()),
+        ("RS256", rsa.as_slice()),
+        ("PS256", rsa.as_slice()),
+    ] {
+        let key = SigningKey::from_pkcs8_der(alg, der).unwrap();
+        let jwk = key.public_jwk();
+        let mut req = request();
+        sign_request(&mut req, &key, KeyMaterial::Hwk(jwk.clone()), 1000).unwrap();
+        let member = match jwk.kty.as_str() {
+            "EC" => format!(
+                r#"sig=hwk;kty="EC";crv="{}";x="{}";y="{}";alg="{alg}""#,
+                jwk.crv, jwk.x, jwk.y
+            ),
+            "RSA" => format!(
+                r#"sig=hwk;kty="RSA";n="{}";e="{}";alg="{alg}""#,
+                jwk.n, jwk.e
+            ),
+            _ => format!(
+                r#"sig=hwk;kty="OKP";crv="Ed25519";x="{}";alg="Ed25519""#,
+                jwk.x
+            ),
+        };
+        assert_eq!(req.headers()["signature-key"].to_str().unwrap(), member);
+        let prepared = PreparedRequest::prepare(&req, "sig", 1000, 60).unwrap();
+        let KeyMaterial::Hwk(inline) = prepared.key().clone() else {
+            panic!("{alg} hwk");
+        };
+        prepared.verify(&inline).unwrap();
+        assert_eq!(inline.thumbprint().unwrap(), jwk.thumbprint().unwrap());
+        let signature = req.headers()["signature"].to_str().unwrap();
+        let signature = signature
+            .strip_prefix("sig=:")
+            .and_then(|value| value.strip_suffix(':'))
+            .unwrap();
+        verify_independently(&jwk, prepared.signature_base(), &decode_std(signature));
+
+        // An inline key must be the signing key under its own algorithm.
+        let mut other_alg = jwk.clone();
+        other_alg.alg = match alg {
+            "RS256" => "PS256",
+            "PS256" => "RS256",
+            _ => "RS256",
+        }
+        .into();
+        for inline in [other_alg, SigningKey::from_seed([3; 32]).public_jwk()] {
+            assert_eq!(
+                sign_request(&mut request(), &key, KeyMaterial::Hwk(inline), 1000).unwrap_err(),
+                Error::InvalidKey,
+                "{alg}"
+            );
+        }
+    }
+}
+
+/// Check a request signature with ring rather than this library's verifier.
+fn verify_independently(jwk: &Jwk, base: &[u8], signature: &[u8]) {
+    use ring::signature::{self as sig, UnparsedPublicKey};
+    let raw = |value: &str| {
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        URL_SAFE_NO_PAD.decode(value).unwrap()
+    };
+    let point = || [vec![4], raw(&jwk.x), raw(&jwk.y)].concat();
+    let rsa = sig::RsaPublicKeyComponents {
+        n: raw(&jwk.n),
+        e: raw(&jwk.e),
+    };
+    match jwk.alg.as_str() {
+        "Ed25519" => UnparsedPublicKey::new(&sig::ED25519, raw(&jwk.x)).verify(base, signature),
+        "ES256" => {
+            UnparsedPublicKey::new(&sig::ECDSA_P256_SHA256_FIXED, point()).verify(base, signature)
+        }
+        "ES384" => {
+            UnparsedPublicKey::new(&sig::ECDSA_P384_SHA384_FIXED, point()).verify(base, signature)
+        }
+        "RS256" => rsa.verify(&sig::RSA_PKCS1_2048_8192_SHA256, base, signature),
+        _ => rsa.verify(&sig::RSA_PSS_2048_8192_SHA256, base, signature),
+    }
+    .unwrap();
+}
+
+fn decode_std(value: &str) -> Vec<u8> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    STANDARD.decode(value).unwrap()
+}
+
+#[test]
 fn x509_checks_the_chain_and_selects_one_algorithm() {
     let url = "https://Client.example/certs/leaf.pem";
     let seed = [9u8; 32];

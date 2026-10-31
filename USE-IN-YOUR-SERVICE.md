@@ -268,6 +268,30 @@ convert that decision to a response unhandled, it is refused with `403`. Every
 `unsupported_scheme` refusal lists `jwt` first, then the further schemes in the
 order you gave them.
 
+## Sign with ECDSA or RSA keys
+
+`SigningKey::generate()` and `SigningKey::from_seed(seed)` make Ed25519 keys,
+which every AAuth role and token uses. A client of a verifier that accepts other
+algorithms imports its key with `SigningKey::from_pkcs8_der(alg, der)`. `alg`
+is `Ed25519`, `ES256`, `ES384`, `RS256` or `PS256`, and `der` is an unencrypted
+PKCS #8 key, the body of a `PRIVATE KEY` PEM block. The algorithm is always
+explicit, because an RSA key names neither padding nor hash. A key that does not
+match `alg`, or an RSA modulus outside 256 to 512 bytes, is `InvalidKey`.
+`key.algorithm()` names the algorithm the key signs with.
+
+Sign an `hwk` request with `sign_request(&mut request, &key,
+KeyMaterial::Hwk(key.public_jwk()), now)`. The member carries the members of
+that key type and its `alg`, such as
+`hwk;kty="EC";crv="P-256";x="...";y="...";alg="ES256"`. An inline key that is
+not the signing key under its own algorithm is `InvalidKey` before anything is
+sent. `jwk.thumbprint()` is the RFC 7638 thumbprint of an OKP, EC or RSA key;
+`urn:jkt:sha-256:` followed by it names a pseudonymous signer, and an RSA key has
+one thumbprint under RS256 and PS256. The same key signs an `x509` request whose
+certificate holds it. Compact JWS stays Ed25519: `Jws::sign` refuses another key
+with `UnsupportedAlgorithm`. AAuth tokens and their confirmation keys, and the
+`jkt-jwt` and `self-jwt` assertions, stay Ed25519, and `ServerKeyBinding`
+admits Ed25519 pseudonym keys only.
+
 ## Request a Signature-Key cache identifier
 
 A `jwt` member asks the verifier to cache its assertion with

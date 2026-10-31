@@ -1,10 +1,14 @@
-//! Ed25519, P-256, P-384 and RSA JWKs, plus Ed25519 compact JWS. No HTTP, discovery or role policy.
+//! Ed25519, P-256, P-384 and RSA JWKs and signing keys, plus Ed25519 compact
+//! JWS. No HTTP, discovery or role policy.
 #![deny(missing_docs)]
 mod json;
 pub use json::strict_json;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::Signer;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
+use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -160,13 +164,6 @@ impl Jwk {
         Ok(Material::Rsa { n, e, padding })
     }
 
-    fn verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey, Error> {
-        match self.classify()? {
-            Material::Ed25519(key) => Ok(key),
-            _ => Err(Error::InvalidKey),
-        }
-    }
-
     /// Verify a signature over these exact message bytes.
     ///
     /// Ed25519, ES256, and ES384 use the raw signature. RS256 is RSASSA-PKCS1-v1_5
@@ -192,14 +189,26 @@ impl Jwk {
         }
     }
 
-    /// RFC 7638 thumbprint of an Ed25519 public key.
+    /// RFC 7638 SHA-256 thumbprint of any key [`Jwk::validate`] accepts.
+    ///
+    /// It hashes only the members the key type requires, in lexicographic
+    /// order: `crv`, `kty` and `x` for OKP; `crv`, `kty`, `x` and `y` for EC;
+    /// `e`, `kty` and `n` for RSA. `alg` is not hashed, so one RSA key has the
+    /// same thumbprint under RS256 and PS256.
     ///
     /// # Errors
-    /// Returns the same key/algorithm errors as [`Jwk::validate`]. Other
-    /// accepted algorithms do not use this thumbprint.
+    /// Returns the same key/algorithm errors as [`Jwk::validate`].
     pub fn thumbprint(&self) -> Result<String, Error> {
-        self.verifying_key()?;
-        let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#, self.x);
+        // Every value below was decoded as unpadded base64url or matched a
+        // fixed curve name, so none needs JSON escaping.
+        let canonical = match self.classify()? {
+            Material::Ed25519(_) => format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#, self.x),
+            Material::Ecdsa { .. } => format!(
+                r#"{{"crv":"{}","kty":"EC","x":"{}","y":"{}"}}"#,
+                self.crv, self.x, self.y
+            ),
+            Material::Rsa { .. } => format!(r#"{{"e":"{}","kty":"RSA","n":"{}"}}"#, self.e, self.n),
+        };
         Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes())))
     }
 }
@@ -240,35 +249,143 @@ fn unsigned(value: &str) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-/// Caller-owned key. Secret material is deliberately absent from Debug/Serialize.
-pub struct SigningKey(ed25519_dalek::SigningKey);
+/// Caller-owned private key for one fully specified algorithm.
+///
+/// Ed25519 is the default: [`SigningKey::generate`] and
+/// [`SigningKey::from_seed`] make Ed25519 keys, and compact JWS signs only
+/// with Ed25519. [`SigningKey::from_pkcs8_der`] also imports ES256, ES384,
+/// RS256 and PS256 keys, which sign HTTP requests such as `hwk` proofs.
+/// Secret material is deliberately absent from Debug/Serialize.
+pub struct SigningKey(Secret);
+
+enum Secret {
+    Ed25519(ed25519_dalek::SigningKey),
+    Es256(p256::ecdsa::SigningKey),
+    Es384(p384::ecdsa::SigningKey),
+    Rs256(rsa::pkcs1v15::SigningKey<Sha256>),
+    Ps256(rsa::pss::BlindedSigningKey<Sha256>),
+}
 
 impl SigningKey {
     /// Generate a fresh Ed25519 signing key using the operating system RNG.
     pub fn generate() -> Self {
-        Self(ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng))
+        let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        Self(Secret::Ed25519(key))
     }
     /// Import a caller-owned seed. Examples/tests use fixed seeds only as fixtures.
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        Self(ed25519_dalek::SigningKey::from_bytes(&seed))
+        let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+        Self(Secret::Ed25519(key))
+    }
+    /// Import an unencrypted PKCS #8 private key (RFC 5958 DER, the body of a
+    /// `PRIVATE KEY` PEM block) for one fully specified algorithm.
+    ///
+    /// The key must match `algorithm`: an Ed25519 key for `Ed25519`, a P-256
+    /// key for `ES256`, a P-384 key for `ES384`, and an `rsaEncryption` key
+    /// for `RS256` or `PS256`. An RSA key names neither padding nor hash, so
+    /// the algorithm is never inferred from the key. RS256 is RSASSA-PKCS1-v1_5
+    /// and PS256 is RSASSA-PSS with a 32-byte salt, both with SHA-256. An RSA
+    /// modulus is 256 to 512 bytes (the `rsa` crate's limit for a private
+    /// key), with an odd exponent of at least 3.
+    ///
+    /// # Errors
+    /// `UnsupportedAlgorithm` when `algorithm` is not one of the five above.
+    /// `InvalidKey` when `der` is not a key of that algorithm, or its public
+    /// key would fail [`Jwk::validate`].
+    pub fn from_pkcs8_der(algorithm: &str, der: &[u8]) -> Result<Self, Error> {
+        let secret = match algorithm {
+            "Ed25519" => ed25519_dalek::SigningKey::from_pkcs8_der(der).map(Secret::Ed25519),
+            "ES256" => p256::ecdsa::SigningKey::from_pkcs8_der(der).map(Secret::Es256),
+            "ES384" => p384::ecdsa::SigningKey::from_pkcs8_der(der).map(Secret::Es384),
+            "RS256" => rsa::RsaPrivateKey::from_pkcs8_der(der)
+                .map(|key| Secret::Rs256(rsa::pkcs1v15::SigningKey::new(key))),
+            "PS256" => rsa::RsaPrivateKey::from_pkcs8_der(der)
+                .map(|key| Secret::Ps256(rsa::pss::BlindedSigningKey::new(key))),
+            _ => return Err(Error::UnsupportedAlgorithm),
+        }
+        .map_err(|_| Error::InvalidKey)?;
+        let key = Self(secret);
+        key.public_jwk().validate().map_err(|_| Error::InvalidKey)?;
+        Ok(key)
+    }
+    /// Fully specified algorithm this key signs with, as its JWK `alg` names it.
+    pub fn algorithm(&self) -> &'static str {
+        match &self.0 {
+            Secret::Ed25519(_) => "Ed25519",
+            Secret::Es256(_) => "ES256",
+            Secret::Es384(_) => "ES384",
+            Secret::Rs256(_) => "RS256",
+            Secret::Ps256(_) => "PS256",
+        }
     }
     /// Export public material only, including its fully specified algorithm.
     pub fn public_jwk(&self) -> Jwk {
-        Jwk {
-            kty: "OKP".into(),
-            crv: "Ed25519".into(),
-            x: URL_SAFE_NO_PAD.encode(self.0.verifying_key().as_bytes()),
+        let mut jwk = Jwk {
+            kty: String::new(),
+            crv: String::new(),
+            x: String::new(),
             y: String::new(),
             n: String::new(),
             e: String::new(),
-            alg: "Ed25519".into(),
+            alg: self.algorithm().into(),
             extra: BTreeMap::new(),
+        };
+        match &self.0 {
+            Secret::Ed25519(key) => {
+                jwk.kty = "OKP".into();
+                jwk.crv = "Ed25519".into();
+                jwk.x = URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes());
+            }
+            Secret::Es256(key) => {
+                let point = key.verifying_key().to_encoded_point(false);
+                ec_coordinates(&mut jwk, "P-256", point.as_bytes());
+            }
+            Secret::Es384(key) => {
+                let point = key.verifying_key().to_encoded_point(false);
+                ec_coordinates(&mut jwk, "P-384", point.as_bytes());
+            }
+            Secret::Rs256(key) => rsa_members(&mut jwk, key.as_ref()),
+            Secret::Ps256(key) => rsa_members(&mut jwk, key.as_ref()),
         }
+        jwk
     }
     /// Sign exact bytes; callers supply domain separation and protocol framing.
-    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
-        self.0.sign(message).to_bytes()
+    ///
+    /// The result is the JWS form [`Jwk::verify`] accepts: 64 bytes for
+    /// Ed25519 and ES256, the fixed-size `R || S` of 96 bytes for ES384, and
+    /// the modulus length for RS256 and PS256. ECDSA nonces are deterministic
+    /// (RFC 6979). RSA signing draws its blinding factor, and PS256 its salt,
+    /// from the operating system RNG.
+    pub fn sign(&self, message: &[u8]) -> Vec<u8> {
+        match &self.0 {
+            Secret::Ed25519(key) => key.sign(message).to_bytes().to_vec(),
+            Secret::Es256(key) => {
+                let signature: p256::ecdsa::Signature = key.sign(message);
+                signature.to_bytes().to_vec()
+            }
+            Secret::Es384(key) => {
+                let signature: p384::ecdsa::Signature = key.sign(message);
+                signature.to_bytes().to_vec()
+            }
+            Secret::Rs256(key) => key.sign_with_rng(&mut rand_core::OsRng, message).to_vec(),
+            Secret::Ps256(key) => key.sign_with_rng(&mut rand_core::OsRng, message).to_vec(),
+        }
     }
+}
+
+/// Split an uncompressed SEC1 point, `0x04 || x || y`, into JWK members.
+fn ec_coordinates(jwk: &mut Jwk, crv: &str, point: &[u8]) {
+    let (x, y) = point[1..].split_at(point.len() / 2);
+    jwk.kty = "EC".into();
+    jwk.crv = crv.into();
+    jwk.x = URL_SAFE_NO_PAD.encode(x);
+    jwk.y = URL_SAFE_NO_PAD.encode(y);
+}
+
+fn rsa_members(jwk: &mut Jwk, key: &rsa::RsaPrivateKey) {
+    jwk.kty = "RSA".into();
+    jwk.n = URL_SAFE_NO_PAD.encode(key.n().to_bytes_be());
+    jwk.e = URL_SAFE_NO_PAD.encode(key.e().to_bytes_be());
 }
 
 /// Parsed bytes are not authenticated until `verify` succeeds.
@@ -365,9 +482,13 @@ impl Jws {
     ///
     /// # Errors
     /// Returns algorithm/header errors for an unsupported alg, crit or b64
-    /// profile, or JSON serialization errors.
+    /// profile, or JSON serialization errors. A key whose algorithm is not
+    /// Ed25519 is `UnsupportedAlgorithm`.
     pub fn sign(header: &Value, payload: &[u8], key: &SigningKey) -> Result<String, Error> {
         check_header(header)?;
+        if key.algorithm() != "Ed25519" {
+            return Err(Error::UnsupportedAlgorithm);
+        }
         let input = format!(
             "{}.{}",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(header)?),

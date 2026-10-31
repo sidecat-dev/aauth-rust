@@ -36,6 +36,11 @@ impl ServerKeyBinding {
     /// different authority.
     pub fn admit(&mut self, server: &str, key: &Jwk) -> Result<(), Error> {
         let server = server_id(server)?;
+        // Thumbprints exist for every request-key algorithm; this binding
+        // keeps its Ed25519 pseudonym profile.
+        if key.alg != "Ed25519" {
+            return Err(Error::InvalidKey);
+        }
         let thumbprint = key.thumbprint().map_err(|_| Error::InvalidKey)?;
         match self.servers.get(&thumbprint) {
             Some(bound) if bound != &server => Err(Error::InvalidKey),

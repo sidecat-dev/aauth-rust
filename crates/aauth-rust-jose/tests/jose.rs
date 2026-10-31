@@ -216,3 +216,106 @@ fn parse_rejects_critical_headers_and_nonobject_headers() {
         );
     }
 }
+
+#[test]
+fn thumbprints_match_the_rfc_examples_for_every_key_type() {
+    let key = |value: serde_json::Value| serde_json::from_value::<Jwk>(value).unwrap();
+    // RFC 8037 Appendix A.3.
+    let okp = key(json!({
+        "kty": "OKP", "crv": "Ed25519", "alg": "Ed25519",
+        "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    }));
+    assert_eq!(
+        okp.thumbprint().unwrap(),
+        "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
+    );
+    // RFC 9449 Section 6.1.
+    let ec = key(json!({
+        "kty": "EC", "crv": "P-256", "alg": "ES256",
+        "x": "l8tFrhx-34tV3hRICRDY9zCkDlpBhF42UQUfWVAWBFs",
+        "y": "9VE4jf_Ok_o64zbTTlcuNJajHmt6v9TDVrU0CdvGRDA",
+    }));
+    assert_eq!(
+        ec.thumbprint().unwrap(),
+        "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+    );
+    // RFC 7638 Section 3.1. The thumbprint does not depend on `alg`.
+    let mut rsa = key(json!({
+        "kty": "RSA", "alg": "RS256", "e": "AQAB",
+        "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+    }));
+    assert_eq!(
+        rsa.thumbprint().unwrap(),
+        "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+    );
+    rsa.alg = "PS256".into();
+    assert_eq!(
+        rsa.thumbprint().unwrap(),
+        "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+    );
+    rsa.alg = "EdDSA".into();
+    assert!(matches!(
+        rsa.thumbprint(),
+        Err(aauth_rust_jose::Error::UnsupportedAlgorithm)
+    ));
+}
+
+#[test]
+fn pkcs8_keys_sign_only_under_their_own_algorithm() {
+    use aauth_rust_jose::Error::{InvalidKey, UnsupportedAlgorithm};
+    use p256::pkcs8::EncodePrivateKey;
+
+    let seed = [7u8; 32];
+    let mut ed25519 = unhex("302e020100300506032b657004220420");
+    ed25519.extend_from_slice(&seed);
+    let imported = SigningKey::from_pkcs8_der("Ed25519", &ed25519).unwrap();
+    assert_eq!(imported.algorithm(), "Ed25519");
+    assert_eq!(imported.sign(b"m"), SigningKey::from_seed(seed).sign(b"m"));
+
+    let es256 = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng)
+        .to_pkcs8_der()
+        .unwrap();
+    let es384 = p384::ecdsa::SigningKey::random(&mut rand_core::OsRng)
+        .to_pkcs8_der()
+        .unwrap();
+    for (alg, der, crv, len) in [
+        ("ES256", es256.as_bytes(), "P-256", 64),
+        ("ES384", es384.as_bytes(), "P-384", 96),
+    ] {
+        let key = SigningKey::from_pkcs8_der(alg, der).unwrap();
+        let jwk = key.public_jwk();
+        assert_eq!(key.algorithm(), alg);
+        assert_eq!((jwk.kty.as_str(), jwk.crv.as_str()), ("EC", crv));
+        assert_eq!(jwk.alg, alg);
+        let signature = key.sign(b"signature base");
+        assert_eq!(signature.len(), len);
+        jwk.verify(b"signature base", &signature).unwrap();
+        assert!(jwk.verify(b"other base", &signature).is_err());
+        assert!(matches!(
+            Jws::sign(&json!({"alg": "Ed25519"}), b"{}", &key),
+            Err(UnsupportedAlgorithm)
+        ));
+    }
+
+    for (alg, der) in [
+        ("ES384", es256.as_bytes()),
+        ("ES256", es384.as_bytes()),
+        ("RS256", es256.as_bytes()),
+        ("Ed25519", es256.as_bytes()),
+        ("ES256", ed25519.as_slice()),
+    ] {
+        assert!(
+            matches!(SigningKey::from_pkcs8_der(alg, der), Err(InvalidKey)),
+            "{alg}"
+        );
+    }
+    for alg in ["EdDSA", "ES512", "PS384", "HS256", "none", ""] {
+        assert!(
+            matches!(
+                SigningKey::from_pkcs8_der(alg, es256.as_bytes()),
+                Err(UnsupportedAlgorithm)
+            ),
+            "{alg}"
+        );
+    }
+}

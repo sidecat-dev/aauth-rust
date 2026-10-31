@@ -10,11 +10,11 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Ed25519, ECDSA and RSA public JWKs, thumbprints and Ed25519 compact JWS primitives for AAuth"
+description = "Ed25519, ECDSA and RSA JWKs, signing keys and thumbprints, and Ed25519 compact JWS primitives for AAuth"
 
 [dependencies]
 base64.workspace = true
-ed25519-dalek.workspace = true
+ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 p256.workspace = true
 p384.workspace = true
 rand_core.workspace = true
