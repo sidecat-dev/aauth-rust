@@ -58,6 +58,7 @@ executable scenes; those tests are outside the workspace test total.
 | Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint base cases (7, including omitted presented_token), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (2 tests: immediate and deferred, including exact forwarded bytes and problem codes) |
 | Federated retained namespace | AS issuer/JTI identifies the credential; explicit PS namespace owns binding/directed identity; exact presented ancestry, conflicts/revocation and reopen | Updated public storetest and persistence contract, MemoryStore and RedbStore |
 | Call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; three-party and four-party chaining, with the Person Server passing `upstream_token` to its Access Server and retaining the chained receipt; missions carried down three- and four-party chains; original binding revocation and hop-by-hop chain revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks, including `Policy::consent_upstream` | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
+| Supervision | Supervision server role (metadata, JWKS, connect, mission, decision and event endpoints, signed terminal decisions, idempotence by `sdi`, event deduplication, standing `once`/`mission`/`always` reach) and the Person Server's consulting side (`with_supervision`): one decision point, so a routed agent's acts are never decided by host policy; `allow` narrowed to the answer's scope and `exp`, `deny` refused, ask, deferral, clarification or an unavailable SS held for the person; in-order event outbox, journal replay to a new SS, `unknown_sub` and `unknown_mission` recovery, and a stored decision record verifiable with public keys. Response signatures with `;req` components in Signature-Key. R3 and resource-initiated interaction for a supervised agent are refused | PS `tests/supervision.rs` (12), SS `tests/server.rs` (7), Signature-Key `tests/responses.rs` (2), `supervised-agents` example |
 
 Snapshot ownership and absence of network fetching are architecture properties
 checked by source inspection of `aauth-rust-core/src/discovery.rs`; they are not
@@ -998,7 +999,7 @@ Features added on 2026-10-30:
   A callback that carries an error ends the request with the mapped polling
   error.
 
-Still open: consent through a supervision server, which needs Supervision.
+Consent through a supervision server came on 2026-10-31; see below.
 
 Added later on 2026-10-30:
 
@@ -1051,6 +1052,25 @@ Added on 2026-10-31:
   held. The drafts do not say whether a per-call token may carry `budget`; this
   is the library's reading. A federated Person Server still refuses a proposal
   that offers a budget. API change: `R3Release` gains `cost`.
+- Supervision (`draft-hardt-aauth-supervision`). The new crate
+  `aauth-rust-supervision-server` is the supervision server role, and
+  `PersonServer::with_supervision` is the Person Server's side. For an agent
+  routed to a supervision server, every act the Person Server decides goes to
+  that server, and host policy is not called. Covered acts: person tokens
+  (direct, sub-agent, chained), auth tokens (three-party, sub-agent, chained,
+  four-party), permission, mission proposal, update and completion. An `allow`
+  issues, narrowed to the answer's scope and `exp`; a `deny` refuses; an ask, a
+  deferral, a clarification or an unavailable server holds the act for the
+  person at a pending URL. Reports are delivered in order, a new supervision
+  server receives the agent's journal before its first act, and a stored
+  decision verifies later against the server's public keys. Signature-Key gains
+  response signatures with `;req` components. Not covered: R3 and
+  resource-initiated interaction for a supervised agent are refused; a
+  four-party `allow` that narrows scope or `exp` is refused because the Access
+  Server takes no narrowing; `auth_token.issued` after an Access Server
+  deferral, `revocation.received` for resource tokens, `interaction.requested`,
+  and mission terminations other than completion are not reported. The draft
+  choices the library made are in INTERPRETATIONS.md and USE-IN-YOUR-SERVICE.md.
 
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
@@ -1324,7 +1344,8 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   unsupported PS parameters are refused explicitly.
 - R3 behavior is limited to the opt-in subsets above; the default Core profile
   does not negotiate it. Events is implemented as recorded above.
-  Bootstrap and Supervision behavior is absent.
+  Bootstrap behavior is absent. Supervision is recorded under "Added on
+  2026-10-31".
   Pinning a document does not imply implementing it. Opt-in budgets are the
   separate row above.
 - Header web keys sign and verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS

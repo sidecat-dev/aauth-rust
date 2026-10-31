@@ -21,7 +21,7 @@ dependencies are not MIT-only: `ed25519-dalek` 2.2.0 is BSD-3-Clause, `ring`
 0.17.14 is Apache-2.0 AND ISC, and `rustls-webpki` 0.103.15 is ISC.
 
 [CONFORMANCE.md](CONFORMANCE.md) is the behavior record. This tag does not claim
-full R3, Bootstrap, or Supervision. Directory recovery there is a process
+full R3, Bootstrap, or Supervision; Supervision is new in this tag. Directory recovery there is a process
 exit, not power loss. Person Server, Access Server, budgets, and one-level
 sub-agent guides remain in the sections below.
 
@@ -435,3 +435,19 @@ and along call chains. Child missions, missions with per-call R3 proposals, a
 human review UI and automatic Resource revocation delivery remain excluded.
 The public request/store controls are in the PS `tests/missions.rs`; scope and
 interpretation details are in CONFORMANCE.md and INTERPRETATIONS.md.
+
+## Supervise agents
+
+A person, or an organization governing its members' agents, can route agents to
+a supervision server that decides in the person's place and asks the person only
+for exceptions. `aauth-rust-supervision-server` is that server, and
+`PersonServer::with_supervision` makes the Person Server consult it. For a
+routed agent, the Person Server makes no decision of its own. Run the worked
+composition, one person with three agents and two supervision servers:
+
+```sh
+cargo run --locked -p aauth-rust-person-server --example supervised-agents
+```
+
+The setup is in USE-IN-YOUR-SERVICE.md ("Supervise agents with a supervision
+server"). What is not covered is in CONFORMANCE.md ("Added on 2026-10-31").
