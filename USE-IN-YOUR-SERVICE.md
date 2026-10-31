@@ -749,6 +749,13 @@ mission_terminated`. A `MissionStore` commits these records with the
 intermediary as holder and the mission owner as principal. Missions need a
 direct PS: a federated PS refuses mission-bound tokens, chained or not.
 
+Revoking a Person token with `PersonServer::revoke_person_token`, or an Agent
+token at `/revoke`, walks the chain. Every token obtained from the revoked one
+enters the PS's ledger, step-ups and federated Auth tokens included. Each Person
+token this PS issued with one of them as `upstream_token` is then revoked with
+its own cascade: at its Resource, at each AS it was presented to, and for the
+Auth tokens obtained with it.
+
 Route both downstream token requests to the PS named by the **verified upstream
 credential**: `iss` for a Person token, `ps` for an Auth token. Read that PS's
 admitted endpoint metadata. Never use the intermediary's own Agent-token `ps`

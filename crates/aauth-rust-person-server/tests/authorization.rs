@@ -1295,7 +1295,7 @@ fn federated_auth_token_is_upstream_evidence_at_both_endpoints_until_revoked() {
     // Core upstream-token-verification: an Auth token's iss may be an AS this
     // PS presented a person token to for that token's aud and sub. Revoking
     // that person token, or the agent token it was issued to, revokes the AS
-    // Auth token here too.
+    // Auth token here too, and walks the chain built on it.
     for revoke_agent in [false, true] {
         let f = Fixture::new();
         let server = f
@@ -1327,7 +1327,7 @@ fn federated_auth_token_is_upstream_evidence_at_both_endpoints_until_revoked() {
         let inventory = resource(&agent(true), &downstream, "read", |r| {
             r.aud = "https://as.example".into()
         });
-        compact(
+        let chained = compact(
             &f.exchange(
                 &server,
                 &agent(true),
@@ -1381,6 +1381,16 @@ fn federated_auth_token_is_upstream_evidence_at_both_endpoints_until_revoked() {
             assert_eq!(output(&refused)["error"], "revoked_upstream_token");
         }
         assert_eq!(f.host.chain_calls.load(Ordering::SeqCst), 2);
+        // The Person token issued from the revoked upstream token, and the AS
+        // Auth token obtained with it, are revoked too: neither can carry the
+        // chain a hop further.
+        for token in [&downstream, &chained] {
+            let token = reference(token);
+            assert!(
+                server.revocation_exp(&token.issuer, &token.jti).is_some(),
+                "revoke_agent={revoke_agent}: {token:?}"
+            );
+        }
     }
 }
 #[test]
