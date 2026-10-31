@@ -48,6 +48,7 @@ fn record(jti: &str, person: &str) -> TokenRecord {
 
 /// Check namespacing, round-trip, exact replay, conflicting commits, binding
 /// revocation and replacement, directed identity consistency, fully populated Auth lineage,
+/// federated receipts with their parent's exact upstream tie,
 /// R3 audit entries committed with their issuance, malformed identity/parent
 /// refusal without state changes, and concurrent first-claim / same-token
 /// retry atomicity.

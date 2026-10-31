@@ -60,6 +60,7 @@ pub(super) fn check_federation(store: impl Store) -> Result<(), String> {
     store
         .commit(step, false)
         .map_err(|e| format!("AS Auth step-up: {e}"))?;
+    check_chained_receipt(&store, &person)?;
     store
         .revoke_binding("https://ps.example", &person.principal)
         .map_err(|e| e.to_string())?;
@@ -67,6 +68,65 @@ pub(super) fn check_federation(store: impl Store) -> Result<(), String> {
     after.token.reference.jti = "after-revoke".into();
     if store.commit(after, false) != Err(StoreError::RevokedBinding) {
         return Err("AS Auth bypassed revoked PS binding".into());
+    }
+    Ok(())
+}
+
+/// An intermediary's chained Person token carries the calling Agent's upstream
+/// tie, and the AS Auth token obtained with it keeps exactly that tie.
+fn check_chained_receipt(store: &impl Store, caller: &TokenRecord) -> Result<(), String> {
+    let mut chained = caller.clone();
+    chained.token.reference.jti = "chained-person".into();
+    chained.token.compact_sha256 = "chained-digest".into();
+    chained.resource = "https://downstream.example".into();
+    chained.subject = "downstream-person".into();
+    chained.agent = AgentIdentity {
+        issuer: "https://intermediary.example".into(),
+        subject: "aauth:Intermediary@intermediary.example".into(),
+    };
+    chained.agent_token_jti = "intermediary-agent-token".into();
+    chained.agent_jkt = "intermediary-key".into();
+    chained.upstream = Some(TokenTie {
+        reference: TokenReference {
+            issuer: "https://as.example".into(),
+            jti: "caller-auth".into(),
+        },
+        compact_sha256: "caller-auth-digest".into(),
+    });
+    store
+        .commit(chained.clone(), false)
+        .map_err(|e| format!("chained Person: {e}"))?;
+    let mut receipt = chained.clone();
+    receipt.kind = TokenKind::Auth;
+    receipt.token.reference.issuer = "https://as.example".into();
+    receipt.token.reference.jti = "chained-as-auth".into();
+    receipt.token.compact_sha256 = "chained-as-digest".into();
+    receipt.person_server = Some(caller.token.reference.issuer.clone());
+    receipt.presented = Some(chained.token.clone());
+    store
+        .commit(receipt.clone(), false)
+        .map_err(|e| format!("chained AS Auth: {e}"))?;
+    if store
+        .token(&receipt.token.reference)
+        .map_err(|e| e.to_string())?
+        != Some(receipt.clone())
+    {
+        return Err("chained AS Auth did not keep its upstream tie".into());
+    }
+    for (case, upstream) in [("dropped", None), ("replaced", Some(caller.token.clone()))] {
+        let mut invalid = receipt.clone();
+        invalid.token.reference.jti = format!("chained-{case}");
+        invalid.upstream = upstream;
+        if store.commit(invalid.clone(), false) != Err(StoreError::InvalidRecord)
+            || store
+                .token(&invalid.token.reference)
+                .map_err(|e| e.to_string())?
+                .is_some()
+        {
+            return Err(format!(
+                "chained AS Auth with a {case} upstream tie accepted"
+            ));
+        }
     }
     Ok(())
 }

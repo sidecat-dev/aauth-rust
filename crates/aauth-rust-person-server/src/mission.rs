@@ -68,7 +68,9 @@ pub trait MissionStore: Send + Sync {
     ) -> Result<MissionRecord, MissionStoreError>;
     /// Atomically compare every expected field, materialize expiry, check active
     /// binding and retain the complete issuance. The record must have this PS,
-    /// owner, private person, mission ceiling and no child/upstream/federation.
+    /// the owner as principal, private person, mission ceiling and no child or
+    /// federation. Its holder is the owner, except on a chained record (with an
+    /// `upstream` tie), which the intermediary holds under the calling Agent's mission.
     /// Logical refusals leave token/binding/index state unchanged. Operational
     /// failure may leave a complete commit's outcome uncertain, never partial.
     fn commit_mission_token(

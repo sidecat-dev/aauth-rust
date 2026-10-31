@@ -162,6 +162,8 @@ pub struct TokenRecord {
     /// Exact credential presented to obtain an Auth token.
     pub presented: Option<TokenTie>,
     /// Exact original caller credential required at both chained stages.
+    /// A federated receipt for a chained request keeps the same tie as the
+    /// Person token presented for it, so the chain survives the Access Server hop.
     pub upstream: Option<TokenTie>,
     /// R3 audit entry of an Auth token this PS issued for an R3 reference. It
     /// is part of the record, so committing the record writes the entry
@@ -234,9 +236,12 @@ impl TokenRecord {
     }
     /// Check the exact retained parent of a federated Auth receipt. Adapters run
     /// this atomically with commit, after exact existing-record comparison.
+    /// A chained receipt carries its parent's `upstream` tie; any other receipt
+    /// has none.
     ///
     /// # Errors
-    /// InvalidRecord on a changed/missing PS namespace, parent, holder or identity.
+    /// InvalidRecord on a changed/missing PS namespace, parent, holder, identity
+    /// or upstream tie.
     pub fn validate_federated_parent(&self, parent: &TokenRecord) -> Result<(), StoreError> {
         if self.person_server.is_none()
             || self.presented.as_ref() != Some(&parent.token)
@@ -251,7 +256,7 @@ impl TokenRecord {
             || self.subject != parent.subject
             || self.tenant != parent.tenant
             || self.expires_at > parent.expires_at
-            || parent.upstream.is_some()
+            || self.upstream != parent.upstream
         {
             return Err(StoreError::InvalidRecord);
         }
@@ -292,7 +297,6 @@ impl TokenRecord {
             aauth_rust_core::validate_server_identifier(ps).is_err()
                 || self.kind != TokenKind::Auth
                 || establish_binding
-                || self.upstream.is_some()
         }) || !valid_tie(&self.token)
             || !valid_identity(&self.agent)
             || !valid_identity(&self.principal)
@@ -645,14 +649,15 @@ impl MissionStore for MemoryStore {
             expected.document.s256(),
             at,
         )?;
+        // A chained record is held by the intermediary; its principal is still
+        // the mission's owner, the calling Agent the upstream token names.
         if &current != expected
             || record.binding_issuer() != expected.person_server
             || record.person_id != expected.person_id
             || record.principal != expected.owner
-            || record.agent != expected.owner
+            || (record.agent != expected.owner && record.upstream.is_none())
             || record.parent_agent.is_some()
             || record.person_server.is_some()
-            || record.upstream.is_some()
             || record.issued_at > at
             || record.expires_at <= at
             || expected
