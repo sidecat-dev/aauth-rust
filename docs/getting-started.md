@@ -6,9 +6,10 @@ account to create, no DNS change and no port to open to the outside.
 
 ## Before you start
 
-Install [rustup](https://rustup.rs/) and a C compiler: `build-essential` on
-Linux, the Xcode Command Line Tools on macOS, or the Visual Studio C++ Build
-Tools on Windows. The example's TLS library needs the compiler.
+Install [git](https://git-scm.com/), [rustup](https://rustup.rs/) and a C
+compiler: `build-essential` on Linux, the Xcode Command Line Tools on macOS, or
+the Visual Studio C++ Build Tools on Windows. The example's TLS library needs
+the compiler.
 
 ## 1. Get the code
 
@@ -24,8 +25,9 @@ git checkout v0.1.0-alpha.17
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
-The first run takes longer: rustup downloads the pinned Rust 1.99.1, and Cargo
-downloads and builds the dependencies. Then the example prints:
+The first run takes longer: rustup downloads the pinned Rust 1.99.1 (several
+hundred MB), and Cargo downloads and builds the dependencies. Then the example
+prints:
 
 ```text
 unsigned: 401 requirement=agent-token
@@ -37,14 +39,19 @@ not admitted: 403
 
 The example starts two HTTPS servers on loopback ports, each with a new
 self-signed certificate that the example's client trusts and nothing else does.
+The client connects straight to each port and checks the certificate for the
+server's name; the names `ap.example` and `api.example` are never looked up,
+so nothing outside the program can reach these servers.
 
 - The **Agent Provider** at `ap.example` issues Agent tokens. An **Agent
   token** is a signed statement from the provider: this agent is
-  `aauth:assistant@ap.example`, and it holds this public key. The provider
-  publishes its own public key at `/.well-known/jwks.json`, so that anyone can
-  check its tokens.
+  `aauth:assistant@ap.example`, and it holds this public key. That name is an
+  agent identifier, `aauth:name@domain`, where the domain is the provider's.
+  The provider publishes a metadata document at
+  `/.well-known/aauth-agent.json`, which names the URL of its public keys,
+  `/.well-known/jwks.json`, so that anyone can check its tokens.
 - The **API** at `api.example` is what AAuth calls a **Resource**. At startup
-  it fetches the provider's metadata and public key. On each request it checks
+  it fetches the provider's metadata and public keys. On each request it checks
   the signature and the Agent token, then asks your policy whether to let this
   agent in.
 
@@ -77,14 +84,17 @@ The three lines of output are three requests:
    provider's signature on the token, checked that the request was signed with
    the key the token names, and the policy admitted this agent.
 3. **`not admitted: 403`.** A second agent, `aauth:other@ap.example`, signed
-   correctly, but the policy admits only the assistant. A refusal by your
-   policy is `403` and says nothing about signatures.
+   correctly, but the policy admits only the assistant. When your policy
+   refuses, the API answers `403` with no `Signature-Error` header, so the
+   agent knows its signature was accepted.
 
 ## 4. Read the code
 
 The whole program is
 [`crates/aauth-rust-resource/examples/getting-started.rs`](../crates/aauth-rust-resource/examples/getting-started.rs).
-The HTTP code is in `support/tls.rs`, which only the examples use.
+The HTTP code is in
+[`support/tls.rs`](../crates/aauth-rust-resource/examples/support/tls.rs),
+which only the examples use.
 
 <!-- sample: crates/aauth-rust-resource/examples/getting-started.rs -->
 ```rust ignore
@@ -243,8 +253,9 @@ of the API's clock.
   project.
 - [How AAuth works](how-aauth-works.md) explains the roles and tokens, and the
   ways an API can decide who gets in.
-- [Resource](roles/resource.md) shows how to put the check in front of your own
-  handlers. The `axum` example does it inside a web framework:
-  `cargo run --locked -p aauth-rust-resource --example axum`.
+- [Agent](roles/agent.md) and [Resource](roles/resource.md) cover the two
+  halves of this example: signing and reading answers, and putting the check
+  in front of your own handlers. The `axum` example does the check inside a
+  web framework: `cargo run --locked -p aauth-rust-resource --example axum`.
 - [Person Server](roles/person-server.md) adds the person: the API learns who
   the agent acts for and what that person allowed.

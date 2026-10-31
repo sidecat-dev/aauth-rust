@@ -7,44 +7,42 @@ the token sent with it. When the API needs more than the agent's identity, it
 asks for a token that names the person the agent acts for and what that person
 allowed.
 
-There is one crate for each AAuth role: Agent, Agent Provider, Resource (the
-API), Person Server, Access Server and Supervision Server. The crates implement
-the core protocol and HTTP Signature Keys, and the R3, Budgets, Events and
-Supervision drafts, each with the limits listed in
-[CONFORMANCE.md](CONFORMANCE.md). The Bootstrap draft, which covers how an agent
-enrolls with its provider, is not implemented.
-[aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
-in Go, makes the same choices where the drafts leave room, and is tested against
-this library.
+There is a crate for each party in the protocol: the agent, the Agent Provider
+that vouches for it, the API (called a Resource), and the servers that speak
+for the person or for the API. [How AAuth works](docs/how-aauth-works.md)
+introduces them.
 
 The libraries open no network connections. Your service sends and receives the
-HTTP messages, fetches other servers' keys and stores state; the libraries sign,
-verify and decide.
+HTTP messages, fetches other servers' keys and stores state; the libraries
+sign, check and decide.
 
-This is an alpha, version `v0.1.0-alpha.17`. The crates are not on crates.io:
-you build against a checkout of a release tag. APIs can change from one release
-to the next, and each release's notes list the changes.
+## Get started
 
-## Install
-
-You need [rustup](https://rustup.rs/) and a C compiler: `build-essential` on
-Linux, the Xcode Command Line Tools on macOS, or the Visual Studio C++ Build
-Tools on Windows. The examples' TLS library uses it; the libraries themselves
-are pure Rust. The checkout pins Rust 1.99.1, which rustup downloads on first
-use (several hundred MB).
+You need [git](https://git-scm.com/), [rustup](https://rustup.rs/) and a C
+compiler: `build-essential` on Linux, the Xcode Command Line Tools on macOS, or
+the Visual Studio C++ Build Tools on Windows. The examples' TLS library uses
+the compiler; the libraries themselves are pure Rust.
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
 git checkout v0.1.0-alpha.17
+cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
-To use the crates in your own project, depend on them by path. The recipe below
-starts in the checkout and creates a new project next to it,
-`../aauth-service`, whose `src/main.rs` is this program. An Agent Provider
-issues a token, an Agent signs a request with it, and a Resource verifies the
-request, all in one process. You can run the same program in the checkout with
-`cargo run --locked -p aauth-rust-resource --example library`.
+The first run downloads the pinned Rust 1.99.1 (several hundred MB) and the
+dependencies. The example starts an Agent Provider and an API on loopback
+ports, with TLS, and has an agent call the API.
+[Get started](docs/getting-started.md) walks through the output and the code.
+
+## Install
+
+The crates are not on crates.io: your project depends on a checkout of a
+release tag by path. Run the commands below from inside the checkout. They
+create a new project next to it, `../aauth-service`, and copy
+`crates/aauth-rust-resource/examples/library.rs` into it as `src/main.rs`.
+That program, shown here, has an Agent Provider issue a token, an agent sign a
+request with it, and a Resource check the request, all in one process.
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -75,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nbf: None,
         extra: Default::default(),
     })?;
-    // This application trusts this provider; a network host supplies admitted documents.
+    // This program trusts this provider. A service fetches these documents over HTTPS.
     let keys = AgentProviderKeys::from_documents(issuer, &provider.metadata()?, &provider.jwks()?)?;
     let resource = AgentIdentityResource::new(
         "https://resource.example/whoami",
@@ -97,10 +95,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The recipe assumes the checkout directory is named `aauth-rust`, and stops if
-`../aauth-service` already exists. It copies the checkout's
-`rust-toolchain.toml`, because a path dependency does not choose your toolchain,
-and creates a lockfile, because your project does not use the checkout's.
+The commands assume the checkout directory is named `aauth-rust`, and stop if
+`../aauth-service` already exists. They copy the checkout's
+`rust-toolchain.toml`, because a path dependency does not choose your
+toolchain, and create a lockfile, because your project does not use the
+checkout's.
 
 <!-- consumer-bootstrap-setup:begin -->
 ```sh
@@ -145,40 +144,31 @@ Then build it, and keep the new `Cargo.lock` with your source:
 <!-- consumer-bootstrap-build:end -->
 
 The first build downloads crates from crates.io. To run a Person Server or an
-Access Server as well, add these lines to the same `[dependencies]` table
-before you generate the lockfile:
+Access Server as well, add these lines to the `[dependencies]` table in
+`../aauth-service/Cargo.toml`, run `cargo generate-lockfile` there again, and
+build:
 
 ```toml
 aauth-rust-person-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-person-server" }
 aauth-rust-access-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
-| Crate | What it does |
-| --- | --- |
-| `aauth-rust-agent` | Signs an agent's requests and checks the tokens it receives |
-| `aauth-rust-agent-provider` | Issues Agent tokens and publishes the provider's keys |
-| `aauth-rust-resource` | Checks requests to an API before your handler runs |
-| `aauth-rust-person-server` | Binds agents to people and issues Person and Auth tokens |
-| `aauth-rust-person-server-redb` | File-backed storage for a Person Server, on Unix |
-| `aauth-rust-access-server` | Issues Auth tokens for a Resource from its own policy |
-| `aauth-rust-supervision-server` | Decides an agent's requests in its person's place |
-| `aauth-rust-r3`, `aauth-rust-budgets` | R3 documents and Budgets objects, used by the roles |
-| `aauth-rust-core`, `aauth-rust-signature-key`, `aauth-rust-jose` | Tokens, HTTP signatures and keys, used by the roles |
-
-## Get started
-
-```sh
-cargo run --locked -p aauth-rust-resource --example getting-started
-```
-
-This starts an Agent Provider and an API on loopback ports, with TLS, and has
-an agent call the API. [Get started](docs/getting-started.md) walks through
-the output and the code.
+| Crate | What it does | Guide |
+| --- | --- | --- |
+| `aauth-rust-agent` | Signs an agent's requests and checks the tokens it receives | [Agent](docs/roles/agent.md) |
+| `aauth-rust-agent-provider` | Issues Agent tokens and publishes the provider's keys | [Agent Provider](docs/roles/agent-provider.md) |
+| `aauth-rust-resource` | Checks requests to an API before your handler runs | [Resource](docs/roles/resource.md) |
+| `aauth-rust-person-server` | Knows which person an agent acts for, and issues tokens that say so | [Person Server](docs/roles/person-server.md) |
+| `aauth-rust-person-server-redb` | File-backed storage for a Person Server, on Unix | [Person Server](docs/roles/person-server.md) |
+| `aauth-rust-access-server` | Decides access for an API from the API's own rules | [Access Server](docs/roles/access-server.md) |
+| `aauth-rust-supervision-server` | Approves or refuses an agent's requests for the person | [Supervision Server](docs/roles/supervision-server.md) |
+| `aauth-rust-r3`, `aauth-rust-budgets` | Operation lists and spending caps, used by the roles | [R3](docs/features/r3.md), [Budgets](docs/features/budgets.md) |
+| `aauth-rust-core`, `aauth-rust-signature-key`, `aauth-rust-jose` | Tokens, HTTP signatures and keys, used by the roles | |
 
 ## Documentation
 
 - [docs/](docs/README.md): how AAuth works, a guide for each role and each
-  draft, and what to do about each error.
+  feature, and what to do about each error.
 - [USE-IN-YOUR-SERVICE.md](USE-IN-YOUR-SERVICE.md): the full reference for
   running each role in a service.
 - [CONFORMANCE.md](CONFORMANCE.md): what the libraries do and do not do, and
@@ -190,6 +180,19 @@ the output and the code.
   service is responsible for.
 - [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRIBUTING.md](CONTRIBUTING.md):
   how the code is organized and how to change it.
+
+## Status
+
+This is an alpha, version `v0.1.0-alpha.17`. APIs can change from one release
+to the next, and each release's notes list the changes.
+
+The crates implement the core AAuth protocol and HTTP Signature Keys, and the
+R3, Budgets, Events and Supervision drafts, each with the limits listed in
+[CONFORMANCE.md](CONFORMANCE.md). The Bootstrap draft, which covers how an
+agent enrolls with its provider, is not implemented.
+[aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
+in Go, makes the same choices where the drafts leave room, and is tested
+against this library.
 
 ## License
 

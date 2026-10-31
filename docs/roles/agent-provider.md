@@ -87,8 +87,9 @@ The claims:
   hours.
 - `cnf.jwk` is the agent's public key. Every request the agent signs must
   verify with it.
-- `ps` names the agent's Person Server, if it has one. An agent with a Person
-  Server must carry it, and this library's Access Server requires it.
+- `ps` names the agent's Person Server. If the agent has one, put it here:
+  the drafts require it, and this library's Access Server refuses an Agent
+  token without it.
 - `extra` holds further claims; their meaning is up to you and the parties you
   agree with.
 
@@ -100,24 +101,24 @@ The claims:
   implemented.
 - **The signing key**, kept safe. `SigningKey::from_pkcs8_der` loads an
   existing key.
-- **Publishing.** Serve `metadata()` and `jwks()` over HTTPS. `jwks()` holds
-  only the current key, and the provider has no rotation schedule: if you
-  replace the key, tokens signed with the old one stop verifying once
-  verifiers refresh. To keep them working through a change, serve your own
-  JWKS that holds both public keys under different key IDs.
+- **Publishing.** Serve `metadata()` and `jwks()` over HTTPS. `jwks()`
+  publishes only the current key. After you change keys, servers that refresh
+  your JWKS reject tokens signed with the old key. To change keys without
+  breaking live tokens, publish your own JWKS with both keys, each under its
+  own key ID, until the old tokens expire.
 - **Renewal.** Issue a new token before the old one expires, naming the same
   public key. The agent switches with `agent.with_token(new_token)`.
 
 ## Also in this crate
 
-- `issue_subagent` issues a token for a sub-agent, one level below a parent
-  agent. See
+- `issue_subagent` issues a token for a sub-agent: an agent that a parent
+  agent starts to do part of its work, one level below it. See
   [Obtain credentials for a one-level sub-agent](../../USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent).
 - `with_display` adds a name and logo to the metadata, which a Person Server
   can show when a person approves a new agent. See
   [Publish display metadata](../../USE-IN-YOUR-SERVICE.md#publish-display-metadata).
-- `with_event_endpoint` makes the provider an inbox for the agent's events.
-  See [Events](../features/events.md).
+- `with_event_endpoint` makes the provider an inbox where APIs send events
+  for its agents. See [Events](../features/events.md).
 
 ## Next
 

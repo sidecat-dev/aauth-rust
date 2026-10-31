@@ -14,18 +14,19 @@ on this page are the drafts' words.
 | Party | What it does | Crate |
 | --- | --- | --- |
 | **Person** | The user or organization an agent acts for, and who is accountable for what it does. | none |
-| **Agent** | An HTTP client acting for a person. It is named by an agent identifier such as `aauth:assistant@ap.example`, and holds its own signing key. | `aauth-rust-agent` |
-| **Agent Provider (AP)** | Vouches for agents: it issues each agent an Agent token. | `aauth-rust-agent-provider` |
-| **Resource** | The API the agent calls. It decides what it requires and enforces it. | `aauth-rust-resource` |
-| **Person Server (PS)** | Represents the person: it knows which person an agent acts for, asks for the person's consent, and issues tokens that say so. The person chooses their PS. | `aauth-rust-person-server` |
-| **Access Server (AS)** | Decides access for a Resource that keeps its own policy, and issues tokens on its behalf. | `aauth-rust-access-server` |
-| **Supervision Server (SS)** | Decides, in the person's place, the requests a Person Server puts to it, and asks the person only about the exceptions. | `aauth-rust-supervision-server` |
+| **Agent** | An HTTP client acting for a person. It holds its own signing key, and is named by an **agent identifier** of the form `aauth:name@domain`, such as `aauth:assistant@ap.example`. | `aauth-rust-agent` |
+| **Agent Provider (AP)** | Vouches for agents: it issues each agent an Agent token. The agent identifier's domain is the provider's. | `aauth-rust-agent-provider` |
+| **Resource** | The API the agent calls. It decides what it requires, and checks every request. | `aauth-rust-resource` |
+| **Person Server (PS)** | Speaks for the person: it knows which person each agent acts for, asks for the person's consent, and issues tokens that say so. The person chooses their Person Server. | `aauth-rust-person-server` |
+| **Access Server (AS)** | An authorization server that belongs to a Resource. It decides access by the Resource's own rules, instead of leaving the decision to the person's Person Server, and issues tokens for the Resource. | `aauth-rust-access-server` |
+| **Supervision Server (SS)** | Approves or refuses an agent's requests for the person, by rules the person or their organization sets. The Person Server asks it first, and it asks the person only when its rules do not decide. | `aauth-rust-supervision-server` |
 
-These are roles, not machines: one server can play several. Each server role is
+These are roles, not machines: one server can play several. Each server is
 named by an HTTPS origin, such as `https://ps.example`, called its **server
-identifier**. It publishes a metadata document at a well-known path, for
-example `https://ps.example/.well-known/aauth-person.json`, and that document
-names its **JWKS**: the set of public keys that check its signatures.
+identifier**. It publishes a **metadata document** at a well-known path, for
+example `https://ps.example/.well-known/aauth-person.json`: a small JSON file
+that names its endpoints and its **JWKS**, the set of public keys that check
+its signatures.
 
 ## Signed requests
 
@@ -34,7 +35,9 @@ Message Signatures ([RFC 9421](https://www.rfc-editor.org/rfc/rfc9421)). Three
 headers carry the signature:
 
 - `Signature-Key` carries the token that names the signing key, so the server
-  knows which key to check the signature with.
+  knows which key to check the signature with. The way the key is carried is
+  called the **scheme**; AAuth agents use the `jwt` scheme, which carries a
+  token.
 - `Signature-Input` lists what the signature covers: here, at least the method,
   the host, the path, the query when there is one, and `Signature-Key` itself.
   When the request has a body, the signature also covers a `Content-Digest`
@@ -50,18 +53,38 @@ each.
 All AAuth tokens are signed JWTs. Agent, Person and Auth tokens name the
 agent's public key in their `cnf` (confirmation) claim, and a server accepts
 one only on a request signed with the matching private key: a stolen token is
-useless without the agent's key. A Resource token names the agent's key by its
-thumbprint instead.
+useless without the agent's key.
+
+A **scope** is a name for a kind of access, such as `notes.read`, that a
+Resource defines and describes in its metadata.
 
 | Token | Issued by | Says |
 | --- | --- | --- |
 | **Agent token** | Agent Provider | This is agent `aauth:assistant@ap.example`, and this is its key. It may name the agent's Person Server in a `ps` claim. |
-| **Resource token** | Resource | A signed challenge: this Resource needs these scopes, for this agent and person, from this Person Server or Access Server. |
-| **Person token** | Person Server | This agent acts for this person, at this one Resource. It names the person with an identifier that only that Resource sees. It grants nothing. |
+| **Person token** | Person Server | This agent acts for this person, at this one Resource. It names the person with an identifier that only that Resource sees. It gives no access by itself: the agent uses it to get an Auth token. |
+| **Resource token** | Resource | A challenge, signed by the Resource: these scopes are needed, for this agent and person, from this Person Server or Access Server. It names the agent's key by its thumbprint, a hash of the public key. |
 | **Auth token** | Person Server or Access Server | This agent may use these scopes at this Resource, for this person, until this time. |
 
-A **scope** is a name for a kind of access, such as `notes.read`, that the
-Resource defines and describes in its metadata.
+## Challenges and waiting
+
+A server says what a request needs in an `AAuth-Requirement` response header.
+The value of `requirement` is one of:
+
+| Value | Status | The agent should |
+| --- | --- | --- |
+| `agent-token` | 401 | sign the request with its Agent token |
+| `person-token` | 401 | get a Person token for this Resource from its Person Server |
+| `auth-token` | 401 | take the Resource token in the header to its Person Server, and exchange it for an Auth token |
+| `interaction` | 202 | send the person to the URL in the header, then poll |
+| `approval` | 202 | wait for someone to approve, then poll |
+| `clarification` | 202 | answer the question in the body |
+| `claims` | 202 | (Access Server to Person Server only) supply the identity claims asked for |
+
+A `202 Accepted` response is a **deferred** answer: the answer is not ready
+yet. It has a `Location` header naming a **pending URL**. The agent sends
+signed `GET` requests to that URL, waiting at least `Retry-After` seconds
+between them, until the response is not `202`. The Rust agent prepares these
+polls with `PollSession`.
 
 ## How an API decides
 
@@ -71,39 +94,42 @@ different one on each endpoint.
 | Mode | The Resource learns | Who says so | In this library |
 | --- | --- | --- | --- |
 | Agent identity | which agent | the Agent Provider | `AgentIdentityResource` |
-| Resource-managed | which person | the Resource's own login | `SessionLedger` (Resource) and `AccessSession` (Agent) |
-| Person identity | which person | the Person Server | no Resource helper; `PsAuthorizationResource` asks for an Auth token instead |
+| Resource-managed | which person | the Resource's own sign-in | `SessionLedger` (Resource) and `AccessSession` (agent) |
+| Person identity | which person | the Person Server | no Resource helper |
 | PS authorization (three-party) | the person and what they consented to | the Person Server | `PsAuthorizationResource::new` |
 | Federated authorization (four-party) | the person and the Access Server's decision | the Access Server | `PsAuthorizationResource::new_federated` |
 
-### Agent identity
+The counts are the parties in the exchange: agent, Resource and Person Server
+make three; an Access Server makes four.
 
-The agent signs with its Agent token, and the Resource checks the token and
-decides from who the agent is. This replaces an API key with the agent's own
-key. [Get started](getting-started.md) runs this mode.
-
-```mermaid
-sequenceDiagram
-    participant Agent
-    participant Resource
-    Agent->>Resource: request, signed with the Agent token
-    Resource-->>Agent: 200
-```
+- **Agent identity.** The agent signs with its Agent token, and the Resource
+  decides from who the agent is. This replaces an API key with the agent's own
+  key. [Get started](getting-started.md) runs this mode.
+- **Resource-managed.** The Resource signs the person in by its own means,
+  then hands the agent a session token in an `AAuth-Access` header, which the
+  agent sends back in `Authorization`.
+- **Person identity.** The Resource serves requests signed with a Person
+  token. This library has no helper for it: `PsAuthorizationResource` answers
+  a Person token by asking for an Auth token.
+- **Three-party** and **four-party**, below.
 
 ### Three-party: the Person Server authorizes
 
 The Resource wants to know the person, and that the person allowed the access.
-It trusts the Person Server that issued the agent's Person token.
+It trusts the Person Server that issued the agent's Person token. The agent
+finds its Person Server in the `ps` claim of its Agent token.
 
 ```mermaid
 sequenceDiagram
     participant Agent
     participant Resource
     participant PS as Person Server
+    Agent->>Resource: request, unsigned
+    Resource-->>Agent: 401, AAuth-Requirement: requirement=person-token
     Agent->>PS: POST /person (signed with the Agent token)
     PS-->>Agent: Person token for this Resource
     Agent->>Resource: request, signed with the Person token
-    Resource-->>Agent: 401, AAuth-Requirement: requirement=auth-token, with a Resource token
+    Resource-->>Agent: 401, requirement=auth-token, with a Resource token
     Agent->>PS: POST /token with the Resource token and the Person token
     Note over PS: The Person Server applies the person's consent
     PS-->>Agent: Auth token
@@ -137,47 +163,30 @@ sequenceDiagram
 
 [Access Server](roles/access-server.md) runs this flow.
 
-## Challenges and waiting
-
-A Resource says what it needs in an `AAuth-Requirement` response header. The
-value of `requirement` is one of:
-
-| Value | Status | The agent should |
-| --- | --- | --- |
-| `agent-token` | 401 | sign the request with its Agent token |
-| `person-token` | 401 | get a Person token for this Resource from its Person Server |
-| `auth-token` | 401 | take the Resource token in the header to its Person Server |
-| `interaction` | 202 | send the person to the URL in the header, then poll |
-| `approval` | 202 | wait for someone to approve, then poll |
-| `clarification` | 202 | answer the question in the body |
-| `claims` | 202 | (Access Server to Person Server only) supply the identity claims asked for |
-
-A `202 Accepted` response means the answer is not ready. It has a `Location`
-header naming a **pending URL**, and the agent sends signed `GET` requests to
-that URL, waiting at least `Retry-After` seconds between them, until the
-response is not `202`. The Rust Agent prepares these polls with `PollSession`.
-
-## Missions and governance
+## Missions and supervision
 
 A person can require their agent to work under a **mission**: a description of
-what the agent intends to do, which the agent proposes and the person approves
-at the Person Server. Tokens obtained under a mission carry its hash,
-`mission_s256`, so every request can be checked against it.
-[Missions](features/missions.md) covers this. A
-[supervision server](features/supervision.md) can make those checks in the
-person's place.
+a task, which the agent proposes and the person approves at the Person Server.
+Tokens obtained under a mission carry its hash, `mission_s256`, so each request
+can be checked against the task. [Missions](features/missions.md) covers this.
+
+Each request the agent makes of its Person Server, such as for a token or for
+permission to act, is decided by the person, or by a
+[supervision server](features/supervision.md) that decides for them.
 
 ## What the library leaves to you
 
-The libraries sign, verify and decide, and open no connections. Your service:
+The libraries sign, check and decide, and open no connections. Your service:
 
 - sends and receives the HTTP messages, over TLS;
 - chooses which Agent Providers, Person Servers and Access Servers to trust,
   fetches their metadata and keys with its own limits and timeouts, and
-  refreshes them;
-- authenticates people and records their consent;
+  refreshes them. It gives the library a **resolver**: an object that returns
+  a trusted server's public key, given the server's identifier, its metadata
+  document's name and the key ID;
+- signs people in and records their consent;
 - stores what the Person Server and Access Server must remember, using the
-  store contracts the crates define;
+  store interfaces the crates define;
 - protects its signing keys;
 - makes repeated requests safe: a signed request can be replayed within its
   60-second window, so an operation that changes state needs its own

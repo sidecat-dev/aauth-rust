@@ -1,8 +1,9 @@
 # Access Server
 
-An Access Server decides access for a Resource that keeps its own policy. The
-Resource addresses its Resource token to the Access Server instead of the
-person's Person Server. The Person Server, once the person consents, sends that
+An Access Server is an authorization server that belongs to a Resource: it
+decides access by the Resource's own rules, instead of leaving the decision to
+the person's Person Server. The Resource addresses its Resource token to the
+Access Server instead of the Person Server. The Person Server, once the person consents, sends that
 token to the Access Server, which applies the Resource's policy and issues the
 Auth token. This is four-party access: agent, Resource, Person Server and
 Access Server.
@@ -94,8 +95,8 @@ impl Policy for People {
     }
 }
 
-/// How the Person Server reaches Access Servers. Yours admits the Access
-/// Server, reads its metadata and sends over HTTPS.
+/// How the Person Server reaches Access Servers. Yours accepts only the
+/// Access Servers you trust, reads their metadata and sends over HTTPS.
 struct ToAccessServer(Arc<dyn Fn(&Request<Vec<u8>>) -> Response<Vec<u8>> + Send + Sync>);
 impl Federation for ToAccessServer {
     fn endpoint(&self, access_server: &str) -> Result<String, FederationError> {
@@ -325,23 +326,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 To answer later rather than at once, for approval, payment, a question or
 identity claims, use `with_deferred`; see
-[Configure AS and PS continuations](../../USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations).
+[Deferred answers at the Access Server and Person Server](../../USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations).
 `cargo run --locked -p aauth-rust-resource --example four-party -- --deferred`
 runs payment and approval over TLS.
 
 ## The Person Server side
 
 - `with_federation(adapter)` makes the Person Server send `/token` requests to
-  the Access Server named by the Resource token. A federated Person Server
-  always does: to issue its own Auth tokens as well, run a second instance and
-  route between them, as the
+  the Access Server named by the Resource token. Once it is on, the Person
+  Server sends every `/token` request to an Access Server and no longer issues
+  Auth tokens itself. To do both, run two instances and route between them, as
+  the
   [mixed-grants example](../../USE-IN-YOUR-SERVICE.md#serve-direct-and-federated-grants-from-one-person-server-origin)
   does.
 - `Policy::consent` decides for the person. It refuses unless you implement
   it.
-- The adapter's `endpoint` admits the Access Server and returns its token
-  endpoint, from its metadata; `send` sends the signed request unchanged, with
-  no redirects. When the Access Server cannot be reached, the agent gets
+- The adapter's `endpoint` refuses Access Servers you do not trust, and
+  returns the token endpoint from a trusted one's metadata; `send` sends the
+  signed request unchanged, following no redirects. When the Access Server cannot be reached, the agent gets
   `502 as_unreachable`.
 
 ## The Resource and the agent

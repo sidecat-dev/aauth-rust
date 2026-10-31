@@ -269,6 +269,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 | POST `/person` | Issue a Person token for one Resource |
 | POST `/token` | Exchange a Resource token and a presented token for an Auth token |
 
+The **presented token** is the Person token (or an earlier Auth token) the
+agent signed its request to the Resource with; the Resource token names it,
+and the agent sends both to `/token`.
+
 Agents should take the endpoint URLs from the metadata
 (`person_token_endpoint`, `auth_token_endpoint`). More endpoints appear when you
 turn on the options below, and the metadata lists only the endpoints that are
@@ -282,23 +286,28 @@ blocking worker.
   claim from an Agent Provider you have an agreement with. Never from
   `login_hint` or other request parameters; the agent wrote those. Return
   `Person` with your internal `id`, a `subject` for this Resource, stable and
-  different for each Resource, and an optional `tenant`.
-  `request.enrolls_agent()` is true the first time an agent is bound to a
-  person.
+  different for each Resource, and an optional `tenant`, the organization the
+  person belongs to. The Person Server records the agent's **binding** to that
+  person and holds it from then on; `request.enrolls_agent()` is true the first
+  time.
 - **`Policy::authorize`**: return the scopes the person allows, a non-empty
   subset of those requested, and a lifetime of at most 3600 seconds, or
   `PolicyError::Denied`.
-- **Trust**: a resolver for the Agent Providers and Resources you accept,
-  built from their published documents, as `Trust` above.
+- **Trust**: a [resolver](../how-aauth-works.md#what-the-library-leaves-to-you)
+  for the Agent Providers and Resources you accept, built from their published
+  documents, as `Trust` above.
 - **A store** for issued tokens and person bindings. `MemoryStore` loses
   everything on restart. `aauth-rust-person-server-redb` stores them in a file
   on Unix; see
   [Durable Person Server storage](../../USE-IN-YOUR-SERVICE.md#durable-person-server-storage).
   A store of your own must pass `storetest::check_store_contract`.
 - **A clock** in Unix seconds, and **token IDs** unique across restarts.
-- **The person's login and consent screens.** In this library the Person
-  Server cannot send a person to a login page in the middle of a request: if
-  you lack the evidence, refuse, or return `PolicyError::UserUnreachable`.
+- **Sign-in and consent, ahead of time.** The person signs in and gives
+  consent on your own pages, outside these requests: the Person Server cannot
+  pause a `/person` or `/token` request to send the person to a sign-in page.
+  If your policy cannot decide from what you already know, refuse with
+  `PolicyError::Denied`, or with `PolicyError::UserUnreachable`, which the
+  agent receives as `403 user_unreachable`.
 
 The Person Server checks the agent's signature, the Agent token, the Resource
 token and the presented token before your policy runs, and keeps the record of
@@ -310,13 +319,13 @@ it holds that token's record, so keep the store when you restart.
 | Call | Adds | Guide |
 | --- | --- | --- |
 | `with_federation(adapter)` | Auth tokens from a Resource's own Access Server | [Access Server](access-server.md) |
-| `with_deferred(config)` | `202` answers while an Access Server waits for approval or payment | [Configure AS and PS continuations](../../USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) |
+| `with_deferred(config)` | Deferred (`202`) answers while an Access Server waits for approval or payment | [Deferred answers at the Access Server and Person Server](../../USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) |
 | `with_missions()` | Mission proposal, approval, update and completion | [Missions](../features/missions.md) |
-| `with_governance(governance)` | Interaction, permission and audit endpoints | [Missions](../features/missions.md) |
-| `with_supervision(config)` | A supervision server decides for routed agents | [Supervision](../features/supervision.md) |
+| `with_governance(governance)` | Endpoints where the agent asks the person's permission and records what it did | [Missions](../features/missions.md) |
+| `with_supervision(config)` | A supervision server decides for the agents you assign to it | [Supervision](../features/supervision.md) |
 | `with_r3(...)` | Auth tokens for R3 documents | [R3](../features/r3.md) |
 | `with_budgets(...)` | Budgets on Auth tokens | [Budgets](../features/budgets.md) |
-| `with_revocation(...)` | A revocation endpoint and its cascades | [Run a Person Server](../../USE-IN-YOUR-SERVICE.md#run-a-person-server) |
+| `with_revocation()` | A revocation endpoint; revoking a token also revokes the tokens obtained with it | [Make an immediate downstream call](../../USE-IN-YOUR-SERVICE.md#make-an-immediate-downstream-call) |
 | `with_resource_interaction(config)` | A Resource's own sign-in step before consent | [Resolve a Resource's own interaction](../../USE-IN-YOUR-SERVICE.md#resolve-a-resources-own-interaction) |
 
 `Policy::bind_upstream` and `Policy::authorize_upstream` serve

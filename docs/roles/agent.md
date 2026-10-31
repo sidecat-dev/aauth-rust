@@ -4,9 +4,8 @@ An agent is an HTTP client acting for a person. With this crate it holds its
 private key and its current token, signs each request, reads what servers ask
 for, and checks the tokens they send back before using them.
 
-The crate does not send requests, wait or retry. Your code does, so nothing is
-sent twice unless you send it twice. There is no HTTP client in the crate
-that answers challenges by itself.
+The crate does not send requests, wait or retry; your HTTP client does, so
+nothing is sent twice unless you send it twice.
 
 Crate: `aauth-rust-agent`. Terms are defined in
 [How AAuth works](../how-aauth-works.md).
@@ -137,13 +136,16 @@ empty, `sign` adds a `Content-Digest` header and covers it, and covers
 afterwards breaks the signature. Signing a request again replaces the old
 signature.
 
-When a Resource's metadata lists `additional_signature_components`, sign for
-it with `agent.with_additional_signature_components(list)`.
+If a Resource's metadata, at `/.well-known/aauth-resource.json`, lists
+`additional_signature_components`, make the agent for that Resource with
+`agent.with_additional_signature_components(list)`, so that its signatures
+cover them.
 
 ## Checking what servers send
 
-Never pass on a token you have not checked. When a Resource answers with
-`requirement=auth-token`, the header carries a Resource token:
+Check every token a server sends you before you use it or send it on. When a
+Resource answers with `requirement=auth-token`, the header carries a Resource
+token:
 
 - In three-party access, check it with `agent.verify_resource_challenge`,
   exchange it at your Person Server, and check the Auth token you get back
@@ -163,8 +165,9 @@ handles.
 
 ## Waiting for an answer
 
-A `202` response means the answer is not ready. `PollSession` prepares the
-polls and enforces the server's timing:
+A `202` response is a [deferred answer](../how-aauth-works.md#challenges-and-waiting):
+the answer is not ready yet. `PollSession` prepares the polls and enforces the
+server's timing:
 
 1. `PollSession::new(endpoint, &response, now, deadline)` reads the `202`. The
    deadline is yours, at most one hour away.
@@ -184,12 +187,13 @@ The four-party example runs a deferred exchange:
 
 - `agent.missions()` tracks missions the Person Server reported ended. See
   [Missions](../features/missions.md).
-- `Subagent` checks a sub-agent's token and credentials. See
+- `Subagent` checks the token and credentials of a sub-agent: an agent that
+  this agent starts to do part of its work, one level below it. See
   [Obtain credentials for a one-level sub-agent](../../USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent).
-- `EventSubscriptions` and `agent.sign_subscription` receive events. See
-  [Events](../features/events.md).
-- `AccessSession` keeps a Resource's session token (`AAuth-Access`) for
-  resource-managed access.
+- `EventSubscriptions` and `agent.sign_subscription` let an API notify the
+  agent later. See [Events](../features/events.md).
+- `AccessSession` keeps the session token a Resource hands out in an
+  `AAuth-Access` header, for resource-managed access.
 
 ## Next
 

@@ -154,7 +154,8 @@ request:
   signature.
 - Keep the method and the headers as received.
 - Read the whole body, with a limit, before checking. The library refuses a
-  body over 1 MiB. Check the body before you decompress it.
+  body over 1 MiB. Pass the body as it arrived, still compressed if it was
+  sent compressed: `Content-Digest` covers those bytes.
 - If TLS ends at a proxy in front of your service, make sure the proxy passes
   the method, path, query, body, `Content-Type` and `Content-Digest` through
   unchanged.
@@ -199,21 +200,23 @@ handler. Failures carry an `application/problem+json` body.
 
 `PsAuthorizationResource::new(config, keys, policy)` takes:
 
-- `issuer`, your published server identifier, and `signed_origin`, the origin
-  requests are sent to (they differ only when you listen on another port);
+- `issuer`, the server identifier you publish, such as `https://api.example`,
+  and `signed_origin`, the origin requests are sent to. They differ only when
+  the origin has a port, such as `https://api.example:8443`;
 - `kid` and `signing_key`, which sign your Resource tokens;
 - `scopes`, the scopes every route behind this value requires, and
   `scope_descriptions`, a description of each one that your metadata
   publishes;
-- `keys`, which must resolve the Person Servers you trust
-  (`aauth-person.json`), or your Access Server (`aauth-access.json`) for
-  `new_federated`.
+- `keys`, a resolver for the public keys of the Person Servers you trust,
+  read from each one's `aauth-person.json`, or of your Access Server, from its
+  `aauth-access.json`, for `new_federated`.
 
 Serve `metadata()` and `jwks()` at `/.well-known/aauth-resource.json` and
 `/.well-known/jwks.json`. Call `authorize(&request, now, challenge_id)` with a
-fresh unique `challenge_id` for each request. One value requires one fixed set
-of scopes; use another value for routes that need other scopes. An Auth token
-that grants only some of the configured scopes is refused with `403`.
+new unique `challenge_id` for each request: it becomes the ID of the Resource
+token, if one is issued. Each `PsAuthorizationResource` requires one fixed set
+of scopes; make one for each set your routes need. An Auth token that grants
+only some of them is refused with `403`.
 
 Options, each described in its guide: `with_mission_context`
 ([Missions](../features/missions.md)), `with_budgets`
@@ -224,7 +227,7 @@ Options, each described in its guide: `with_mission_context`
 ## What your service supplies
 
 - The Agent Providers, Person Servers and Access Servers you trust, and their
-  keys, fetched by you and refreshed when an `UnknownKey` error says a key is
+  keys, which you fetch, and refresh when an `UnknownKey` error says a key is
   missing.
 - Your signing key, for `PsAuthorizationResource`.
 - **Protection against repeats.** A signed request is accepted again if it is

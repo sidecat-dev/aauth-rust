@@ -1,12 +1,13 @@
 # Supervision Server
 
-A supervision server decides an agent's requests in its person's place. A
-person with many agents, or an organization governing its members' agents,
-registers a supervision server with their Person Server. For each agent routed
-to it, the Person Server puts every act to the server: a Person token, an Auth
-token, a permission, a mission proposal, update or completion. The server
+A supervision server approves or refuses an agent's requests for the person.
+A person with many agents, or an organization that governs its members'
+agents, registers one with the Person Server and assigns agents to it. For each
+assigned agent, the Person Server asks the server before it issues a Person or
+Auth token, grants a permission, or accepts a mission proposal, update or
+completion. The draft calls each of these requests an **act**. The server
 answers `allow`, `deny` or `ask` (put it to the person), or asks the agent a
-question first. It also receives reports of what happened afterwards.
+question first. Afterwards the Person Server reports to it what happened.
 
 The server issues no tokens and calls no one: everything it says is a response
 to the Person Server. With a signing key it signs every final answer, so the
@@ -36,8 +37,8 @@ sequenceDiagram
 ```
 
 When the answer is `ask`, or the server cannot be reached, the Person Server
-holds the act: the agent gets `202` and polls, and your service asks the
-person.
+answers the agent `202` and keeps the request pending while your service asks
+the person.
 
 ## Smallest working code
 
@@ -86,7 +87,7 @@ impl supervision::Policy for Standing {
 }
 
 /// The Person Server still says which person an agent acts for. For an agent
-/// routed to a supervision server, `authorize` is not called.
+/// assigned to a supervision server, `authorize` is not called.
 struct People;
 impl Policy for People {
     fn bind_person(&self, _: &PersonRequest) -> Result<Person, PolicyError> {
@@ -223,7 +224,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &server.jwks().ok_or("unsigned")?,
     )?;
 
-    // The Person Server, with every agent routed to that server.
+    // The Person Server, with every agent assigned to that server.
     let reach = server.clone();
     let router = Router {
         metadata: server.metadata(),
@@ -261,7 +262,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 - `Config::new(issuer)`, with `with_signing(kid, key)` to sign answers and
   publish `jwks_uri`. Set `interaction_url` to the page where a person
-  confirms a new Person Server, if your policy asks them to.
+  confirms that a Person Server may send you their agents' requests, if your
+  policy asks them to.
 - `keys`, a resolver for the Person Servers you accept
   (`aauth-person.json`). Others are refused with `unsupported_iss`.
 - `policy`, which implements `supervision::Policy`:
@@ -279,8 +281,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 `handle` serves the metadata, the JWKS, and the `/connect`, `/mission`,
 `/decision`, `/event` and `/pending/` paths. The same request repeated under
 the same decision ID gets the same signed answer without asking your policy
-again. When the person answers `mission` or `always`, the server remembers it
-and applies it to later acts of the same kind by the same agent.
+again. A person who answers an act can say how far the answer reaches: this
+once, for the rest of the mission (`mission`), or from now on (`always`). The
+server remembers `mission` and `always` answers and applies them to later acts
+of the same kind by the same agent.
 
 ## The Person Server side
 
@@ -296,7 +300,7 @@ on. `host` is your implementation of `Supervision`:
   `send(request)` sends the signed bytes unchanged. Apply your own limits on
   where you connect, and follow no redirects.
 
-For a routed agent, your `Policy::bind_person` still says which person the
+For an assigned agent, your `Policy::bind_person` still says which person the
 agent acts for; `authorize`, `consent` and the mission approval are not
 called. The Person Server's resolver must hold the supervision server's keys
 (`aauth-supervisor.json`): by default it accepts only signed answers.
@@ -310,8 +314,9 @@ answers and the record of decisions.
   agent.
 - In four-party access, an `allow` that narrows the scope or expiry is refused,
   because the Access Server takes no narrowing.
-- Some reports are not sent; [CONFORMANCE.md](../../CONFORMANCE.md) lists them
-  under "Added on 2026-10-31".
+- These reports are not sent: `auth_token.issued` after an Access Server
+  deferral, `revocation.received` for Resource tokens,
+  `interaction.requested`, and mission endings other than completion.
 
 ## Next
 

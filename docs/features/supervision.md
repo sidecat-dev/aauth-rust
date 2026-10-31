@@ -1,11 +1,11 @@
 # Supervision
 
-Supervision is the decision on each act an agent asks its Person Server for:
-a Person token, an Auth token, a permission, a mission proposal, update or
-completion. By default the person decides, through your Person Server's
-policy. With a **supervision server**, the Person Server puts each act of the
-agents routed to it to that server instead, which answers from standing
-policy and asks the person only about the exceptions.
+Supervision is the decision on each **act**: each request an agent makes of
+its Person Server for a Person token, an Auth token, a permission, or a
+mission proposal, update or completion. By default the person decides,
+through your Person Server's policy. With a **supervision server**, the Person
+Server asks that server instead, for the agents assigned to it; the server
+answers from standing rules and asks the person only about the exceptions.
 
 Defined in `draft-hardt-aauth-supervision`. The
 [Supervision Server](../roles/supervision-server.md) guide sets up both sides;
@@ -16,7 +16,7 @@ this page covers what happens to each act. Terms are defined in
 
 ```mermaid
 flowchart TD
-    A[Agent asks the Person Server for an act] --> B{Agent routed to a supervision server?}
+    A[Agent asks the Person Server for an act] --> B{Agent assigned to a supervision server?}
     B -->|no| P[Your Person Server policy decides]
     B -->|yes| C[The Person Server checks the request, then asks the server]
     C --> D{Answer}
