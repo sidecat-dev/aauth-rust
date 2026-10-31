@@ -292,6 +292,9 @@ pub(super) struct R3Profile {
     operation_for_request: BoxedR3OperationMapper,
     pub(super) require_core_scope: bool,
     per_call: Option<R3PerCallConfig>,
+    /// The Resource meters the release of a held result, not the execution,
+    /// of operations its definition annotates `budget: true`.
+    release_metered: bool,
 }
 
 enum Issue {
@@ -331,6 +334,7 @@ impl R3Profile {
             operation_for_request: config.operation_for_request,
             require_core_scope: config.require_core_scope,
             per_call: None,
+            release_metered: false,
         })
     }
 

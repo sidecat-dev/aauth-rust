@@ -24,7 +24,7 @@ use crate::document::{Document, validate_document_account};
 use crate::error::Error;
 use crate::grant::{Authorization, Grant};
 use crate::jsonvalue::{expect_json_string, parse_raw_object};
-use crate::proposal::validate_proposal_account;
+use crate::proposal::{Proposal, validate_proposal_account};
 use crate::reference::Reference;
 use crate::vocabulary::{GrantedOperations, Operation, Registry};
 
@@ -496,6 +496,20 @@ pub fn mint_per_call_auth_token(
     reference: &Reference,
     exact_proposal: &[u8],
 ) -> Result<String, R3TokenError> {
+    let granted = per_call_granted(registry, claims, reference, exact_proposal)?;
+    let mut prepared = claims.clone();
+    prepare_auth_members(&mut prepared.extra, reference, granted, None)?;
+    Ok(aauth_rust_core::mint_auth_token(key, kid, &prepared)?)
+}
+
+/// The signed `r3_granted` value of a per-call Auth token: exactly the one
+/// operation of the proposal `reference` names, after checking its account.
+pub(crate) fn per_call_granted(
+    registry: &Registry,
+    claims: &AuthClaims,
+    reference: &Reference,
+    exact_proposal: &[u8],
+) -> Result<Value, R3TokenError> {
     let proposal = registry
         .parse_referenced_proposal(reference, exact_proposal)
         .map_err(|err| wrap("r3: per-call auth-token proposal", err))?;
@@ -506,10 +520,7 @@ pub fn mint_per_call_auth_token(
         .vocabulary(operation.vocabulary())
         .ok_or_else(|| r3_error("r3: per-call auth-token vocabulary is not registered"))?;
     let granted = GrantedOperations::new(&vocabulary, std::slice::from_ref(&operation))?;
-    let granted = signed_operations_value(registry, &granted)?;
-    let mut prepared = claims.clone();
-    prepare_auth_members(&mut prepared.extra, reference, granted, None)?;
-    Ok(aauth_rust_core::mint_auth_token(key, kid, &prepared)?)
+    signed_operations_value(registry, &granted)
 }
 
 /// Verify a direct-only Auth token: Core trust, one complete reference, and
@@ -604,6 +615,18 @@ pub fn verify_per_call_auth_token(
         .parse_referenced_proposal(expected_reference, exact_proposal)
         .map_err(|err| wrap("r3: verify per-call proposal", err))?;
     let token = verify_auth_token_claims(registry, compact, keys, now)?;
+    let operation = per_call_operation(&token, expected_reference, &proposal)?;
+    Ok((token, operation))
+}
+
+/// The one operation a verified per-call Auth token grants, after checking
+/// that it echoes `expected_reference`, carries no `r3_per_call`, matches the
+/// proposal's account, and grants exactly the proposal's operation.
+pub(crate) fn per_call_operation(
+    token: &VerifiedR3AuthToken,
+    expected_reference: &Reference,
+    proposal: &Proposal,
+) -> Result<Operation, R3TokenError> {
     if token.operations.per_call_present || !token.operations.per_call.operations()?.is_empty() {
         return Err(r3_error(
             "r3: per-call auth token must not contain r3_per_call",
@@ -614,7 +637,7 @@ pub fn verify_per_call_auth_token(
             "r3: per-call auth token changed the proposal reference",
         ));
     }
-    validate_proposal_account(&proposal, token.claims.account.as_deref())
+    validate_proposal_account(proposal, token.claims.account.as_deref())
         .map_err(|err| wrap("r3: per-call auth-token account", err))?;
     let mut operations = token.operations.granted.operations()?;
     if operations.len() != 1 {
@@ -628,7 +651,7 @@ pub fn verify_per_call_auth_token(
             "r3: per-call auth token granted an operation other than the proposal",
         ));
     }
-    Ok((token, operation))
+    Ok(operation)
 }
 
 pub(crate) fn referenced_document(

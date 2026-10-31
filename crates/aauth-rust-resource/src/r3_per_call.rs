@@ -28,7 +28,13 @@
 //! with the record. Completion releases that stored response once to the first
 //! exact per-call token; the host executes nothing. An operation the
 //! Resource's own definition annotates `budget: true` draws down a budget when
-//! it runs, so the Resource never asks the hook to run it before approval.
+//! it runs, so the Resource never asks the hook to run it before approval,
+//! unless [`PsAuthorizationResource::with_release_metering`] says the Resource
+//! meters the release of such an operation's result instead. A metered release
+//! states its cost, the proposal's Resource token offers that cost as its
+//! budget, and the release draws it down from the per-call Auth token once,
+//! as for any held invocation (`draft-hardt-aauth-budgets`, Deferred Delivery).
+//! A declined release meters nothing.
 //! A re-requested held call (for example after the presented class token
 //! expired during approval) is proposed again from that custody: the stored
 //! proposal bytes and response move to the new challenge, the prior record is
@@ -36,12 +42,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
+use aauth_rust_budgets::{Budget, parse_resource_claims};
 use aauth_rust_core::continuation::generate_pending_id;
-use aauth_rust_core::{AgentKeyResolver, ResourceClaims, VerifiedAuthToken};
+use aauth_rust_core::{AgentKeyResolver, ResourceClaims, ResourceToken, VerifiedAuthToken};
 use aauth_rust_r3::{
     Display, Operation, Parameters, PresentedParameter, Proposal, ProposalDisplay, ProposalOptions,
-    ProposalResult, Reference, VerifiedR3AuthToken, digest, mint_proposal_resource_token,
-    validate_proposal_account, verify_per_call_auth_token,
+    ProposalResult, Reference, VerifiedR3AuthToken, digest, mint_budget_proposal_resource_token,
+    mint_proposal_resource_token, validate_proposal_account, verify_budget_per_call_auth_token,
+    verify_per_call_auth_token,
 };
 use http::{Request, Response, StatusCode};
 use serde_json::json;
@@ -49,7 +57,7 @@ use serde_json::json;
 use super::{R3Grant, R3HostError, R3Profile, R3StoreError, document_response, no_store};
 use crate::PolicyOutcome;
 use crate::ps_authorization::{
-    AuthDecision, PsAuthorizationResource, PsConfigurationError, refusal,
+    AuthDecision, PsAuthorizationResource, PsConfigurationError, insert_budget, refusal,
 };
 
 const PERSON_DOCUMENT: &str = "aauth-person.json";
@@ -107,8 +115,9 @@ pub struct R3CallDescription {
 /// result changes when the call runs: the draft forbids executing first where
 /// execution is audited, metered or billed, or calls another party. The
 /// Resource does not call it for an operation its authoritative definition
-/// annotates `budget: true`; whether a call is audited or billed, or calls
-/// another party, only the host knows.
+/// annotates `budget: true`, unless
+/// [`PsAuthorizationResource::with_release_metering`] is set; whether a call
+/// is audited or billed, or calls another party, only the host knows.
 pub type BoxedR3Release = Box<
     dyn Fn(
             &Request<Vec<u8>>,
@@ -134,6 +143,11 @@ pub struct R3Release {
     /// The computed response, released once on approval and never otherwise.
     /// An application `202` is kept under the same rule as an executed call.
     pub response: Response<Vec<u8>>,
+    /// What releasing this response draws down, in the first unit the Resource
+    /// declares. `Some` exactly for an operation annotated `budget: true`
+    /// under [`PsAuthorizationResource::with_release_metering`]; `None` for
+    /// an unmetered release.
+    pub cost: Option<i64>,
 }
 
 /// One held request, retained so the `202` completion runs the exact call.
@@ -374,6 +388,8 @@ pub(super) struct R3Completion {
     /// Held-result horizon copied from the proposal record. Completion refuses
     /// at this instant even when the per-call Auth token is still unexpired.
     pub(super) release_until: Option<i64>,
+    /// Release cost a metered release draws down from the per-call Auth token.
+    pub(super) cost: Option<i64>,
 }
 
 /// Removes one proposal URI from the in-process held-execution set.
@@ -769,6 +785,24 @@ struct Publication {
     release_until: Option<i64>,
     /// The unclaimed held release this challenge retires.
     supersedes: Option<String>,
+    /// Budget offer of a metered release: exactly its cost.
+    offer: Option<Budget>,
+}
+
+/// The budget offer a stored proposal's Resource token carries: the cost of a
+/// metered release. The record is Resource custody, so its own token is read
+/// without verifying it again.
+fn stored_offer(record: &R3ProposalRecord) -> Result<Option<Budget>, ()> {
+    let token = ResourceToken::parse(&record.resource_token).map_err(|_| ())?;
+    let claims = token.unverified_claims();
+    let offer = parse_resource_claims(&claims.extra, &claims.presented_jti)
+        .map_err(|_| ())?
+        .budget;
+    // Only a held release is metered here.
+    if offer.is_some() && record.released.is_none() {
+        return Err(());
+    }
+    Ok(offer)
 }
 
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
@@ -801,6 +835,43 @@ where
             return Err(PsConfigurationError::InvalidR3Profile);
         };
         profile.per_call = Some(config);
+        Ok(self)
+    }
+
+    /// Meter the release of a held result, rather than the execution, for
+    /// operations this Resource's definition annotates `budget: true`
+    /// (`draft-hardt-aauth-r3`, Approving Release Rather Than Execution).
+    ///
+    /// The `release` hook of [`Self::with_r3_per_call`] is then called for
+    /// those operations too, and a release it returns for one must state
+    /// [`R3Release::cost`]; the hook returns `None` for any whose execution is
+    /// itself metered or billed. The proposal's Resource token offers exactly
+    /// that cost in the first declared unit, the Person Server grants a budget
+    /// on the per-call Auth token, and releasing the result draws the cost down
+    /// once, so the ledger and usage counters show it. A per-call token whose
+    /// budget is below the cost is refused with `403` and an `AAuth-Budget`
+    /// stating `required`, and releases nothing. A declined release meters
+    /// nothing. Call after [`Self::with_budgets`] and [`Self::with_r3_per_call`].
+    ///
+    /// # Errors
+    /// [`PsConfigurationError::InvalidBudgetProfile`] when budgets are not
+    /// enabled, [`PsConfigurationError::InvalidR3Profile`] when per-call
+    /// release is not configured.
+    pub fn with_release_metering(mut self) -> Result<Self, PsConfigurationError> {
+        if self.budgets.is_none() {
+            return Err(PsConfigurationError::InvalidBudgetProfile);
+        }
+        let Some(profile) = self.r3.as_mut() else {
+            return Err(PsConfigurationError::InvalidR3Profile);
+        };
+        if profile
+            .per_call
+            .as_ref()
+            .is_none_or(|per_call| per_call.release.is_none())
+        {
+            return Err(PsConfigurationError::InvalidR3Profile);
+        }
+        profile.release_metered = true;
         Ok(self)
     }
 
@@ -909,12 +980,17 @@ where
                 let Some(release_until) = prior.release_until else {
                     return AuthDecision::InternalError;
                 };
+                // A metered release keeps the cost it was first offered at.
+                let Ok(offer) = stored_offer(&prior) else {
+                    return AuthDecision::InternalError;
+                };
                 let publication = Publication {
                     expires_at: now.saturating_add(PROPOSAL_LIFETIME).min(c.exp),
                     supersedes: Some(prior.reference.uri().to_owned()),
                     exact: prior.exact_json,
                     released: prior.released,
                     release_until: Some(release_until),
+                    offer,
                 };
                 return self.publish_proposal(
                     profile,
@@ -939,11 +1015,16 @@ where
         }
         // Release gating runs the call now, only under 202; with_r3_per_call
         // refuses release without hold, and this refuses it again. Execution
-        // that draws down a budget is the metered event, so approval precedes it.
+        // that draws down a budget is the metered event, so approval precedes
+        // it, unless this Resource meters the release instead. A metered
+        // release states its cost and an unmetered one states none.
         let release = match (&per_call.release, per_call.hold) {
             (Some(run), true) => match profile.metered(operation) {
-                Ok(true) => None,
-                Ok(false) => match run(request, operation, &presented, c.account.as_deref()) {
+                Ok(true) if !profile.release_metered => None,
+                Ok(metered) => match run(request, operation, &presented, c.account.as_deref()) {
+                    Ok(Some(release)) if release.cost.is_some() != metered => {
+                        return AuthDecision::InternalError;
+                    }
                     Ok(release) => release,
                     Err(_) => return AuthDecision::InternalError,
                 },
@@ -951,6 +1032,19 @@ where
             },
             (Some(_), false) => return AuthDecision::InternalError,
             (None, _) => None,
+        };
+        // The proposal offers exactly the release cost. A declared ceiling
+        // below it could never be granted, so nothing is proposed.
+        let offer = match (
+            release.as_ref().and_then(|release| release.cost),
+            &self.budgets,
+        ) {
+            (None, _) => None,
+            (Some(cost), Some(gate)) => match gate.release_offer(cost) {
+                Ok(offer) => Some(offer),
+                Err(_) => return AuthDecision::InternalError,
+            },
+            (Some(_), None) => return AuthDecision::InternalError,
         };
         let display = match &release {
             Some(release) => match release_display(&release.display) {
@@ -983,6 +1077,7 @@ where
             released: release
                 .map(|release| prepare_retained(&self.document_origin(), &release.response)),
             supersedes: None,
+            offer,
         };
         self.publish_proposal(
             profile,
@@ -1044,14 +1139,26 @@ where
             &claims.aud,
             &claims.jti,
         );
-        let Ok((compact, reference)) = mint_proposal_resource_token(
-            &profile.registry,
-            &self.config.signing_key,
-            &self.config.kid,
-            &claims,
-            &uri,
-            &publication.exact,
-        ) else {
+        let minted = match &publication.offer {
+            Some(offer) => mint_budget_proposal_resource_token(
+                &profile.registry,
+                &self.config.signing_key,
+                &self.config.kid,
+                &claims,
+                &uri,
+                &publication.exact,
+                offer,
+            ),
+            None => mint_proposal_resource_token(
+                &profile.registry,
+                &self.config.signing_key,
+                &self.config.kid,
+                &claims,
+                &uri,
+                &publication.exact,
+            ),
+        };
+        let Ok((compact, reference)) = minted else {
             return AuthDecision::InternalError;
         };
         // A held call's pending URL ends in a fresh random id, never the
@@ -1229,15 +1336,49 @@ where
             .retained_proposal(profile, &record, record.reference.uri())
             .map_err(|()| AuthDecision::InternalError)?;
         // Exactly the stored proposal: same reference, one operation, no r3_per_call, account.
-        let (verified, operation): (VerifiedR3AuthToken, Operation) = verify_per_call_auth_token(
-            &profile.registry,
-            token.compact(),
-            &self.keys,
-            now,
-            &record.reference,
-            &record.exact_json,
-        )
-        .map_err(|_| forbidden())?;
+        // A metered release also needs the budget the Person Server granted
+        // against the offered cost: the release draws all of it at once.
+        let offer = stored_offer(&record).map_err(|()| AuthDecision::InternalError)?;
+        let (verified, operation): (VerifiedR3AuthToken, Operation) = match &offer {
+            Some(offer) => {
+                let (verified, operation, grant) = verify_budget_per_call_auth_token(
+                    &profile.registry,
+                    token.compact(),
+                    &self.keys,
+                    now,
+                    &record.reference,
+                    &record.exact_json,
+                )
+                .map_err(|_| forbidden())?;
+                if grant.unit() != offer.unit()
+                    || grant.decimals() != offer.decimals()
+                    || grant.amount() > offer.amount()
+                {
+                    return Err(forbidden());
+                }
+                // Refused before the claim, so a token that does fit can
+                // still release the result.
+                if grant.amount() < offer.amount() {
+                    let gate = self.budgets.as_ref().ok_or(AuthDecision::InternalError)?;
+                    let header = gate
+                        .refusal_header(token, &grant, Some(offer.amount()))
+                        .map_err(|_| AuthDecision::InternalError)?;
+                    return Err(AuthDecision::Forbidden {
+                        budget_header: Some(header),
+                    });
+                }
+                (verified, operation)
+            }
+            None => verify_per_call_auth_token(
+                &profile.registry,
+                token.compact(),
+                &self.keys,
+                now,
+                &record.reference,
+                &record.exact_json,
+            )
+            .map_err(|_| forbidden())?,
+        };
         let claims = verified.claims();
         let holder = claims
             .cnf
@@ -1295,6 +1436,7 @@ where
                 executing: None,
                 released: record.released.clone(),
                 release_until: record.release_until,
+                cost: offer.map(|offer| offer.amount()),
             }),
         })
     }
@@ -1334,6 +1476,7 @@ where
         else {
             return Err(AuthDecision::InternalError);
         };
+        let (uri, cost) = (completion.uri.clone(), completion.cost);
         if completion.token.retain_until <= now
             || completion.release_until.is_some_and(|until| now >= until)
         {
@@ -1391,12 +1534,42 @@ where
         // The store is host code too. A completed revocation during its claim or
         // retain callback fences first execution, first release and replay.
         if self.presented_revoked(&claims.iss, &claims.jti, now) {
-            Err(AuthDecision::Revoked {
+            return Err(AuthDecision::Revoked {
                 auth_token: true,
                 budget_header: None,
-            })
-        } else {
-            outcome
+            });
+        }
+        match (outcome, cost) {
+            (Err(AuthDecision::Replayed(response)), Some(cost)) => {
+                Err(self.meter_release(&uri, cost, token, *response, now))
+            }
+            (outcome, _) => outcome,
+        }
+    }
+
+    /// Draw a metered release's cost down from the per-call Auth token once
+    /// (`draft-hardt-aauth-budgets`, Deferred Delivery, rules 2 and 4): the
+    /// first answer meters it, a replay reports the token's current
+    /// `remaining` and the cost without metering again. When metering fails
+    /// nothing is released now; the result stays retained and is metered when
+    /// the token is presented again.
+    fn meter_release(
+        &self,
+        uri: &str,
+        cost: i64,
+        token: &VerifiedAuthToken,
+        mut response: Response<Vec<u8>>,
+        now: i64,
+    ) -> AuthDecision<O::Context> {
+        let Some(gate) = &self.budgets else {
+            return AuthDecision::InternalError;
+        };
+        match gate.complete_held(uri, token, cost, cost, now) {
+            Ok(header) => {
+                insert_budget(&mut response, Some(header));
+                AuthDecision::Replayed(Box::new(response))
+            }
+            Err(_) => AuthDecision::InternalError,
         }
     }
 }
@@ -1411,6 +1584,13 @@ impl R3Grant {
     /// The original held request under `202`, which is what the host executes.
     pub fn held_request(&self) -> Option<&Request<Vec<u8>>> {
         self.completion.as_ref()?.held.as_ref()
+    }
+    /// Whether this completion releases a metered held result. The claim
+    /// meters it by its cost, so it is not admitted as a metered request.
+    pub(crate) fn meters_release(&self) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|completion| completion.cost.is_some())
     }
 }
 

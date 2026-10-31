@@ -1116,6 +1116,7 @@ fn query_release(control: Arc<AdmissionControl>) -> BoxedR3Release {
                 result,
                 display,
                 response,
+                cost: None,
             }))
         },
     )

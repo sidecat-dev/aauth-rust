@@ -2542,6 +2542,7 @@ fn a_released_application_202_replays_with_its_pending_headers_or_as_server_erro
                     .header("content-type", "application/json")
                     .body(br#"{"status":"pending"}"#.to_vec())
                     .unwrap(),
+                cost: None,
             }))
         },
     );
@@ -2942,9 +2943,15 @@ fn tool_name(operation: &Operation) -> String {
     value["tool"].as_str().unwrap().to_owned()
 }
 
+/// What releasing the result of `records.export` costs when the Resource
+/// meters the release rather than the execution.
+const RELEASE_COST: i64 = 250;
+
 /// A held per-call Resource whose release hook runs, before approval, every
 /// call it is asked to run, except `records.audit`: the host's audit regime
-/// records that call, so the hook keeps it for execution approval.
+/// records that call, so the hook keeps it for execution approval. The hook
+/// states [`RELEASE_COST`] for `records.export`, which the Resource asks it to
+/// run only when it meters the release.
 struct ReleaseHost {
     resource: Resource,
     proposals: Arc<MemoryCalls>,
@@ -2956,6 +2963,9 @@ struct ReleaseHost {
     ran: Arc<Mutex<Vec<String>>>,
 }
 fn release_host() -> ReleaseHost {
+    release_host_with(false)
+}
+fn release_host_with(metered: bool) -> ReleaseHost {
     let calls = Arc::new(AtomicUsize::new(0));
     let store = Arc::new(VolatileTestStore::default());
     let proposals = Arc::new(MemoryCalls::new());
@@ -3007,11 +3017,23 @@ fn release_host() -> ReleaseHost {
                         .status(200)
                         .body(format!("{tool} result").into_bytes())
                         .unwrap(),
+                    cost: (tool == "records.export").then_some(RELEASE_COST),
                 }))
             },
         )
     };
-    let resource = core_resource(&calls)
+    let mut resource = core_resource(&calls);
+    if metered {
+        resource = resource
+            .with_budgets(
+                vec![UnitDeclaration::new("USD", 2, "US dollars").unwrap()],
+                "https://resource.example/usage",
+                1_000,
+                1_000,
+            )
+            .unwrap();
+    }
+    let mut resource = resource
         .with_r3(r3_config_for(&store, RELEASE_TOOLS))
         .unwrap()
         .with_r3_per_call(R3PerCallConfig {
@@ -3023,6 +3045,9 @@ fn release_host() -> ReleaseHost {
             held_result_lifetime: 300,
         })
         .unwrap();
+    if metered {
+        resource = resource.with_release_metering().unwrap();
+    }
     let record = issue(&resource, &store, &RELEASE_OPERATIONS, "rt-release");
     let class = class_token(
         &record,
@@ -3089,16 +3114,37 @@ impl ReleaseHost {
     }
     /// Present the per-call Auth token approving `record` at its pending URL.
     fn complete(&self, record: &R3ProposalRecord, jti: &str) -> AuthDecision<String> {
+        self.complete_granting(record, jti, None)
+    }
+    /// As [`Self::complete`], with a per-call token granting `budget` cents.
+    fn complete_granting(
+        &self,
+        record: &R3ProposalRecord,
+        jti: &str,
+        budget: Option<i64>,
+    ) -> AuthDecision<String> {
         let mut claims = auth_claims(None);
         claims.jti = jti.into();
-        let token = aauth_rust_r3::mint_per_call_auth_token(
-            &standard_registry().unwrap(),
-            &SigningKey::from_seed([3; 32]),
-            "ps-1",
-            &claims,
-            &record.reference,
-            &record.exact_json,
-        )
+        let (registry, key) = (standard_registry().unwrap(), SigningKey::from_seed([3; 32]));
+        let token = match budget {
+            Some(amount) => aauth_rust_r3::mint_budget_per_call_auth_token(
+                &registry,
+                &key,
+                "ps-1",
+                &claims,
+                &record.reference,
+                &record.exact_json,
+                &aauth_rust_budgets::Budget::new(amount, "USD", 2).unwrap(),
+            ),
+            None => aauth_rust_r3::mint_per_call_auth_token(
+                &registry,
+                &key,
+                "ps-1",
+                &claims,
+                &record.reference,
+                &record.exact_json,
+            ),
+        }
         .expect("per-call auth token");
         let pending = format!("/r3/pending/{}", record.held.as_ref().unwrap().pending_id);
         self.resource
@@ -3204,6 +3250,77 @@ fn a_metered_or_audited_call_runs_only_after_approval() {
         [
             "records.export after approval",
             "records.audit after approval"
+        ]
+    );
+}
+
+// R3 Approving Release Rather Than Execution, and Budgets Deferred Delivery:
+// a Resource that meters the release of `records.export`, not its execution,
+// runs it before approval and offers the release cost on the proposal. The
+// per-call Auth token that approves the release must carry that budget, and
+// releasing the result draws the cost from it once; a replay does not meter
+// again, and the person's ledger shows the charge.
+#[test]
+fn a_metered_release_draws_its_cost_from_the_per_call_token_once() {
+    let host = release_host_with(true);
+    let export = host.hold("records.export");
+    assert!(export.released.is_some());
+    let (_, offer, consumed) =
+        verify_budget_resource_token(&export.resource_token, &keys(), NOW).unwrap();
+    assert_eq!((offer.amount(), consumed), (RELEASE_COST, None));
+    let query = host.hold("records.query");
+    verify_resource_token(&query.resource_token, &keys(), NOW).expect("no offer");
+
+    // Without the budget, or with less than the cost, nothing is released and
+    // the proposal stays open for a token that fits.
+    assert!(matches!(
+        host.complete(&export, "per-call-unfunded"),
+        AuthDecision::Forbidden { .. }
+    ));
+    let AuthDecision::Forbidden {
+        budget_header: Some(short),
+    } = host.complete_granting(&export, "per-call-short", Some(RELEASE_COST - 1))
+    else {
+        panic!("a short budget is refused with its remaining and required figures");
+    };
+    assert!(
+        short.contains(&format!("required={RELEASE_COST}")),
+        "{short}"
+    );
+    let ledger = host.resource.budget_ledger().unwrap();
+    let charged = || {
+        ledger
+            .lock()
+            .unwrap()
+            .person_total(PS, "directed-person", RESOURCE, "USD")
+    };
+    assert_eq!(charged(), 0);
+    for presentation in ["release", "replay"] {
+        match host.complete_granting(&export, "per-call-export", Some(RELEASE_COST)) {
+            AuthDecision::Replayed(response) => {
+                assert_eq!(response.body(), b"records.export result");
+                let header = response.headers()["aauth-budget"].to_str().unwrap();
+                assert!(header.contains(&format!("cost={RELEASE_COST}")), "{header}");
+                assert!(header.contains("remaining=0"), "{header}");
+            }
+            other => panic!("{presentation}: {other:?}"),
+        }
+        assert_eq!(charged(), RELEASE_COST, "{presentation}");
+    }
+    // An unmetered release needs no budget and meters nothing.
+    match host.complete(&query, "per-call-query") {
+        AuthDecision::Replayed(response) => {
+            assert_eq!(response.body(), b"records.query result");
+            assert!(!response.headers().contains_key("aauth-budget"));
+        }
+        other => panic!("unmetered release: {other:?}"),
+    }
+    assert_eq!(charged(), RELEASE_COST);
+    assert_eq!(
+        *host.ran.lock().unwrap(),
+        [
+            "records.export before approval",
+            "records.query before approval"
         ]
     );
 }

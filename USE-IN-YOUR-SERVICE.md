@@ -741,7 +741,8 @@ pending URL `{signed_origin}/r3/pending/{id}`; the Resource draws `id` from
 the URL from `Location`. `HeldInvocations::open` draws its ids the same way. The
 `release` callback must change nothing outside the result it returns. Audited, billed, or third-party work
 needs execution consent instead: return `None` for it. The Resource does not
-call `release` for an operation its definition annotates `budget: true`.
+call `release` for an operation its definition annotates `budget: true`, unless
+it meters the release, as described below.
 
 The proposal's `display` comes from `R3Release::display`, and the Resource opens
 its `detail` with an `## Action` section saying the operation has already run and
@@ -758,6 +759,25 @@ Server approval that is still live can release the new bytes when the proposal
 document is unchanged. That limit is described in
 [CONFORMANCE.md](CONFORMANCE.md). The executable scene is
 `cargo run --locked -p aauth-rust-resource --example r3-per-call`.
+
+To meter the release of a result rather than the execution, enable budgets and
+call `with_release_metering` after `with_r3_per_call`. The Resource then asks
+`release` to run operations its definition annotates `budget: true` as well.
+Return `None` for any whose execution is itself metered or billed, and set
+`R3Release::cost` on the release of the others; an unannotated operation's
+release states no cost. The proposal's Resource token offers exactly that cost
+in the first declared unit. A three-party Person Server narrows the offer and
+grants it on the per-call Auth token; a federated one refuses a proposal that
+carries an offer with `invalid_resource_token`, because the relay has no
+per-call budget profile. The poll that presents the per-call token draws the
+cost down once: the released response carries `AAuth-Budget`, a replay reports
+`remaining` without metering again, and the ledger and usage counters show the
+charge. A per-call token without the budget is `403`. One whose budget is below
+the cost is `403` with an `AAuth-Budget` stating `required`, and the result
+stays held for a token that fits. A declined release meters nothing. The
+Agent's R3 helpers leave budgets to the host: verify a metered proposal
+challenge with `aauth_rust_r3::verify_budget_resource_token` and its per-call
+token with `aauth_rust_r3::verify_budget_per_call_auth_token`.
 
 ## Make an immediate downstream call
 

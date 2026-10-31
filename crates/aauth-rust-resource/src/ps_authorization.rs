@@ -315,6 +315,7 @@ pub enum AuthDecision<T = ()> {
     /// The retained result for this exact per-call Auth token: a replay of
     /// the one execution it authorized, or a release-gated result released
     /// now on its first presentation. Nothing runs; the host sends it as is.
+    /// A metered release carries `AAuth-Budget` for the per-call token.
     Replayed(Box<Response<Vec<u8>>>),
 }
 impl<T> std::fmt::Debug for AuthDecision<T> {
@@ -1414,9 +1415,16 @@ where
                     Some((token, grant)) => self.with_budget(decision, token, Some(grant)),
                     None => decision,
                 };
+                // A metered release is metered by its cost when it is claimed,
+                // not as a request against the per-call token's budget.
+                let metered = if r3.as_ref().is_some_and(R3Grant::meters_release) {
+                    None
+                } else {
+                    grant
+                };
                 // Every admission, Core or R3, passes the shared post-callback
                 // verification: a revocation completed during host policy fences it.
-                match self.admit_auth(token, policy_request, now, challenge_jti, grant, meter)? {
+                match self.admit_auth(token, policy_request, now, challenge_jti, metered, meter)? {
                     AuthDecision::Granted(mut admitted) => {
                         match self.post_callback_admission(r3, &admitted.token, now) {
                             Ok(claimed) => admitted.r3 = claimed,

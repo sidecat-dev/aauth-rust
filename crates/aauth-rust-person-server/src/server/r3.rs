@@ -15,6 +15,9 @@
 //! release.
 //! A class document may carry a budget offer when budgets are enabled. The
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
+//! A proposal may carry one too, as a Resource that meters the release of a
+//! held result does: this PS narrows it and the per-call Auth token carries
+//! the grant. A relayed per-call grant carries no budget.
 //! A Person token's approved mission composes with a class document: the grant
 //! ends no later than the mission and commits against the unchanged active
 //! mission, whether this PS signs it or relays it. Missions with proposals,
@@ -26,9 +29,9 @@ use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
     FetchTransport, GrantedOperations, IssuanceRecord, IssuanceStore, OperationAccess, Proposal,
     Reference, Registry, VerifiedR3AuthToken, VocabularyUri, mint_auth_token as mint_r3_auth_token,
-    mint_budget_auth_token, mint_direct_auth_token, mint_per_call_auth_token,
-    validate_document_account, validate_proposal_account, verify_auth_token_claims,
-    verify_budget_resource_token, verify_resource_token,
+    mint_budget_auth_token, mint_budget_per_call_auth_token, mint_direct_auth_token,
+    mint_per_call_auth_token, validate_document_account, validate_proposal_account,
+    verify_auth_token_claims, verify_budget_resource_token, verify_resource_token,
 };
 use std::sync::Arc;
 
@@ -218,8 +221,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// The PS signs each document fetch as itself under `aauth-person.json`.
     /// A Resource token without R3 claims keeps Core issuance unchanged.
-    /// Budgets may already be enabled. A class token then carries a budget
-    /// offer through the same verifier as `with_budgets` after R3.
+    /// Budgets may already be enabled. A class or proposal token then carries
+    /// a budget offer through the same verifier as `with_budgets` after R3.
     ///
     /// # Errors
     /// [`ConfigurationError`] for an empty registry. Federation may already be
@@ -529,9 +532,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 if context.mission.is_some() {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
-                // A proposal plus a budget offer is the same unsigned composition.
-                // Do not record approval or mint a per-call token that drops the offer.
-                if granted_budget.is_some() {
+                // A proposal's budget offer is granted on the per-call token this
+                // PS signs. The relay has no per-call budget profile, so it is
+                // refused rather than relayed without its offer.
+                if granted_budget.is_some() && self.federation.is_some() {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
                 // Release gating executed before approval: release consent, never
@@ -697,15 +701,27 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     );
                 }
                 let (reference, exact) = (reference.clone(), exact.clone());
+                let budget_grant = granted_budget.clone();
                 let mint: TokenMint<'_> = Box::new(move |claims: &AuthClaims| {
-                    mint_per_call_auth_token(
-                        &r3.registry,
-                        &self.config.signing_key,
-                        &self.config.kid,
-                        claims,
-                        &reference,
-                        &exact,
-                    )
+                    match &budget_grant {
+                        Some(budget_grant) => mint_budget_per_call_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                            budget_grant,
+                        ),
+                        None => mint_per_call_auth_token(
+                            &r3.registry,
+                            &self.config.signing_key,
+                            &self.config.kid,
+                            claims,
+                            &reference,
+                            &exact,
+                        ),
+                    }
                     .map_err(|_| Failure::internal())
                 });
                 (

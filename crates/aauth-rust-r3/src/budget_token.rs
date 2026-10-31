@@ -1,9 +1,14 @@
-//! One token carrying an R3 class reference and a Budgets companion.
+//! One token carrying an R3 reference and a Budgets companion.
 //!
-//! Ported from Go `r3/budget_token.go`. The plain R3 wrappers keep refusing
-//! Budgets members; only these functions accept both companions together.
-//! Narrowing the budget against the offer and the issuer's cap is the issuer's
-//! duty through `aauth_rust_budgets`, before minting.
+//! Ported from Go `r3/budget_token.go`, which covers class documents. The
+//! per-call functions extend the same profile to a per-call proposal whose
+//! release a Resource meters (`draft-hardt-aauth-r3`, Approving Release Rather
+//! Than Execution; `draft-hardt-aauth-budgets`, Deferred Delivery): the
+//! proposal's Resource token offers a budget and the per-call Auth token
+//! carries the grant. The plain R3 wrappers keep refusing Budgets members;
+//! only these functions accept both companions together. Narrowing the budget
+//! against the offer and the issuer's cap is the issuer's duty through
+//! `aauth_rust_budgets`, before minting.
 
 use aauth_rust_budgets::{
     Budget, BudgetHeader, ConsumptionRecord, Error as BudgetError, parse_resource_claims,
@@ -16,16 +21,17 @@ use serde_json::Value;
 use crate::digest::digest;
 use crate::document::validate_document_account;
 use crate::grant::Grant;
+use crate::proposal::validate_proposal_account;
 use crate::reference::Reference;
 use crate::token::{
     AUTH_TOKEN, AuthTokenOperations, BUDGET, BUDGET_CONSUMED, R3_GRANTED, R3_PER_CALL, R3_S256,
     R3_URI, R3TokenError, RESOURCE_TOKEN, VerifiedR3AuthToken, VerifiedR3ResourceToken,
-    claim_operations, empty_like, insert_reference, payload_members, r3_error,
-    reference_from_members, referenced_document, reject_case_variants, reject_collisions,
-    reject_folded, reject_removed_members, remove_members, require_members,
-    signed_operations_value, wrap,
+    claim_operations, empty_like, insert_reference, payload_members, per_call_granted,
+    per_call_operation, r3_error, reference_from_members, referenced_document,
+    reject_case_variants, reject_collisions, reject_folded, reject_removed_members, remove_members,
+    require_members, signed_operations_value, wrap,
 };
-use crate::vocabulary::Registry;
+use crate::vocabulary::{Operation, Registry};
 
 const PER_CALL_REASON: &str = "the class-R3 Budget profile does not permit r3_per_call";
 
@@ -74,8 +80,10 @@ pub fn mint_budget_resource_token(
     Ok((compact, reference))
 }
 
-/// Verify Core trust, one complete R3 class reference, a budget offer, and an
+/// Verify Core trust, one complete R3 reference, a budget offer, and an
 /// optional consumption record whose `jti` is the token's `presented_jti`.
+/// The reference names a class document or a per-call proposal; it is not
+/// fetched here.
 ///
 /// # Errors
 /// Returns [`R3TokenError`] for a Core failure, a missing or malformed claim,
@@ -109,6 +117,111 @@ pub fn verify_budget_resource_token(
         offer,
         budget.consumed,
     ))
+}
+
+/// Mint the Resource token for a per-call proposal with a budget offer: what
+/// the Resource will meter for the call it proposes, such as the release of a
+/// held result. It carries no consumption record: the token presented on the
+/// call is a class Auth token, which this profile gives no budget.
+///
+/// # Errors
+/// Returns [`R3TokenError`] for an invalid proposal, account, URI, or member,
+/// or a Core failure.
+pub fn mint_budget_proposal_resource_token(
+    registry: &Registry,
+    key: &SigningKey,
+    kid: &str,
+    claims: &ResourceClaims,
+    proposal_uri: &str,
+    exact_proposal: &[u8],
+    offer: &Budget,
+) -> Result<(String, Reference), R3TokenError> {
+    let proposal = registry
+        .parse_proposal(exact_proposal)
+        .map_err(|err| wrap("r3: Budget proposal resource-token proposal", err))?;
+    validate_proposal_account(&proposal, claims.account.as_deref())
+        .map_err(|err| wrap("r3: Budget proposal resource-token account", err))?;
+    let reference = Reference::new(proposal_uri, digest(exact_proposal))
+        .map_err(|err| wrap("r3: Budget proposal resource-token reference", err))?;
+    let mut prepared = claims.clone();
+    reject_collisions(
+        RESOURCE_TOKEN,
+        &prepared.extra,
+        &[R3_URI, R3_S256, BUDGET, BUDGET_CONSUMED],
+    )?;
+    reject_combined_resource_members(&prepared.extra)?;
+    insert_reference(&mut prepared.extra, &reference);
+    prepared.extra.insert(BUDGET.to_owned(), offer.to_value());
+    let compact = aauth_rust_core::mint_resource_token(key, kid, &prepared)?;
+    Ok((compact, reference))
+}
+
+/// Mint the one-operation Auth token for an approved exact proposal, with a
+/// fixed budget grant.
+///
+/// As [`crate::mint_per_call_auth_token`], plus `budget`. The budget unit must
+/// be representable in `AAuth-Budget`.
+///
+/// # Errors
+/// Returns [`R3TokenError`] for a reference or digest mismatch, an account
+/// mismatch, an operation Core cannot sign exactly, an unrepresentable unit,
+/// a colliding member, or a Core failure.
+pub fn mint_budget_per_call_auth_token(
+    registry: &Registry,
+    key: &SigningKey,
+    kid: &str,
+    claims: &AuthClaims,
+    reference: &Reference,
+    exact_proposal: &[u8],
+    budget_grant: &Budget,
+) -> Result<String, R3TokenError> {
+    let granted = per_call_granted(registry, claims, reference, exact_proposal)?;
+    validate_feedback_unit(budget_grant)?;
+    let mut prepared = claims.clone();
+    reject_collisions(
+        AUTH_TOKEN,
+        &prepared.extra,
+        &[
+            R3_URI,
+            R3_S256,
+            R3_GRANTED,
+            R3_PER_CALL,
+            BUDGET,
+            BUDGET_CONSUMED,
+        ],
+    )?;
+    reject_removed_members(AUTH_TOKEN, &prepared.extra)?;
+    insert_reference(&mut prepared.extra, reference);
+    prepared.extra.insert(R3_GRANTED.to_owned(), granted);
+    prepared
+        .extra
+        .insert(BUDGET.to_owned(), budget_grant.to_value());
+    Ok(aauth_rust_core::mint_auth_token(key, kid, &prepared)?)
+}
+
+/// Verify a per-call Auth token with a fixed budget grant against the exact
+/// proposal it approves.
+///
+/// The checks of [`crate::verify_per_call_auth_token`] apply, and those of
+/// [`verify_budget_auth_token`] for the budget.
+///
+/// # Errors
+/// Returns [`R3TokenError`] when the proposal bytes do not match the reference
+/// or any of those checks fail.
+pub fn verify_budget_per_call_auth_token(
+    registry: &Registry,
+    compact: &str,
+    keys: &dyn AgentKeyResolver,
+    now: i64,
+    expected_reference: &Reference,
+    exact_proposal: &[u8],
+) -> Result<(VerifiedR3AuthToken, Operation, Budget), R3TokenError> {
+    let proposal = registry
+        .parse_referenced_proposal(expected_reference, exact_proposal)
+        .map_err(|err| wrap("r3: verify Budget per-call proposal", err))?;
+    let (token, grant) = verify_budget_auth_token(registry, compact, keys, now)?;
+    let operation = per_call_operation(&token, expected_reference, &proposal)?;
+    Ok((token, operation, grant))
 }
 
 /// Mint one Auth token carrying a proven R3 class grant and a fixed budget grant.

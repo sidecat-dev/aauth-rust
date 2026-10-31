@@ -16,9 +16,10 @@ use crate::{
     AnnotationEncoding, Authorization, Codec, Error, GrantedOperations, IssuanceError,
     IssuanceRecord, IssuanceStore, McpCodec, Operation, OperationAccess, Parameter, Parameters,
     Proposal, ProposalOptions, R3TokenError, Reference, Registry, Vocabulary, VocabularyUri,
-    digest, mint_auth_token, mint_budget_auth_token, mint_budget_resource_token,
-    mint_direct_auth_token, mint_per_call_auth_token, mint_proposal_resource_token,
-    mint_resource_token, standard_registry, verify_auth_token_claims, verify_budget_auth_token,
+    digest, mint_auth_token, mint_budget_auth_token, mint_budget_per_call_auth_token,
+    mint_budget_proposal_resource_token, mint_budget_resource_token, mint_direct_auth_token,
+    mint_per_call_auth_token, mint_proposal_resource_token, mint_resource_token, standard_registry,
+    verify_auth_token_claims, verify_budget_auth_token, verify_budget_per_call_auth_token,
     verify_budget_resource_token, verify_direct_auth_token, verify_per_call_auth_token,
     verify_resource_token,
 };
@@ -936,6 +937,74 @@ fn token_budget_profile_carries_both_companions_together() -> Checked {
             "accepted {name}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn token_budget_profile_carries_a_per_call_grant() -> Checked {
+    let f = fixture();
+    let document = f.registry.parse_document(CLASS)?;
+    let read = f.registry.parse_grant(READ.as_bytes(), &document)?;
+    let operation = read.granted_operations().operations()?.remove(0);
+    let proposal = Proposal::new(
+        &operation,
+        &Parameters::new(std::iter::empty())?,
+        ProposalOptions::default(),
+    )?;
+    let exact = serde_json::to_vec(&proposal)?;
+    let offer = Budget::new(40, "USD", 2)?;
+    let (resource_compact, pinned) = mint_budget_proposal_resource_token(
+        &f.registry,
+        &f.resource_key,
+        RESOURCE_KID,
+        &resource_claims(),
+        "https://resource.example/r3/proposal-one",
+        &exact,
+        &offer,
+    )?;
+    let (verified, got_offer, consumed) =
+        verify_budget_resource_token(&resource_compact, &f.keys, NOW)?;
+    assert_eq!(verified.reference(), &pinned);
+    assert_eq!((got_offer, consumed), (offer.clone(), None));
+    assert!(verify_resource_token(&resource_compact, &f.keys, NOW).is_err());
+
+    let claims = auth_claims(&f.request_key);
+    let compact = mint_budget_per_call_auth_token(
+        &f.registry,
+        &f.access_key,
+        ACCESS_KID,
+        &claims,
+        &pinned,
+        &exact,
+        &offer,
+    )?;
+    let (token, granted, grant) =
+        verify_budget_per_call_auth_token(&f.registry, &compact, &f.keys, NOW, &pinned, &exact)?;
+    assert_eq!(grant, offer);
+    assert!(granted.equal(&operation)?);
+    assert!(!token.claims().extra.contains_key("budget"));
+    // The plain per-call profile refuses the budget; the budget profile
+    // refuses another proposal and a grant without a budget.
+    assert!(
+        verify_per_call_auth_token(&f.registry, &compact, &f.keys, NOW, &pinned, &exact).is_err()
+    );
+    let other = Reference::new("https://resource.example/r3/proposal-two", digest(&exact))?;
+    assert!(
+        verify_budget_per_call_auth_token(&f.registry, &compact, &f.keys, NOW, &other, &exact)
+            .is_err()
+    );
+    let plain = mint_per_call_auth_token(
+        &f.registry,
+        &f.access_key,
+        ACCESS_KID,
+        &claims,
+        &pinned,
+        &exact,
+    )?;
+    assert!(
+        verify_budget_per_call_auth_token(&f.registry, &plain, &f.keys, NOW, &pinned, &exact)
+            .is_err()
+    );
     Ok(())
 }
 

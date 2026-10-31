@@ -33,8 +33,8 @@ use aauth_rust_r3::{
     FetchBody, FetchLimits, FetchResponse, FetchTransport, GrantedOperations, GrpcCodec,
     GrpcDefinitionSource, ODataCodec, ODataMetadataSource, Operation, Parameters,
     PresentedParameter, Proposal, ProposalOptions, Reference, Vocabulary, WsdlCodec,
-    WsdlDocumentSource, digest, mint_budget_resource_token, mint_proposal_resource_token,
-    standard_registry,
+    WsdlDocumentSource, digest, mint_budget_proposal_resource_token, mint_budget_resource_token,
+    mint_proposal_resource_token, standard_registry, verify_budget_per_call_auth_token,
 };
 use aauth_rust_resource::{
     AuthDecision, BoxedAuthAdmissionPolicy, BoxedR3Describe, BoxedR3OperationMapper,
@@ -1756,7 +1756,7 @@ fn proposal_artifact_uri(exact: &[u8], jti: &str) -> String {
 }
 
 #[test]
-fn proposal_with_a_budget_offer_is_refused_before_approval() {
+fn a_proposal_with_a_budget_offer_gets_a_narrowed_per_call_grant() {
     let profile = odata_profile();
     let documents = Arc::new(Documents::default());
     let calls = Arc::new(OneCall::new());
@@ -1988,41 +1988,52 @@ fn proposal_with_a_budget_offer_is_refused_before_approval() {
         1,
         "the plain proposal is approved"
     );
-    claims.extra.insert(
-        "budget".into(),
-        json!({"amount": 500, "unit": "USD", "decimals": 2}),
+    assert!(
+        !aauth_rust_core::AuthToken::parse(&member(&approved, "auth_token").unwrap())
+            .unwrap()
+            .unverified_claims()
+            .extra
+            .contains_key("budget")
     );
-    claims.extra.insert("r3_uri".into(), json!(uri));
-    claims
-        .extra
-        .insert("r3_s256".into(), json!(reference.digest()));
-    let with_budget = aauth_rust_core::mint_resource_token(
+    // The same proposal with a budget offer, as a Resource that meters the
+    // release of a held result sends it: the per-call token carries the offer
+    // narrowed to this Person Server's cap, and the grant is accounted.
+    let (with_budget, _) = mint_budget_proposal_resource_token(
+        &standard_registry().unwrap(),
         &SigningKey::from_seed([4; 32]),
         "resource-1",
         &claims,
+        &uri,
+        &exact,
+        &Budget::new(5_000_000, "USD", 2).unwrap(),
     )
     .expect("proposal token with a budget offer");
-    let refused = ps.handle(&post(
+    let funded = ps.handle(&post(
         &signer,
         &format!("{PS}/token"),
         json!({ "resource_token": with_budget, "presented_token": class_auth }),
     ));
     assert_eq!(
-        refused.status(),
-        400,
+        funded.status(),
+        200,
         "{}",
-        String::from_utf8_lossy(refused.body())
+        String::from_utf8_lossy(funded.body())
     );
+    let (_, _, grant) = verify_budget_per_call_auth_token(
+        &standard_registry().unwrap(),
+        &member(&funded, "auth_token").unwrap(),
+        &keys(),
+        NOW,
+        &reference,
+        &exact,
+    )
+    .expect("per-call grant with a budget");
     assert_eq!(
-        member(&refused, "error").as_deref(),
-        Some("invalid_resource_token")
+        (grant.amount(), grant.unit(), grant.decimals()),
+        (2_000_000, "USD", 2)
     );
-    assert!(member(&refused, "auth_token").is_none());
-    assert_eq!(
-        proposals.load(Ordering::SeqCst),
-        1,
-        "the budget offer does not record another approval"
-    );
+    assert_eq!(ps.budget_accounted(), Some(2_000_000));
+    assert_eq!(proposals.load(Ordering::SeqCst), 2);
     assert_eq!(effects.load(Ordering::SeqCst), 0);
 }
 
@@ -4333,6 +4344,7 @@ fn release_gating_runs_once_before_approval_and_replays_the_held_response() {
                     .header("content-type", "text/plain")
                     .body(b"released".to_vec())
                     .unwrap(),
+                cost: None,
             }))
         },
     );
@@ -4557,6 +4569,7 @@ fn re_requested_held_release_reuses_the_bytes_and_retires_the_prior() {
                     .header("content-type", "text/plain")
                     .body(format!("released-{n}").into_bytes())
                     .unwrap(),
+                cost: None,
             }))
         },
     );

@@ -70,13 +70,36 @@ impl BudgetGate {
         token: &VerifiedAuthToken,
         grant: &Budget,
     ) -> Result<String, Error> {
+        self.refusal_header(token, grant, None)
+    }
+
+    /// Refusal header for a verified budgeted token: its `remaining`, and
+    /// `required` when the request needed more than that. Nothing is metered.
+    pub(super) fn refusal_header(
+        &self,
+        token: &VerifiedAuthToken,
+        grant: &Budget,
+        required: Option<i64>,
+    ) -> Result<String, Error> {
         let ledger = self.lock();
         let (committed, reserved) = ledger
             .outstanding(token.claims().iss.as_str(), token.claims().jti.as_str())
             .unwrap_or((0, 0));
         let remaining = grant.amount() - committed - reserved;
-        let header = BudgetHeader::refusal(remaining, None, grant.unit(), grant.decimals())?;
+        let header = BudgetHeader::refusal(remaining, required, grant.unit(), grant.decimals())?;
         sender_field(&header, false)
+    }
+
+    /// The offer for a release that costs `cost` in the first declared unit.
+    /// A declared ceiling below the cost cannot be offered.
+    pub(super) fn release_offer(&self, cost: i64) -> Result<Budget, Error> {
+        let units = self.declarations();
+        let unit = units.first().ok_or(Error::Malformed)?;
+        let offer = self.offer(Some(&Budget::new(cost, unit.unit(), unit.decimals())?))?;
+        if offer.amount() != cost {
+            return Err(Error::Malformed);
+        }
+        Ok(offer)
     }
 
     /// Host bound, lowered by a client `AAuth-Max-Cost` when that figure is smaller.

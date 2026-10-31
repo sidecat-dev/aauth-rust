@@ -46,7 +46,8 @@ pub use annotation::AnnotationEncoding;
 pub use artifact::{ArtifactKind, ReferencedArtifact};
 pub use asyncapi_definition::AsyncApiDocumentSource;
 pub use budget_token::{
-    mint_budget_auth_token, mint_budget_resource_token, verify_budget_auth_token,
+    mint_budget_auth_token, mint_budget_per_call_auth_token, mint_budget_proposal_resource_token,
+    mint_budget_resource_token, verify_budget_auth_token, verify_budget_per_call_auth_token,
     verify_budget_resource_token,
 };
 pub use definition::{
