@@ -26,9 +26,10 @@ publication; APIs and package names may change during the alpha series.
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
 other eleven crates or the workspace's complete service guides. The root
-`README.md`, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and `SPECIFICATIONS.md`
-in the full development checkout describe executable examples, host integration,
-the implemented subset and pinned protocol sources. This is a partial protocol
+`README.md`, the `docs/` guides, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and
+`SPECIFICATIONS.md` in the full development checkout describe executable
+examples, host integration, the implemented subset and pinned protocol
+sources. This is a partial protocol
 implementation, not a full-profile conformance claim.
 
 ## Use and verify development sources
