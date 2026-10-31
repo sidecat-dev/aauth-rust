@@ -412,51 +412,73 @@ fn revoked_upstream_token_is_refused() {
 }
 
 #[test]
-fn pending_chained_request_ends_when_its_upstream_token_expires() {
-    let now = Arc::new(AtomicI64::new(1000));
-    let clock = now.clone();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let counted = calls.clone();
-    let mut config = DeferredConfig::new(MemoryContinuations::new(4));
-    config.lifetime = 3600;
-    config.retry_after = 0;
-    let server = AccessServer::new(
-        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
-        Keys,
-        move |_: &AuthorizationRequest| {
-            counted.fetch_add(1, Ordering::SeqCst);
-            Ok(Decision {
-                scopes: vec!["read".into()],
-                lifetime: 3600,
-            })
-        },
-        move || clock.load(Ordering::SeqCst),
-        || "downstream-auth".into(),
-    )
-    .unwrap()
-    .with_deferred(config, |context: &DeferredContext| {
-        assert!(context.authorization.upstream.is_some());
-        Ok(Some(Requirement::Approval))
-    })
-    .unwrap();
-    // The upstream token ends before every other input of the request.
-    let mut short = upstream_person();
-    short.exp = 1200;
-    let upstream = person_compact(&short, 3);
-    let first = server.handle(&token_request(&chained_body(json!(upstream))));
-    assert_eq!(
-        first.status(),
-        202,
-        "{}",
-        String::from_utf8_lossy(first.body())
-    );
-    let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
-    now.store(1199, Ordering::SeqCst);
-    let waiting = server.handle(&signed("GET", &pending.location, None, 1199));
-    assert_eq!(waiting.status(), 202);
-    now.store(1200, Ordering::SeqCst);
-    let ended = server.handle(&signed("GET", &pending.location, None, 1200));
-    assert_eq!(ended.status(), 408);
-    assert_eq!(error(&ended), "expired");
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+fn pending_chained_request_ends_when_its_upstream_token_expires_or_is_revoked() {
+    for revoke in [false, true] {
+        let now = Arc::new(AtomicI64::new(1000));
+        let clock = now.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let mut config = DeferredConfig::new(MemoryContinuations::new(4));
+        config.lifetime = 3600;
+        config.retry_after = 0;
+        let server = AccessServer::new(
+            Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+            Keys,
+            move |_: &AuthorizationRequest| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(Decision {
+                    scopes: vec!["read".into()],
+                    lifetime: 3600,
+                })
+            },
+            move || clock.load(Ordering::SeqCst),
+            || "downstream-auth".into(),
+        )
+        .unwrap()
+        .with_revocation()
+        .with_deferred(config, |context: &DeferredContext| {
+            assert!(context.authorization.upstream.is_some());
+            Ok(Some(Requirement::Approval))
+        })
+        .unwrap();
+        // The upstream token ends before every other input of the request.
+        let mut short = upstream_person();
+        short.exp = 1200;
+        let upstream = person_compact(&short, 3);
+        let first = server.handle(&token_request(&chained_body(json!(upstream))));
+        assert_eq!(
+            first.status(),
+            202,
+            "{}",
+            String::from_utf8_lossy(first.body())
+        );
+        let pending = PendingResponse::parse(&format!("{AS}/token"), &first).unwrap();
+        now.store(1199, Ordering::SeqCst);
+        let waiting = server.handle(&signed("GET", &pending.location, None, 1199));
+        assert_eq!(waiting.status(), 202);
+        if revoke {
+            let revoked = server.handle(&signed(
+                "POST",
+                &format!("{AS}/revoke"),
+                Some(&json!({"jti": "upstream-person", "exp": 1200})),
+                1199,
+            ));
+            assert!(revoked.status().is_success());
+            // Presenting a Revoked Token: the waiting request ends with the
+            // polling error `revoked`, not the parameter error.
+            let ended = server.handle(&signed("GET", &pending.location, None, 1199));
+            assert_eq!(ended.status(), 403);
+            assert_eq!(error(&ended), "revoked");
+            let body: Value = serde_json::from_slice(ended.body()).unwrap();
+            assert!(body["detail"].as_str().unwrap().contains("upstream token"));
+            let gone = server.handle(&signed("GET", &pending.location, None, 1199));
+            assert_eq!(gone.status(), 410);
+        } else {
+            now.store(1200, Ordering::SeqCst);
+            let ended = server.handle(&signed("GET", &pending.location, None, 1200));
+            assert_eq!(ended.status(), 408);
+            assert_eq!(error(&ended), "expired");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }

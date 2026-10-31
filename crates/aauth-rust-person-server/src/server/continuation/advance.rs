@@ -273,7 +273,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 None,
             )
         })();
-        let mut response = result.unwrap_or_else(Failure::response);
+        let mut response = result.unwrap_or_else(|error| error.while_pending().response());
         let current = (self.clock)();
         let held = d
             .store
@@ -332,7 +332,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Err(error) = self.check_release(&value, &mut response) {
             // Agent delivery repeats the same validity checks; this trusted-host
             // preview must also refuse a grant invalidated during publication.
-            response = error.response();
+            response = error.while_pending().response();
         }
         Ok(response)
     }

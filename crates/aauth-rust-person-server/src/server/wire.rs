@@ -13,6 +13,7 @@ pub(super) struct Failure {
     date: Option<i64>,
     federation: Option<Box<crate::FederationFailure>>,
     mission_reason: Option<String>,
+    detail: Option<&'static str>,
 }
 impl Failure {
     pub(super) fn mission_terminated(reason: &str) -> Self {
@@ -28,6 +29,7 @@ impl Failure {
             date: None,
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn policy(error: PolicyError) -> Self {
@@ -45,6 +47,7 @@ impl Failure {
             date: None,
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn internal() -> Self {
@@ -90,6 +93,7 @@ impl Failure {
             date: matches!(error, ProofError::ClockSkew).then_some(now),
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn revoked_jwt() -> Self {
@@ -100,6 +104,7 @@ impl Failure {
             date: None,
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn credential(error: TokenError) -> Self {
@@ -111,6 +116,7 @@ impl Failure {
             date: None,
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn clock(now: i64) -> Self {
@@ -121,6 +127,7 @@ impl Failure {
             date: Some(now),
             federation: None,
             mission_reason: None,
+            detail: None,
         }
     }
     pub(super) fn with_federation(mut self, diagnostic: crate::FederationFailure) -> Self {
@@ -130,6 +137,21 @@ impl Failure {
     pub(super) fn with_date(mut self, date: i64) -> Self {
         self.date = Some(date);
         self
+    }
+    /// The answer to a poll, host advance or release of a pending request.
+    /// `revoked_upstream_token` names a request parameter; a chained request
+    /// that is already waiting ends instead with the polling error `revoked`,
+    /// whose `detail` says which token (Presenting a Revoked Token).
+    pub(super) fn while_pending(self) -> Self {
+        if self.code != "revoked_upstream_token" {
+            return self;
+        }
+        let mut revoked = Self::status(StatusCode::FORBIDDEN, "revoked");
+        revoked.detail = Some(
+            "The upstream token of this chained request, or its calling agent's agent token or binding, was revoked.",
+        );
+        revoked.federation = self.federation;
+        revoked
     }
     pub(super) fn response(self) -> Response<Vec<u8>> {
         // A body sent with Signature-Error names that error code as its type.
@@ -142,6 +164,9 @@ impl Failure {
         if let Some(reason) = self.mission_reason {
             body["mission_status"] = json!("terminated");
             body["termination_reason"] = json!(reason);
+        }
+        if let Some(detail) = self.detail {
+            body["detail"] = json!(detail);
         }
         let mut response = json_response(self.status, body);
         response

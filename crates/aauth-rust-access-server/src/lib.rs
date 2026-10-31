@@ -7,7 +7,8 @@
 //! approval and payment continuations. One-level parent-mediated sub-agents use
 //! the parent's policy identity and the child's credential key. A passed-through
 //! `upstream_token` is verified per Upstream Token Verification before policy and
-//! bounds the issued token. Full R3 and missions remain outside this profile and
+//! bounds the issued token; a deferred chained request whose upstream token is
+//! revoked while it waits ends with the polling error `revoked`. Full R3 and missions remain outside this profile and
 //! are refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
@@ -316,7 +317,7 @@ impl<
             return Err(Failure::proof(ProofError::TargetMismatch, request, now));
         }
         if request.uri().path().starts_with("/token/pending/") && self.deferred.is_some() {
-            return self.pending(request, now);
+            return self.pending(request, now).map_err(Failure::while_pending);
         }
         if let Some(response) = self.route_revocation(request, now)? {
             return Ok(response);

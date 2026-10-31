@@ -11,6 +11,7 @@ pub(crate) struct Failure {
     code: &'static str,
     signature: Option<String>,
     date: Option<i64>,
+    detail: Option<&'static str>,
 }
 impl Failure {
     pub(crate) fn parameter(code: &'static str) -> Self {
@@ -19,6 +20,7 @@ impl Failure {
             code,
             signature: None,
             date: None,
+            detail: None,
         }
     }
     pub(crate) fn policy(error: PolicyError) -> Self {
@@ -33,6 +35,7 @@ impl Failure {
             code,
             signature: None,
             date: None,
+            detail: None,
         }
     }
     pub(crate) fn internal() -> Self {
@@ -78,6 +81,7 @@ impl Failure {
             code,
             signature: Some(signature),
             date: matches!(error, ProofError::ClockSkew).then_some(now),
+            detail: None,
         }
     }
     pub(crate) fn credential(error: TokenError) -> Self {
@@ -87,6 +91,7 @@ impl Failure {
             code,
             signature: Some(format!("error={code}")),
             date: None,
+            detail: None,
         }
     }
     pub(crate) fn clock(now: i64) -> Self {
@@ -95,7 +100,20 @@ impl Failure {
             code: "clock_skew",
             signature: None,
             date: Some(now),
+            detail: None,
         }
+    }
+    /// The answer to a poll of a pending request. `revoked_upstream_token`
+    /// names a request parameter; a chained request that is already waiting
+    /// ends instead with the polling error `revoked`, whose `detail` says which
+    /// token (Presenting a Revoked Token).
+    pub(crate) fn while_pending(self) -> Self {
+        if self.code != "revoked_upstream_token" {
+            return self;
+        }
+        let mut revoked = Self::status(StatusCode::FORBIDDEN, "revoked");
+        revoked.detail = Some("The upstream token of this chained request was revoked.");
+        revoked
     }
     pub(crate) fn response(self) -> Response<Vec<u8>> {
         // A body sent with Signature-Error names that error code as its type.
@@ -104,10 +122,11 @@ impl Failure {
         } else {
             "about:blank".into()
         };
-        let mut response = json_response(
-            self.status,
-            json!({"type":kind,"title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code}),
-        );
+        let mut body = json!({"type":kind,"title":self.status.canonical_reason().unwrap_or("Request refused"),"status":self.status.as_u16(),"error":self.code});
+        if let Some(detail) = self.detail {
+            body["detail"] = json!(detail);
+        }
+        let mut response = json_response(self.status, body);
         response
             .headers_mut()
             .insert("content-type", "application/problem+json".parse().unwrap());

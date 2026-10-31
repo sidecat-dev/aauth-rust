@@ -837,6 +837,9 @@ token's `iss` or an auth token's `ps` is the signing PS, its `aud` is the `iss` 
 the intermediary's Agent token, and it is neither expired nor revoked here
 (`invalid_upstream_token`, `expired_upstream_token`, `revoked_upstream_token`).
 Policy sees it as `AuthorizationRequest::upstream`; the grant ends no later than it.
+A deferred chained request whose upstream token this AS has since recorded as
+revoked ends at its next poll with the polling error `403 revoked`, its `detail`
+naming the upstream token.
 
 For the PS, construct the ordinary PersonServer then call
 `server.with_federation(adapter)`. Implement `Policy::consent` explicitly; its
@@ -951,8 +954,11 @@ that outlives the upstream token with `502 as_unreachable`, and retains the
 receipt with the upstream tie described above. A step-up repeats the same
 `upstream_token`. With deferred federation, the intermediary that started the
 request polls it; its Agent token need not name this PS. The request ends with
-`408 expired` no later than the upstream token's `exp`, and with
-`revoked_upstream_token` once that token is revoked. An AS
+`408 expired` no later than the upstream token's `exp`. Once that token, or the
+calling Agent's Agent token or binding, is revoked, it ends at the next poll or
+host advance with the polling error `403 revoked`, whose `detail` names the
+upstream token. A new request carrying the same token still gets the parameter
+error `revoked_upstream_token`. An AS
 `requirement=interaction` reaches the intermediary unchanged; the intermediary
 raises it to its own caller with `aauth_rust_core::interaction::ChainedInteraction`,
 under its own code and pending URL.

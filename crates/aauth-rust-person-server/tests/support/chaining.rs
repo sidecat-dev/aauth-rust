@@ -223,7 +223,9 @@ fn consent_to_federation_is_not_consent_to_federated_delegation() {
 
 #[test]
 fn a_deferred_chained_request_relays_the_as_interaction_to_the_intermediary() {
-    for revoke in [false, true] {
+    // Delivered, or ended by revoking the upstream token while it waits, seen
+    // first by the intermediary's poll or by the host's advance.
+    for ending in ["delivered", "revoked at poll", "revoked at advance"] {
         let f = Fixture::new();
         let transport = NativeTransport::new(&f, 6, 0);
         let mut config = DeferredConfig::new(Arc::new(MemoryContinuations::new(16)));
@@ -286,11 +288,36 @@ fn a_deferred_chained_request_relays_the_as_interaction_to_the_intermediary() {
             poll(&server, &caller, &pending.location, "GET", None, 1000).status(),
             403
         );
-        if revoke {
+        if ending != "delivered" {
             server.revoke_person_token(&reference(&upstream).jti);
-            let ended = poll(&server, &intermediary, &pending.location, "GET", None, 1000);
-            assert_eq!(ended.status(), 400);
-            assert_eq!(output(&ended)["error"], "revoked_upstream_token");
+            // Presenting a Revoked Token: a waiting request whose upstream
+            // token is revoked ends with the polling error `revoked`.
+            let mut ended = Vec::new();
+            if ending == "revoked at advance" {
+                ended.push(
+                    server
+                        .advance_federation(&pending.location, FederationInput::Poll)
+                        .unwrap(),
+                );
+            }
+            ended.push(poll(
+                &server,
+                &intermediary,
+                &pending.location,
+                "GET",
+                None,
+                1000,
+            ));
+            for response in &ended {
+                assert_eq!(response.status(), 403, "{ending}");
+                assert_eq!(output(response)["error"], "revoked", "{ending}");
+                assert!(
+                    output(response)["detail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("upstream token")
+                );
+            }
             assert_eq!(
                 poll(&server, &intermediary, &pending.location, "GET", None, 1000).status(),
                 410

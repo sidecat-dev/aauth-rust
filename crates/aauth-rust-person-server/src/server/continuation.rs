@@ -67,7 +67,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 {
     /// Enable deferred AS exchanges after `with_federation`. Payment settlement,
     /// billing caches, identity-claim sources and interaction/code lifecycle stay
-    /// with host policy. Normal Agent GETs never contact the AS.
+    /// with host policy. Normal Agent GETs never contact the AS. A chained
+    /// request whose upstream token is revoked while it waits ends at the next
+    /// poll or advance with the polling error `revoked` (403).
     pub fn with_deferred(mut self, config: DeferredConfig) -> Result<Self, ConfigurationError> {
         if self.federation.is_none()
             || !(1..=3600).contains(&config.lifetime)
