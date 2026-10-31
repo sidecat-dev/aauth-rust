@@ -2774,6 +2774,155 @@ fn x509_requires_a_current_crl_for_every_certificate() {
     }
 }
 
+#[test]
+fn x509_accepts_rsa_signed_chains_and_crls() {
+    use rsa::pkcs1::DecodeRsaPrivateKey;
+    let fixture = include_bytes!("fixtures/rsa-2048.der");
+    let rsa_pem = pkcs8_pem(&rsa_pkcs8(fixture));
+    let rsa_key = |alg: &'static rcgen::SignatureAlgorithm| {
+        rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(&rsa_pem, alg).unwrap()
+    };
+    let rng = ring::rand::SystemRandom::new();
+    let p256 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let ec_leaf = rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(
+        &pkcs8_pem(p256.as_ref()),
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )
+    .unwrap();
+    let ec_signer = SigningKey::from_pkcs8_der("ES256", p256.as_ref()).unwrap();
+    let seed = [11; 32];
+    let ed_leaf = rcgen::KeyPair::from_pkcs8_pem_and_sign_algo(
+        &pkcs8_pem(&ed25519_pkcs8(&seed)),
+        &rcgen::PKCS_ED25519,
+    )
+    .unwrap();
+    let ed_signer = SigningKey::from_seed(seed);
+
+    // An RSA root and its RSA-signed CRL over a P-256 end entity, then over an
+    // Ed25519 one with SHA-384 and SHA-512. The end entity selects the HTTP
+    // algorithm.
+    let rsa_sha256 = rsa_key(&rcgen::PKCS_RSA_SHA256);
+    let ec = Rooted::new(&rsa_sha256, &rsa_sha256, &ec_leaf, &ec_signer);
+    assert_eq!(ec.verify().unwrap().key.alg, "ES256");
+    let ed = Rooted::new(
+        &rsa_key(&rcgen::PKCS_RSA_SHA384),
+        &rsa_key(&rcgen::PKCS_RSA_SHA512),
+        &ed_leaf,
+        &ed_signer,
+    );
+    assert_eq!(ed.verify().unwrap().key.alg, "Ed25519");
+    let mut altered = ec;
+    *altered.crl.last_mut().unwrap() ^= 1;
+    assert_eq!(altered.verify().unwrap_err(), Error::InvalidKey);
+
+    // An RSA end entity still names neither padding nor hash.
+    let rsa_signer = SigningKey::from_pkcs8_der("PS256", &rsa_pkcs8(fixture)).unwrap();
+    let rsa_leaf = Rooted::new(&rsa_sha256, &rsa_sha256, &rsa_sha256, &rsa_signer);
+    assert_eq!(rsa_leaf.verify().unwrap_err(), Error::UnsupportedAlgorithm);
+
+    // Through one signer, a 2048-bit root verifies and a 1024-bit one does not.
+    for (der, expected) in [
+        (fixture.as_slice(), Ok("ES256".to_owned())),
+        (
+            include_bytes!("fixtures/rsa-1024.der").as_slice(),
+            Err(Error::InvalidKey),
+        ),
+    ] {
+        let issuer = RsaIssuer::key_pair(rsa::RsaPrivateKey::from_pkcs1_der(der).unwrap());
+        let proof = Rooted::new(&issuer, &issuer, &ec_leaf, &ec_signer).verify();
+        assert_eq!(proof.map(|identity| identity.key.alg), expected);
+    }
+}
+
+/// An `x509` proof for an end entity that a root issued, with the root's CRL.
+struct Rooted {
+    request: Request<Vec<u8>>,
+    chain: String,
+    root: Vec<u8>,
+    crl: Vec<u8>,
+}
+
+impl Rooted {
+    /// `crl_key` is the root key, possibly under another signature algorithm.
+    fn new(
+        root_key: &rcgen::KeyPair,
+        crl_key: &rcgen::KeyPair,
+        leaf_key: &rcgen::KeyPair,
+        signer: &SigningKey,
+    ) -> Self {
+        let root = ca_cert("rsa-root.example", root_key);
+        let leaf = issued(
+            "leaf.example",
+            leaf_key,
+            &root,
+            root_key,
+            (1970, 1, 1),
+            (2099, 1, 1),
+        );
+        let mut request = request();
+        let material = KeyMaterial::X509 {
+            x5u: "https://client.example/leaf.pem".into(),
+            x5t: sha256(leaf.der().as_ref()),
+        };
+        sign_request(&mut request, signer, material, 1000).unwrap();
+        Self {
+            request,
+            chain: leaf.pem(),
+            root: root.der().to_vec(),
+            crl: crl(&root, crl_key, &[], (2099, 1, 1)),
+        }
+    }
+
+    fn verify(&self) -> Result<aauth_rust_signature_key::X509Identity, Error> {
+        prepare_x509(&self.request)?.verify_x509(
+            &self.chain,
+            &[self.root.as_slice()],
+            &[self.crl.as_slice()],
+            1000,
+        )
+    }
+}
+
+/// An RSA certificate issuer that signs with the `rsa` crate, which, unlike
+/// ring, also signs with a key below 2048 bits.
+struct RsaIssuer {
+    key: rsa::pkcs1v15::SigningKey<sha2::Sha256>,
+    public: Vec<u8>,
+}
+
+impl RsaIssuer {
+    fn key_pair(key: rsa::RsaPrivateKey) -> rcgen::KeyPair {
+        use rsa::pkcs1::EncodeRsaPublicKey;
+        let public = key
+            .to_public_key()
+            .to_pkcs1_der()
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let key = rsa::pkcs1v15::SigningKey::new(key);
+        rcgen::KeyPair::from_remote(Box::new(Self { key, public })).unwrap()
+    }
+}
+
+impl rcgen::RemoteKeyPair for RsaIssuer {
+    fn public_key(&self) -> &[u8] {
+        &self.public
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        use rsa::signature::{SignatureEncoding, Signer};
+        Ok(self.key.sign(message).to_vec())
+    }
+
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &rcgen::PKCS_RSA_SHA256
+    }
+}
+
 fn ec_certificate(
     signing: &'static ring::signature::EcdsaSigningAlgorithm,
     cert_alg: &'static rcgen::SignatureAlgorithm,

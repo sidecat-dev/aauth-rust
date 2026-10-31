@@ -268,6 +268,14 @@ convert that decision to a response unhandled, it is refused with `403`. Every
 `unsupported_scheme` refusal lists `jwt` first, then the further schemes in the
 order you gave them.
 
+An `x509` proof is verified with `proof.verify_x509(chain_pem, anchors, crls,
+now)`. Its certificates and CRLs may be signed by Ed25519, ECDSA P-256 or P-384,
+or RSA issuers. An RSA issuer signs with PKCS #1 v1.5 or PSS over SHA-256,
+SHA-384 or SHA-512, and its modulus must be 256 to 1024 bytes; a smaller RSA
+root, intermediate or CRL signer is `invalid_key`. Only the end-entity key
+selects the HTTP algorithm, so an RSA end entity is still
+`unsupported_algorithm`.
+
 ## Sign with ECDSA or RSA keys
 
 `SigningKey::generate()` and `SigningKey::from_seed(seed)` make Ed25519 keys,

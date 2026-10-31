@@ -180,6 +180,7 @@ dependencies = [
  "rand_core",
  "rcgen",
  "ring",
+ "rsa",
  "rustls-pki-types",
  "rustls-webpki",
  "serde_json",

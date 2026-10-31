@@ -5,15 +5,18 @@
 //! fetches the certificate revocation lists (CRLs) for the chain and passes
 //! them; this check verifies each CRL and refuses a certificate it revokes or
 //! that no current CRL covers. OCSP is not supported. The first PEM
-//! certificate is the end entity.
+//! certificate is the end entity. Issuers may sign certificates and CRLs with
+//! Ed25519, ECDSA, or RSA; the end-entity key alone selects the HTTP algorithm.
 use super::{Error, KeyMaterial, PreparedRequest};
 use aauth_rust_jose::Jwk;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use rsa::{BigUint, Pkcs1v15Sign, Pss};
 use rustls_pki_types::{
     AlgorithmIdentifier, CertificateDer, InvalidSignature, SignatureVerificationAlgorithm,
     TrustAnchor, UnixTime,
 };
-use sha2::{Digest, Sha256};
+use sha2::digest::{DynDigest, const_oid::AssociatedOid};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::time::Duration;
 use webpki::{
     BorrowedCertRevocationList, CertRevocationList, EndEntityCert, ExpirationPolicy,
@@ -38,12 +41,21 @@ const P256: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 const P384: &[u8] = &[0x2b, 0x81, 0x04, 0x00, 0x22];
 const RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
 
-/// Certificate signature algorithms. The HTTP signature is verified separately.
+/// Certificate and CRL signature algorithms. The HTTP signature is verified
+/// separately. An RSA issuer key has a modulus of 256 to 1024 bytes and signs
+/// with PKCS #1 v1.5 or PSS over SHA-256, SHA-384 or SHA-512; a PSS salt is as
+/// long as the hash.
 #[derive(Clone, Copy, Debug)]
 enum ChainAlg {
     Ed25519,
     P256,
     P384,
+    RsaPkcs1Sha256,
+    RsaPkcs1Sha384,
+    RsaPkcs1Sha512,
+    RsaPssSha256,
+    RsaPssSha384,
+    RsaPssSha512,
 }
 
 impl SignatureVerificationAlgorithm for ChainAlg {
@@ -80,6 +92,12 @@ impl SignatureVerificationAlgorithm for ChainAlg {
                 p384::ecdsa::signature::Verifier::verify(&key, message, &signature)
                     .map_err(|_| InvalidSignature)
             }
+            Self::RsaPkcs1Sha256 => rsa_pkcs1::<Sha256>(public_key, message, signature),
+            Self::RsaPkcs1Sha384 => rsa_pkcs1::<Sha384>(public_key, message, signature),
+            Self::RsaPkcs1Sha512 => rsa_pkcs1::<Sha512>(public_key, message, signature),
+            Self::RsaPssSha256 => rsa_pss::<Sha256>(public_key, message, signature),
+            Self::RsaPssSha384 => rsa_pss::<Sha384>(public_key, message, signature),
+            Self::RsaPssSha512 => rsa_pss::<Sha512>(public_key, message, signature),
         }
     }
 
@@ -89,6 +107,12 @@ impl SignatureVerificationAlgorithm for ChainAlg {
             Self::Ed25519 => alg_id::ED25519,
             Self::P256 => alg_id::ECDSA_P256,
             Self::P384 => alg_id::ECDSA_P384,
+            Self::RsaPkcs1Sha256
+            | Self::RsaPkcs1Sha384
+            | Self::RsaPkcs1Sha512
+            | Self::RsaPssSha256
+            | Self::RsaPssSha384
+            | Self::RsaPssSha512 => alg_id::RSA_ENCRYPTION,
         }
     }
 
@@ -98,8 +122,52 @@ impl SignatureVerificationAlgorithm for ChainAlg {
             Self::Ed25519 => alg_id::ED25519,
             Self::P256 => alg_id::ECDSA_SHA256,
             Self::P384 => alg_id::ECDSA_SHA384,
+            Self::RsaPkcs1Sha256 => alg_id::RSA_PKCS1_SHA256,
+            Self::RsaPkcs1Sha384 => alg_id::RSA_PKCS1_SHA384,
+            Self::RsaPkcs1Sha512 => alg_id::RSA_PKCS1_SHA512,
+            Self::RsaPssSha256 => alg_id::RSA_PSS_SHA256,
+            Self::RsaPssSha384 => alg_id::RSA_PSS_SHA384,
+            Self::RsaPssSha512 => alg_id::RSA_PSS_SHA512,
         }
     }
+}
+
+fn rsa_pkcs1<D: Digest + AssociatedOid>(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), InvalidSignature> {
+    rsa_issuer_key(public_key)?
+        .verify(Pkcs1v15Sign::new::<D>(), &D::digest(message), signature)
+        .map_err(|_| InvalidSignature)
+}
+
+/// The salt is as long as the hash, as the PSS algorithm identifiers require.
+fn rsa_pss<D: Digest + DynDigest + Send + Sync + 'static>(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), InvalidSignature> {
+    rsa_issuer_key(public_key)?
+        .verify(Pss::new::<D>(), &<D as Digest>::digest(message), signature)
+        .map_err(|_| InvalidSignature)
+}
+
+/// An issuer's PKCS #1 `RSAPublicKey`. A modulus outside 256 to 1024 bytes is
+/// refused before any signature is checked. The `rsa` crate also requires an
+/// odd modulus and an odd exponent of at least 3.
+fn rsa_issuer_key(public_key: &[u8]) -> Result<rsa::RsaPublicKey, InvalidSignature> {
+    let parsed = rsa::pkcs1::RsaPublicKey::try_from(public_key).map_err(|_| InvalidSignature)?;
+    let modulus = parsed.modulus.as_bytes();
+    if !(256..=1024).contains(&modulus.len()) {
+        return Err(InvalidSignature);
+    }
+    rsa::RsaPublicKey::new_with_max_size(
+        BigUint::from_bytes_be(modulus),
+        BigUint::from_bytes_be(parsed.public_exponent.as_bytes()),
+        8192,
+    )
+    .map_err(|_| InvalidSignature)
 }
 
 pub(crate) fn validate(url: &str, thumbprint: &[u8]) -> Result<(), Error> {
@@ -161,6 +229,11 @@ impl PreparedRequest {
     /// whose issuer name matches is the one checked. Delta CRLs are not
     /// supported.
     ///
+    /// Certificates and CRLs may be signed with Ed25519, ECDSA P-256 with
+    /// SHA-256, ECDSA P-384 with SHA-384, or RSA PKCS #1 v1.5 or PSS with
+    /// SHA-256, SHA-384 or SHA-512. An RSA issuer's modulus is 256 to 1024
+    /// bytes; a smaller one is `invalid_key`.
+    ///
     /// The end-entity subject public key selects exactly one HTTP algorithm:
     /// Ed25519, P-256 as ES256, or P-384 as ES384. `rsaEncryption` does not
     /// name a padding or a hash, so an RSA certificate is
@@ -210,11 +283,21 @@ impl PreparedRequest {
             .iter()
             .map(|der| CertificateDer::from_slice(der))
             .collect();
-        // These algorithms verify the certificates' own signatures. Each
-        // certificate names one of them. The HTTP algorithm is chosen later
-        // from the end-entity key alone.
-        let chain_algs: &[&dyn SignatureVerificationAlgorithm] =
-            &[&ChainAlg::Ed25519, &ChainAlg::P256, &ChainAlg::P384];
+        // These algorithms verify the certificates' and CRLs' own signatures.
+        // Each names one of them. The HTTP algorithm is chosen later from the
+        // end-entity key alone, so an RSA issuer does not make RSA an HTTP
+        // algorithm.
+        let chain_algs: &[&dyn SignatureVerificationAlgorithm] = &[
+            &ChainAlg::Ed25519,
+            &ChainAlg::P256,
+            &ChainAlg::P384,
+            &ChainAlg::RsaPkcs1Sha256,
+            &ChainAlg::RsaPkcs1Sha384,
+            &ChainAlg::RsaPkcs1Sha512,
+            &ChainAlg::RsaPssSha256,
+            &ChainAlg::RsaPssSha384,
+            &ChainAlg::RsaPssSha512,
+        ];
         end_entity
             .verify_for_usage(
                 chain_algs,
