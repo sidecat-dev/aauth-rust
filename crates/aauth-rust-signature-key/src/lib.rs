@@ -1,4 +1,5 @@
-//! Buffered RFC 9421 request proofs with `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, `cached`, and explicit `jwks_uri` schemes.
+//! Buffered RFC 9421 request proofs with `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, `cached`, and explicit `jwks_uri` schemes,
+//! and response signatures that name their signer in a `Signature-Key` response field.
 //! Verification proves a key; the accepting role supplies identity and policy.
 #![deny(missing_docs)]
 mod cache;
@@ -9,6 +10,7 @@ mod jkt;
 mod jwks;
 mod jwt_discovery;
 mod key_cache;
+mod response;
 mod self_jwt;
 mod server_keys;
 mod x509;
@@ -29,6 +31,7 @@ pub use key_cache::{
     CachedDocument, DEFAULT_KEY_TTL, FetchedHeaders, KeyCache, KeyCacheAnswer, KeyCacheStore,
     MIN_REFETCH_INTERVAL,
 };
+pub use response::{PreparedResponse, accept_signature_components, sign_response};
 pub use self_jwt::{IssuerKeyResolver, SelfJwtAssertion};
 pub use server_keys::ServerKeyBinding;
 pub use x509::X509Identity;
@@ -254,9 +257,13 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
 }
 
 fn header(req: &Request<Vec<u8>>, name: &str) -> Result<String, Error> {
+    field_value(req.headers(), name)
+}
+/// One field's combined value, at most 16 KiB, as RFC 9421 Section 2.1 joins it.
+pub(crate) fn field_value(headers: &http::HeaderMap, name: &str) -> Result<String, Error> {
     let mut combined = String::new();
     let mut present = false;
-    for value in req.headers().get_all(name) {
+    for value in headers.get_all(name) {
         if value.as_bytes().len() > 16384 - combined.len() {
             return Err(Error::InvalidSignature);
         }

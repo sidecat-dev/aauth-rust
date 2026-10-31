@@ -122,6 +122,37 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if aauth_rust_core::validate_agent_identifier(&owner.sub).is_err() {
             return Err(Failure::parameter("invalid_request"));
         }
+        if let Some(person_id) = self.bound_person(&Self::identity(&agent)) {
+            let parameters = Value::Object(body.clone());
+            let supervised = self.supervise(
+                ActInput {
+                    act: Act::MissionProposal,
+                    agent: &agent,
+                    person_id: &person_id,
+                    mission_s256: None,
+                    parameters: &parameters,
+                    members: act_members(Act::MissionProposal, &agent),
+                    path: "/mission",
+                    requested_scopes: None,
+                    deadline: i64::MAX,
+                },
+                None,
+            )?;
+            match supervised {
+                Supervised::Host => {}
+                Supervised::Allowed { sdi, allowance } => {
+                    return self.record_supervised_mission(
+                        &agent,
+                        &person_id,
+                        &Resumed { sdi, allowance },
+                    );
+                }
+                Supervised::Denied { reason } => {
+                    return Ok(self.denial(Act::MissionProposal, reason.as_deref(), false));
+                }
+                Supervised::Held(response) => return Ok(response),
+            }
+        }
         let id = aauth_rust_core::continuation::generate_pending_id();
         self.insert_proposal(
             id.clone(),
@@ -206,6 +237,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 proposal.description.clone(),
             )
         };
+        let owner = AgentIdentity {
+            issuer: owner_issuer.clone(),
+            subject: owner_subject.clone(),
+        };
         let written = (|| -> Result<(String, String), Failure> {
             let document = ApprovedMission::mint(&owner_subject, now, &description)
                 .map_err(|_| Failure::internal())?;
@@ -229,6 +264,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 return Err(error);
             }
         };
+        // Kept for a supervision server the person routes this agent to later.
+        if let Some(person_id) = self.bound_person(&owner) {
+            self.report(
+                &person_id,
+                &owner,
+                Report::Approved {
+                    s256: &s256,
+                    mission: &encoded,
+                },
+                None,
+                None,
+                None,
+            );
+        }
         let mut proposals = self.proposals()?;
         let Some(proposal) = find_proposal(&mut proposals, id) else {
             return Err(Failure::internal());
@@ -251,7 +300,123 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ) -> Result<Response<Vec<u8>>, Failure> {
         let agent = self.verify_request(request, now)?;
         direct_agent(&agent)?;
-        let body = json_object(request)?;
+        let body = Value::Object(json_object(request)?);
+        let identity = Self::identity(&agent);
+        let Some(person_id) = self.bound_person(&identity) else {
+            return self.apply_mission_edit(&agent, s256, &body, now, None);
+        };
+        let act = match body.get("action").and_then(Value::as_str) {
+            Some("update") => {
+                required_text(
+                    body.as_object().ok_or_else(Failure::internal)?,
+                    "description",
+                )?;
+                Act::MissionUpdate
+            }
+            Some("completion") => {
+                required_text(body.as_object().ok_or_else(Failure::internal)?, "summary")?;
+                Act::MissionCompletion
+            }
+            _ => return Err(Failure::parameter("invalid_request")),
+        };
+        // Only this agent's live mission is put to its supervision server.
+        let Some(audit) = self
+            .store
+            .read_mission_audit(
+                &self.config.issuer,
+                &identity.issuer,
+                &identity.subject,
+                s256,
+            )
+            .map_err(stored)?
+        else {
+            return Err(mission_not_found());
+        };
+        if let Some(reason) = audit.termination_at(now).map_err(stored)? {
+            return Err(Failure::mission_terminated(reason));
+        }
+        let path = format!("/mission/{s256}");
+        let supervised = self.supervise(
+            ActInput {
+                act,
+                agent: &agent,
+                person_id: &person_id,
+                mission_s256: Some(s256),
+                parameters: &body,
+                members: act_members(act, &agent),
+                path: &path,
+                requested_scopes: None,
+                deadline: i64::MAX,
+            },
+            None,
+        )?;
+        match supervised {
+            Supervised::Host => self.apply_mission_edit(&agent, s256, &body, now, None),
+            Supervised::Allowed { sdi, allowance } => {
+                self.apply_mission_edit(&agent, s256, &body, now, Some(&Resumed { sdi, allowance }))
+            }
+            Supervised::Denied { reason } => Ok(self.denial(act, reason.as_deref(), false)),
+            Supervised::Held(response) => Ok(response),
+        }
+    }
+
+    /// Record a mission a supervision server, or the person in its place,
+    /// approved with these terms, and report it.
+    pub(in crate::server) fn record_supervised_mission(
+        &self,
+        agent: &aauth_rust_core::VerifiedAgentToken,
+        person_id: &str,
+        resumed: &Resumed,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let terms = resumed
+            .allowance
+            .mission
+            .as_ref()
+            .ok_or_else(Failure::internal)?;
+        let owner = agent.claims();
+        let document = ApprovedMission::mint_terms(&owner.sub, (self.clock)(), terms)
+            .map_err(|_| Failure::internal())?;
+        let audit = MissionAudit {
+            person_server: self.config.issuer.clone(),
+            owner_issuer: owner.iss.clone(),
+            owner_subject: owner.sub.clone(),
+            s256: document.s256().to_owned(),
+            encoded: document.encoded().to_owned(),
+            updates: Vec::new(),
+            summary: None,
+            termination_reason: None,
+        };
+        self.store.write_mission_audit(&audit).map_err(stored)?;
+        self.report(
+            person_id,
+            &Self::identity(agent),
+            Report::Approved {
+                s256: document.s256(),
+                mission: document.encoded(),
+            },
+            Some(&resumed.sdi),
+            None,
+            None,
+        );
+        Ok(json_response(
+            StatusCode::OK,
+            json!({ "s256": document.s256(), "mission": document.encoded() }),
+        ))
+    }
+
+    /// Accept an update or a completion. A completion terminates the mission,
+    /// which is reported.
+    pub(in crate::server) fn apply_mission_edit(
+        &self,
+        agent: &aauth_rust_core::VerifiedAgentToken,
+        s256: &str,
+        body: &Value,
+        now: i64,
+        resumed: Option<&Resumed>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let body = body
+            .as_object()
+            .ok_or_else(|| Failure::parameter("invalid_request"))?;
         let action = match body.get("action") {
             Some(Value::String(action)) => action.clone(),
             _ => return Err(Failure::parameter("invalid_request")),
@@ -259,10 +424,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let edit = match action.as_str() {
             "update" => MissionEdit::Update(update_bytes(
                 "description",
-                &required_text(&body, "description")?,
+                &required_text(body, "description")?,
             )?),
             "completion" => {
-                MissionEdit::Completion(update_bytes("summary", &required_text(&body, "summary")?)?)
+                MissionEdit::Completion(update_bytes("summary", &required_text(body, "summary")?)?)
             }
             _ => return Err(Failure::parameter("invalid_request")),
         };
@@ -281,6 +446,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .store
             .edit_mission_audit(&self.config.issuer, &owner.iss, &owner.sub, s256, edit)
             .map_err(edited)?;
+        if action == "completion"
+            && let Some(person_id) = self.bound_person(&Self::identity(agent))
+        {
+            self.report(
+                &person_id,
+                &Self::identity(agent),
+                Report::Terminated {
+                    s256,
+                    reason: "completed",
+                },
+                resumed.map(|r| r.sdi.as_str()),
+                None,
+                None,
+            );
+        }
         let response = if action == "completion" {
             json!({
                 "mission_status": "terminated",

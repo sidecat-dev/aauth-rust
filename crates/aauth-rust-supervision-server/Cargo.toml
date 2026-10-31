@@ -1,0 +1,23 @@
+[package]
+name = "aauth-rust-supervision-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "AAuth supervision server: signed decisions, standing reach and event records for the agents a person routes to it"
+
+[dependencies]
+aauth-rust-core.workspace = true
+aauth-rust-jose.workspace = true
+aauth-rust-signature-key.workspace = true
+base64.workspace = true
+http.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

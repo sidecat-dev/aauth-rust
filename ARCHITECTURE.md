@@ -8,14 +8,15 @@ unimplemented role surfaces as empty Rust crates.
 | Crate | Owns | Depends on |
 | --- | --- | --- |
 | `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
-| `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time | JOSE, `http`, `sfv`, `sha2` |
-| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; Events subscribe and event tokens; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
+| `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time; response signatures with `;req` components and a `Signature-Key` response field | JOSE, `http`, `sfv`, `sha2` |
+| `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; Events subscribe and event tokens; Supervision wire values; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes; opt-in Events subscribe tokens, inbox and file-backed event store | Core, Signature-Key, JOSE |
 | `aauth-rust-agent` | Signed requests using caller-owned credentials; explicit bounded polling sessions; R3 `/authorize` preparation and class-grant verification; Events subscription signing and event verification | Core, Signature-Key, R3, JOSE |
 | `aauth-rust-budgets` | Budget objects, narrowing, per-token metering, consumption records and usage counters | JOSE |
 | `aauth-rust-r3` | Vocabulary grammar, documents, grants, and proposals | serialization, SHA-256 |
 | `aauth-rust-resource` | Direct Agent identity, PS/AS authorization and signed Resource challenges, proof before policy, HTTP decisions, opt-in metering, opt-in immediate class R3, opt-in Events registration and signed delivery | Core, Signature-Key, Budgets, R3, JOSE |
-| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance, opt-in direct class R3 issuance | Core, Signature-Key, Budgets, R3, JOSE |
+| `aauth-rust-person-server` | Atomic person binding, retained issuance/lineage, direct Auth grants, explicit AS federation and opt-in deferred custody, immediate direct call chaining, opt-in budget issuance, opt-in direct class R3 issuance, opt-in supervision: relaying, recording and enforcing a supervision server's decisions | Core, Signature-Key, Budgets, R3, JOSE |
+| `aauth-rust-supervision-server` | Supervision server role: connect, signed decisions, deferral and clarification, idempotence by `sdi`, standing reach of the person's answers, event and mission records | Core, Signature-Key, JOSE |
 | `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; verified call-chaining upstream tokens; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
 
@@ -180,3 +181,24 @@ release rechecks state, binding and current time after host work. A direct
 Resource receives signed mission context only after `with_mission_context`;
 otherwise it refuses the digest before policy. Host policy still admits the
 payload. Core never imports the role or storage adapter.
+
+## Supervision boundary
+
+The Supervision wire values (metadata, envelope, decisions, reach, events and
+the error table) live in Core, as the Events tokens do. The supervision server
+is its own role crate; the Person Server side is an opt-in of the PS role, and
+neither imports the other. Response signing is generic RFC 9421 in
+Signature-Key: a response names its signer in `Signature-Key`, and `;req`
+components bind it to the request it answers.
+
+With supervision enabled, the PS routes each act through one decision point:
+no deciding server leaves host policy in charge; a deciding server's `allow`,
+`deny` or `ask` replaces it. Host policy still identifies the person. A held
+act keeps the agent's exact request and is resumed through the same
+verification as the original request, with the allowance injected instead
+of asking again. The PS performs no background I/O: the agent's request, its
+clarification answer, and explicit host calls each send at most the requests
+they need, and every supervision request first delivers its pair's outbox, so
+reports reach a server in the order the acts occurred. One host
+`ContinuationStore` holds held acts, the decision log, outboxes, connections
+and each agent's journal; the supervision server keeps its records in another.

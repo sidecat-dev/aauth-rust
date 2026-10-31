@@ -262,6 +262,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         request: &Request<Vec<u8>>,
         now: i64,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        self.pending_at(request, now, None)
+    }
+    /// Answer a request at a pending URL. `reference` names the custody when
+    /// another pending URL answers for it, as a supervised act does once its
+    /// Access Server defers.
+    pub(super) fn pending_at(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+        reference: Option<&str>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
         let d = self.deferred.as_ref().ok_or_else(Failure::internal)?;
         if request.uri().query().is_some()
             || !["GET", "POST", "DELETE"].contains(&request.method().as_str())
@@ -270,9 +281,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::parameter("invalid_request"));
         }
         let caller = self.verify_agent(request, now, request.method() == "POST")?;
-        let id = self
-            .reference(&request.uri().to_string())
-            .map_err(|_| Failure::status(StatusCode::GONE, "gone"))?;
+        let id = match reference {
+            Some(id) => id.to_owned(),
+            None => self
+                .reference(&request.uri().to_string())
+                .map_err(|_| Failure::status(StatusCode::GONE, "gone"))?,
+        };
         let snapshot = d
             .store
             .load(&id)
@@ -471,7 +485,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 
     /// Prepare a stored exchange again. A chained request's `upstream_token` is
     /// verified anew, since it can expire or be revoked while the request waits.
-    fn prepare_stored(
+    pub(super) fn prepare_stored(
         &self,
         agent: &VerifiedAgentToken,
         parameters: Value,
@@ -540,7 +554,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         Ok(())
     }
 }
-fn same_updated_resource(left: &VerifiedResourceToken, right: &VerifiedResourceToken) -> bool {
+pub(super) fn same_updated_resource(
+    left: &VerifiedResourceToken,
+    right: &VerifiedResourceToken,
+) -> bool {
     let left = left.claims();
     let right = right.claims();
     left.iss == right.iss

@@ -18,6 +18,13 @@ pub use resource_interaction::{
     ResourceInteractionConfig, ResourceInteractionError,
 };
 mod subagents;
+mod supervision;
+use supervision::{ActInput, Issued, Report, Resumed, Supervised, act_members};
+pub use supervision::{
+    ConnectOutcome, PersonAnswer, RecordError, Supervision, SupervisionConfig, SupervisionExchange,
+    SupervisionHold, SupervisionHostError, SupervisionRecord, SupervisionUnavailable, Unconsulted,
+    VerifiedDecision, Waiting,
+};
 mod usage;
 mod wire;
 use wire::{Failure, bytes_response, json_response, token_response};
@@ -32,6 +39,7 @@ use aauth_rust_budgets::{
     parse_budget, parse_resource_claims, read_granted, verify_delivered,
 };
 use aauth_rust_core::interaction::ResourceInteraction;
+use aauth_rust_core::supervision::{Act, Allowance};
 use aauth_rust_core::{
     AgentKeyResolver, AgentToken, AuthClaims, AuthToken, Confirmation, MetadataDisplay,
     PersonClaims, PersonToken, ResourceToken, TokenError, VerifiedAgentToken,
@@ -109,6 +117,7 @@ pub struct PersonServer<K, S, P, C, I> {
     r3_approvals: Mutex<Vec<r3::RecordedApproval>>,
     display: MetadataDisplay,
     resource_interaction: Option<resource_interaction::Gate>,
+    supervision: Option<supervision::Gate>,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -233,6 +242,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             r3_approvals: Mutex::new(Vec::new()),
             display: MetadataDisplay::new(),
             resource_interaction: None,
+            supervision: None,
         })
     }
     /// Publish `name`, `description`, `logo_uri` and the other display
@@ -372,6 +382,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return self.resource_interaction_poll(request, now);
         }
+        if let Some(response) = self.route_supervision(request, now)? {
+            return Ok(response);
+        }
         if let Some(response) = self.route_revocation(request, now)? {
             return Ok(response);
         }
@@ -416,9 +429,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             if upstream.is_none() && agent.claims().ps.as_deref() != Some(&self.config.issuer) {
                 return Err(Failure::credential(TokenError::InvalidJwt));
             }
-            self.person(agent, body, upstream)
+            self.person(agent, body, upstream, None)
         } else {
-            self.auth(agent, body, now, upstream)
+            self.auth(agent, body, now, upstream, None)
         }
     }
     fn verify_request(
@@ -598,11 +611,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             token,
         })
     }
+    /// A person token request. `resumed` carries an allowance a supervision
+    /// server, or the person in its place, already gave for this request.
     fn person(
         &self,
         agent: VerifiedAgentToken,
         parameters: Value,
         upstream: Option<Upstream>,
+        resumed: Option<&Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let resource = required_string(&parameters, "resource")?;
         validate_server_identifier(resource).map_err(|_| Failure::parameter("invalid_request"))?;
@@ -677,6 +693,28 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         {
             return Err(Failure::policy(PolicyError::Denied));
         }
+        // With a deciding supervision server, the policy above only
+        // identified the person. Whether the token is issued is the server's.
+        let supervised = self.supervise(
+            ActInput {
+                act: Act::PersonToken,
+                agent: &agent,
+                person_id: &person.id,
+                mission_s256: mission.as_ref().map(|m| m.document.s256()),
+                parameters: &policy_request.parameters,
+                members: act_members(Act::PersonToken, &agent),
+                path: "/person",
+                requested_scopes: None,
+                deadline: i64::MAX,
+            },
+            resumed,
+        )?;
+        let (sdi, allowance) = match supervised {
+            Supervised::Host => (None, Allowance::default()),
+            Supervised::Allowed { sdi, allowance } => (Some(sdi), allowance),
+            Supervised::Denied { .. } => return Err(Failure::policy(PolicyError::Denied)),
+            Supervised::Held(response) => return Ok(response),
+        };
         let now = (self.clock)();
         check_agent_current(&agent, now)?;
         self.subagent_current(&agent, policy_request.subagent.as_ref(), now)?;
@@ -691,6 +729,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             expires_at = expires_at.min(up.token.exp);
         }
         if let Some(exp) = mission.as_ref().and_then(|m| m.document.expires_at()) {
+            expires_at = expires_at.min(exp);
+        }
+        if let Some(exp) = allowance.exp {
             expires_at = expires_at.min(exp);
         }
         let claims = PersonClaims {
@@ -754,6 +795,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if expires_at <= released_at {
             return Err(Failure::internal());
         }
+        let identity = Self::identity(&agent);
+        if binding.is_none() && upstream.is_none() {
+            self.report_bound(&person.id, &identity);
+        }
+        self.report_issued(
+            &person.id,
+            &identity,
+            sdi.as_deref(),
+            Issued {
+                kind: TokenKind::Person,
+                jti: &claims.jti,
+                aud: &claims.aud,
+                exp: expires_at,
+                scope: None,
+                issuer: &self.config.issuer,
+                mission_s256: claims.mission_s256.as_deref(),
+            },
+        );
         Ok(token_response(
             "person_token",
             compact,
@@ -945,21 +1004,32 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             offer,
         })
     }
+    /// An auth token request. `resumed` is as for [`Self::person`].
     fn auth(
         &self,
         agent: VerifiedAgentToken,
         parameters: Value,
         verified_at: i64,
         upstream: Option<Upstream>,
+        resumed: Option<&Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         // Unverified dispatch only: the R3 path verifies every claim it uses.
         if self.r3.is_some() && r3::carries_reference(&parameters) {
+            // Supervision defines no R3 act; a supervised agent's R3 request
+            // is refused rather than decided here.
+            let identity = Self::identity(&agent);
+            if self
+                .bound_person(&identity)
+                .is_some_and(|person| self.deciding(&person, &identity).is_some())
+            {
+                return Err(Failure::policy(PolicyError::Denied));
+            }
             return self.auth_r3(agent, parameters, verified_at, upstream);
         }
         let prepared =
             self.prepare_authorization(&agent, parameters, verified_at, upstream.as_ref())?;
         if self.federation.is_some() {
-            return self.federate(&agent, &prepared);
+            return self.federate_supervised(&agent, &prepared, resumed);
         }
         if let Some(interaction) = ResourceInteraction::from_claims(prepared.resource.claims())
             .map_err(|_| Failure::parameter("invalid_resource_token"))?
@@ -968,15 +1038,23 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(Failure::parameter("invalid_request"));
             }
+            // Its consent step is host consent; a supervised agent is refused.
+            if self
+                .deciding(&prepared.retained.person_id, &Self::identity(&agent))
+                .is_some()
+            {
+                return Err(Failure::policy(PolicyError::Denied));
+            }
             return self.open_resource_interaction(&agent, &prepared, interaction);
         }
-        self.grant_auth(&agent, prepared)
+        self.grant_auth(&agent, prepared, resumed)
     }
     /// Policy, issuance, commit and release of one prepared direct Auth grant.
     fn grant_auth(
         &self,
         agent: &VerifiedAgentToken,
         prepared: PreparedAuthorization,
+        resumed: Option<&Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -988,12 +1066,41 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         } = prepared;
         let r = resource.claims();
         let upstream = context.upstream.as_ref();
-        let grant = if upstream.is_some() {
-            self.policy.authorize_upstream(&context)
-        } else {
-            self.policy.authorize(&context)
-        }
-        .map_err(Failure::policy)?;
+        let supervised = self.supervise(
+            ActInput {
+                act: Act::AuthToken,
+                agent,
+                person_id: &retained.person_id,
+                mission_s256: r.mission_s256.as_deref(),
+                parameters: &context.parameters,
+                members: act_members(Act::AuthToken, agent),
+                path: "/token",
+                requested_scopes: Some(&context.scopes),
+                deadline: r.exp.min(presented.exp),
+            },
+            resumed,
+        )?;
+        let (sdi, grant, allowed_exp) = match supervised {
+            Supervised::Host => {
+                let grant = if upstream.is_some() {
+                    self.policy.authorize_upstream(&context)
+                } else {
+                    self.policy.authorize(&context)
+                }
+                .map_err(Failure::policy)?;
+                (None, grant, None)
+            }
+            Supervised::Allowed { sdi, allowance } => {
+                let scopes = match &allowance.scope {
+                    Some(scope) => scope.split(' ').map(str::to_owned).collect(),
+                    None => context.scopes.clone(),
+                };
+                let lifetime = self.supervised_lifetime();
+                (Some(sdi), Grant { scopes, lifetime }, allowance.exp)
+            }
+            Supervised::Denied { .. } => return Err(Failure::policy(PolicyError::Denied)),
+            Supervised::Held(response) => return Ok(response),
+        };
         validate_grant(&grant, &context.scopes)?;
         let mission = context.mission.as_ref();
         let now = (self.clock)();
@@ -1019,6 +1126,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .and_then(|state| state.policy.period_end)
         {
             expires_at = expires_at.min(end);
+        }
+        if let Some(exp) = allowed_exp {
+            expires_at = expires_at.min(exp);
         }
         let granted_budget = self.narrow_offer(offer.as_ref(), &r.sub, &r.iss, false)?;
         let mut extra = std::collections::BTreeMap::new();
@@ -1093,6 +1203,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     budget_owner(&claims.sub, &claims.aud),
                 );
         }
+        self.report_issued(
+            &retained.person_id,
+            &Self::identity(agent),
+            sdi.as_deref(),
+            Issued {
+                kind: TokenKind::Auth,
+                jti: &claims.jti,
+                aud: &claims.aud,
+                exp: expires_at,
+                scope: claims.scope.as_deref(),
+                issuer: &self.config.issuer,
+                mission_s256: claims.mission_s256.as_deref(),
+            },
+        );
         Ok(token_response(
             "auth_token",
             compact,

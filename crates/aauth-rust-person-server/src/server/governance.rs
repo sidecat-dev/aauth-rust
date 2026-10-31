@@ -2,6 +2,7 @@ use super::*;
 use aauth_rust_core::continuation::{
     canonical_interaction_code, generate_interaction_code, generate_pending_id,
 };
+use aauth_rust_core::supervision::EventKind;
 use aauth_rust_jose::strict_json;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -233,6 +234,36 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let body = json_object(request)?;
         let action = required_text(&body, "action")?;
         self.mission_if_present(&agent, &body, now)?;
+        if let Some(person_id) = self.bound_person(&Self::identity(&agent)) {
+            let parameters = Value::Object(body.clone());
+            let supervised = self.supervise(
+                ActInput {
+                    act: Act::Permission,
+                    agent: &agent,
+                    person_id: &person_id,
+                    mission_s256: body.get("mission_s256").and_then(Value::as_str),
+                    parameters: &parameters,
+                    members: act_members(Act::Permission, &agent),
+                    path: "/permission",
+                    requested_scopes: None,
+                    deadline: i64::MAX,
+                },
+                None,
+            )?;
+            match supervised {
+                Supervised::Host => {}
+                Supervised::Allowed { .. } => {
+                    return Ok(json_response(
+                        StatusCode::OK,
+                        json!({ "permission": "granted" }),
+                    ));
+                }
+                Supervised::Denied { reason } => {
+                    return Ok(self.denial(Act::Permission, reason.as_deref(), false));
+                }
+                Supervised::Held(response) => return Ok(response),
+            }
+        }
         let granted = self
             .governance_policy()?
             .permit(&action)
@@ -249,8 +280,25 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         direct_agent(&agent)?;
         let body = json_object(request)?;
         let s256 = required_text(&body, "mission_s256")?;
-        let _action = required_text(&body, "action")?;
+        required_text(&body, "action")?;
         self.active_mission(&agent, &s256, now)?;
+        let identity = Self::identity(&agent);
+        if let Some(person_id) = self.bound_person(&identity) {
+            let mut members = serde_json::Map::new();
+            for name in ["action", "description", "parameters", "result"] {
+                if let Some(value) = body.get(name) {
+                    members.insert(name.into(), value.clone());
+                }
+            }
+            self.report(
+                &person_id,
+                &identity,
+                Report::Event(EventKind::AuditRecorded, members),
+                None,
+                Some(&s256),
+                None,
+            );
+        }
         let mut response = Response::new(Vec::new());
         *response.status_mut() = StatusCode::CREATED;
         Ok(response)

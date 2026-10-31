@@ -13,6 +13,9 @@ pub(crate) fn field(body: &[u8]) -> String {
 }
 pub(crate) fn verify(req: &Request<Vec<u8>>) -> Result<(), Error> {
     let field = header(req, "content-digest").map_err(|_| Error::InvalidDigest)?;
+    verify_field(&field, req.body())
+}
+pub(crate) fn verify_field(field: &str, body: &[u8]) -> Result<(), Error> {
     let parsed: Dictionary = Parser::new(&field)
         .parse()
         .map_err(|_| Error::InvalidDigest)?;
@@ -25,7 +28,7 @@ pub(crate) fn verify(req: &Request<Vec<u8>>) -> Result<(), Error> {
     let BareItem::ByteSequence(expected) = &item.bare_item else {
         return Err(Error::InvalidDigest);
     };
-    if !item.params.is_empty() || expected.as_slice() != Sha256::digest(req.body()).as_slice() {
+    if !item.params.is_empty() || expected.as_slice() != Sha256::digest(body).as_slice() {
         return Err(Error::InvalidDigest);
     }
     Ok(())

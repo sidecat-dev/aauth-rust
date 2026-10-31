@@ -169,6 +169,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::parameter("invalid_request"));
         }
         gate.ledger.remember(&caller.id, &body.jti, body.exp);
+        if caller.dwk == "aauth-agent.json" {
+            self.report_agent_revocation(&caller.id, &body.jti, body.exp);
+        }
         let targets = if caller.dwk == "aauth-agent.json" {
             self.agent_targets(&caller.id, &body.jti)?
         } else {

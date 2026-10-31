@@ -1994,3 +1994,148 @@ returns (`type: http`, `scheme: aauth-subscribe`), or it is refused.
 `SubscriptionStore` has the same durability contract as `EventStore`;
 `MemorySubscriptionStore` is the volatile reference. AsyncAPI payload validation
 is not implemented.
+
+## Supervise agents with a supervision server
+
+A person with many agents, or an organization governing its members' agents,
+can have a supervision server (SS) decide in the person's place
+(`draft-hardt-aauth-supervision`). The SS applies standing policy and asks the
+person only for the exceptions. The Person Server relays each act to it,
+records the exchange and enforces the answer; for an agent routed to an SS it
+makes no supervision decision of its own. Run the worked composition, one
+person with three agents and two servers:
+
+```sh
+cargo run --locked -p aauth-rust-person-server --example supervised-agents
+```
+
+### Person Server
+
+Enable it with `PersonServer::with_supervision(SupervisionConfig::new(host,
+store))`. `host` implements `Supervision`:
+
+- `route(person_id, agent)` names the agent's deciding SS, or `None` when the
+  person supervises it. The person may name a default and others for
+  particular agents; exactly one decides for each agent. An organization can
+  set this for the people it governs.
+- `subject(person_id, supervisor)` is the person's identifier directed to that
+  SS, derived by the rule you use for resources. Each SS sees its own.
+- `tenant(person_id)` is asserted at connect; an organization's SS can accept
+  its people by tenant without asking them.
+- `metadata(supervisor)` returns `aauth-supervisor.json`, and `send(request)`
+  sends exactly the signed bytes it is given. Apply your egress admission
+  before both, bound the response, and never follow redirects.
+
+Verify signed decisions with your existing `AgentKeyResolver`: it resolves
+`(supervisor, "aauth-supervisor.json", kid)`, for example from a
+`TrustedIssuerKeys::from_documents(supervisor, "aauth-supervisor.json",
+metadata, jwks)` snapshot. `require_signed` defaults to `true`: an SS that
+publishes no `jwks_uri` is treated as unavailable. Set it to `false` only if
+you never need to show what a supervisor said. `store` is one
+`ContinuationStore` for held acts, the decision log, outboxes, connections and
+each agent's journal; use a durable adapter in production and a store of its
+own. Tell the person, when they register an SS, that it will see everything
+the PS puts to it and will exercise their judgment.
+
+Connect the person when they register the SS:
+`ps.connect_supervisor(person_id, supervisor)` returns `Connected`, or
+`Confirm { url, code }`: send the person to `{url}?code={code}` and call it
+again after they confirm. `Refused` means the SS does not accept this PS. A
+first act connects on its own when needed. `disconnect_supervisor` tells the SS
+the person removed it.
+
+For a routed agent, person tokens, auth tokens (direct and four-party),
+permissions, and mission proposals, updates and completions are put to the SS
+after the request passes every check it passes today. `Policy::bind_person` and
+`bind_upstream` still identify the person and derive subjects; do not consent
+there for a routed agent. `authorize`, `authorize_upstream`, `consent`,
+`Governance::permit` and the signed mission approval are not called for it.
+Its R3 requests and resource-initiated interactions are refused with
+`403 access_denied`. An agent the PS cannot tie to a person yet, such as one
+asking permission before its first person token, is decided by host policy.
+
+- `allow` proceeds. An auth token takes the SS's narrower `scope`, and every
+  token is capped at its `exp`. A four-party `allow` that narrows is refused,
+  since the Access Server cannot be told. A mission proposal's `allow` carries
+  the approved terms: the PS mints the blob with them and answers `200` with
+  `s256` and `mission`.
+- `deny` refuses: `403 access_denied` for a token or mission request (the
+  latter with a `reason` member), `permission: denied` with the reason.
+- `ask`, a deferred answer, a question for the agent and an SS that cannot be
+  consulted hold the act. The agent receives `202` with
+  `Location: {signed_origin}/pending/{id}` and polls it like any deferred
+  response. Read the `SupervisionHold` in the response extensions before you
+  serialize it; `ps.supervision_hold(reference)` reads it again later.
+
+What `SupervisionHold::waiting` asks of you:
+
+| `Waiting` | Do |
+| --- | --- |
+| `Person(ask)` | Present the act with the SS's `summary`, `recommendation`, `proposed` terms and `apply_options`, then `ps.resolve_supervision(reference, PersonAnswer { .. })`. |
+| `Unavailable(reason)` | Present the act to the person yourself and resolve it the same way. `PairingDropped` means the SS dropped this PS; tell the person. `ConnectPending { url, code }` means the person must confirm at the SS first. |
+| `Supervisor { retry_after }` | Call `ps.advance_supervision(reference)` after that many seconds. |
+| `Agent { question }` | Nothing: the agent sees `requirement=clarification`, and its answer is relayed. At most `max_rounds` rounds (five) are relayed. |
+| `AccessServer { reference }` | Allowed, and the Access Server deferred: advance that reference with `advance_federation`. |
+| `Decided` | Nothing: the agent's next poll receives the outcome. |
+
+`PersonAnswer::apply` is the reach the person chose: a value the SS offered,
+or `once`, `mission` or `always`. If you offer the last three yourself, word
+them as the draft does and no more precisely. The PS applies no reach; the SS
+remembers it. Do not require a `reason`. An act nobody answers before it
+expires is reported `abandoned`.
+
+The PS reports what happened: `agent.bound`, `person_token.issued`,
+`auth_token.issued`, `decision.resolved`, `audit.recorded` and
+`revocation.received` for agent tokens, and a mission's approval and
+termination. Reports for one `(SS, sub)` pair are delivered in order, under
+stable `id`s, through an outbox. Each supervision request delivers its pair's
+outbox first; call `ps.deliver_supervision()` when an SS may be reachable
+again, such as after its machine wakes. It returns how many pairs still wait.
+`unknown_sub` reconnects and `unknown_mission` replays the mission, then the
+request is sent again. When `route` names a new SS for an agent, the agent's
+journal (binding, active missions with what happened under them, outstanding
+tokens) is replayed to it before its first act.
+
+`ps.supervision_record(sdi)` is the decision log: each request as signed and
+each response as received. `record.verify(&keys)` checks the signed decision
+against the signer the response itself names, so anyone holding the record can
+verify it later without knowing which SS was configured.
+
+### Supervision server
+
+Add `aauth-rust-supervision-server`. `SupervisionServer::new(config, keys,
+policy, store, clock)` takes:
+
+- `Config::new(issuer).with_signing(kid, key)`: with a key, the server
+  publishes `jwks_uri` and signs every terminal decision. Set
+  `interaction_url` to the page where a person confirms a connect.
+- `keys`, an `AgentKeyResolver` for the Person Servers you admit, under
+  `aauth-person.json`. `TokenError::UntrustedIssuer` refuses a PS with
+  `unsupported_iss`.
+- `policy`, a `Policy`: `connect` answers `Connected`, `Confirm` or `Refused`
+  for a PS and person; `decide` returns a `Verdict` for each `Case`; `kind`
+  names "this kind of act" for the `mission` and `always` reaches (default:
+  the act with its resource or action); `observe` sees every event and report.
+- `store`, one `ContinuationStore` for connections, decisions, pending URLs,
+  delivered event ids, missions and standing answers. Use a durable adapter
+  and collect expired records yourself.
+
+Route `handle(&request)` for the metadata, JWKS, `/connect`, `/mission`,
+`/decision`, `/event` and `/pending/` paths. A `Case` carries the exact request
+body: the forwarded tokens, verified by the PS and resource-asserted where a
+resource issued them, and the agent's `justification`, `description` and
+clarification answers, which are agent-asserted. `Verdict::Allow`, `Deny` and
+`Ask` answer at once. `Clarify` asks the agent through the PS, and `decide`
+runs again with the answer in `case.rounds`. `Defer` answers `202`; decide
+later with `decide_pending(ps, sdi, verdict)`, and the PS's next poll receives
+the decision signed for that poll.
+
+A repeated request under an `sdi` already decided gets the same signed bytes,
+and the policy is not asked again. A repeated event `id` is acknowledged
+without being recorded twice. A `decision.resolved` with `apply` of `mission`
+or `always` becomes a standing answer, applied to later acts of the same kind
+by the same agent before `decide` is called, until the mission ends;
+`standing(ps, sub, agent)` lists them. Custom `apply` values reach `observe`.
+On the confirmation page, show `pending_connection(code)`'s Person Server
+`issuer` and its metadata `name`, and the code, then call
+`confirm_connection(code, accept)`.

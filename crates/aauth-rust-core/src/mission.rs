@@ -124,7 +124,28 @@ impl ApprovedMission {
     /// Rejects an empty description, a negative approval time, an agent identifier
     /// the decoder refuses, or a timestamp that cannot be written as RFC3339.
     pub fn mint(agent: &str, approved_at: i64, description: &str) -> Result<Self, MissionError> {
-        if approved_at < 0 || description.is_empty() {
+        Self::mint_terms(
+            agent,
+            approved_at,
+            &crate::supervision::MissionTerms::described(description),
+        )
+    }
+
+    /// Build the exact JSON for a mission approved with these terms, as a
+    /// supervision server's `allow` or the person's edit of its proposal
+    /// sets them: `agent`, `approved_at`, `description`, and `approved_tools`,
+    /// `approved_resources` and `expires_at` when present.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::mint`], and for an `expires_at` that is not after
+    /// `approved_at`.
+    pub fn mint_terms(
+        agent: &str,
+        approved_at: i64,
+        terms: &crate::supervision::MissionTerms,
+    ) -> Result<Self, MissionError> {
+        if approved_at < 0 || terms.description.is_empty() {
             return Err(MissionError);
         }
         let stamp = OffsetDateTime::from_unix_timestamp(approved_at).map_err(|_| MissionError)?;
@@ -132,7 +153,7 @@ impl ApprovedMission {
         let mut object = Map::new();
         object.insert("agent".into(), Value::String(agent.into()));
         object.insert("approved_at".into(), Value::String(approved_at_text));
-        object.insert("description".into(), Value::String(description.into()));
+        terms.write(&mut object);
         let bytes = serde_json::to_vec(&Value::Object(object)).map_err(|_| MissionError)?;
         let digest = Sha256::digest(&bytes);
         Self::decode(

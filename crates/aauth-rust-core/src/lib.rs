@@ -1,5 +1,6 @@
 //! AAuth Agent, Person, Resource and Auth JWT trust verification, plus the
-//! Events subscribe and event tokens in [`events`].
+//! Events subscribe and event tokens in [`events`] and the Supervision wire
+//! values in [`supervision`].
 //! No enrollment, HTTP proof verification or application admission policy.
 #![deny(missing_docs)]
 pub mod capabilities;
@@ -13,6 +14,7 @@ mod mission;
 pub mod resource_link;
 pub mod revocation;
 pub mod session;
+pub mod supervision;
 pub use mission::{ApprovedMission, MissionError};
 mod tokens;
 pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};

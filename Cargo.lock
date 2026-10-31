@@ -99,6 +99,7 @@ dependencies = [
  "aauth-rust-jose",
  "aauth-rust-r3",
  "aauth-rust-signature-key",
+ "aauth-rust-supervision-server",
  "base64",
  "http",
  "httpdate",
@@ -185,6 +186,20 @@ dependencies = [
  "rustls-webpki",
  "serde_json",
  "sfv",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "aauth-rust-supervision-server"
+version = "0.1.0-alpha.16"
+dependencies = [
+ "aauth-rust-core",
+ "aauth-rust-jose",
+ "aauth-rust-signature-key",
+ "base64",
+ "http",
+ "serde_json",
  "sha2",
  "thiserror",
 ]

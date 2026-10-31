@@ -175,7 +175,7 @@ pub struct TrustedIssuerKeys {
 }
 impl TrustedIssuerKeys {
     /// Retain discovery documents for the exact issuer and metadata role the host trusts.
-    /// Supports Agent, Person, Resource and Access well-known document names.
+    /// Supports Agent, Person, Resource, Access and Supervisor well-known document names.
     ///
     /// # Errors
     /// Rejects an unknown role, invalid metadata/issuer or malformed/oversized JWKS.
@@ -190,6 +190,7 @@ impl TrustedIssuerKeys {
             "aauth-person.json",
             "aauth-resource.json",
             "aauth-access.json",
+            crate::supervision::SUPERVISOR_DOCUMENT,
         ]
         .contains(&dwk)
         {

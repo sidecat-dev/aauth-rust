@@ -66,7 +66,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         )
     }
 
-    fn federate_with(
+    pub(super) fn federate_with(
         &self,
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,

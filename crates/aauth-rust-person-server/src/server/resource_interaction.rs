@@ -676,7 +676,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(Failure::credential)?;
         let prepared =
             self.prepare_authorization(&agent, value["parameters"].clone(), now, None)?;
-        self.grant_auth(&agent, prepared)
+        self.grant_auth(&agent, prepared, None)
     }
 }
 

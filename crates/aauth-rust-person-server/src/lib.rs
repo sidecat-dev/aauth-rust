@@ -1,5 +1,8 @@
 //! Person Server identity binding, direct authorization and explicit AS continuations.
 //!
+//! [`PersonServer::with_supervision`] puts the acts of agents the host routes
+//! to a supervision server to that server (`draft-hardt-aauth-supervision`).
+//!
 //! The host supplies authenticated person policy, admitted issuer keys, an atomic
 //! store, Unix-second clock and fresh token IDs. This complete example publishes
 //! metadata while refusing person/authorization requests until host policy and
@@ -68,11 +71,14 @@ pub use policy::{
     Policy, PolicyError, UpstreamContext,
 };
 pub use server::{
-    AdvanceError, BoxedEgress, BoxedR3Policy, Config, ConfigurationError, DeferredConfig,
-    FederationInput, Governance, GovernanceError, InteractionDecision, OpenedInteraction,
-    PendingResourceInteraction, PersonServer, R3AuthorizationRequest, R3Decision, R3IssuerConfig,
-    R3Policy, R3ProposalDecision, R3ProposalRequest, ResourceInteractionCallback,
-    ResourceInteractionConfig, ResourceInteractionError,
+    AdvanceError, BoxedEgress, BoxedR3Policy, Config, ConfigurationError, ConnectOutcome,
+    DeferredConfig, FederationInput, Governance, GovernanceError, InteractionDecision,
+    OpenedInteraction, PendingResourceInteraction, PersonAnswer, PersonServer,
+    R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision,
+    R3ProposalRequest, RecordError, ResourceInteractionCallback, ResourceInteractionConfig,
+    ResourceInteractionError, Supervision, SupervisionConfig, SupervisionExchange, SupervisionHold,
+    SupervisionHostError, SupervisionRecord, SupervisionUnavailable, Unconsulted, VerifiedDecision,
+    Waiting,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, R3IssuanceAudit, Store, StoreError, TokenKind,
