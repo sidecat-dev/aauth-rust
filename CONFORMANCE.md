@@ -1023,6 +1023,9 @@ Added later on 2026-10-30:
   whose upstream token or resource token is revoked ends with the polling error
   `403 revoked`; a new request naming a revoked token still gets
   `revoked_upstream_token` or `revoked_resource_token`.
+  An Access Server told that a person token is revoked revokes every Auth
+  token issued from it, including step-ups at any depth, at its Resource and
+  in its own ledger, so none is accepted again as a presented token.
 - Signature-Key signing: `SigningKey::from_pkcs8_der` signs with ES256, ES384,
   RS256 and PS256 keys as well as Ed25519, and an `hwk` member carries the key
   in the draft's order. `KeyMaterial::Jwt { jwt, cache }` may carry the bare
