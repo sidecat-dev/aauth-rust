@@ -18,6 +18,8 @@ Run a focused test while developing. Before opening a merge request, run:
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+sh ci/check-docs.sh
+cargo run --locked -p aauth-rust-resource --example getting-started
 cargo run --locked -p aauth-rust-resource --example library
 cargo run --locked -p aauth-rust-resource --example axum
 cargo run --locked -p aauth-rust-resource --example direct-identity
@@ -57,6 +59,13 @@ remaining limitation in the merge request. Update public docs when supported
 behavior changes. Keep development diaries and review transcripts outside the
 product repository. API and package names may change during the alpha series;
 there are no supported releases yet.
+
+The guides in `docs/` hold two kinds of Rust sample. A plain `rust` block is a
+complete program: the page is included as a doctest of `aauth-rust-resource` or
+`aauth-rust-person-server`, so `cargo test` compiles and runs it. A `rust ignore`
+block follows a `<!-- sample: PATH -->` line and quotes PATH unchanged;
+`ci/check-docs.sh` checks the quote, the relative links and that every page
+with a plain sample is included.
 
 Keep the service guide's host-step code identical to `examples/deferred_host.rs`
 in the Person Server crate, and compile-check that example after editing it.

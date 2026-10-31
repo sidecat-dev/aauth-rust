@@ -1,0 +1,198 @@
+# Agent
+
+An agent is an HTTP client acting for a person. With this crate it holds its
+private key and its current token, signs each request, reads what servers ask
+for, and checks the tokens they send back before using them.
+
+The crate does not send requests, wait or retry. Your code does, so nothing is
+sent twice unless you send it twice. There is no HTTP client in the crate
+that answers challenges by itself.
+
+Crate: `aauth-rust-agent`. Terms are defined in
+[How AAuth works](../how-aauth-works.md).
+
+## Flow
+
+What an agent does with each response:
+
+```mermaid
+flowchart TD
+    A[Sign the request with the current token] --> B[Send it]
+    B --> C{Response}
+    C -->|2xx| D[Done]
+    C -->|401 with AAuth-Requirement| E[Read it with Requirement::from_headers]
+    E -->|agent-token| A
+    E -->|person-token| F[Get a Person token from the Person Server] --> A
+    E -->|auth-token| G[Check the Resource token, exchange it at the Person Server, check the Auth token] --> A
+    C -->|401 with Signature-Error| H[Fix what the error names; see Errors]
+    C -->|202 with Location| I[Poll the pending URL with PollSession]
+    C -->|403| J[Refused: tell the person]
+```
+
+## Smallest working code
+
+The `call` function signs a request, sends it, and says what the answer asks
+for. `main` sets up an Agent Provider and an API in the same process so that
+the program runs on its own; in your code, `send` is your HTTP client.
+
+```rust
+use aauth_rust_agent::{Agent, Requirement};
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
+use aauth_rust_jose::SigningKey;
+use aauth_rust_resource::AgentIdentityResource;
+use http::{Request, Response};
+use std::error::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// Sign one GET, send it, and return the body or what the server needs.
+fn call(
+    agent: &Agent,
+    uri: &str,
+    send: &dyn Fn(Request<Vec<u8>>) -> Response<Vec<u8>>,
+) -> Result<String, Box<dyn Error>> {
+    let mut request = Request::builder().uri(uri).body(Vec::new())?;
+    agent.sign(&mut request, now())?;
+    let response = send(request);
+    if response.status().is_success() {
+        return Ok(String::from_utf8(response.into_body())?);
+    }
+    if let Some(error) = response.headers().get("signature-error") {
+        return Err(format!("signature refused: {}", error.to_str()?).into());
+    }
+    match Requirement::from_headers(response.headers())? {
+        Some(Requirement::AgentToken) => Err("sign with the Agent token".into()),
+        Some(Requirement::PersonToken) => Err("get a Person token for this Resource".into()),
+        Some(Requirement::AuthToken { .. }) => Err("exchange the Resource token".into()),
+        None => Err(format!("refused with {}", response.status()).into()),
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // The agent's key never leaves it; the provider's token names its public half.
+    let key = SigningKey::generate();
+    let provider = AgentProvider::new("https://ap.example", "ap-key-1", SigningKey::generate())?;
+    let token = provider.issue(&AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:assistant@ap.example".into(),
+        jti: "assistant-1".into(),
+        iat: now(),
+        exp: now() + 600,
+        cnf: Confirmation {
+            jwk: key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    let agent = Agent::new(key, token)?;
+
+    // An API that admits any agent from this provider.
+    let keys = AgentProviderKeys::from_documents(
+        "https://ap.example",
+        &provider.metadata()?,
+        &provider.jwks()?,
+    )?;
+    let api = AgentIdentityResource::for_origin(
+        "https://api.example",
+        keys,
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )?;
+    let send = |request: Request<Vec<u8>>| api.authorize(&request, now()).into_response();
+
+    let body = call(&agent, "https://api.example/hello", &send)?;
+    assert_eq!(body, "aauth:assistant@ap.example");
+    Ok(())
+}
+```
+
+## Keys and tokens
+
+- Make the key with `SigningKey::generate()` and keep it for the life of the
+  agent. `agent.public_jwk()` gives the public half for a renewed token.
+- `Agent::new(key, agent_token)` checks that the token names this key. It does
+  not check the provider's signature; the server you call does that.
+- `agent.with_token(token)` returns an agent with the same key and another
+  token: a renewed Agent token, or a Person or Auth token for one Resource.
+  Keep the agent that holds the Agent token: it signs your requests to the
+  Person Server.
+
+## Signing
+
+`agent.sign(&mut request, now)` adds the `Signature-Key`, `Signature-Input` and
+`Signature` headers. The request needs an absolute `https` URL. The signature
+covers the method, the host, the path, the query when there is one,
+`Authorization` when it is set, and `Signature-Key`. When the body is not
+empty, `sign` adds a `Content-Digest` header and covers it, and covers
+`Content-Type` when it is set. Call `sign` last: changing a covered part
+afterwards breaks the signature. Signing a request again replaces the old
+signature.
+
+When a Resource's metadata lists `additional_signature_components`, sign for
+it with `agent.with_additional_signature_components(list)`.
+
+## Checking what servers send
+
+Never pass on a token you have not checked. When a Resource answers with
+`requirement=auth-token`, the header carries a Resource token:
+
+- In three-party access, check it with `agent.verify_resource_challenge`,
+  exchange it at your Person Server, and check the Auth token you get back
+  with `agent.verify_auth_delivery`. [Person Server](person-server.md) shows
+  the whole exchange.
+- In four-party access, use `verify_federated_resource_challenge` and
+  `verify_federated_auth_delivery` with a `FederatedContext` that names the
+  Resource, Person Server and Access Server you expect.
+  [Access Server](access-server.md) shows it.
+
+These checks confirm who signed the token, that it is for you and for that
+Resource, and that the Auth token grants no more than was asked.
+
+`Requirement::from_headers` reads the three `401` requirements. It returns
+`RequirementError::Unsupported` for the `202` requirements, which `PollSession`
+handles.
+
+## Waiting for an answer
+
+A `202` response means the answer is not ready. `PollSession` prepares the
+polls and enforces the server's timing:
+
+1. `PollSession::new(endpoint, &response, now, deadline)` reads the `202`. The
+   deadline is yours, at most one hour away.
+2. `session.request(&agent, now)` returns the next signed `GET` for the
+   pending URL, or `PollError::TooEarly` if `Retry-After` has not passed.
+3. `session.accept(response, now)` returns `None` while the answer is still
+   pending, and the final response once it is not. Check that response's
+   status: it can be a refusal.
+
+For a question from the person (`requirement=clarification`),
+`session.answer(&agent, answer, now)` prepares the reply, and
+`session.cancel(&agent, now)` prepares a `DELETE` that withdraws the request.
+The four-party example runs a deferred exchange:
+`cargo run --locked -p aauth-rust-resource --example four-party -- --deferred`.
+
+## Also in this crate
+
+- `agent.missions()` tracks missions the Person Server reported ended. See
+  [Missions](../features/missions.md).
+- `Subagent` checks a sub-agent's token and credentials. See
+  [Obtain credentials for a one-level sub-agent](../../USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent).
+- `EventSubscriptions` and `agent.sign_subscription` receive events. See
+  [Events](../features/events.md).
+- `AccessSession` keeps a Resource's session token (`AAuth-Access`) for
+  resource-managed access.
+
+## Next
+
+- [Errors](../errors.md): what each refusal means and what to do.
+- [Prepare explicit Agent polls](../../USE-IN-YOUR-SERVICE.md#prepare-explicit-agent-polls):
+  the details of polling.

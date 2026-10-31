@@ -584,3 +584,31 @@ where
         }
     }
 }
+
+// The Rust samples in docs/ run as doctests of this crate, which can reach
+// every role crate. ci/check-docs.sh checks the samples quoted from examples.
+#[cfg(doctest)]
+mod docs {
+    #[doc = include_str!("../../../docs/getting-started.md")]
+    mod getting_started {}
+    #[doc = include_str!("../../../docs/roles/agent.md")]
+    mod agent {}
+    #[doc = include_str!("../../../docs/roles/agent-provider.md")]
+    mod agent_provider {}
+    #[doc = include_str!("../../../docs/roles/resource.md")]
+    mod resource {}
+    #[doc = include_str!("../../../docs/roles/person-server.md")]
+    mod person_server {}
+    #[doc = include_str!("../../../docs/roles/access-server.md")]
+    mod access_server {}
+    #[doc = include_str!("../../../docs/features/call-chaining.md")]
+    mod call_chaining {}
+    #[doc = include_str!("../../../docs/features/missions.md")]
+    mod missions {}
+    #[doc = include_str!("../../../docs/features/budgets.md")]
+    mod budgets {}
+    #[doc = include_str!("../../../docs/features/events.md")]
+    mod events {}
+    #[doc = include_str!("../../../docs/features/r3.md")]
+    mod r3 {}
+}

@@ -18,12 +18,14 @@ linux:
     - cargo build --locked
     # Fresh separate consumer: compile README recipe using the primed registry cache.
     - sh ci/check-consumer-bootstrap.sh "${CI_PROJECT_DIR}/target/consumer-bootstrap"
+    - sh ci/check-docs.sh
     - cargo fmt --all -- --check
     - cargo clippy --workspace --all-targets --locked -- -D warnings
     - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
     # Stage unpublished sibling dependencies and verify every archive; never upload.
     - cargo publish --workspace --dry-run --locked
     - cargo test --locked
+    - cargo run --locked -p aauth-rust-resource --example getting-started
     - cargo run --locked -p aauth-rust-resource --example library
     - cargo run --locked -p aauth-rust-resource --example axum
     - cargo run --locked -p aauth-rust-resource --example three-party
