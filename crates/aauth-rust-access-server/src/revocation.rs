@@ -84,6 +84,10 @@ impl<
 > AccessServer<K, P, C, I>
 {
     /// Accept signed revocations and advertise `revocation_endpoint`.
+    ///
+    /// When a Person Server revokes a person token here, every Auth token this
+    /// server issued from it, step-ups included, is revoked at its Resource
+    /// and refused from then on as a presented token.
     pub fn with_revocation(self) -> Self {
         self.with_revocation_limits(RevocationLimits::default())
     }
@@ -258,6 +262,11 @@ impl<
         }
         Ok(self.finish(&job.caller, job.key, job.report, job.targets, Some(&id)))
     }
+    /// The Auth tokens this server issued against the revoked token, and every
+    /// step-up issued against one of those in turn, at their Resources. Each
+    /// enters this server's ledger too, so none is accepted as a presented token
+    /// again (Revocation Cascade: the AS MUST NOT issue further auth tokens
+    /// against a revoked person token, and MUST revoke those it issued).
     fn auth_targets(&self, caller: &str, presented_jti: &str) -> Vec<Target> {
         let Some(gate) = &self.revocation else {
             return Vec::new();
@@ -265,14 +274,29 @@ impl<
         let Ok(rows) = gate.issued.lock() else {
             return Vec::new();
         };
-        rows.iter()
-            .filter(|row| row.presented_issuer == caller && row.presented_jti == presented_jti)
-            .map(|row| Target {
-                recipient: row.resource.clone(),
-                jti: row.jti.clone(),
-                exp: row.exp,
-            })
-            .collect()
+        let mut lineage = vec![(caller.to_owned(), presented_jti.to_owned())];
+        let mut targets = Vec::new();
+        let mut walked = 0;
+        while let Some((issuer, jti)) = lineage.get(walked).cloned() {
+            walked += 1;
+            for row in rows
+                .iter()
+                .filter(|row| row.presented_issuer == issuer && row.presented_jti == jti)
+            {
+                let issued = (self.config.issuer.clone(), row.jti.clone());
+                if lineage.contains(&issued) {
+                    continue;
+                }
+                gate.ledger.remember(&issued.0, &issued.1, row.exp);
+                lineage.push(issued);
+                targets.push(Target {
+                    recipient: row.resource.clone(),
+                    jti: row.jti.clone(),
+                    exp: row.exp,
+                });
+            }
+        }
+        targets
     }
     /// Dispatch the cascade and answer. `polled` is the pending id being polled,
     /// which a deferred answer keeps.

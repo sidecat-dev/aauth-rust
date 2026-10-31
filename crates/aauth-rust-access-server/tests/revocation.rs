@@ -162,12 +162,28 @@ fn value(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).unwrap()
 }
 
+/// A step-up of `auth`: the same exchange, presenting that Auth token to a
+/// fresh challenge that names it.
+fn step_up_body(auth: &str) -> Value {
+    let claims = AuthToken::parse(auth).unwrap().unverified_claims().clone();
+    let mut challenge = resource_claims();
+    challenge.jti = format!("step-up-of-{}", claims.jti);
+    challenge.presented_jti = claims.jti;
+    let mut body = token_body(1200);
+    body["presented_token"] = json!(auth);
+    body["resource_token"] = json!(
+        mint_resource_token(&SigningKey::from_seed([5; 32]), "resource", &challenge).unwrap()
+    );
+    body
+}
+
 #[test]
-fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
+fn person_token_revocation_reaches_step_ups_reports_downstream_and_refuses_further_grants() {
     let seen = Arc::new(AtomicUsize::new(0));
     let count = seen.clone();
     let now = Arc::new(AtomicI64::new(1000));
     let clock = now.clone();
+    let ids = AtomicUsize::new(0);
     let directory = Arc::new(Recording(Mutex::new(Vec::new())));
     let server = AccessServer::new(
         Config::new(AS, "as", SigningKey::from_seed([4; 32])),
@@ -180,7 +196,7 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
             })
         },
         move || clock.load(Ordering::SeqCst),
-        || "auth-1".into(),
+        move || format!("auth-{}", ids.fetch_add(1, Ordering::SeqCst)),
     )
     .unwrap()
     .with_revocation_directory(directory.clone());
@@ -193,9 +209,33 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
         "{}",
         String::from_utf8_lossy(granted.body())
     );
-    let auth = AuthToken::parse(value(granted.body())["auth_token"].as_str().unwrap()).unwrap();
-    let auth_jti = auth.unverified_claims().jti.clone();
-    let auth_exp = auth.unverified_claims().exp;
+    let first = value(granted.body())["auth_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // An AS-local step-up: issued against the first Auth token, not the
+    // person token.
+    let stepped = server.handle(&token_request(step_up_body(&first), 1000));
+    assert_eq!(
+        stepped.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(stepped.body())
+    );
+    let step = value(stepped.body())["auth_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let issued: Vec<(String, String, i64)> = [&first, &step]
+        .iter()
+        .map(|compact| {
+            let claims = AuthToken::parse(compact)
+                .unwrap()
+                .unverified_claims()
+                .clone();
+            (RESOURCE.to_owned(), claims.jti, claims.exp)
+        })
+        .collect();
     let cascade = server.handle(&revoke(
         3,
         PS,
@@ -214,10 +254,18 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
     assert!(body.get("downstream").is_some());
     assert_eq!(body["downstream"][0]["recipient"], RESOURCE);
     assert!(body["downstream"][0].get("error").is_none());
-    assert_eq!(
-        directory.0.lock().unwrap().as_slice(),
-        [(RESOURCE.into(), auth_jti, auth_exp)]
-    );
+    // Revocation Cascade: every Auth token issued from the person token, the
+    // step-up included, is revoked at its Resource.
+    assert_eq!(directory.0.lock().unwrap().as_slice(), issued.as_slice());
+    for (_, jti, exp) in &issued {
+        assert_eq!(server.revocation_exp(AS, jti), Some(*exp));
+    }
+    // Neither is accepted again as the presented token of a further step-up.
+    for presented in [&first, &step] {
+        let refused = server.handle(&token_request(step_up_body(presented), 1000));
+        assert_eq!(refused.status(), 400);
+        assert_eq!(value(refused.body())["error"], "revoked_presented_token");
+    }
     assert_eq!(server.revocation_exp(PS, "person"), Some(1200));
     assert!(
         server
@@ -227,7 +275,7 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
     let refused = server.handle(&token_request(token_body(1200), 1000));
     assert_eq!(refused.status(), 400);
     assert_eq!(value(refused.body())["error"], "revoked_presented_token");
-    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
     now.store(1200, Ordering::SeqCst);
     let expired = server.handle(&token_request(token_body(1200), 1200));
     assert_eq!(
@@ -237,7 +285,7 @@ fn person_token_revocation_reports_downstream_and_refuses_further_grants() {
         String::from_utf8_lossy(expired.body())
     );
     assert_eq!(value(expired.body())["error"], "revoked_presented_token");
-    assert_eq!(seen.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
 }
 
 /// The PS's signed poll of an AS pending URL.
