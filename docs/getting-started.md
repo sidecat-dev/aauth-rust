@@ -30,6 +30,7 @@ hundred MB), and Cargo downloads and builds the dependencies. Then the example
 prints:
 
 ```text
+metadata: 200 issuer=https://api.example
 unsigned: 401 requirement=agent-token
 signed: 200 hello, aauth:assistant@ap.example
 not admitted: 403
@@ -51,8 +52,9 @@ so nothing outside the program can reach these servers.
   `/.well-known/aauth-agent.json`, which names the URL of its public keys,
   `/.well-known/jwks.json`, so that anyone can check its tokens.
 - The **API** at `api.example` is what AAuth calls a **Resource**. At startup
-  it fetches the provider's metadata and public keys. On each request it checks
-  the signature and the Agent token, then asks your policy whether to let this
+  it fetches the provider's metadata and public keys. It publishes its own
+  metadata at `/.well-known/aauth-resource.json`. On each request it checks the
+  signature and the Agent token, then asks your policy whether to let this
   agent in.
 
 The agent makes its own key pair. It never sends the private key anywhere: the
@@ -67,23 +69,29 @@ sequenceDiagram
     API->>AP: GET /.well-known/aauth-agent.json
     API->>AP: GET /.well-known/jwks.json
     Note over Agent,AP: The provider issues an Agent token<br/>that names the agent's public key
+    Agent->>API: GET /.well-known/aauth-resource.json
+    API-->>Agent: 200, the API's metadata
     Agent->>API: GET /hello, no signature
     API-->>Agent: 401, AAuth-Requirement: requirement=agent-token
     Agent->>API: GET /hello, signed, with the Agent token
     API-->>Agent: 200 hello, aauth:assistant@ap.example
 ```
 
-The three lines of output are three requests:
+The four lines of output are four requests:
 
-1. **`unsigned: 401 requirement=agent-token`.** The request had no signature.
+1. **`metadata: 200 issuer=https://api.example`.** The agent reads the API's
+   metadata: its identifier and what it accepts. This library's agent does not
+   need it to sign, but other clients, such as aauth-go's, read it before
+   calling, so serve it from every API.
+2. **`unsigned: 401 requirement=agent-token`.** The request had no signature.
    The API answers `401` with an `AAuth-Requirement` header that says what it
    needs: an Agent token.
-2. **`signed: 200 hello, aauth:assistant@ap.example`.** The agent signed the
+3. **`signed: 200 hello, aauth:assistant@ap.example`.** The agent signed the
    request. The signature covers the method, the host, the path and the
    `Signature-Key` header, which carries the Agent token. The API checked the
    provider's signature on the token, checked that the request was signed with
    the key the token names, and the policy admitted this agent.
-3. **`not admitted: 403`.** A second agent, `aauth:other@ap.example`, signed
+4. **`not admitted: 403`.** A second agent, `aauth:other@ap.example`, signed
    correctly, but the policy admits only the assistant. When your policy
    refuses, the API answers `403` with no `Signature-Error` header, so the
    agent knows its signature was accepted.
@@ -133,7 +141,7 @@ fn main() -> Result<(), Error> {
             "/.well-known/jwks.json" => published.jwks(),
             _ => return status(404),
         };
-        Response::new(document.unwrap())
+        json(document.unwrap())
     })?;
 
     // The API fetches the provider's public key over TLS, then checks every request.
@@ -149,12 +157,26 @@ fn main() -> Result<(), Error> {
             agent.claims().sub == "aauth:assistant@ap.example"
         },
     )?;
+    // The API publishes its own metadata. Clients such as aauth-go's read it first.
+    let metadata = resource.metadata()?;
     let api = tls::TlsServer::start("api.example", move |request| {
+        if request.uri().path() == "/.well-known/aauth-resource.json" {
+            return json(metadata.clone());
+        }
         match resource.authorize(&request, now()).into_result() {
             Ok((agent, ())) => Response::new(format!("hello, {}", agent.claims().sub).into_bytes()),
             Err(refusal) => *refusal,
         }
     })?;
+
+    // The agent reads the API's metadata.
+    let response = api.send(&get("https://api.example/.well-known/aauth-resource.json")?)?;
+    let published: serde_json::Value = serde_json::from_slice(response.body())?;
+    println!(
+        "metadata: {} issuer={}",
+        response.status().as_u16(),
+        published["issuer"].as_str().unwrap_or("")
+    );
 
     // Without a signature, the API answers 401 and says what it needs.
     let response = api.send(&get("https://api.example/hello")?)?;
@@ -216,6 +238,13 @@ fn get(uri: &str) -> Result<Request<Vec<u8>>, Error> {
     Ok(Request::builder().uri(uri).body(Vec::new())?)
 }
 
+fn json(body: Vec<u8>) -> Response<Vec<u8>> {
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
+}
+
 fn status(code: u16) -> Response<Vec<u8>> {
     Response::builder().status(code).body(Vec::new()).unwrap()
 }
@@ -241,6 +270,8 @@ The parts that matter in a real service:
   policy runs only after the signature and token have been checked.
   `into_result` gives your handler the verified token, or gives you the `401`
   or `403` response to send.
+- `resource.metadata()` is the document to serve at
+  `/.well-known/aauth-resource.json`. The library does not route it for you.
 - `Agent::sign` adds the `Signature-Key`, `Signature-Input` and `Signature`
   headers. Call it last, once the URL, headers and body are final.
 

@@ -37,12 +37,33 @@ ports, with TLS, and has an agent call the API.
 
 ## Install
 
-The crates are not on crates.io: your project depends on a checkout of a
-release tag by path. Run the commands below from inside the checkout. They
-create a new project next to it, `../aauth-service`, and copy
+The crates are not on crates.io. Your project depends on a release tag, either
+fetched by Cargo from git or in a checkout next to your project. Your project
+needs Rust 1.99 or later.
+
+From git, list each crate you use with the repository and the tag:
+
+<!-- checked: git-dependencies -->
+```toml
+[dependencies]
+aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+http = "1"
+```
+
+The other crates in the table below are added the same way.
+
+From a checkout, by path: run the commands below from inside the checkout.
+They create a new project next to it, `../aauth-service`, and copy
 `crates/aauth-rust-resource/examples/library.rs` into it as `src/main.rs`.
 That program, shown here, has an Agent Provider issue a token, an agent sign a
-request with it, and a Resource check the request, all in one process.
+request with it, and a Resource check the request, all in one process. In a
+real API, also serve `resource.metadata()` at
+`/.well-known/aauth-resource.json`; the [Resource](docs/roles/resource.md)
+guide shows how.
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -148,6 +169,7 @@ Access Server as well, add these lines to the `[dependencies]` table in
 `../aauth-service/Cargo.toml`, run `cargo generate-lockfile` there again, and
 build:
 
+<!-- checked: role-crates -->
 ```toml
 aauth-rust-person-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-person-server" }
 aauth-rust-access-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-access-server" }

@@ -33,7 +33,7 @@ fn main() -> Result<(), Error> {
             "/.well-known/jwks.json" => published.jwks(),
             _ => return status(404),
         };
-        Response::new(document.unwrap())
+        json(document.unwrap())
     })?;
 
     // The API fetches the provider's public key over TLS, then checks every request.
@@ -49,12 +49,26 @@ fn main() -> Result<(), Error> {
             agent.claims().sub == "aauth:assistant@ap.example"
         },
     )?;
+    // The API publishes its own metadata. Clients such as aauth-go's read it first.
+    let metadata = resource.metadata()?;
     let api = tls::TlsServer::start("api.example", move |request| {
+        if request.uri().path() == "/.well-known/aauth-resource.json" {
+            return json(metadata.clone());
+        }
         match resource.authorize(&request, now()).into_result() {
             Ok((agent, ())) => Response::new(format!("hello, {}", agent.claims().sub).into_bytes()),
             Err(refusal) => *refusal,
         }
     })?;
+
+    // The agent reads the API's metadata.
+    let response = api.send(&get("https://api.example/.well-known/aauth-resource.json")?)?;
+    let published: serde_json::Value = serde_json::from_slice(response.body())?;
+    println!(
+        "metadata: {} issuer={}",
+        response.status().as_u16(),
+        published["issuer"].as_str().unwrap_or("")
+    );
 
     // Without a signature, the API answers 401 and says what it needs.
     let response = api.send(&get("https://api.example/hello")?)?;
@@ -114,6 +128,13 @@ fn now() -> i64 {
 
 fn get(uri: &str) -> Result<Request<Vec<u8>>, Error> {
     Ok(Request::builder().uri(uri).body(Vec::new())?)
+}
+
+fn json(body: Vec<u8>) -> Response<Vec<u8>> {
+    Response::builder()
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap()
 }
 
 fn status(code: u16) -> Response<Vec<u8>> {

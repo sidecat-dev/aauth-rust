@@ -116,8 +116,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 ## Keys and tokens
 
-- Make the key with `SigningKey::generate()` and keep it for the life of the
-  agent. `agent.public_jwk()` gives the public half for a renewed token.
+- The agent's key must outlive a restart: its Agent token names it.
+  `SigningKey::generate()` makes a key that exists only in memory, and there
+  is no way to write it out, so load the key from a file instead
+  (`SigningKey::from_pkcs8_der`); see
+  [When the agent and the provider are separate programs](agent-provider.md#when-the-agent-and-the-provider-are-separate-programs).
+  `agent.public_jwk()` gives the public half, as JSON-serializable data, for
+  enrollment or a renewed token.
 - `Agent::new(key, agent_token)` checks that the token names this key. It does
   not check the provider's signature; the server you call does that.
 - `agent.with_token(token)` returns an agent with the same key and another

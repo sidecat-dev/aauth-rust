@@ -93,14 +93,83 @@ The claims:
 - `extra` holds further claims; their meaning is up to you and the parties you
   agree with.
 
+## When the agent and the provider are separate programs
+
+The agent's private key never goes to the provider. The agent loads its key,
+sends the provider only the public half, `public_jwk()`, which is plain JSON,
+and keeps the token it gets back. A `SigningKey` cannot be written out: it has
+no method that returns the private key. So create the key outside the program,
+as a PKCS #8 file, and load it each time the agent starts:
+
+```sh
+openssl genpkey -algorithm ed25519 -outform DER -out agent-key.der
+```
+
+<!-- checked: pkcs8-prefix -->
+```rust
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, Confirmation};
+use aauth_rust_jose::{Jwk, SigningKey};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// An Ed25519 key in PKCS #8 DER: the test key from RFC 8410. Read yours from
+/// the file instead: `std::fs::read("agent-key.der")?`.
+const AGENT_KEY_DER: [u8; 48] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+    0xd4, 0xee, 0x72, 0xdb, 0xf9, 0x13, 0x58, 0x4a, 0xd5, 0xb6, 0xd8, 0xf1, 0xf7, 0x69, 0xf8, 0xad,
+    0x3a, 0xfe, 0x7c, 0x28, 0xcb, 0xf1, 0xd4, 0xfb, 0xe0, 0x97, 0xa8, 0x8f, 0x44, 0x75, 0x58, 0x42,
+];
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+
+    // The agent program: load its key, and send the public half to enroll.
+    let key = SigningKey::from_pkcs8_der("Ed25519", &AGENT_KEY_DER)?;
+    let enrollment = serde_json::to_string(&key.public_jwk())?;
+
+    // The provider program: it receives only the public key.
+    let provider = AgentProvider::new("https://ap.example", "ap-key-1", SigningKey::generate())?;
+    let public_key: Jwk = serde_json::from_str(&enrollment)?;
+    let token = provider.issue(&AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:assistant@ap.example".into(),
+        jti: "issuance-0002".into(),
+        iat: now,
+        exp: now + 3600,
+        cnf: Confirmation { jwk: public_key },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+
+    // The agent program, started again: the same key file and the token it
+    // stored. Agent::new checks that the token names this key.
+    let agent = Agent::new(
+        SigningKey::from_pkcs8_der("Ed25519", &AGENT_KEY_DER)?,
+        token,
+    )?;
+    assert_eq!(
+        agent.public_jwk().thumbprint()?,
+        key.public_jwk().thumbprint()?
+    );
+    Ok(())
+}
+```
+
+The provider's own signing key is loaded the same way. `SigningKey::from_seed`
+takes a 32-byte seed instead, if your key store holds seeds. Keep the key file
+readable only by the program that uses it.
+
 ## What your service supplies
 
 - **Enrollment.** How an agent proves to you that it is genuine: a platform
   attestation, a person signing in, a key the person controls. The library
   has no enrollment endpoint; the Bootstrap draft that describes one is not
   implemented.
-- **The signing key**, kept safe. `SigningKey::from_pkcs8_der` loads an
-  existing key.
+- **The signing key**, kept safe and loaded at start, as above.
 - **Publishing.** Serve `metadata()` and `jwks()` over HTTPS. `jwks()`
   publishes only the current key. After you change keys, servers that refresh
   your JWKS reject tokens signed with the old key. To change keys without

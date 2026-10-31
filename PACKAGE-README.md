@@ -43,8 +43,15 @@ checkout. For example, in an application next to an `aauth-rust` checkout:
 aauth-rust-resource = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-resource" }
 ```
 
-Adjust the path to your checkout. A single archive cannot supply its unpublished
-sibling dependencies. To create and compile-verify all twelve archives together,
+Adjust the path to your checkout. Cargo can also fetch the crates from the
+release tag instead:
+
+```toml
+[dependencies]
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+```
+
+A single archive cannot supply its unpublished sibling dependencies. To create and compile-verify all twelve archives together,
 run this from the full workspace with its lockfile:
 
 ```sh

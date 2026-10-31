@@ -49,7 +49,7 @@ use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_resource::{AgentIdentityResource, Deny};
-use http::{Request, Response};
+use http::{HeaderValue, Request, Response};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// What the policy tells the handler about an admitted agent.
@@ -86,8 +86,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    // Your handler.
+    // Your handler. It also serves the API's metadata, which some clients,
+    // such as aauth-go's, read before calling.
+    let metadata = api.metadata()?;
     let handle = |request: Request<Vec<u8>>| -> Response<Vec<u8>> {
+        if request.uri().path() == "/.well-known/aauth-resource.json" {
+            let mut response = Response::new(metadata.clone());
+            let json = HeaderValue::from_static("application/json");
+            response.headers_mut().insert("content-type", json);
+            return response;
+        }
         match api.authorize(&request, now()).into_result() {
             Ok((agent, caller)) => {
                 let body = format!("{} is on the {} plan", agent.claims().sub, caller.plan);
@@ -97,8 +105,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Publish this at https://api.example/.well-known/aauth-resource.json.
-    let _metadata = api.metadata()?;
+    // Anyone can read the metadata.
+    let get = Request::builder()
+        .uri("https://api.example/.well-known/aauth-resource.json")
+        .body(Vec::new())?;
+    assert_eq!(handle(get).status(), 200);
 
     // An unsigned request is told what to send.
     let unsigned = Request::builder()
@@ -160,13 +171,204 @@ request:
   the method, path, query, body, `Content-Type` and `Content-Digest` through
   unchanged.
 
-The `axum` example does this:
+- Serve `metadata()` at `/.well-known/aauth-resource.json`. The library does
+  not route it for you.
+
+The `axum` example does all of this:
 `cargo run --locked -p aauth-rust-resource --example axum`. Its adapter is
 [`examples/framework/mod.rs`](../../crates/aauth-rust-resource/examples/framework/mod.rs).
+To start your own axum service from it, run these commands from inside the
+checkout. They create `../aauth-axum-service` with the example as its
+`src/main.rs`, the adapter beside it, and the dependencies it needs, then run
+it:
+
+<!-- checked: axum-project -->
+```sh
+(
+set -eu
+mkdir ../aauth-axum-service ../aauth-axum-service/src ../aauth-axum-service/src/framework
+cp rust-toolchain.toml ../aauth-axum-service/
+cp crates/aauth-rust-resource/examples/axum.rs ../aauth-axum-service/src/main.rs
+cp crates/aauth-rust-resource/examples/framework/mod.rs ../aauth-axum-service/src/framework/
+cat > ../aauth-axum-service/Cargo.toml <<'TOML'
+[package]
+name = "aauth-axum-service"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace]
+
+[dependencies]
+aauth-rust-agent = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-resource" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+http = "1"
+hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
+TOML
+cd ../aauth-axum-service
+cargo generate-lockfile
+cargo run --locked
+)
+```
+
+`hyper-util` is there only because the example calls its own server as a
+client; your service may not need it. With git dependencies, replace each
+`path` with the `git` and `tag` shown in the [README](../../README.md#install).
 
 `AgentIdentityResource::new(endpoint, ...)` accepts one exact URL;
 `for_origin(origin, ...)` accepts any path on that origin, and your router
 decides which paths exist.
+
+## Trusting several Agent Providers
+
+`AgentProviderKeys` holds the keys of one Agent Provider. To accept agents
+from several, give the Resource a resolver of your own that looks up each
+provider's keys by its identifier. The library has no ready-made type for this;
+it is a few lines:
+
+```rust
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{
+    AgentClaims, AgentKeyResolver, Confirmation, TokenError, TrustedIssuerKeys, VerifiedAgentToken,
+};
+use aauth_rust_jose::{Jwk, SigningKey};
+use aauth_rust_resource::AgentIdentityResource;
+use http::Request;
+use std::collections::BTreeMap;
+use std::error::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// The Agent Providers this API trusts, by server identifier.
+#[derive(Default)]
+struct Providers(BTreeMap<String, TrustedIssuerKeys>);
+impl Providers {
+    /// Trust one more provider, from its metadata and JWKS documents.
+    fn add(&mut self, issuer: &str, metadata: &[u8], jwks: &[u8]) -> Result<(), TokenError> {
+        let keys = TrustedIssuerKeys::from_documents(issuer, "aauth-agent.json", metadata, jwks)?;
+        self.0.insert(issuer.into(), keys);
+        Ok(())
+    }
+}
+impl AgentKeyResolver for Providers {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        let keys = self.0.get(issuer).ok_or(TokenError::UntrustedIssuer)?;
+        keys.key(issuer, dwk, kid)
+    }
+}
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// A signed GET from a new agent of `provider`.
+fn call(provider: &AgentProvider, issuer: &str) -> Result<Request<Vec<u8>>, Box<dyn Error>> {
+    let key = SigningKey::generate();
+    let host = issuer.trim_start_matches("https://");
+    let token = provider.issue(&AgentClaims {
+        iss: issuer.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: format!("aauth:assistant@{host}"),
+        jti: format!("assistant-{host}"),
+        iat: now(),
+        exp: now() + 600,
+        cnf: Confirmation {
+            jwk: key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    let mut request = Request::builder()
+        .uri("https://api.example/notes")
+        .body(Vec::new())?;
+    Agent::new(key, token)?.sign(&mut request, now())?;
+    Ok(request)
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let one = AgentProvider::new("https://ap-one.example", "one-1", SigningKey::generate())?;
+    let two = AgentProvider::new("https://ap-two.example", "two-1", SigningKey::generate())?;
+    let other = AgentProvider::new(
+        "https://ap-other.example",
+        "other-1",
+        SigningKey::generate(),
+    )?;
+
+    // Your service fetched these documents from each provider it trusts.
+    let mut providers = Providers::default();
+    providers.add("https://ap-one.example", &one.metadata()?, &one.jwks()?)?;
+    providers.add("https://ap-two.example", &two.metadata()?, &two.jwks()?)?;
+
+    let api = AgentIdentityResource::for_origin(
+        "https://api.example",
+        providers,
+        |_: &VerifiedAgentToken, _: &Request<Vec<u8>>| true,
+    )?;
+    let status =
+        |request: Request<Vec<u8>>| api.authorize(&request, now()).into_response().status();
+    assert_eq!(status(call(&one, "https://ap-one.example")?), 200);
+    assert_eq!(status(call(&two, "https://ap-two.example")?), 200);
+    // A provider you have not added is refused: 401, Signature-Error invalid_key.
+    assert_eq!(status(call(&other, "https://ap-other.example")?), 401);
+    Ok(())
+}
+```
+
+The same pattern trusts Person Servers (`aauth-person.json`) and Access
+Servers (`aauth-access.json`): key the map by identifier and metadata document,
+as the `Trust` type in the [Person Server](person-server.md) guide does. To
+change a provider's keys, rebuild its entry from fresh documents.
+
+## What your handler receives
+
+`into_result()` gives your handler the verified token and your policy's value.
+The token's `claims()` are already checked; `compact()` is the token exactly as
+it arrived.
+
+From `AgentIdentityResource`, a `VerifiedAgentToken` whose `claims()` is an
+`AgentClaims`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `iss` | `String` | The Agent Provider |
+| `sub` | `String` | The agent identifier, `aauth:name@domain` |
+| `ps` | `Option<String>` | The agent's Person Server, if it named one |
+| `parent_agent` | `Option<String>` | For a sub-agent, its parent agent |
+| `jti`, `iat`, `exp`, `nbf` | `String`, `i64`, `i64`, `Option<i64>` | Token ID and times, in Unix seconds |
+| `cnf` | `Confirmation` | The agent's public key, `cnf.jwk` |
+| `extra` | `BTreeMap<String, Value>` | Any other claims the provider added |
+
+From `PsAuthorizationResource`, a `VerifiedAuthToken` whose `claims()` is an
+`AuthClaims`. It names the person, not the agent: an Auth token carries no
+agent identifier.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `sub` | `String` | The person, as an identifier only this Resource sees |
+| `ps` | `String` | The person's Person Server; `sub` is unique within it |
+| `scope` | `Option<String>` | The granted scopes, separated by spaces |
+| `iss` | `String` | Who issued the token: the Person Server, or your Access Server |
+| `aud` | `String` | This Resource |
+| `tenant` | `Option<String>` | The person's organization, if given |
+| `account` | `Option<String>` | The account, if your Resource token asked for one |
+| `mission_s256` | `Option<String>` | The mission, with `with_mission_context` |
+| `jti`, `iat`, `exp`, `nbf` | `String`, `i64`, `i64`, `Option<i64>` | Token ID and times |
+| `cnf` | `Confirmation` | The agent's public key |
+| `extra` | `BTreeMap<String, Value>` | Other claims, such as `budget` |
+
+To act per person, key your data on the pair `(ps, sub)`.
 
 ## Decisions and responses
 
