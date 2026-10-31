@@ -430,7 +430,8 @@ is not an Auth grant.
 Existing stores default to mission unsupported. A custom MissionStore must share
 the Store's atomic boundary; a two-store precheck is insufficient. The reference
 store is volatile and terminates permanently, including expiry. The redb adapter
-does not support this extension. AS, child/chained/federated missions, creation,
-human review UI, automatic Resource revocation delivery and R3 remain excluded.
+does not support this extension. Missions also work through an Access Server
+and along call chains. Child missions, missions with per-call R3 proposals, a
+human review UI and automatic Resource revocation delivery remain excluded.
 The public request/store controls are in the PS `tests/missions.rs`; scope and
 interpretation details are in CONFORMANCE.md and INTERPRETATIONS.md.
