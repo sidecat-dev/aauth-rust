@@ -61,7 +61,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// The ledger is process memory. Downstream calls use a
     /// [`RevocationDirectory`] when one is installed; without it, each
-    /// downstream target is `revocation_unavailable`.
+    /// downstream target is `revocation_unavailable`. An Agent Provider's
+    /// revocation of an Agent token revokes every person token issued to that
+    /// Agent as [`Self::revoke_person_token`] does.
     pub fn with_revocation(self) -> Self {
         self.with_revocation_limits(RevocationLimits::default())
     }
@@ -409,9 +411,20 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     }
                 }
             }
-            people.extend(chained_from(records, &lineage, |record| {
-                self.issued_person(record)
-            }));
+            // Revocation Cascade: the person tokens issued with one of these
+            // as `upstream_token` are revoked in the same cascade.
+            people.extend(
+                records
+                    .iter()
+                    .filter(|record| {
+                        self.issued_person(record)
+                            && record
+                                .upstream
+                                .as_ref()
+                                .is_some_and(|tie| lineage.contains(&tie.reference))
+                    })
+                    .cloned(),
+            );
         }
     }
     fn agent_targets(&self, caller: &str, agent_jti: &str) -> Result<Vec<Target>, Failure> {
@@ -425,71 +438,31 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Some(subject) = subject else {
             return Ok(Vec::new());
         };
-        let mut targets = Vec::new();
-        let mut access_servers = std::collections::BTreeSet::new();
-        for record in records.iter().filter(|record| {
+        let issued = |record: &TokenRecord| {
             record.agent.issuer == caller
                 && record.agent.subject == subject
                 && record.binding_issuer() == self.config.issuer
-        }) {
-            // Every retained child, including an Auth token an Access Server
-            // issued through federation, is revoked here: such a token can
-            // still be presented to this Person Server as upstream evidence.
+        };
+        // Every token issued to the Agent enters the ledger, including an Auth
+        // token an Access Server issued through federation: such a token can
+        // still be presented to this Person Server as upstream evidence.
+        for record in records.iter().filter(|record| issued(record)) {
             self.remember(
                 &record.token.reference.issuer,
                 &record.token.reference.jti,
                 record.expires_at,
             );
-            if record.kind == TokenKind::Person
-                && record.token.reference.issuer == self.config.issuer
-            {
-                targets.push(Target {
-                    recipient: record.resource.clone(),
-                    jti: record.token.reference.jti.clone(),
-                    exp: record.expires_at,
-                });
-            } else if record.kind == TokenKind::Auth
-                && record.person_server.is_some()
-                && let Some(presented) = &record.presented
-                && access_servers.insert(record.token.reference.issuer.clone())
-            {
-                let exp = records
-                    .iter()
-                    .find(|person| person.token.reference == presented.reference)
-                    .map(|person| person.expires_at)
-                    .unwrap_or(record.expires_at);
-                targets.push(Target {
-                    recipient: record.token.reference.issuer.clone(),
-                    jti: presented.reference.jti.clone(),
-                    exp,
-                });
-            } else if record.kind == TokenKind::Auth
-                && record.token.reference.issuer == self.config.issuer
-            {
-                targets.push(Target {
-                    recipient: record.resource.clone(),
-                    jti: record.token.reference.jti.clone(),
-                    exp: record.expires_at,
-                });
-            }
         }
-        // The Agent's person tokens are revoked above. Where one of its tokens
-        // was later presented as `upstream_token`, the person tokens issued
-        // from it are revoked with their own cascade.
-        let issued: Vec<TokenReference> = records
+        // Each of its person tokens is revoked as `revoke_person_token` would:
+        // at its Resource, at every Access Server it was presented to, for the
+        // Auth tokens obtained with it, and down any chain built on them.
+        let people = records
             .iter()
-            .filter(|record| {
-                record.agent.issuer == caller
-                    && record.agent.subject == subject
-                    && record.binding_issuer() == self.config.issuer
-            })
-            .map(|record| record.token.reference.clone())
+            .filter(|record| issued(record) && self.issued_person(record))
+            .cloned()
             .collect();
-        let chained = chained_from(&records, &issued, |record| {
-            self.issued_person(record)
-                && (record.agent.issuer != caller || record.agent.subject != subject)
-        });
-        self.cascade_people(&records, chained, &mut targets);
+        let mut targets = Vec::new();
+        self.cascade_people(&records, people, &mut targets);
         Ok(targets)
     }
     fn remember(&self, issuer: &str, jti: &str, exp: i64) {
@@ -538,25 +511,6 @@ pub(super) fn revoked_parameter(parameter: &'static str) -> Failure {
         "upstream" => "revoked_upstream_token",
         _ => "revoked_presented_token",
     })
-}
-/// The records `admit` accepts that were issued with one of `upstream` as
-/// their `upstream_token`.
-fn chained_from(
-    records: &[TokenRecord],
-    upstream: &[TokenReference],
-    admit: impl Fn(&TokenRecord) -> bool,
-) -> Vec<TokenRecord> {
-    records
-        .iter()
-        .filter(|record| {
-            record
-                .upstream
-                .as_ref()
-                .is_some_and(|tie| upstream.contains(&tie.reference))
-                && admit(record)
-        })
-        .cloned()
-        .collect()
 }
 fn aggregate(states: &[TargetState]) -> Vec<DownstreamReport> {
     let mut recipients = Vec::new();

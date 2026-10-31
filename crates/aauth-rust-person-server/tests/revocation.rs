@@ -2,8 +2,8 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
-    AgentClaims, AgentKeyResolver, AgentProviderKeys, AgentToken, AuthClaims, CallOutcome,
-    Confirmation, PersonToken, ResourceClaims, ResourceToken, RevocationDirectory,
+    AgentClaims, AgentKeyResolver, AgentProviderKeys, AgentToken, AuthClaims, AuthToken,
+    CallOutcome, Confirmation, PersonToken, ResourceClaims, ResourceToken, RevocationDirectory,
     RevocationLimits, TokenError, mint_auth_token, mint_resource_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
@@ -252,8 +252,40 @@ fn resource_token_for(agent: &Agent, person: &str, audience: &str, jti: &str) ->
     )
     .unwrap()
 }
+/// A challenge naming an Auth token from the AS, for a step-up through it.
+fn step_up_token_for(agent: &Agent, auth: &str, jti: &str) -> String {
+    let auth = AuthToken::parse(auth).unwrap();
+    let claims = auth.unverified_claims();
+    mint_resource_token(
+        &SigningKey::from_seed([4; 32]),
+        "resource-1",
+        &ResourceClaims {
+            iss: RESOURCE.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: AS.into(),
+            sub: claims.sub.clone(),
+            jti: jti.into(),
+            iat: 1000,
+            exp: 1300,
+            ps: claims.ps.clone(),
+            presented_jti: claims.jti.clone(),
+            agent_jkt: agent.public_jwk().thumbprint().unwrap(),
+            nbf: None,
+            tenant: claims.tenant.clone(),
+            mission_s256: None,
+            scope: Some("read".into()),
+            account: None,
+            login_hint: None,
+            extra: Default::default(),
+        },
+    )
+    .unwrap()
+}
+/// An Access Server that grants every request. Its Auth tokens take their
+/// `jti` from `jtis`, in call order.
 struct CountingAs {
     calls: Arc<AtomicUsize>,
+    jtis: &'static [&'static str],
 }
 impl aauth_rust_person_server::Federation for CountingAs {
     fn endpoint(&self, issuer: &str) -> Result<String, aauth_rust_person_server::FederationError> {
@@ -267,7 +299,7 @@ impl aauth_rust_person_server::Federation for CountingAs {
         &self,
         request: &Request<Vec<u8>>,
     ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let body: Value = serde_json::from_slice(request.body()).expect("token body");
         let agent = AgentToken::parse(body["agent_token"].as_str().unwrap()).unwrap();
         let resource = ResourceToken::parse(body["resource_token"].as_str().unwrap())
@@ -286,7 +318,7 @@ impl aauth_rust_person_server::Federation for CountingAs {
                 cnf: Confirmation {
                     jwk: agent.unverified_claims().cnf.jwk.clone(),
                 },
-                jti: "as-auth".into(),
+                jti: self.jtis[call].into(),
                 iat: 1000,
                 exp: 1200,
                 scope: Some("read".into()),
@@ -633,6 +665,7 @@ fn person_server_revokes_its_person_token_and_does_not_present_it() {
     let built = harness(RevocationLimits::default(), Some(directory.clone()));
     let server = built.server.with_federation(CountingAs {
         calls: calls.clone(),
+        jtis: &["as-auth"],
     });
     let (agent, _) = agent_token("agent-1");
     let person = server.handle(&signed_agent(
@@ -698,6 +731,127 @@ fn person_server_revokes_its_person_token_and_does_not_present_it() {
     assert_eq!(value(&refused)["error"], "revoked_presented_token");
     assert!(value(&refused).get("auth_token").is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// A server whose revocations reach `directory`, federating with a
+/// [`CountingAs`] that issues `jtis` in turn.
+fn federated(
+    directory: &Arc<Scripted>,
+    jtis: &'static [&'static str],
+) -> PersonServer<Keys, MemoryStore, Host, BoxedClock, BoxedTokenIds> {
+    harness(RevocationLimits::default(), Some(directory.clone()))
+        .server
+        .with_federation(CountingAs {
+            calls: Arc::new(AtomicUsize::new(0)),
+            jtis,
+        })
+}
+fn exchange(
+    server: &PersonServer<Keys, MemoryStore, Host, BoxedClock, BoxedTokenIds>,
+    agent: &Agent,
+    challenge: &str,
+    presented: &str,
+) -> String {
+    let granted = server.handle(&signed_agent(
+        agent,
+        "/token",
+        json!({"resource_token": challenge, "presented_token": presented}),
+    ));
+    assert_eq!(
+        granted.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(granted.body())
+    );
+    value(&granted)["auth_token"].as_str().unwrap().to_owned()
+}
+fn calls_at_access_server(directory: &Scripted) -> Vec<(String, String, i64)> {
+    let mut calls: Vec<_> = directory
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.0 == AS)
+        .cloned()
+        .collect();
+    calls.sort();
+    calls
+}
+
+#[test]
+fn agent_revocation_revokes_each_person_token_presented_to_an_access_server() {
+    // Both of the Agent's person tokens were presented to the same AS. Each
+    // is revoked there, not only the first.
+    let directory = Arc::new(Scripted {
+        calls: Mutex::new(Vec::new()),
+        deferred: AtomicBool::new(false),
+    });
+    let server = federated(&directory, &["as-auth-1", "as-auth-2"]);
+    let (agent, _) = agent_token("agent-1");
+    let mut expected = Vec::new();
+    for challenge in ["resource-1", "resource-2"] {
+        let person = server.handle(&signed_agent(
+            &agent,
+            "/person",
+            json!({"resource": RESOURCE}),
+        ));
+        let person = value(&person)["person_token"].as_str().unwrap().to_owned();
+        exchange(
+            &server,
+            &agent,
+            &resource_token_for(&agent, &person, AS, challenge),
+            &person,
+        );
+        let claims = PersonToken::parse(&person).unwrap();
+        let claims = claims.unverified_claims();
+        expected.push((AS.to_owned(), claims.jti.clone(), claims.exp));
+    }
+    let response = server.handle(&revoke(ap_key(), json!({"jti":"agent-1","exp":2000})));
+    assert_eq!(response.status(), 200);
+    expected.sort();
+    assert_eq!(calls_at_access_server(&directory), expected);
+}
+
+#[test]
+fn agent_revocation_names_the_person_token_at_the_access_server_after_a_step_up() {
+    // The step-up's Auth token, `as-a`, sorts before the one it replaced,
+    // `as-z`. The AS still receives the person token both were obtained with,
+    // never the jti of its own Auth token.
+    let directory = Arc::new(Scripted {
+        calls: Mutex::new(Vec::new()),
+        deferred: AtomicBool::new(false),
+    });
+    let server = federated(&directory, &["as-z", "as-a"]);
+    let (agent, _) = agent_token("agent-1");
+    let person = server.handle(&signed_agent(
+        &agent,
+        "/person",
+        json!({"resource": RESOURCE}),
+    ));
+    let person = value(&person)["person_token"].as_str().unwrap().to_owned();
+    let first = exchange(
+        &server,
+        &agent,
+        &resource_token_for(&agent, &person, AS, "resource-1"),
+        &person,
+    );
+    exchange(
+        &server,
+        &agent,
+        &step_up_token_for(&agent, &first, "resource-2"),
+        &first,
+    );
+    let response = server.handle(&revoke(ap_key(), json!({"jti":"agent-1","exp":2000})));
+    assert_eq!(response.status(), 200);
+    let claims = PersonToken::parse(&person).unwrap();
+    let claims = claims.unverified_claims();
+    assert_eq!(
+        calls_at_access_server(&directory),
+        vec![(AS.to_owned(), claims.jti.clone(), claims.exp)]
+    );
+    for jti in ["as-z", "as-a"] {
+        assert!(server.revocation_exp(AS, jti).is_some(), "{jti}");
+    }
 }
 
 #[test]
