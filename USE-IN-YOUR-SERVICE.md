@@ -833,11 +833,18 @@ presentation and distinct-resource-per-Agent rate limits belong to host policy.
 If displaying `justification` or other Agent-provided Markdown, sanitize it and
 label it as Agent-asserted content.
 
-The direct constructor implements immediate, missionless PS authorization.
-Explicit AS federation is described below. Missions, R3 vocabulary, Budget
-semantics, deferred consent/polling, revocation transport and automatic step-up
-orchestration remain outside that direct configuration. One-level parent-mediated
-child issuance is described in the sub-agent section below.
+The direct constructor issues Person and Auth tokens from this PS immediately.
+Everything else is opt-in on the same value. A store whose `Store::missions`
+returns a `MissionStore`, as `MemoryStore` does, carries approved missions into
+issuance; `with_missions` adds the Agent's mission endpoint, and
+`with_governance` the interaction, permission and audit endpoints. `with_r3`
+issues for R3 class documents and per-call proposals, and `with_budgets` grants
+and accounts for budgets. `with_revocation` adds the revocation endpoint and
+its cascades, and `with_revocation_directory` delivers their downstream calls.
+`with_resource_interaction` resolves a Resource's own interaction. AS
+federation, with optional deferred responses, is described below, and one-level
+parent-mediated child issuance in the sub-agent section. Step-up orchestration
+stays with the Agent and host.
 The PS rejects unsupported parameters explicitly. Its discovery publishes only
 implemented endpoints, with one active public key; it provides no key-overlap
 lifecycle. Core token verification alone does not establish application consent,
