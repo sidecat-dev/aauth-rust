@@ -176,7 +176,8 @@ permission to act, is decided by the person, or by a
 
 ## What the library leaves to you
 
-The libraries sign, check and decide, and open no connections. Your service:
+The protocol and role libraries sign, check and decide, and open no
+connections. Your service:
 
 - sends and receives the HTTP messages, over TLS;
 - chooses which Agent Providers, Person Servers and Access Servers to trust,

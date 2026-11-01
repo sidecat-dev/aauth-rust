@@ -280,7 +280,7 @@ SPECIFICATIONS.md.
 - **What an Agent signs for a Resource.** Covered Components (line 2216): an
   agent learns further components "from server metadata or from an
   `invalid_input` error response that includes `required_input`". The library
-  opens no connections, so the host passes what it received.
+  opens no connections in the Agent crate, so the host passes what it received.
   `Agent::with_resource_metadata` takes the document fetched from
   `{resource}/.well-known/aauth-resource.json` and the identifier it was
   fetched for, refuses it unless its `issuer` equals that identifier byte for
