@@ -369,8 +369,12 @@ fn mcp(tool: &str) -> std::result::Result<Operation, R3HostError> {
 
 // ---- Resource custody: exact class documents and per-call proposals -------
 
+// Set by a test on its own thread, so a test running beside it cannot take
+// the interruption meant for this one.
 #[cfg(test)]
-static INTERRUPT_WRITE: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    static INTERRUPT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     if path.exists() {
@@ -421,7 +425,7 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 fn interrupt_write(bytes: &[u8], file: &mut fs::File) -> io::Result<bool> {
     #[cfg(test)]
-    if INTERRUPT_WRITE.swap(false, Ordering::SeqCst) {
+    if INTERRUPT_WRITE.with(|interrupt| interrupt.replace(false)) {
         let torn = if bytes.is_empty() { bytes } else { &bytes[..1] };
         file.write_all(torn)?;
         file.sync_all()?;
@@ -2612,7 +2616,7 @@ fn interrupted_replace_keeps_the_previous_claim_bytes() {
     let first = br#"{"result":null}"#;
     let second = br#"{"result":{"status":200}}"#;
     assert!(write_new(&path, first).unwrap());
-    INTERRUPT_WRITE.store(true, Ordering::SeqCst);
+    INTERRUPT_WRITE.with(|interrupt| interrupt.set(true));
     assert!(replace(&path, second).is_err());
     assert_eq!(fs::read(&path).unwrap(), first);
     assert!(path.with_extension("tmp").is_file());
@@ -2622,7 +2626,7 @@ fn interrupted_replace_keeps_the_previous_claim_bytes() {
     fs::write(&path, b"{").unwrap();
     assert_eq!(read_record(&path).unwrap(), first);
     let fresh = root.join("claim-new.json");
-    INTERRUPT_WRITE.store(true, Ordering::SeqCst);
+    INTERRUPT_WRITE.with(|interrupt| interrupt.set(true));
     assert!(write_new(&fresh, second).is_err());
     assert!(!fresh.exists());
     assert!(write_new(&fresh, second).unwrap());
