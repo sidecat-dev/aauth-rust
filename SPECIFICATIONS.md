@@ -166,8 +166,9 @@ The agent signs each POST with `jwt`. `type` is required on interaction. `action
 is required on permission and audit, and audit also requires `mission_s256`.
 A denied permission does not authorize the action. For a resource-hosted interaction,
 the resource pending URL remains the completion signal after the Person Server relay
-resolves. `interaction` and `payment` return `424 interaction_unavailable` because
-this library has no user channel. A `question` is answered by the host. An interaction
+resolves. `interaction` and `payment` reach the person through the host's
+`RelayChannel` with `with_interaction_relay`, and otherwise return
+`424 interaction_unavailable`. A `question` is answered by the host. An interaction
 code is compared after stripping hyphens and folding Crockford aliases and case.
 Presenting the code correlates the session and does not itself approve or deny. After that code is consumed, one POST signed as this Person Server stores the decision, and a second decision is refused. `InteractionCompletion` and `PermissionDecision` are agent helpers; no library poller calls them.
 The code is single-use. Three failed attempts make it terminally `invalid_code`.

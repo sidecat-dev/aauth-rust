@@ -271,6 +271,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 endpoint,
                 stored_sent_budget(&value).map_err(|_| Failure::internal())?,
                 None,
+                AllowedToken::stored(&value["supervised"]).as_ref(),
             )
         })();
         let mut response = result.unwrap_or_else(|error| error.while_pending().response());

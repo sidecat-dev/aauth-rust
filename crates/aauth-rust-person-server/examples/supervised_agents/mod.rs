@@ -193,6 +193,8 @@ impl SupervisorPolicy for OrgPolicy {
 pub struct HomePolicy {
     pub observed: Observed,
     pub defer: Arc<AtomicBool>,
+    /// The `expires_at` it sets on the missions it approves.
+    pub mission_expiry: Arc<Mutex<Option<String>>>,
 }
 impl SupervisorPolicy for HomePolicy {
     fn connect(&self, _: &ConnectRequest) -> ConnectAnswer {
@@ -220,9 +222,12 @@ impl SupervisorPolicy for HomePolicy {
                 mission: None,
             }),
             (Act::MissionProposal, _) => Verdict::Allow(Allowance {
-                mission: Some(MissionTerms::described(
-                    case.request["description"].as_str().unwrap_or("A mission"),
-                )),
+                mission: Some(MissionTerms {
+                    expires_at: self.mission_expiry.lock().unwrap().clone(),
+                    ..MissionTerms::described(
+                        case.request["description"].as_str().unwrap_or("A mission"),
+                    )
+                }),
                 ..Allowance::default()
             }),
             _ => Verdict::Allow(Allowance::default()),
@@ -337,10 +342,12 @@ impl Supervision for Router {
 
 pub type Ps = PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>;
 
-/// The calendar's Access Server, in process. It defers while `defer` is set.
+/// The calendar's Access Server, in process. It defers while `defer` is
+/// set, and grants `grant` instead of the requested scopes when it is set.
 pub struct Access {
     now: Arc<AtomicI64>,
     defer: Arc<AtomicBool>,
+    grant: Arc<Mutex<Option<String>>>,
     pending: Arc<MemoryContinuations>,
     ids: Arc<AtomicUsize>,
 }
@@ -356,12 +363,15 @@ impl aauth_rust_person_server::Federation for Access {
         let mut deferred = aauth_rust_access_server::DeferredConfig::new(self.pending.clone());
         deferred.retry_after = 0;
         let (now, ids, defer) = (self.now.clone(), self.ids.clone(), self.defer.clone());
+        let grant = self.grant.lock().unwrap().clone();
         let server = aauth_rust_access_server::AccessServer::new(
             aauth_rust_access_server::Config::new(AS, "as-1", SigningKey::from_seed([6; 32])),
             Keys,
-            |r: &aauth_rust_access_server::AuthorizationRequest| {
+            move |r: &aauth_rust_access_server::AuthorizationRequest| {
                 Ok(aauth_rust_access_server::Decision {
-                    scopes: r.scopes.clone(),
+                    scopes: grant
+                        .as_ref()
+                        .map_or_else(|| r.scopes.clone(), |scope| vec![scope.clone()]),
                     lifetime: 600,
                 })
             },
@@ -393,6 +403,10 @@ pub struct World {
     pub defer_home: Arc<AtomicBool>,
     /// The Access Server defers while set, in a world built with one.
     pub defer_access: Arc<AtomicBool>,
+    /// The one scope the Access Server grants while set.
+    pub access_grant: Arc<Mutex<Option<String>>>,
+    /// The `expires_at` the person's own server sets on missions it approves.
+    pub mission_expiry: Arc<Mutex<Option<String>>>,
     federated: bool,
     /// A work agent: email.
     pub mail: Agent,
@@ -455,19 +469,25 @@ fn supervisor(
 
 impl World {
     pub fn new() -> Self {
-        Self::build(false)
+        Self::build(false, |ps| ps)
     }
 
     /// A world whose calendar is behind its own Access Server (four-party).
     pub fn federated() -> Self {
-        Self::build(true)
+        Self::build(true, |ps| ps)
     }
 
-    fn build(federated: bool) -> Self {
+    /// A world whose Person Server `extend` adds features to.
+    pub fn extended(federated: bool, extend: impl FnOnce(Ps) -> Ps) -> Self {
+        Self::build(federated, extend)
+    }
+
+    fn build(federated: bool, extend: impl FnOnce(Ps) -> Ps) -> Self {
         let now = Arc::new(AtomicI64::new(START));
         let org_observed: Observed = Arc::default();
         let home_observed: Observed = Arc::default();
         let defer_home = Arc::new(AtomicBool::new(false));
+        let mission_expiry: Arc<Mutex<Option<String>>> = Arc::default();
         let org = {
             let observed = org_observed.clone();
             supervisor(
@@ -486,6 +506,7 @@ impl World {
         let home = {
             let observed = home_observed.clone();
             let defer = defer_home.clone();
+            let expiry = mission_expiry.clone();
             supervisor(
                 HOME,
                 "home-1",
@@ -495,6 +516,7 @@ impl World {
                     Box::new(HomePolicy {
                         observed: observed.clone(),
                         defer: defer.clone(),
+                        mission_expiry: expiry.clone(),
                     })
                 },
                 home_observed,
@@ -504,6 +526,7 @@ impl World {
         let host_decisions = Arc::new(AtomicUsize::new(0));
         let ids = Arc::new(AtomicUsize::new(0));
         let defer_access = Arc::new(AtomicBool::new(false));
+        let access_grant: Arc<Mutex<Option<String>>> = Arc::default();
         let clock = now.clone();
         let mut ps = PersonServer::new(
             Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
@@ -538,12 +561,14 @@ impl World {
                 .with_federation(Access {
                     now: now.clone(),
                     defer: defer_access.clone(),
+                    grant: access_grant.clone(),
                     pending: Arc::new(MemoryContinuations::new(1000)),
                     ids: Arc::default(),
                 })
                 .with_deferred(custody)
                 .unwrap();
         }
+        let ps = extend(ps);
         Self {
             now,
             ps,
@@ -553,6 +578,8 @@ impl World {
             host_decisions,
             defer_home,
             defer_access,
+            access_grant,
+            mission_expiry,
             federated,
             mail: agent("mail", 11),
             research: agent("research", 12),

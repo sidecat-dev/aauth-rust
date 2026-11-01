@@ -4,7 +4,10 @@ mod governance;
 mod mission_http;
 mod revocation;
 pub use continuation::{AdvanceError, DeferredConfig, FederationInput};
-pub use governance::{Governance, GovernanceError, InteractionDecision, OpenedInteraction};
+pub use governance::{
+    Governance, GovernanceError, InteractionDecision, InteractionRelay, InteractionRelayConfig,
+    OpenedInteraction, RelayChannel, RelayError, RelayUnavailable,
+};
 mod lineage;
 mod missions;
 mod r3;
@@ -19,7 +22,7 @@ pub use resource_interaction::{
 };
 mod subagents;
 mod supervision;
-use supervision::{ActInput, Issued, Report, Resumed, Supervised, act_members};
+use supervision::{ActInput, AllowedToken, Issued, Report, Resumed, Supervised, act_members};
 pub use supervision::{
     ConnectOutcome, PersonAnswer, RecordError, Supervision, SupervisionConfig, SupervisionExchange,
     SupervisionHold, SupervisionHostError, SupervisionRecord, SupervisionUnavailable, Unconsulted,
@@ -118,6 +121,7 @@ pub struct PersonServer<K, S, P, C, I> {
     display: MetadataDisplay,
     resource_interaction: Option<resource_interaction::Gate>,
     supervision: Option<supervision::Gate>,
+    relay: Option<governance::RelayGate>,
 }
 struct BudgetState {
     policy: IssuerPolicy,
@@ -243,6 +247,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             display: MetadataDisplay::new(),
             resource_interaction: None,
             supervision: None,
+            relay: None,
         })
     }
     /// Publish `name`, `description`, `logo_uri` and the other display
@@ -706,6 +711,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 path: "/person",
                 requested_scopes: None,
                 deadline: i64::MAX,
+                r3: None,
             },
             resumed,
         )?;
@@ -1015,16 +1021,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ) -> Result<Response<Vec<u8>>, Failure> {
         // Unverified dispatch only: the R3 path verifies every claim it uses.
         if self.r3.is_some() && r3::carries_reference(&parameters) {
-            // Supervision defines no R3 act; a supervised agent's R3 request
-            // is refused rather than decided here.
-            let identity = Self::identity(&agent);
-            if self
-                .bound_person(&identity)
-                .is_some_and(|person| self.deciding(&person, &identity).is_some())
-            {
-                return Err(Failure::policy(PolicyError::Denied));
-            }
-            return self.auth_r3(agent, parameters, verified_at, upstream);
+            return self.auth_r3(agent, parameters, verified_at, upstream, resumed);
         }
         let prepared =
             self.prepare_authorization(&agent, parameters, verified_at, upstream.as_ref())?;
@@ -1077,6 +1074,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 path: "/token",
                 requested_scopes: Some(&context.scopes),
                 deadline: r.exp.min(presented.exp),
+                r3: None,
             },
             resumed,
         )?;

@@ -187,7 +187,13 @@ fn disabled_governance_is_not_advertised() {
     let response = fixture.server.handle(
         &fixture
             .owner
-            .post_interaction("https://ps.example/interaction", "interaction", 1000)
+            .post_interaction(
+                "https://ps.example/interaction",
+                "interaction",
+                "https://booking.example/confirm",
+                "X7K2-M9P4",
+                1000,
+            )
             .unwrap(),
     );
     assert_eq!(response.status(), 404);
@@ -223,7 +229,13 @@ fn signed_interaction_requires_agent_jwt_and_type() {
     let relay = fixture.server.handle(
         &fixture
             .owner
-            .post_interaction("https://ps.example/interaction", "interaction", 1000)
+            .post_interaction(
+                "https://ps.example/interaction",
+                "interaction",
+                "https://booking.example/confirm",
+                "X7K2-M9P4",
+                1000,
+            )
             .unwrap(),
     );
     assert_eq!(relay.status(), 424);
@@ -231,7 +243,13 @@ fn signed_interaction_requires_agent_jwt_and_type() {
     let payment = fixture.server.handle(
         &fixture
             .owner
-            .post_interaction("https://ps.example/interaction", "payment", 1000)
+            .post_interaction(
+                "https://ps.example/interaction",
+                "payment",
+                "https://booking.example/confirm",
+                "X7K2-M9P4",
+                1000,
+            )
             .unwrap(),
     );
     assert_eq!(payment.status(), 424);

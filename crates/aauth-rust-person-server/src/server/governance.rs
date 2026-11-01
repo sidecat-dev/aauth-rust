@@ -1,3 +1,9 @@
+mod relay;
+pub(super) use relay::Gate as RelayGate;
+pub use relay::{
+    InteractionRelay, InteractionRelayConfig, RelayChannel, RelayError, RelayUnavailable,
+};
+
 use super::*;
 use aauth_rust_core::continuation::{
     canonical_interaction_code, generate_interaction_code, generate_pending_id,
@@ -11,7 +17,8 @@ const MAX_TEXT: usize = 16_384;
 const FAILURE_LIMIT: u8 = 3;
 
 /// Host answer and permission policy for the opt-in person channel.
-/// Interaction and payment relays stay unavailable: this library has no user channel.
+/// Interaction and payment relays go to [`RelayChannel`] instead, with
+/// [`PersonServer::with_interaction_relay`].
 pub trait Governance: Send + Sync {
     /// Answer a `question` interaction. The string is untrusted Markdown.
     ///
@@ -79,6 +86,7 @@ pub enum InteractionDecision {
 
 enum Route {
     Interaction,
+    Relay(String),
     Permission,
     Audit,
     Redeem(String),
@@ -100,8 +108,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// Metadata gains the three endpoints only after this call. An agent signs
     /// each POST with `jwt`. A token with `parent_agent` is `401 invalid_jwt`.
-    /// `interaction` and `payment` return `424
-    /// interaction_unavailable` because this library has no relay channel.
+    /// `interaction` and `payment` are relayed with
+    /// [`Self::with_interaction_relay`], and are otherwise `424
+    /// interaction_unavailable`.
     /// A `question` is answered by `governance`. Permission is immediate.
     /// Audit requires an active mission document from [`crate::Store::read_mission_audit`].
     /// Presented codes are correlated only. A decision requires the Person Server
@@ -186,11 +195,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let Some(route) = parse_route(request.uri().path()) else {
             return Ok(None);
         };
+        if let Route::Relay(id) = &route {
+            if request.method() != "GET" || self.relay.is_none() {
+                return Ok(None);
+            }
+            return self.poll_relay(request, now, id).map(Some);
+        }
         if request.method() != "POST" {
             return Ok(None);
         }
         let response = match route {
             Route::Interaction => self.interaction(request, now)?,
+            Route::Relay(_) => return Ok(None),
             Route::Permission => self.permission(request, now)?,
             Route::Audit => self.audit(request, now)?,
             Route::Redeem(id) => self.redeem(request, now, &id)?,
@@ -215,11 +231,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     .governance_policy()?
                     .answer(&question)
                     .map_err(Failure::policy)?;
+                self.report_interaction(
+                    &agent,
+                    "question",
+                    None,
+                    body.get("mission_s256").and_then(Value::as_str),
+                );
                 Ok(json_response(StatusCode::OK, json!({ "answer": answer })))
             }
-            Some(Value::String(kind)) if kind == "interaction" || kind == "payment" => Err(
-                Failure::status(StatusCode::FAILED_DEPENDENCY, "interaction_unavailable"),
-            ),
+            Some(Value::String(kind)) if kind == "interaction" || kind == "payment" => {
+                self.relay_request(&agent, &body, kind, now)
+            }
             _ => Err(Failure::parameter("invalid_request")),
         }
     }
@@ -247,6 +269,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     path: "/permission",
                     requested_scopes: None,
                     deadline: i64::MAX,
+                    r3: None,
                 },
                 None,
             )?;
@@ -417,7 +440,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::status(StatusCode::NOT_FOUND, "mission_not_found"));
         };
         if let Some(reason) = audit.termination_at(now).map_err(|_| Failure::internal())? {
-            return Err(Failure::mission_terminated(reason));
+            return Err(self.mission_ended(&Self::identity(agent), s256, reason));
         }
         Ok(())
     }
@@ -433,6 +456,9 @@ fn parse_route(path: &str) -> Option<Route> {
 }
 
 fn parse_pending(path: &str) -> Option<Route> {
+    if let Some(id) = path.strip_prefix("/interaction/relay/") {
+        return path_token(id).then(|| Route::Relay(id.to_owned()));
+    }
     let rest = path.strip_prefix("/interaction/pending/")?;
     if let Some(id) = rest.strip_suffix("/decision") {
         return path_token(id).then(|| Route::Decision(id.to_owned()));

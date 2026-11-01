@@ -322,6 +322,7 @@ it holds that token's record, so keep the store when you restart.
 | `with_deferred(config)` | Deferred (`202`) answers while an Access Server waits for approval or payment | [Deferred answers at the Access Server and Person Server](../../USE-IN-YOUR-SERVICE.md#configure-as-and-ps-continuations) |
 | `with_missions()` | Mission proposal, approval, update and completion | [Missions](../features/missions.md) |
 | `with_governance(governance)` | Endpoints where the agent asks the person's permission and records what it did | [Missions](../features/missions.md) |
+| `with_interaction_relay(config)` | Relays an agent's interaction or payment to the person through your channel | [Relay an agent's interaction to the person](../../USE-IN-YOUR-SERVICE.md#relay-an-agents-interaction-to-the-person) |
 | `with_supervision(config)` | A supervision server decides for the agents you assign to it | [Supervision](../features/supervision.md) |
 | `with_r3(...)` | Auth tokens for R3 documents | [R3](../features/r3.md) |
 | `with_budgets(...)` | Budgets on Auth tokens | [Budgets](../features/budgets.md) |

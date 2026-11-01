@@ -3,12 +3,38 @@
 #[path = "../examples/supervised_agents/mod.rs"]
 mod world;
 
-use aauth_rust_core::ApprovedMission;
+use aauth_rust_core::continuation::MemoryContinuations;
 use aauth_rust_core::supervision::{Answer, Decision};
-use aauth_rust_person_server::{SupervisionHostError, Unconsulted, Waiting};
-use serde_json::json;
-use std::sync::atomic::Ordering;
-use world::{CALENDAR, HOME, Keys, ORG, START, World, body, hold, location, text};
+use aauth_rust_core::{ApprovedMission, AuthToken, PersonToken, ResourceClaims};
+use aauth_rust_jose::SigningKey;
+use aauth_rust_person_server::{
+    FederationInput, InteractionRelay, InteractionRelayConfig, PolicyError, R3AuthorizationRequest,
+    R3Decision, R3IssuerConfig, R3Policy, RelayChannel, RelayError, RelayUnavailable,
+    SupervisionHostError, Unconsulted, Waiting,
+};
+use aauth_rust_r3::{
+    FetchBody, FetchLimits, FetchResponse, FetchTransport, IssuanceError, IssuanceRecord,
+    IssuanceStore, standard_registry,
+};
+use aauth_rust_signature_key::{KeyMaterial, sign_request};
+use http::{Request, Response};
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use world::{CALENDAR, HOME, Keys, ORG, PS, START, Supervisor, World, body, hold, location, text};
+
+/// What a supervision server observed under `name`, in order.
+fn observed(supervisor: &Supervisor, name: &str) -> Vec<Value> {
+    supervisor
+        .observed
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(seen, _)| seen == name)
+        .map(|(_, event)| event.clone())
+        .collect()
+}
 
 #[test]
 fn the_four_use_cases_hold_together() {
@@ -160,13 +186,99 @@ fn a_mission_is_refined_approved_updated_and_completed_under_supervision() {
     let approved_at = names.iter().position(|n| n == "approved").unwrap();
     let terminated_at = names.iter().position(|n| n == "terminated").unwrap();
     assert!(approved_at < terminated_at, "{names:?}");
-    // A completed mission refuses further acts at this server; nothing is put.
+    // A completed mission refuses further acts at this server; nothing is put,
+    // and its end is not reported again.
     let after = world.post(
         &world.mail,
         &format!("/mission/{s256}"),
         json!({ "action": "update", "description": "One more thing." }),
     );
     assert_eq!(body(&after)["error"], "mission_terminated");
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let ended = observed(&world.org, "terminated");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["reason"], "completed");
+    assert_eq!(ended[0]["sdi"], json!(held.sdi));
+}
+
+#[test]
+fn a_mission_that_expires_is_reported_terminated_once() {
+    let world = World::new();
+    world.route(&world.travel, Some(HOME));
+    world.connect_home();
+    assert_eq!(world.person_token(&world.travel, None).status(), 200);
+    // START + 600.
+    *world.mission_expiry.lock().unwrap() = Some("2027-01-15T08:10:00Z".into());
+    let approved = world.post(
+        &world.travel,
+        "/mission",
+        json!({ "description": "# Weekend away\n\nBook a hotel." }),
+    );
+    assert_eq!(approved.status(), 200, "{}", text(&approved));
+    let s256 = body(&approved)["s256"].as_str().unwrap().to_owned();
+    world.advance(600);
+    for _ in 0..2 {
+        let late = world.post(
+            &world.travel,
+            "/permission",
+            json!({ "action": "BookHotel", "mission_s256": s256 }),
+        );
+        assert_eq!(
+            (
+                late.status().as_u16(),
+                body(&late)["termination_reason"].clone()
+            ),
+            (403, json!("expired")),
+            "{}",
+            text(&late)
+        );
+    }
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let ended = observed(&world.home, "terminated");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["reason"], "expired");
+}
+
+/// The calendar revokes one of its resource tokens at the Person Server.
+fn revoke_resource_token(world: &World, jti: &str, exp: i64) -> Response<Vec<u8>> {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(format!("{PS}/revoke"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({ "jti": jti, "exp": exp })).unwrap())
+        .unwrap();
+    sign_request(
+        &mut request,
+        &SigningKey::from_seed([5; 32]),
+        KeyMaterial::JwksUri {
+            id: CALENDAR.into(),
+            dwk: "aauth-resource.json".into(),
+            kid: "cal-1".into(),
+        },
+        world.time(),
+    )
+    .unwrap();
+    world.ps.handle(&request)
+}
+
+#[test]
+fn a_resource_token_its_resource_revokes_is_reported_once() {
+    let world = World::extended(false, |ps| ps.with_revocation());
+    world.route(&world.mail, Some(ORG));
+    let granted = world.auth_token(&world.mail, "calendar.read");
+    assert_eq!(granted.status(), 200, "{}", text(&granted));
+    let jti = format!("rt-{START}-calendar.read");
+    for _ in 0..2 {
+        let revoked = revoke_resource_token(&world, &jti, START + 300);
+        assert_eq!(revoked.status(), 200, "{}", text(&revoked));
+    }
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let reported = observed(&world.org, "revocation.received");
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert_eq!(reported[0]["token_type"], "resource_token");
+    assert_eq!(reported[0]["iss"], CALENDAR);
+    assert_eq!(reported[0]["jti"], json!(jti));
+    assert_eq!(reported[0]["exp"], START + 300);
 }
 
 #[test]
@@ -438,16 +550,295 @@ fn a_four_party_request_is_put_to_the_supervisor_before_the_access_server() {
     assert_eq!(advanced.status(), 200);
     let delivered = world.poll(&world.mail, &location(&write));
     assert_eq!(delivered.status(), 200, "{}", text(&delivered));
-    assert!(body(&delivered)["auth_token"].is_string());
+    let token = AuthToken::parse(body(&delivered)["auth_token"].as_str().unwrap()).unwrap();
     assert_eq!(world.poll(&world.mail, &location(&write)).status(), 410);
+    // The token the Access Server issued after deferring is reported under the act.
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let issued = observed(&world.org, "auth_token.issued");
+    let reported = issued
+        .iter()
+        .find(|event| event["sdi"] == json!(held.sdi))
+        .unwrap_or_else(|| panic!("{issued:?}"));
+    assert_eq!(reported["jti"], json!(token.unverified_claims().jti));
+    assert_eq!(reported["issuer"], world::AS);
 
-    // A narrowing the Access Server cannot be told about is refused, not widened.
+    // The Access Server cannot be told about a narrowing, so its token must fit it.
     world.connect_home();
     world.route(&world.travel, Some(HOME));
-    let narrowed = world.auth_token(&world.travel, "calendar.read calendar.write");
+    *world.access_grant.lock().unwrap() = Some("calendar.read".into());
+    let fits = world.auth_token(&world.travel, "calendar.read calendar.write");
+    assert_eq!(fits.status(), 200, "{}", text(&fits));
+    *world.access_grant.lock().unwrap() = None;
+    let wider = world.auth_token(&world.travel, "calendar.read calendar.write");
     assert_eq!(
-        (narrowed.status().as_u16(), body(&narrowed)["error"].clone()),
+        (wider.status().as_u16(), body(&wider)["error"].clone()),
         (403, json!("access_denied"))
     );
+    // One issued after the Access Server deferred is refused at the agent's poll.
+    world.defer_access.store(true, Ordering::SeqCst);
+    let waiting = world.auth_token(&world.travel, "calendar.read calendar.write");
+    assert_eq!(waiting.status(), 202, "{}", text(&waiting));
+    world.defer_access.store(false, Ordering::SeqCst);
+    world
+        .ps
+        .advance_federation(&location(&waiting), FederationInput::Poll)
+        .unwrap();
+    let refused = world.poll(&world.travel, &location(&waiting));
+    assert_eq!(
+        (refused.status().as_u16(), body(&refused)["error"].clone()),
+        (403, json!("denied"))
+    );
+    assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
+}
+
+const CLASS: &[u8] = br#"{"vocabulary":"urn:aauth:vocabulary:mcp","operations":[{"tool":"events.read"},{"tool":"events.write"}]}"#;
+const CLASS_URI: &str = "https://calendar.example/r3/calendar";
+
+struct Document {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+impl FetchBody for Document {
+    fn read(&mut self, out: &mut [u8], _: Instant) -> std::io::Result<usize> {
+        let size = out.len().min(self.bytes.len() - self.offset);
+        out[..size].copy_from_slice(&self.bytes[self.offset..self.offset + size]);
+        self.offset += size;
+        Ok(size)
+    }
+}
+
+/// The calendar serves its R3 document to the Person Server.
+struct Calendar;
+impl FetchTransport for Calendar {
+    fn send(&self, request: Request<Vec<u8>>, _: Instant) -> std::io::Result<FetchResponse> {
+        assert_eq!(request.uri().to_string(), CLASS_URI);
+        Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Box::new(Document {
+                bytes: CLASS.to_vec(),
+                offset: 0,
+            }) as Box<dyn FetchBody>)
+            .unwrap())
+    }
+}
+
+/// Host R3 consent, which must not decide for a supervised agent.
+struct HostR3(Arc<AtomicUsize>);
+impl R3Policy for HostR3 {
+    fn authorize_document(
+        &self,
+        _: &R3AuthorizationRequest<'_>,
+    ) -> Result<R3Decision, PolicyError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(PolicyError::Denied)
+    }
+}
+
+struct AuditLog;
+impl IssuanceStore for AuditLog {
+    fn commit(&self, _: &IssuanceRecord) -> Result<(), IssuanceError> {
+        Ok(())
+    }
+}
+
+/// A person token, then an auth token for `scope` at the calendar, whose
+/// challenge names its R3 document.
+fn r3_auth_token(world: &World, agent: &aauth_rust_agent::Agent, scope: &str) -> Response<Vec<u8>> {
+    let person = world.person_token(agent, None);
+    assert_eq!(person.status(), 200, "{}", text(&person));
+    let person_token = body(&person)["person_token"].as_str().unwrap().to_owned();
+    let presented = PersonToken::parse(&person_token).unwrap();
+    let p = presented.unverified_claims();
+    let (resource_token, _) = aauth_rust_r3::mint_resource_token(
+        &standard_registry().unwrap(),
+        &SigningKey::from_seed([5; 32]),
+        "cal-1",
+        &ResourceClaims {
+            iss: CALENDAR.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: PS.into(),
+            sub: p.sub.clone(),
+            jti: format!("r3-{}-{scope}", world.time()),
+            iat: world.time(),
+            exp: world.time() + 300,
+            ps: PS.into(),
+            presented_jti: p.jti.clone(),
+            agent_jkt: agent.public_jwk().thumbprint().unwrap(),
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            scope: Some(scope.into()),
+            account: None,
+            login_hint: None,
+            extra: Default::default(),
+        },
+        CLASS_URI,
+        CLASS,
+    )
+    .unwrap();
+    world.post(
+        agent,
+        "/token",
+        json!({ "resource_token": resource_token, "presented_token": person_token }),
+    )
+}
+
+#[test]
+fn an_r3_request_is_an_auth_token_act_for_the_supervisor() {
+    let host_r3 = Arc::new(AtomicUsize::new(0));
+    let policy = host_r3.clone();
+    let world = World::extended(false, move |ps| {
+        ps.with_r3(R3IssuerConfig {
+            registry: standard_registry().unwrap(),
+            egress: Box::new(|_: &str, _: Instant| Ok(())),
+            transport: Box::new(Calendar),
+            limits: FetchLimits::default(),
+            policy: Box::new(HostR3(policy)),
+            audit: Arc::new(AuditLog),
+        })
+        .unwrap()
+    });
+    world.route(&world.mail, Some(ORG));
+    // Standing policy allows reading: every operation of the document is granted.
+    let granted = r3_auth_token(&world, &world.mail, "calendar.read");
+    assert_eq!(granted.status(), 200, "{}", text(&granted));
+    let token = AuthToken::parse(body(&granted)["auth_token"].as_str().unwrap()).unwrap();
+    let claims = token.unverified_claims();
+    assert_eq!(
+        claims.extra["r3_granted"]["operations"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert!(!claims.extra.contains_key("r3_per_call"));
+    // An exception goes to the person, with the document to show them.
+    let asked = r3_auth_token(&world, &world.mail, "calendar.write");
+    assert_eq!(asked.status(), 202, "{}", text(&asked));
+    let held = hold(&asked);
+    assert_eq!(held.r3_document.as_deref(), Some(CLASS));
+    world.person_answers(&held, Answer::Allow, None);
+    let issued = world.poll(&world.mail, &location(&asked));
+    assert_eq!(issued.status(), 200, "{}", text(&issued));
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    assert!(
+        observed(&world.org, "auth_token.issued")
+            .iter()
+            .any(|event| event["sdi"] == json!(held.sdi))
+    );
+    assert_eq!(host_r3.load(Ordering::SeqCst), 0);
+    assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
+}
+
+/// The person's channel: it has none for payments.
+#[derive(Clone, Default)]
+struct PersonChannel(Arc<Mutex<Vec<InteractionRelay>>>);
+impl RelayChannel for PersonChannel {
+    fn relay(&self, relay: &InteractionRelay) -> Result<(), RelayUnavailable> {
+        if relay.kind == "payment" {
+            return Err(RelayUnavailable);
+        }
+        self.0.lock().unwrap().push(relay.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn a_relayed_interaction_reaches_the_person_and_the_supervisor_is_told() {
+    let person = PersonChannel::default();
+    let channel = person.clone();
+    let world = World::extended(false, move |ps| {
+        ps.with_interaction_relay(InteractionRelayConfig::new(
+            channel,
+            MemoryContinuations::new(100),
+        ))
+        .unwrap()
+    });
+    world.route(&world.mail, Some(ORG));
+    assert_eq!(world.person_token(&world.mail, None).status(), 200);
+    let accepted = world.post(
+        &world.mail,
+        "/interaction",
+        json!({
+            "type": "interaction", "url": "https://calendar.example/confirm",
+            "code": "X7K2-M9P4", "description": "Confirm the booking.",
+        }),
+    );
+    assert_eq!(accepted.status(), 202, "{}", text(&accepted));
+    let relay = accepted
+        .extensions()
+        .get::<InteractionRelay>()
+        .cloned()
+        .unwrap();
+    assert_eq!(*person.0.lock().unwrap(), vec![relay.clone()]);
+    assert_eq!(
+        location(&accepted),
+        format!("{PS}/interaction/relay/{}", relay.reference)
+    );
+    assert_eq!(world.poll(&world.mail, &location(&accepted)).status(), 202);
+    assert_eq!(
+        world.poll(&world.research, &location(&accepted)).status(),
+        410
+    );
+    world.ps.relay_engaged(&relay.reference).unwrap();
+    // The same answer again converges; another one is refused.
+    world.ps.relay_engaged(&relay.reference).unwrap();
+    assert_eq!(
+        world.ps.relay_finished(&relay.reference),
+        Err(RelayError::Gone)
+    );
+    let engaged = world.poll(&world.mail, &location(&accepted));
+    assert_eq!(
+        (engaged.status().as_u16(), body(&engaged)),
+        (200, json!({ "status": "interacting" }))
+    );
+    assert_eq!(world.poll(&world.mail, &location(&accepted)).status(), 410);
+    assert_eq!(
+        world.ps.relay_engaged(&relay.reference),
+        Err(RelayError::Gone)
+    );
+
+    // Without a channel the agent directs the person itself.
+    let payment = world.post(
+        &world.mail,
+        "/interaction",
+        json!({ "type": "payment", "url": "https://calendar.example/pay", "code": "X7K2-M9P4" }),
+    );
+    assert_eq!(
+        (payment.status().as_u16(), body(&payment)["error"].clone()),
+        (424, json!("interaction_unavailable"))
+    );
+    // A relay the person never engages with ends at the agent's max_wait.
+    let quiet = world.post(
+        &world.mail,
+        "/interaction",
+        json!({
+            "type": "interaction", "url": "https://calendar.example/confirm",
+            "code": "X7K2-M9P4", "max_wait": 30,
+        }),
+    );
+    assert_eq!(quiet.status(), 202, "{}", text(&quiet));
+    world.advance(30);
+    let ended = world.poll(&world.mail, &location(&quiet));
+    assert_eq!(
+        (ended.status().as_u16(), body(&ended)),
+        (200, json!({ "status": "pending" }))
+    );
+    let answered = world.post(
+        &world.mail,
+        "/interaction",
+        json!({ "type": "question", "question": "Window seat?" }),
+    );
+    assert_eq!(answered.status(), 200, "{}", text(&answered));
+
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let requested = observed(&world.org, "interaction.requested");
+    let kinds: Vec<&str> = requested
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["interaction", "interaction", "question"]);
+    assert_eq!(requested[0]["url"], "https://calendar.example/confirm");
+    assert!(requested.iter().all(|event| event.get("code").is_none()));
     assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
 }

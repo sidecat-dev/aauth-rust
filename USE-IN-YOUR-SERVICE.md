@@ -710,6 +710,39 @@ complete. This flow is three-party only: with AS federation the claim is still
 refused as `invalid_resource_token`, and it refuses call chaining, sub-agents and
 budget offers with `invalid_request`.
 
+## Relay an agent's interaction to the person
+
+An agent that holds a resource's interaction `url` and `code` asks its Person
+Server to take it to the person, who may be easier to reach there (Relaying
+Through the Person Server). With `with_governance` the Person Server publishes
+the interaction endpoint; `with_interaction_relay(InteractionRelayConfig::new(
+channel, store))` makes it relay `interaction` and `payment` requests through
+your `RelayChannel`. `store` is a `ContinuationStore` of its own.
+
+```rust
+struct Notifications;
+impl RelayChannel for Notifications {
+    fn relay(&self, relay: &InteractionRelay) -> Result<(), RelayUnavailable> {
+        // Reach the person, sending them to `{url}?code={code}`.
+        push_to_person(&relay.agent, &relay.url, &relay.code).map_err(|_| RelayUnavailable)
+    }
+}
+```
+
+The agent posts with `Agent::post_interaction(endpoint, kind, url, code, now)`.
+The relay is kept before the agent receives `202` with
+`Location: {signed_origin}/interaction/relay/{id}`; the response extensions
+carry the `InteractionRelay`, whose `reference` your host keeps. Call
+`ps.relay_engaged(reference)` once the person engaged, or
+`ps.relay_finished(reference)` when you can do no more. The agent's next poll
+gets `200 {"status":"interacting"}` or `{"status":"pending"}` once; a relay
+nobody resolves answers `pending` when its wait ends: `lifetime` (600 s by
+default), shortened by the agent's `max_wait`. Either way the agent keeps
+polling the resource's pending URL, which says when the interaction is done.
+`RelayUnavailable` answers the agent `424 interaction_unavailable`, and it
+directs the person itself. The `description` is agent-asserted Markdown:
+sanitize it before showing it.
+
 ## Compose one R3 document across definitions
 
 A Resource may organize its R3 authorization into several internal definitions,
@@ -857,7 +890,8 @@ The direct constructor issues Person and Auth tokens from this PS immediately.
 Everything else is opt-in on the same value. A store whose `Store::missions`
 returns a `MissionStore`, as `MemoryStore` does, carries approved missions into
 issuance; `with_missions` adds the Agent's mission endpoint, and
-`with_governance` the interaction, permission and audit endpoints. `with_r3`
+`with_governance` the interaction, permission and audit endpoints, and
+`with_interaction_relay` relays interactions through them. `with_r3`
 issues for R3 class documents and per-call proposals, and `with_budgets` grants
 and accounts for budgets. `with_revocation` adds the revocation endpoint and
 its cascades, and `with_revocation_directory` delivers their downstream calls.
@@ -2049,16 +2083,23 @@ permissions, and mission proposals, updates and completions are put to the SS
 after the request passes every check it passes today. `Policy::bind_person` and
 `bind_upstream` still identify the person and derive subjects; do not consent
 there for a routed agent. `authorize`, `authorize_upstream`, `consent`,
-`Governance::permit` and the signed mission approval are not called for it.
-Its R3 requests and resource-initiated interactions are refused with
+`Governance::permit`, `R3Policy` and the signed mission approval are not
+called for it. Its resource-initiated interactions are refused with
 `403 access_denied`. An agent the PS cannot tie to a person yet, such as one
 asking permission before its first person token, is decided by host policy.
 
 - `allow` proceeds. An auth token takes the SS's narrower `scope`, and every
-  token is capped at its `exp`. A four-party `allow` that narrows is refused,
-  since the Access Server cannot be told. A mission proposal's `allow` carries
-  the approved terms: the PS mints the blob with them and answers `200` with
-  `s256` and `mission`.
+  token is capped at its `exp`. The Access Server cannot be told about a
+  four-party narrowing, so its token is checked when it arrives: one wider
+  than the `allow` is refused, `403 access_denied` (or `403 denied` at a
+  poll). A mission proposal's `allow` carries the approved terms: the PS mints
+  the blob with them and answers `200` with `s256` and `mission`.
+- An R3 auth token request is an auth token act like the others. The SS sees
+  the request as the agent sent it; it cannot fetch the R3 document. Its
+  `allow` grants every operation of the class document, none per call, or the
+  per-call token for a proposed call, narrowed to the answer's `scope` and
+  `exp`. A held R3 act's `SupervisionHold::r3_document` is the exact document
+  or proposal the PS fetched: show the person its `display`.
 - `deny` refuses: `403 access_denied` for a token or mission request (the
   latter with a `reason` member), `permission: denied` with the reason.
 - `ask`, a deferred answer, a question for the agent and an SS that cannot be
@@ -2085,9 +2126,15 @@ remembers it. Do not require a `reason`. An act nobody answers before it
 expires is reported `abandoned`.
 
 The PS reports what happened: `agent.bound`, `person_token.issued`,
-`auth_token.issued`, `decision.resolved`, `audit.recorded` and
-`revocation.received` for agent tokens, and a mission's approval and
-termination. Reports for one `(SS, sub)` pair are delivered in order, under
+`auth_token.issued` (a four-party token once it is released, also after the
+Access Server deferred), `decision.resolved`, `audit.recorded`,
+`interaction.requested` for each relay or question it took to the person, and
+a mission's approval and its end. A mission's end is reported once, with its
+reason, the first time the PS finds it ended, so a mission your host
+terminates is reported when the PS next meets it. With `with_revocation`,
+`revocation.received` reports an Agent Provider's revocation of the agent's
+token, and a Resource's revocation of a resource token that was in one of the
+agent's supervised requests. Reports for one `(SS, sub)` pair are delivered in order, under
 stable `id`s, through an outbox. Each supervision request delivers its pair's
 outbox first; call `ps.deliver_supervision()` when an SS may be reachable
 again, such as after its machine wakes. It returns how many pairs still wait.

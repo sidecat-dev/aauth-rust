@@ -10,14 +10,6 @@ pub(super) enum RelayR3<'a> {
 impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String>
     PersonServer<K, S, P, C, I>
 {
-    pub(super) fn federate(
-        &self,
-        agent: &VerifiedAgentToken,
-        prepared: &PreparedAuthorization,
-    ) -> Result<Response<Vec<u8>>, Failure> {
-        self.federate_with(agent, prepared, true, None)
-    }
-
     /// Consent before the PS contacts the AS. A request that chains an
     /// `upstream_token` asks the chained hook, so consent to direct federation
     /// is not consent to delegation.
@@ -40,12 +32,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: &PreparedAuthorization,
         reference: &aauth_rust_r3::Reference,
         document: &aauth_rust_r3::Document,
+        allowed: Option<&AllowedToken>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         self.federate_with(
             agent,
             prepared,
             false,
             Some(RelayR3::Document(reference, document)),
+            allowed,
         )
     }
 
@@ -57,21 +51,26 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: &PreparedAuthorization,
         reference: &aauth_rust_r3::Reference,
         exact_proposal: &[u8],
+        allowed: Option<&AllowedToken>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         self.federate_with(
             agent,
             prepared,
             false,
             Some(RelayR3::Proposal(reference, exact_proposal)),
+            allowed,
         )
     }
 
+    /// Send the PS-to-AS token request. `allowed` is what a supervision
+    /// server allowed: the Access Server's token must fit it.
     pub(super) fn federate_with(
         &self,
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
         core_consent: bool,
         relay: Option<RelayR3<'_>>,
+        allowed: Option<&AllowedToken>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -148,8 +147,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let response = adapter
             .send(&request)
             .map_err(|_| unreachable(&r.aud, None, Reason::TransportUnavailable))?;
-        self.accept_federation(response, agent, prepared, &endpoint, sent, relay)
+        self.accept_federation(response, agent, prepared, &endpoint, sent, relay, allowed)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn accept_federation(
         &self,
         response: Response<Vec<u8>>,
@@ -158,6 +158,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         endpoint: &str,
         sent: Option<Budget>,
         relay: Option<RelayR3<'_>>,
+        allowed: Option<&AllowedToken>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -181,7 +182,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             if relay.is_some() || prepared.offer.is_some() {
                 return Err(Failure::internal());
             }
-            return self.defer_federation(&response, agent, prepared, endpoint, sent.clone());
+            return self.defer_federation(
+                &response,
+                agent,
+                prepared,
+                endpoint,
+                sent.clone(),
+                allowed,
+            );
         }
         let current = (self.clock)();
         self.inputs_current(agent, resource, presented, current)?;
@@ -369,6 +377,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     verified.map_err(|_| failed(Reason::InvalidGrant))?;
                 }
             }
+        }
+        // A supervision server's narrowing, which the Access Server was not told.
+        if let Some(allowed) = allowed {
+            allowed.check(&granted, c.exp)?;
         }
         let issued = read_granted(&c.extra).map_err(|_| failed(Reason::InvalidGrant))?;
         if verify_delivered(sent.as_ref(), issued.as_ref()).is_err() {

@@ -25,6 +25,10 @@
 //! sub-agents, and call chaining are refused. With federation enabled, a class
 //! document or a person-presented proposal is consented and the exact tokens
 //! are relayed to the access server.
+//! For an agent routed to a supervision server, an R3 request is an
+//! `auth_token` act like any other, and that server decides it instead of
+//! [`R3Policy`]: an `allow` grants every operation of the class document, or
+//! the proposed call, narrowed to the answer's `scope` and `exp`.
 use super::*;
 use aauth_rust_r3::{
     Authorization, Document, FetchClient, FetchConfig, FetchEgress, FetchIdentity, FetchLimits,
@@ -361,12 +365,44 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         Some(approvals.remove(position))
     }
 
+    /// Put an R3 auth token request to the agent's supervision server, as
+    /// the `auth_token` act it is. The server is sent the request as the
+    /// agent made it; the fetched bytes stay here, with a held act.
+    fn supervise_r3(
+        &self,
+        agent: &VerifiedAgentToken,
+        context: &AuthorizationRequest,
+        presented_exp: i64,
+        exact: &[u8],
+        resumed: Option<&Resumed>,
+    ) -> Result<Supervised, Failure> {
+        let r = context.resource.claims();
+        self.supervise(
+            ActInput {
+                act: Act::AuthToken,
+                agent,
+                person_id: &context.presented.person_id,
+                mission_s256: r.mission_s256.as_deref(),
+                parameters: &context.parameters,
+                members: act_members(Act::AuthToken, agent),
+                path: "/token",
+                requested_scopes: Some(&context.scopes),
+                deadline: r.exp.min(presented_exp),
+                r3: Some(exact),
+            },
+            resumed,
+        )
+    }
+
+    /// `resumed` is an allowance a supervision server, or the person in its
+    /// place, already gave for this request.
     pub(super) fn auth_r3(
         &self,
         agent: VerifiedAgentToken,
         parameters: Value,
         verified_at: i64,
         upstream: Option<Upstream>,
+        resumed: Option<&Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let r3 = self.r3.as_ref().ok_or_else(Failure::internal)?;
         if upstream.is_some() || parameters.get("subagent_token").is_some() {
@@ -426,20 +462,40 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             Err(_) => return Err(Failure::internal()),
         };
         let exact = artifact.exact_bytes().to_vec();
+        // What a supervision server allowed, enforced on the token and reported with it.
+        let mut allowed: Option<AllowedToken> = None;
 
         // Each branch ends with the scopes, lifetime, recorded-approval cap, signer and vocabulary to issue.
         let (scopes, lifetime, approval_expires_at, vocabulary, mint): PreparedR3Grant<'_> =
             if let Some(document) = artifact.document() {
                 validate_document_account(document, r.account.as_deref())
                     .map_err(|_| Failure::parameter("invalid_resource_token"))?;
-                let decision = r3
-                    .policy
-                    .authorize_document(&R3AuthorizationRequest {
-                        core: &context,
-                        reference: &reference,
-                        document,
-                    })
-                    .map_err(Failure::policy)?;
+                let decision =
+                    match self.supervise_r3(&agent, &context, presented.exp, &exact, resumed)? {
+                        Supervised::Host => r3
+                            .policy
+                            .authorize_document(&R3AuthorizationRequest {
+                                core: &context,
+                                reference: &reference,
+                                document,
+                            })
+                            .map_err(Failure::policy)?,
+                        Supervised::Allowed { sdi, allowance } => {
+                            let decision = supervised_document(
+                                &r3.registry,
+                                document,
+                                &allowance,
+                                &context.scopes,
+                                self.supervised_lifetime(),
+                            )?;
+                            allowed = Some(AllowedToken::new(sdi, &allowance, resumed.is_some()));
+                            decision
+                        }
+                        Supervised::Denied { .. } => {
+                            return Err(Failure::policy(PolicyError::Denied));
+                        }
+                        Supervised::Held(response) => return Ok(response),
+                    };
                 if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
                     return Err(Failure::internal());
                 }
@@ -457,7 +513,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 // Go consents on the fetched class document, then relays the
                 // exact tokens. The access server signs the Auth token.
                 if self.federation.is_some() {
-                    return self.federate_r3(
+                    let person_id = retained.person_id.clone();
+                    let response = self.federate_r3(
                         &agent,
                         &PreparedAuthorization {
                             resource,
@@ -469,7 +526,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         },
                         &reference,
                         document,
-                    );
+                        allowed.as_ref(),
+                    )?;
+                    self.report_r3_federated(&person_id, &agent, allowed.as_ref(), &response);
+                    return Ok(response);
                 }
                 let mint: TokenMint<'_> = match &decision.per_call {
                     None => {
@@ -543,22 +603,38 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 validate_proposal_account(proposal, r.account.as_deref())
                     .map_err(|_| Failure::parameter("invalid_resource_token"))?;
                 if self.federation.is_some() && presented.kind == TokenKind::Person {
-                    let request = R3ProposalRequest {
-                        core: &context,
-                        reference: &reference,
-                        proposal,
-                        class: None,
-                    };
-                    let decision = if release {
-                        r3.policy.authorize_release(&request)
-                    } else {
-                        r3.policy.authorize_proposal(&request)
+                    match self.supervise_r3(&agent, &context, presented.exp, &exact, resumed)? {
+                        Supervised::Host => {
+                            let request = R3ProposalRequest {
+                                core: &context,
+                                reference: &reference,
+                                proposal,
+                                class: None,
+                            };
+                            let decision = if release {
+                                r3.policy.authorize_release(&request)
+                            } else {
+                                r3.policy.authorize_proposal(&request)
+                            }
+                            .map_err(Failure::policy)?;
+                            if !valid_grant_shape(
+                                &decision.scopes,
+                                decision.lifetime,
+                                &context.scopes,
+                            ) {
+                                return Err(Failure::internal());
+                            }
+                        }
+                        Supervised::Allowed { sdi, allowance } => {
+                            allowed = Some(AllowedToken::new(sdi, &allowance, resumed.is_some()));
+                        }
+                        Supervised::Denied { .. } => {
+                            return Err(Failure::policy(PolicyError::Denied));
+                        }
+                        Supervised::Held(response) => return Ok(response),
                     }
-                    .map_err(Failure::policy)?;
-                    if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
-                        return Err(Failure::internal());
-                    }
-                    return self.federate_r3_proposal(
+                    let person_id = retained.person_id.clone();
+                    let response = self.federate_r3_proposal(
                         &agent,
                         &PreparedAuthorization {
                             resource,
@@ -570,7 +646,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         },
                         &reference,
                         &exact,
-                    );
+                        allowed.as_ref(),
+                    )?;
+                    self.report_r3_federated(&person_id, &agent, allowed.as_ref(), &response);
+                    return Ok(response);
                 }
                 // The presented token is the class Auth token this PS issued; its
                 // retained lineage was verified above. Its R3 claims come from its
@@ -600,88 +679,119 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 ) {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
-                let check_now = (self.clock)();
-                let (decision, approval_expires_at) = if let Some(recorded) = self
-                    .take_recorded_approval(
-                        &retained,
-                        r,
-                        &context.scopes,
-                        reference.digest(),
-                        &exact,
-                        release,
-                        &presented.jti,
-                        check_now,
-                    ) {
-                    if !valid_grant_shape(&recorded.scopes, recorded.lifetime, &context.scopes) {
-                        return Err(Failure::internal());
-                    }
-                    (
-                        R3ProposalDecision {
-                            scopes: recorded.scopes,
-                            lifetime: recorded.lifetime,
-                        },
-                        Some(recorded.expires_at),
-                    )
-                } else {
-                    let request = R3ProposalRequest {
-                        core: &context,
-                        reference: &reference,
-                        proposal,
-                        class: Some(&class),
-                    };
-                    let decision = if release {
-                        r3.policy.authorize_release(&request)
-                    } else {
-                        r3.policy.authorize_proposal(&request)
-                    }
-                    .map_err(Failure::policy)?;
-                    if !valid_grant_shape(&decision.scopes, decision.lifetime, &context.scopes) {
-                        return Err(Failure::internal());
-                    }
-                    let approved_at = (self.clock)();
-                    self.inputs_unrevoked(&agent, &resource, &presented, approved_at)?;
-                    check_agent_current(&agent, approved_at)?;
-                    let binding = self
-                        .binding(&retained.principal, binding_context)?
-                        .ok_or_else(|| Failure::parameter("invalid_presented_token"))?;
-                    if binding.person_id != retained.person_id
-                        || binding.generation != retained.binding_generation
-                    {
-                        return Err(binding_context.revoked());
-                    }
-                    if presented.exp <= approved_at && presented.exp <= r.exp {
-                        self.record_approval(
-                            RecordedApproval {
-                                person_id: retained.person_id.clone(),
-                                principal: retained.principal.clone(),
-                                agent: retained.agent.clone(),
-                                agent_jti: agent.claims().jti.clone(),
-                                agent_jkt: r.agent_jkt.clone(),
-                                resource: r.iss.clone(),
-                                subject: r.sub.clone(),
-                                tenant: r.tenant.clone(),
-                                account: r.account.clone(),
-                                requested_scopes: context.scopes.clone(),
-                                proposal_s256: reference.digest().to_owned(),
-                                exact_proposal: exact.clone(),
+                let (decision, approval_expires_at) =
+                    match self.supervise_r3(&agent, &context, presented.exp, &exact, resumed)? {
+                        // A recorded per-call approval is host policy's own
+                        // record, so it is applied only without a supervisor.
+                        Supervised::Host => {
+                            let check_now = (self.clock)();
+                            if let Some(recorded) = self.take_recorded_approval(
+                                &retained,
+                                r,
+                                &context.scopes,
+                                reference.digest(),
+                                &exact,
                                 release,
-                                expired_presented_issuer: presented.issuer.clone(),
-                                expired_presented_jti: presented.jti.clone(),
-                                expired_resource_jti: r.jti.clone(),
-                                scopes: decision.scopes,
-                                lifetime: decision.lifetime,
-                                expires_at: approved_at
-                                    .saturating_add(decision.lifetime)
-                                    .min(agent.claims().exp),
-                            },
-                            approved_at,
-                        );
-                        return Err(Failure::parameter("expired_presented_token"));
-                    }
-                    (decision, None)
-                };
+                                &presented.jti,
+                                check_now,
+                            ) {
+                                if !valid_grant_shape(
+                                    &recorded.scopes,
+                                    recorded.lifetime,
+                                    &context.scopes,
+                                ) {
+                                    return Err(Failure::internal());
+                                }
+                                (
+                                    R3ProposalDecision {
+                                        scopes: recorded.scopes,
+                                        lifetime: recorded.lifetime,
+                                    },
+                                    Some(recorded.expires_at),
+                                )
+                            } else {
+                                let request = R3ProposalRequest {
+                                    core: &context,
+                                    reference: &reference,
+                                    proposal,
+                                    class: Some(&class),
+                                };
+                                let decision = if release {
+                                    r3.policy.authorize_release(&request)
+                                } else {
+                                    r3.policy.authorize_proposal(&request)
+                                }
+                                .map_err(Failure::policy)?;
+                                if !valid_grant_shape(
+                                    &decision.scopes,
+                                    decision.lifetime,
+                                    &context.scopes,
+                                ) {
+                                    return Err(Failure::internal());
+                                }
+                                let approved_at = (self.clock)();
+                                self.inputs_unrevoked(&agent, &resource, &presented, approved_at)?;
+                                check_agent_current(&agent, approved_at)?;
+                                let binding = self
+                                    .binding(&retained.principal, binding_context)?
+                                    .ok_or_else(|| {
+                                    Failure::parameter("invalid_presented_token")
+                                })?;
+                                if binding.person_id != retained.person_id
+                                    || binding.generation != retained.binding_generation
+                                {
+                                    return Err(binding_context.revoked());
+                                }
+                                if presented.exp <= approved_at && presented.exp <= r.exp {
+                                    self.record_approval(
+                                        RecordedApproval {
+                                            person_id: retained.person_id.clone(),
+                                            principal: retained.principal.clone(),
+                                            agent: retained.agent.clone(),
+                                            agent_jti: agent.claims().jti.clone(),
+                                            agent_jkt: r.agent_jkt.clone(),
+                                            resource: r.iss.clone(),
+                                            subject: r.sub.clone(),
+                                            tenant: r.tenant.clone(),
+                                            account: r.account.clone(),
+                                            requested_scopes: context.scopes.clone(),
+                                            proposal_s256: reference.digest().to_owned(),
+                                            exact_proposal: exact.clone(),
+                                            release,
+                                            expired_presented_issuer: presented.issuer.clone(),
+                                            expired_presented_jti: presented.jti.clone(),
+                                            expired_resource_jti: r.jti.clone(),
+                                            scopes: decision.scopes,
+                                            lifetime: decision.lifetime,
+                                            expires_at: approved_at
+                                                .saturating_add(decision.lifetime)
+                                                .min(agent.claims().exp),
+                                        },
+                                        approved_at,
+                                    );
+                                    return Err(Failure::parameter("expired_presented_token"));
+                                }
+                                (decision, None)
+                            }
+                        }
+                        Supervised::Allowed { sdi, allowance } => {
+                            allowed = Some(AllowedToken::new(sdi, &allowance, resumed.is_some()));
+                            (
+                                R3ProposalDecision {
+                                    scopes: allowed_scopes(&allowance, &context.scopes),
+                                    lifetime: self.supervised_lifetime(),
+                                },
+                                None,
+                            )
+                        }
+                        Supervised::Denied { .. } => {
+                            return Err(Failure::policy(PolicyError::Denied));
+                        }
+                        Supervised::Held(response) => return Ok(response),
+                    };
                 if self.federation.is_some() {
-                    return self.federate_r3_proposal(
+                    let person_id = retained.person_id.clone();
+                    let response = self.federate_r3_proposal(
                         &agent,
                         &PreparedAuthorization {
                             resource,
@@ -693,7 +803,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         },
                         &reference,
                         &exact,
-                    );
+                        allowed.as_ref(),
+                    )?;
+                    self.report_r3_federated(&person_id, &agent, allowed.as_ref(), &response);
+                    return Ok(response);
                 }
                 let (reference, exact) = (reference.clone(), exact.clone());
                 let budget_grant = granted_budget.clone();
@@ -763,6 +876,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .and_then(|state| state.policy.period_end)
         {
             expires_at = expires_at.min(end);
+        }
+        if let Some(exp) = allowed.as_ref().and_then(|allowed| allowed.exp) {
+            expires_at = expires_at.min(exp);
         }
         let claims = AuthClaims {
             iss: self.config.issuer.clone(),
@@ -866,10 +982,72 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     budget_owner(&claims.sub, &claims.aud),
                 );
         }
+        self.report_issued(
+            &retained.person_id,
+            &Self::identity(&agent),
+            allowed.as_ref().and_then(|allowed| allowed.sdi.as_deref()),
+            Issued {
+                kind: TokenKind::Auth,
+                jti: &claims.jti,
+                aud: &claims.aud,
+                exp: expires_at,
+                scope: claims.scope.as_deref(),
+                issuer: &self.config.issuer,
+                mission_s256: claims.mission_s256.as_deref(),
+            },
+        );
         Ok(token_response(
             "auth_token",
             compact,
             expires_at - released_at,
         ))
     }
+
+    /// Report the R3 auth token an Access Server issued for this request.
+    fn report_r3_federated(
+        &self,
+        person_id: &str,
+        agent: &VerifiedAgentToken,
+        allowed: Option<&AllowedToken>,
+        response: &Response<Vec<u8>>,
+    ) {
+        self.report_federated(
+            person_id,
+            &Self::identity(agent),
+            allowed.and_then(|allowed| allowed.sdi.as_deref()),
+            response,
+        );
+    }
+}
+
+/// What a supervision server's `allow` grants for a class document: every
+/// operation the document covers, none left per call, and the requested
+/// scopes narrowed to the answer's. The answer can narrow nothing else.
+fn supervised_document(
+    registry: &Registry,
+    document: &Document,
+    allowance: &Allowance,
+    requested: &[String],
+    lifetime: i64,
+) -> Result<R3Decision, Failure> {
+    let operations = document.operation_set();
+    let vocabulary = registry
+        .vocabulary(operations.vocabulary())
+        .ok_or_else(Failure::internal)?;
+    let operations = operations.operations().map_err(|_| Failure::internal())?;
+    let granted =
+        GrantedOperations::new(&vocabulary, &operations).map_err(|_| Failure::internal())?;
+    Ok(R3Decision {
+        granted,
+        per_call: None,
+        scopes: allowed_scopes(allowance, requested),
+        lifetime,
+    })
+}
+
+fn allowed_scopes(allowance: &Allowance, requested: &[String]) -> Vec<String> {
+    allowance.scope.as_ref().map_or_else(
+        || requested.to_vec(),
+        |scope| scope.split(' ').map(str::to_owned).collect(),
+    )
 }

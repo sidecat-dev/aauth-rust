@@ -101,22 +101,29 @@ impl InteractionCompletion {
 }
 
 impl Agent {
-    /// Signed `jwt` POST of an `interaction` or `payment` relay.
+    /// Signed `jwt` POST asking the Person Server to relay an `interaction`
+    /// or `payment` to the person: the `url` and `code` a resource gave.
     ///
     /// # Errors
     ///
-    /// `kind` must be `interaction` or `payment`. Signing failures become
-    /// [`ChannelError::Signing`].
+    /// `kind` must be `interaction` or `payment`, and `url` and `code` must
+    /// not be empty. Signing failures become [`ChannelError::Signing`].
     pub fn post_interaction(
         &self,
         endpoint: &str,
         kind: &str,
+        url: &str,
+        code: &str,
         now: i64,
     ) -> Result<Request<Vec<u8>>, ChannelError> {
-        if kind != "interaction" && kind != "payment" {
+        if (kind != "interaction" && kind != "payment") || url.is_empty() || code.is_empty() {
             return Err(ChannelError::Incomplete);
         }
-        self.post_json(endpoint, json!({ "type": kind }), now)
+        self.post_json(
+            endpoint,
+            json!({ "type": kind, "url": url, "code": code }),
+            now,
+        )
     }
 
     /// Signed `jwt` POST of a question for the person.

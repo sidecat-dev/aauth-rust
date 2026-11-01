@@ -301,8 +301,8 @@ on. `host` is your implementation of `Supervision`:
   where you connect, and follow no redirects.
 
 For an assigned agent, your `Policy::bind_person` still says which person the
-agent acts for; `authorize`, `consent` and the mission approval are not
-called. The Person Server's resolver must hold the supervision server's keys
+agent acts for; `authorize`, `consent`, `R3Policy` and the mission approval
+are not called. The Person Server's resolver must hold the supervision server's keys
 (`aauth-supervisor.json`): by default it accepts only signed answers.
 
 [Supervision](../features/supervision.md) covers held acts, the person's
@@ -310,13 +310,13 @@ answers and the record of decisions.
 
 ## Limits
 
-- R3 requests and a Resource's own sign-in step are refused for a supervised
-  agent.
-- In four-party access, an `allow` that narrows the scope or expiry is refused,
-  because the Access Server takes no narrowing.
-- These reports are not sent: `auth_token.issued` after an Access Server
-  deferral, `revocation.received` for Resource tokens,
-  `interaction.requested`, and mission endings other than completion.
+- A Resource's own sign-in step is refused for a supervised agent.
+- In four-party access the Access Server takes no narrowing, so the Person
+  Server refuses its token when it is wider than your `allow`.
+- An R3 request reaches you as an auth token act with its resource token. You
+  cannot fetch the R3 document, and an `allow` grants all of its operations:
+  answer `ask` when the person should see what the resource says it means.
+- A mission's end reaches you when the Person Server finds it, once.
 
 ## Next
 

@@ -16,8 +16,8 @@
 //! ([`crate::Policy::bind_person`], [`crate::Policy::bind_upstream`]) and
 //! derives their directed subjects; with a deciding SS it must not consent
 //! there. [`crate::Policy::authorize`], [`crate::Policy::authorize_upstream`],
-//! [`crate::Governance::permit`] and the host's mission approval are not
-//! called for a supervised agent.
+//! [`crate::Governance::permit`], [`crate::R3Policy`] and the host's mission
+//! approval are not called for a supervised agent.
 mod held;
 mod journal;
 mod record;
@@ -221,6 +221,11 @@ pub struct SupervisionHold {
     pub waiting: Waiting,
     /// The agent's request body, agent-asserted, for presenting the act.
     pub parameters: Value,
+    /// For an R3 auth token act, the exact R3 document or per-call proposal
+    /// this server fetched and checked against `r3_s256`. It is
+    /// resource-asserted: present its `display` with the act. A supervision
+    /// server cannot fetch it, and is not sent it.
+    pub r3_document: Option<Vec<u8>>,
 }
 
 /// The person's answer to a held act.
@@ -332,6 +337,9 @@ pub(super) struct ActInput<'a> {
     pub(super) requested_scopes: Option<&'a [String]>,
     /// Latest time a held act can still complete.
     pub(super) deadline: i64,
+    /// For an R3 auth token act, the exact R3 document or per-call proposal
+    /// this server fetched, kept with a held act for presenting it.
+    pub(super) r3: Option<&'a [u8]>,
 }
 
 /// What an SS said to one request.
@@ -359,9 +367,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// and completions are put to that server, after the request passes
     /// every check it passes today:
     ///
-    /// - `allow` proceeds, narrowed to the server's `scope` and `exp`. A
-    ///   four-party `allow` that narrows is refused (`403 access_denied`),
-    ///   since the Access Server cannot be told about the narrowing.
+    /// - `allow` proceeds, narrowed to the server's `scope` and `exp`. The
+    ///   Access Server cannot be told about a four-party narrowing, so its
+    ///   token is refused when it is wider (`403 access_denied`, or `denied`
+    ///   at a poll).
     /// - `deny` refuses: a token request with `403 access_denied`, a
     ///   permission with `permission: denied` and the server's `reason`, a
     ///   mission request with `403 access_denied` and a `reason` member.
@@ -377,9 +386,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// for a routed agent. [`crate::Policy::authorize`],
     /// [`crate::Policy::authorize_upstream`], [`crate::Policy::consent`],
     /// [`crate::Governance::permit`] and the signed mission approval are not
-    /// consulted for it. Its R3 requests and resource-initiated interactions
-    /// are refused with `403 access_denied`: the draft defines no act for them,
-    /// and their consent steps are host consent.
+    /// consulted for it, and neither is [`crate::R3Policy`]: an R3 request is an auth
+    /// token act, and its `allow` grants every operation of the R3 document,
+    /// or the proposed call. Its resource-initiated interactions are refused
+    /// with `403 access_denied`: their consent step is host consent.
     ///
     /// Every exchange is logged by `sdi` ([`Self::supervision_record`]).
     /// What happened afterwards is reported to the agent's deciding server
@@ -450,6 +460,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         };
         let now = (self.clock)();
         let sub = config.host.subject(input.person_id, &supervisor);
+        if input.act == Act::AuthToken {
+            self.remember_resource_token(input.person_id, &identity, input.parameters);
+        }
         let sdi = format!("d-{}", generate_pending_id());
         let mut body = input
             .parameters
@@ -510,6 +523,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             body: &body,
             deadline,
             requested_scopes: input.requested_scopes,
+            r3: input.r3,
         };
         match answered {
             Answered::Decision(Decision::Allow(allowance))
@@ -885,8 +899,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
 
     /// A four-party request. The Access Server takes no narrowing from this
-    /// server, so an `allow` that narrows scope or lifetime cannot be
-    /// enforced and is refused rather than widened.
+    /// server, so the token it issues is held to what the supervision server
+    /// allowed when it is delivered, and reported then.
     pub(super) fn federate_supervised(
         &self,
         agent: &VerifiedAgentToken,
@@ -905,49 +919,144 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 path: "/token",
                 requested_scopes: Some(&prepared.context.scopes),
                 deadline: r.exp.min(prepared.presented.exp),
+                r3: None,
             },
             resumed,
         )?;
-        let sdi = match supervised {
-            Supervised::Host => return self.federate(agent, prepared),
+        let identity = Self::identity(agent);
+        let allowed = match supervised {
+            Supervised::Host => {
+                // Kept for a supervision server the agent is routed to later.
+                let unsupervised = AllowedToken::default();
+                let response = self.federate_with(
+                    agent,
+                    prepared,
+                    true,
+                    None,
+                    self.supervision.as_ref().map(|_| &unsupervised),
+                )?;
+                self.report_federated(&prepared.retained.person_id, &identity, None, &response);
+                return Ok(response);
+            }
             Supervised::Allowed { sdi, allowance } => {
-                if allowance
-                    .scope
-                    .as_deref()
-                    .is_some_and(|scope| scope != prepared.context.scopes.join(" "))
-                    || allowance.exp.is_some()
-                {
-                    return Err(Failure::policy(PolicyError::Denied));
-                }
-                sdi
+                AllowedToken::new(sdi, &allowance, resumed.is_some())
             }
             Supervised::Denied { .. } => return Err(Failure::policy(PolicyError::Denied)),
             Supervised::Held(response) => return Ok(response),
         };
-        let response = self.federate_with(agent, prepared, false, None)?;
-        if response.status() == StatusCode::OK
-            && let Some(token) = strict_json(response.body())
-                .ok()
-                .and_then(|body| body["auth_token"].as_str().map(str::to_owned))
-            && let Ok(parsed) = AuthToken::parse(&token)
-        {
-            let c = parsed.unverified_claims();
-            self.report_issued(
-                &prepared.retained.person_id,
-                &Self::identity(agent),
-                Some(&sdi),
-                Issued {
-                    kind: TokenKind::Auth,
-                    jti: &c.jti,
-                    aud: &c.aud,
-                    exp: c.exp,
-                    scope: c.scope.as_deref(),
-                    issuer: &c.iss,
-                    mission_s256: c.mission_s256.as_deref(),
-                },
-            );
-        }
+        let response = self.federate_with(agent, prepared, false, None, Some(&allowed))?;
+        self.report_federated(
+            &prepared.retained.person_id,
+            &identity,
+            allowed.sdi.as_deref(),
+            &response,
+        );
         Ok(response)
+    }
+
+    /// Report the auth token an Access Server issued, once it is released to
+    /// the agent: `auth_token.issued` with the Access Server as `issuer`.
+    pub(super) fn report_federated(
+        &self,
+        person_id: &str,
+        agent: &AgentIdentity,
+        sdi: Option<&str>,
+        response: &Response<Vec<u8>>,
+    ) {
+        if response.status() != StatusCode::OK {
+            return;
+        }
+        let Some(token) = strict_json(response.body())
+            .ok()
+            .and_then(|body| body["auth_token"].as_str().map(str::to_owned))
+        else {
+            return;
+        };
+        let Ok(parsed) = AuthToken::parse(&token) else {
+            return;
+        };
+        let c = parsed.unverified_claims();
+        self.report_issued(
+            person_id,
+            agent,
+            sdi,
+            Issued {
+                kind: TokenKind::Auth,
+                jti: &c.jti,
+                aud: &c.aud,
+                exp: c.exp,
+                scope: c.scope.as_deref(),
+                issuer: &c.iss,
+                mission_s256: c.mission_s256.as_deref(),
+            },
+        );
+    }
+}
+
+/// What a supervision server allowed for an auth token, carried to the
+/// token's issuance: the token must fit it, and is reported under `sdi`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct AllowedToken {
+    /// The decision; `None` for an agent no supervision server decides for.
+    pub(super) sdi: Option<String>,
+    /// The scopes allowed, when the answer narrowed them.
+    pub(super) scope: Option<Vec<String>>,
+    /// The latest `exp` allowed.
+    pub(super) exp: Option<i64>,
+    /// The agent is polling: a refusal is the polling error `denied`.
+    pub(super) polled: bool,
+}
+
+impl AllowedToken {
+    pub(super) fn new(sdi: String, allowance: &Allowance, polled: bool) -> Self {
+        Self {
+            sdi: Some(sdi),
+            scope: allowance
+                .scope
+                .as_ref()
+                .map(|scope| scope.split(' ').map(str::to_owned).collect()),
+            exp: allowance.exp,
+            polled,
+        }
+    }
+
+    /// Refuse a token another server issued wider than the allowance: a
+    /// scope outside it or an `exp` after it.
+    pub(super) fn check(&self, granted: &[String], exp: i64) -> Result<(), Failure> {
+        let wider = self
+            .scope
+            .as_ref()
+            .is_some_and(|allowed| granted.iter().any(|scope| !allowed.contains(scope)))
+            || self.exp.is_some_and(|allowed| exp > allowed);
+        if !wider {
+            return Ok(());
+        }
+        Err(if self.polled {
+            Failure::status(StatusCode::FORBIDDEN, "denied")
+        } else {
+            Failure::policy(PolicyError::Denied)
+        })
+    }
+
+    /// The custody form, read back with [`Self::stored`].
+    pub(super) fn to_value(&self) -> Value {
+        json!({ "sdi": self.sdi, "scope": self.scope, "exp": self.exp })
+    }
+
+    /// An allowance kept with a waiting request. Whoever reads it answers a poll.
+    pub(super) fn stored(value: &Value) -> Option<Self> {
+        value.as_object()?;
+        Some(Self {
+            sdi: value["sdi"].as_str().map(str::to_owned),
+            scope: value["scope"].as_array().map(|scopes| {
+                scopes
+                    .iter()
+                    .filter_map(|scope| scope.as_str().map(str::to_owned))
+                    .collect()
+            }),
+            exp: value["exp"].as_i64(),
+            polled: true,
+        })
     }
 }
 
@@ -977,6 +1086,7 @@ struct HeldAct<'a> {
     body: &'a Value,
     deadline: i64,
     requested_scopes: Option<&'a [String]>,
+    r3: Option<&'a [u8]>,
 }
 
 /// An SS `allow` must fit the act: a scope within the requested scopes and

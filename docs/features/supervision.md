@@ -95,6 +95,10 @@ with `ps.supervision_hold(reference)`. Its `waiting` says what to do:
 | `AccessServer { reference }` | Allowed, and the Access Server is waiting. Advance it with `advance_federation`. |
 | `Decided` | Nothing. The agent's next poll gets the result. |
 
+An R3 request is an auth token act. For one, `SupervisionHold::r3_document`
+holds the R3 document or per-call proposal the Person Server fetched; show the
+person its `display`. The supervision server cannot fetch it.
+
 `PersonAnswer` carries the person's answer and how far it reaches:
 `once`, `mission` (for the rest of the mission) or `always`. The supervision
 server, not the Person Server, remembers `mission` and `always` and applies
@@ -102,6 +106,12 @@ them to later acts of the same kind by the same agent.
 
 ## Reports and records
 
+- Besides tokens issued and the person's answers, the server is told when the
+  Person Server takes an interaction to the person for the agent
+  (`interaction.requested`), when a resource token in one of the agent's
+  requests or its agent token is revoked (`revocation.received`), and when a
+  mission ends, for any reason. A mission's end is reported once, when the
+  Person Server finds it.
 - Reports for one person and server are delivered in order through an outbox.
   Each request to a server sends its outbox first; call
   `ps.deliver_supervision()` when a server may be reachable again. It returns
@@ -116,12 +126,13 @@ them to later acts of the same kind by the same agent.
 
 ## Limits
 
-- R3 requests and a Resource's own sign-in step are refused for a supervised
-  agent.
-- In four-party access, an `allow` that narrows scope or expiry is refused.
-- Some reports are not sent: `auth_token.issued` after an Access Server
-  deferral, `revocation.received` for Resource tokens,
-  `interaction.requested`, and mission endings other than completion.
+- A Resource's own sign-in step is refused for a supervised agent.
+- In four-party access the Access Server is not told about a narrowing: a
+  token wider than the `allow` is refused when it arrives.
+- An `allow` for an R3 request grants every operation of the document; the
+  supervision server cannot leave some per call.
+- A mission your service terminates is reported when the Person Server next
+  meets it.
 - [INTERPRETATIONS.md](../../INTERPRETATIONS.md) ("Selected supervision
   interpretations") lists the wire choices made where the draft leaves room.
 

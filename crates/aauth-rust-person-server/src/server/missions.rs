@@ -24,7 +24,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .missions()
             .ok_or_else(|| Failure::parameter("invalid_request"))?
             .load_mission(&self.config.issuer, owner, s256, at)
-            .map_err(|e| mission_failure(e, context))?;
+            .map_err(|e| {
+                if let MissionStoreError::Terminated(reason) = &e {
+                    self.report_mission_end(owner, s256, reason, None);
+                }
+                mission_failure(e, context)
+            })?;
         record.validate().map_err(|_| Failure::internal())?;
         if record.person_server != self.config.issuer
             || &record.owner != owner
@@ -33,12 +38,18 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(Failure::internal());
         }
         if let MissionState::Terminated(reason) = &record.state {
-            return Err(Failure::mission_terminated(reason));
+            return Err(self.mission_ended(owner, s256, reason));
         }
         if record.document.expires_at().is_some_and(|exp| at >= exp) {
-            return Err(Failure::mission_terminated("expired"));
+            return Err(self.mission_ended(owner, s256, "expired"));
         }
         Ok(record)
+    }
+    /// A mission found ended: its supervision server is told once, and the
+    /// request is refused with `mission_terminated`.
+    pub(super) fn mission_ended(&self, owner: &AgentIdentity, s256: &str, reason: &str) -> Failure {
+        self.report_mission_end(owner, s256, reason, None);
+        Failure::mission_terminated(reason)
     }
     pub(super) fn recheck_mission(
         &self,
@@ -79,7 +90,17 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .store
                 .missions()
                 .ok_or(StoreError::Unavailable)?
-                .commit_mission_token(mission, (self.clock)(), record, establish),
+                .commit_mission_token(mission, (self.clock)(), record, establish)
+                .inspect_err(|e| {
+                    if let MissionStoreError::Terminated(reason) = e {
+                        self.report_mission_end(
+                            &mission.owner,
+                            mission.document.s256(),
+                            reason,
+                            None,
+                        );
+                    }
+                }),
             None => Ok(self.store.commit(record, establish)?),
         }
     }

@@ -88,6 +88,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: &PreparedAuthorization,
         endpoint: &str,
         sent: Option<Budget>,
+        allowed: Option<&AllowedToken>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let PreparedAuthorization {
             resource,
@@ -141,7 +142,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         let ps_pending = self.agent_pending(&location, &pending)?;
         let interval = d.retry_after.max(pending.retry_after);
         let sent_budget = sent.as_ref().map(Budget::to_value).unwrap_or(Value::Null);
-        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(interval as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now),"sent_budget":sent_budget});
+        let value = json!({"state":"waiting","agent_token":agent.compact(),"parameters":context.parameters,"endpoint":endpoint,"deadline":deadline,"next_agent":now.saturating_add(interval as i64),"next_as":now.saturating_add(pending.retry_after as i64),"as_pending":pending,"ps_pending":ps_pending,"queued":null,"retrying":false,"rounds":usize::from(matches!(pending.requirement,Requirement::Clarification{..})),"question_deadline":question_deadline(&pending,now),"sent_budget":sent_budget,"supervised":allowed.map(AllowedToken::to_value)});
         d.store
             .insert(&id, value.clone())
             .map_err(|_| Failure::internal())?;
@@ -434,6 +435,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return throttled_for(&value, (self.clock)());
             }
+            let allowed = AllowedToken::stored(&value["supervised"]);
             let result = (|| {
                 let response = decode(&value["terminal"])?;
                 if response.status() != StatusCode::OK {
@@ -446,6 +448,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     required_string(&value, "endpoint")?,
                     stored_sent_budget(&value)?,
                     None,
+                    allowed.as_ref(),
                 )
             })();
             let held = d
@@ -464,6 +467,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let mut response = result.map_err(Failure::while_pending)?;
             self.check_release(&value, &mut response)
                 .map_err(Failure::while_pending)?;
+            if let Some(allowed) = &allowed {
+                self.report_federated(
+                    &prepared.retained.person_id,
+                    &Self::identity(&original_agent),
+                    allowed.sdi.as_deref(),
+                    &response,
+                );
+            }
             return Ok(response);
         }
         if now < number(&value, "next_agent")? {

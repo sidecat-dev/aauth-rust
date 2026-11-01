@@ -73,12 +73,12 @@ pub use policy::{
 pub use server::{
     AdvanceError, BoxedEgress, BoxedR3Policy, Config, ConfigurationError, ConnectOutcome,
     DeferredConfig, FederationInput, Governance, GovernanceError, InteractionDecision,
-    OpenedInteraction, PendingResourceInteraction, PersonAnswer, PersonServer,
-    R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy, R3ProposalDecision,
-    R3ProposalRequest, RecordError, ResourceInteractionCallback, ResourceInteractionConfig,
-    ResourceInteractionError, Supervision, SupervisionConfig, SupervisionExchange, SupervisionHold,
-    SupervisionHostError, SupervisionRecord, SupervisionUnavailable, Unconsulted, VerifiedDecision,
-    Waiting,
+    InteractionRelay, InteractionRelayConfig, OpenedInteraction, PendingResourceInteraction,
+    PersonAnswer, PersonServer, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy,
+    R3ProposalDecision, R3ProposalRequest, RecordError, RelayChannel, RelayError, RelayUnavailable,
+    ResourceInteractionCallback, ResourceInteractionConfig, ResourceInteractionError, Supervision,
+    SupervisionConfig, SupervisionExchange, SupervisionHold, SupervisionHostError,
+    SupervisionRecord, SupervisionUnavailable, Unconsulted, VerifiedDecision, Waiting,
 };
 pub use store::{
     AgentIdentity, Binding, MemoryStore, R3IssuanceAudit, Store, StoreError, TokenKind,

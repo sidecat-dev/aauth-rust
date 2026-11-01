@@ -63,7 +63,10 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// [`RevocationDirectory`] when one is installed; without it, each
     /// downstream target is `revocation_unavailable`. An Agent Provider's
     /// revocation of an Agent token revokes every person token issued to that
-    /// Agent as [`Self::revoke_person_token`] does.
+    /// Agent as [`Self::revoke_person_token`] does. With
+    /// [`Self::with_supervision`], the supervision server deciding for the
+    /// agent is told of an Agent token's revocation, and of a Resource
+    /// token's that was in a request put to it (`revocation.received`).
     pub fn with_revocation(self) -> Self {
         self.with_revocation_limits(RevocationLimits::default())
     }
@@ -171,6 +174,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         gate.ledger.remember(&caller.id, &body.jti, body.exp);
         if caller.dwk == "aauth-agent.json" {
             self.report_agent_revocation(&caller.id, &body.jti, body.exp);
+        } else {
+            self.report_resource_revocation(&caller.id, &body.jti, body.exp);
         }
         let targets = if caller.dwk == "aauth-agent.json" {
             self.agent_targets(&caller.id, &body.jti)?

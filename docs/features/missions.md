@@ -247,8 +247,9 @@ Proposals are held in memory.
 `with_governance(governance)` adds the permission and audit endpoints: the
 agent asks the person's permission for an action (`Agent::post_permission`)
 and records what it did (`Agent::post_audit`). Your `Governance` decides
-permissions. Relayed interaction answers `424 interaction_unavailable`: the
-library has no channel to the person.
+permissions. An `interaction` or `payment` the agent asks you to relay goes
+to your `RelayChannel` with `with_interaction_relay`; without one it answers
+`424 interaction_unavailable`, and the agent directs the person itself.
 
 ## Issuing under a mission
 

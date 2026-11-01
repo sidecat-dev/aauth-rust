@@ -135,6 +135,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     path: "/mission",
                     requested_scopes: None,
                     deadline: i64::MAX,
+                    r3: None,
                 },
                 None,
             )?;
@@ -333,7 +334,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(mission_not_found());
         };
         if let Some(reason) = audit.termination_at(now).map_err(stored)? {
-            return Err(Failure::mission_terminated(reason));
+            return Err(self.mission_ended(&identity, s256, reason));
         }
         let path = format!("/mission/{s256}");
         let supervised = self.supervise(
@@ -347,6 +348,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 path: &path,
                 requested_scopes: None,
                 deadline: i64::MAX,
+                r3: None,
             },
             None,
         )?;
@@ -432,6 +434,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             _ => return Err(Failure::parameter("invalid_request")),
         };
         let owner = agent.claims();
+        let identity = Self::identity(agent);
         // The store's edit sees only a recorded termination; expiry is a
         // comparison with this request's time.
         if let Some(audit) = self
@@ -440,25 +443,23 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(stored)?
             && let Some(reason) = audit.termination_at(now).map_err(stored)?
         {
-            return Err(Failure::mission_terminated(reason));
+            return Err(self.mission_ended(&identity, s256, reason));
         }
         let audit = self
             .store
             .edit_mission_audit(&self.config.issuer, &owner.iss, &owner.sub, s256, edit)
-            .map_err(edited)?;
-        if action == "completion"
-            && let Some(person_id) = self.bound_person(&Self::identity(agent))
-        {
-            self.report(
-                &person_id,
-                &Self::identity(agent),
-                Report::Terminated {
-                    s256,
-                    reason: "completed",
-                },
+            .map_err(|error| {
+                if let crate::MissionAuditError::Terminated(reason) = &error {
+                    self.report_mission_end(&identity, s256, reason, None);
+                }
+                edited(error)
+            })?;
+        if action == "completion" {
+            self.report_mission_end(
+                &identity,
+                s256,
+                "completed",
                 resumed.map(|r| r.sdi.as_str()),
-                None,
-                None,
             );
         }
         let response = if action == "completion" {
@@ -507,6 +508,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             value["summary"] = json!({ "s256": summary.s256, "encoded": summary.encoded });
         }
         if let Some(reason) = audit.termination_at(now).map_err(stored)? {
+            self.report_mission_end(&Self::identity(&agent), s256, reason, None);
             value["mission_status"] = json!("terminated");
             value["termination_reason"] = json!(reason);
         }

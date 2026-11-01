@@ -172,6 +172,110 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         }
     }
 
+    /// Note the resource token a supervised auth token act carries, so that
+    /// its resource's revocation of it reaches the server deciding for the
+    /// agent (`revocation.received`).
+    pub(in crate::server) fn remember_resource_token(
+        &self,
+        person_id: &str,
+        agent: &AgentIdentity,
+        parameters: &Value,
+    ) {
+        let Some(config) = self.gate() else {
+            return;
+        };
+        let Some(token) = parameters
+            .get("resource_token")
+            .and_then(Value::as_str)
+            .and_then(|compact| ResourceToken::parse(compact).ok())
+        else {
+            return;
+        };
+        let claims = token.unverified_claims();
+        let entry = json!({
+            "person_id": person_id, "exp": claims.exp,
+            "agent": { "issuer": agent.issuer, "subject": agent.subject },
+        });
+        let _ = update(
+            config.store.as_ref(),
+            &resource_key(&claims.iss, &claims.jti),
+            |_| Some(entry.clone()),
+        );
+    }
+
+    /// Tell the server deciding for the agent a resource token was put to
+    /// supervision for that its resource revoked it (`revocation.received`).
+    /// Reported once: a repeated revocation finds nothing to report.
+    pub(in crate::server) fn report_resource_revocation(&self, issuer: &str, jti: &str, exp: i64) {
+        let Some(config) = self.gate() else {
+            return;
+        };
+        let key = resource_key(issuer, jti);
+        let Ok(Some(snapshot)) = config.store.load(&key) else {
+            return;
+        };
+        if !config
+            .store
+            .replace(&key, snapshot.revision, None)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let entry = snapshot.value;
+        let agent = AgentIdentity {
+            issuer: entry["agent"]["issuer"].as_str().unwrap_or("").into(),
+            subject: entry["agent"]["subject"].as_str().unwrap_or("").into(),
+        };
+        let mut members = Map::new();
+        members.insert("token_type".into(), json!("resource_token"));
+        members.insert("iss".into(), json!(issuer));
+        members.insert("jti".into(), json!(jti));
+        members.insert("exp".into(), json!(exp));
+        self.report(
+            entry["person_id"].as_str().unwrap_or(""),
+            &agent,
+            Report::Event(EventKind::RevocationReceived, members),
+            None,
+            None,
+            None,
+        );
+    }
+
+    /// Report a mission's end to the server deciding for its owner, once:
+    /// when this server ends it, or the first time it finds it ended, for
+    /// whatever reason (Terminated). `sdi` is the completion that ended it.
+    pub(in crate::server) fn report_mission_end(
+        &self,
+        owner: &AgentIdentity,
+        s256: &str,
+        reason: &str,
+        sdi: Option<&str>,
+    ) {
+        let Some(config) = self.gate() else {
+            return;
+        };
+        let Some(person_id) = self.bound_person(owner) else {
+            return;
+        };
+        // Whoever records the end first reports it.
+        let ended = key("t", &[&owner.issuer, &owner.subject, s256]);
+        if config
+            .store
+            .insert(&ended, json!({ "reason": reason }))
+            .is_err()
+        {
+            return;
+        }
+        self.report(
+            &person_id,
+            owner,
+            Report::Terminated { s256, reason },
+            sdi,
+            None,
+            None,
+        );
+    }
+
     /// Queue one journal entry for `(supervisor, sub)`.
     fn enqueue(&self, supervisor: &str, sub: &str, mut entry: Value) -> Result<(), ()> {
         let config = self.gate().ok_or(())?;
@@ -623,4 +727,8 @@ fn outbox_key(supervisor: &str, sub: &str) -> String {
 
 fn connection_key(supervisor: &str, sub: &str) -> String {
     key("c", &[supervisor, sub])
+}
+
+fn resource_key(issuer: &str, jti: &str) -> String {
+    key("r", &[issuer, jti])
 }

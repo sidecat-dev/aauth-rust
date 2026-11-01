@@ -30,6 +30,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             "parameters": held.parameters, "mission_s256": held.mission_s256,
             "target": held.target, "body": held.body, "deadline": held.deadline,
             "rounds": 0, "resolved": false, "requested_scopes": held.requested_scopes,
+            "r3": held.r3.map(|bytes| URL_SAFE_NO_PAD.encode(bytes)),
         });
         self.apply_answered(&mut record, answered, now);
         let id = generate_pending_id();
@@ -194,6 +195,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             agent: agent_of(record),
             waiting,
             parameters: record["parameters"].clone(),
+            r3_document: record["r3"]
+                .as_str()
+                .and_then(|encoded| URL_SAFE_NO_PAD.decode(encoded).ok()),
         }
     }
 
@@ -406,6 +410,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     }
                 }
                 record["parameters"] = parameters;
+                self.remember_resource_token(
+                    record["person_id"].as_str().unwrap_or(""),
+                    &agent_of(record),
+                    &record["parameters"],
+                );
                 Value::Object(object.clone())
             }
             _ => return Err(invalid()),
