@@ -4,7 +4,8 @@ use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse, Requirement};
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthToken, CallOutcome, Confirmation, PersonClaims,
-    ResourceClaims, RevocationDirectory, TokenError, mint_person_token, mint_resource_token,
+    ResourceClaims, RevocationDirectory, RevocationSender, RevocationTarget, TokenError,
+    mint_person_token, mint_resource_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
@@ -35,17 +36,20 @@ impl AgentKeyResolver for Keys {
 }
 struct Recording(Mutex<Vec<(String, String, i64)>>);
 impl RevocationDirectory for Recording {
-    fn revoke(&self, recipient: &str, jti: &str, exp: i64) -> CallOutcome {
-        self.0
-            .lock()
-            .expect("directory")
-            .push((recipient.to_owned(), jti.to_owned(), exp));
+    fn revoke(&self, sender: &RevocationSender<'_>, target: &RevocationTarget<'_>) -> CallOutcome {
+        assert_eq!((sender.issuer, sender.dwk), (AS, "aauth-access.json"));
+        assert_eq!(target.dwk, "aauth-resource.json");
+        self.0.lock().expect("directory").push((
+            target.recipient.to_owned(),
+            target.jti.to_owned(),
+            target.exp,
+        ));
         CallOutcome::Recorded
     }
 }
 struct Deferring(AtomicBool);
 impl RevocationDirectory for Deferring {
-    fn revoke(&self, _: &str, _: &str, _: i64) -> CallOutcome {
+    fn revoke(&self, _: &RevocationSender<'_>, _: &RevocationTarget<'_>) -> CallOutcome {
         if self.0.load(Ordering::SeqCst) {
             CallOutcome::Deferred
         } else {

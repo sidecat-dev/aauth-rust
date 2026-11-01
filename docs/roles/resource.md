@@ -229,9 +229,11 @@ decides which paths exist.
 ## Trusting several Agent Providers
 
 `AgentProviderKeys` holds the keys of one Agent Provider. To accept agents
-from several, give the Resource a resolver of your own that looks up each
-provider's keys by its identifier. The library has no ready-made type for this;
-it is a few lines:
+from several, give the Resource a resolver that looks up each provider's keys
+by its identifier. With documents you already hold, it is a few lines, below.
+`KeyResolver` in `aauth-rust-discovery` is the same resolver with the fetching
+and caching done for you; see
+[Discovery and revocation delivery](../discovery.md).
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -430,7 +432,10 @@ Options, each described in its guide: `with_mission_context`
 
 - The Agent Providers, Person Servers and Access Servers you trust, and their
   keys, which you fetch, and refresh when an `UnknownKey` error says a key is
-  missing.
+  missing, or which `KeyResolver` fetches and refreshes for you.
+- With `with_revocation_directory`, the delivery of the Resource-token
+  revocations `revoke_issued_resource_token` cascades; `RevocationClient`
+  sends them over HTTPS.
 - Your signing key, for `PsAuthorizationResource`.
 - **Protection against repeats.** A signed request is accepted again if it is
   replayed within its 60-second window. For a request that changes something,

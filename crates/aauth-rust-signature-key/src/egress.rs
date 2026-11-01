@@ -68,6 +68,12 @@ pub enum DiscoveryFetch<'a> {
         /// Absolute HTTPS URL.
         url: &'a str,
     },
+    /// An endpoint a metadata document names, such as `revocation_endpoint`,
+    /// or a pending URL that endpoint answered with.
+    Endpoint {
+        /// Absolute HTTPS URL.
+        url: &'a str,
+    },
 }
 
 /// A `jwks_uri` `id`. Parsing it does not mean the origin authorized the request.
@@ -114,9 +120,33 @@ pub fn admit_fetch(
     target: DiscoveryFetch<'_>,
     address: IpAddr,
 ) -> Result<PinnedFetch, Error> {
+    let url = admit_target(limits, target)?;
+    if restricted(address) && !limits.allow_restricted_addresses {
+        return Err(Error::InvalidKey);
+    }
+    Ok(PinnedFetch {
+        url,
+        address,
+        max_response_bytes: limits.max_response_bytes,
+        timeout: limits.timeout,
+        allow_restricted_addresses: limits.allow_restricted_addresses,
+        redirects: 0,
+    })
+}
+
+/// Check the URL rules of [`admit_fetch`] before resolving its host.
+///
+/// Returns the URL to resolve. Each resolved address still goes through
+/// [`admit_fetch`], which repeats this check.
+///
+/// # Errors
+/// As for [`admit_fetch`], without the address check.
+pub fn admit_target(limits: &EgressLimits, target: DiscoveryFetch<'_>) -> Result<String, Error> {
     bounded_budget(limits.max_response_bytes, limits.timeout)?;
     let url = match target {
-        DiscoveryFetch::Metadata { url } | DiscoveryFetch::Jwks { url } => url.to_owned(),
+        DiscoveryFetch::Metadata { url }
+        | DiscoveryFetch::Jwks { url }
+        | DiscoveryFetch::Endpoint { url } => url.to_owned(),
         DiscoveryFetch::JwksFromMetadata {
             metadata_url,
             jwks_url,
@@ -130,17 +160,7 @@ pub fn admit_fetch(
         }
     };
     https_host(&url)?;
-    if restricted(address) && !limits.allow_restricted_addresses {
-        return Err(Error::InvalidKey);
-    }
-    Ok(PinnedFetch {
-        url,
-        address,
-        max_response_bytes: limits.max_response_bytes,
-        timeout: limits.timeout,
-        allow_restricted_addresses: limits.allow_restricted_addresses,
-        redirects: 0,
-    })
+    Ok(url)
 }
 
 /// Admit a redirect that stays on the pinned host and pins `address`.

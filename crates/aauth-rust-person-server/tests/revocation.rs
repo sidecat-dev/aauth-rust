@@ -4,7 +4,8 @@ use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AgentProviderKeys, AgentToken, AuthClaims, AuthToken,
     CallOutcome, Confirmation, PersonToken, ResourceClaims, ResourceToken, RevocationDirectory,
-    RevocationLimits, TokenError, mint_auth_token, mint_resource_token,
+    RevocationLimits, RevocationSender, RevocationTarget, TokenError, mint_auth_token,
+    mint_resource_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
@@ -72,11 +73,13 @@ struct Scripted {
     deferred: AtomicBool,
 }
 impl RevocationDirectory for Scripted {
-    fn revoke(&self, recipient: &str, jti: &str, exp: i64) -> CallOutcome {
-        self.calls
-            .lock()
-            .expect("directory")
-            .push((recipient.to_owned(), jti.to_owned(), exp));
+    fn revoke(&self, sender: &RevocationSender<'_>, target: &RevocationTarget<'_>) -> CallOutcome {
+        assert_eq!(sender.dwk, "aauth-person.json");
+        self.calls.lock().expect("directory").push((
+            target.recipient.to_owned(),
+            target.jti.to_owned(),
+            target.exp,
+        ));
         if self.deferred.load(Ordering::SeqCst) {
             CallOutcome::Deferred
         } else {

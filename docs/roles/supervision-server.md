@@ -265,7 +265,8 @@ fn main() -> Result<(), Box<dyn Error>> {
   confirms that a Person Server may send you their agents' requests, if your
   policy asks them to.
 - `keys`, a resolver for the Person Servers you accept
-  (`aauth-person.json`). Others are refused with `unsupported_iss`.
+  (`aauth-person.json`), such as `KeyResolver` from `aauth-rust-discovery`.
+  Others are refused with `unsupported_iss`.
 - `policy`, which implements `supervision::Policy`:
   - `connect` answers a Person Server's first request for a person:
     `Connected`, `Confirm` (the person confirms at your page) or `Refused`;

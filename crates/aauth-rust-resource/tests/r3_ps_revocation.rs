@@ -9,7 +9,8 @@ use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{
     AgentClaims, AgentKeyResolver, AuthToken, CallOutcome, Confirmation, PersonToken,
-    RevocationDirectory, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
+    RevocationDirectory, RevocationSender, RevocationTarget, TokenError, TrustedIssuerKeys,
+    VerifiedAuthToken,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
@@ -209,11 +210,11 @@ impl IssuanceStore for Audit {
 #[derive(Default)]
 struct Recorder(Mutex<Vec<(String, String)>>);
 impl RevocationDirectory for Recorder {
-    fn revoke(&self, recipient: &str, jti: &str, _: i64) -> CallOutcome {
+    fn revoke(&self, _: &RevocationSender<'_>, target: &RevocationTarget<'_>) -> CallOutcome {
         self.0
             .lock()
             .unwrap()
-            .push((recipient.to_owned(), jti.to_owned()));
+            .push((target.recipient.to_owned(), target.jti.to_owned()));
         CallOutcome::Recorded
     }
 }

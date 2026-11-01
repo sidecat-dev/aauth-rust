@@ -322,7 +322,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 - a clock in Unix seconds, and unique token IDs.
 
 `handle` serves `/.well-known/aauth-access.json`, `/.well-known/jwks.json` and
-`POST /token`. The Access Server opens no connections.
+`POST /token`. The Access Server opens no connections. With `with_revocation`,
+a Person Server's revocation of a person token revokes the Auth tokens issued
+against it at their Resources, through the directory you install with
+`with_revocation_directory`; `RevocationClient` in `aauth-rust-discovery`
+delivers them over HTTPS ([Discovery and revocation delivery](../discovery.md)).
 
 To answer later rather than at once, for approval, payment, a question or
 identity claims, use `with_deferred`; see
@@ -344,7 +348,9 @@ runs payment and approval over TLS.
 - The adapter's `endpoint` refuses Access Servers you do not trust, and
   returns the token endpoint from a trusted one's metadata; `send` sends the
   signed request unchanged, following no redirects. When the Access Server cannot be reached, the agent gets
-  `502 as_unreachable`.
+  `502 as_unreachable`. `DiscoveryClient::fetch_metadata` and
+  `DiscoveryClient::send` in `aauth-rust-discovery` do both halves over
+  admitted HTTPS; the adapter still decides which Access Servers it trusts.
 
 ## The Resource and the agent
 

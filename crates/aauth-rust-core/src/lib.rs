@@ -22,7 +22,7 @@ pub use identifiers::{validate_agent_identifier, validate_server_identifier};
 pub use metadata::{DISPLAY_URI_MEMBERS, DisplayError, MetadataDisplay};
 pub use revocation::{
     CallOutcome, DownstreamReport, RevocationBody, RevocationDirectory, RevocationLedger,
-    RevocationLimits,
+    RevocationLimits, RevocationSender, RevocationTarget,
 };
 pub use session::{
     SessionTokenError, format_aauth_access, format_session_authorization, parse_aauth_access,

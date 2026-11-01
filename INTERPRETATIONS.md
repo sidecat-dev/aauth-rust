@@ -347,3 +347,69 @@ Where the draft's text pulls two ways, this library reads it as follows.
 10. **`unsupported_iss` vs. `unknown_sub`.** The draft does not say how an SS tells them apart. The library: an untrusted PS (key resolver) is `unsupported_iss`; a trusted PS without the connection is `unknown_sub` (choice 10).
 11. **An agent with no person yet.** Routing is per person, so a permission or mission request from an agent not yet bound to a person cannot be routed. The library lets host policy decide it.
 12. **Mission approval and `approved_resources`.** The SS `allow` names the resources "the PS is to issue person tokens for at approval". The library's mission endpoint returns no `person_tokens` today (see CONFORMANCE.md).
+
+# Selected discovery and revocation delivery interpretations
+
+Source: Signature-Key, `JWKS URI Discovery`, `Caching and Performance` and
+`Scheme-Specific Risks`; AAuth Core, `Metadata Documents`, `Keying Material`,
+`JWKS Discovery and Caching` and `Token Revocation`, as recorded in
+SPECIFICATIONS.md. These choices concern the opt-in `aauth-rust-discovery`
+crate.
+
+1. **Redirects.** Egress admission says "at minimum, do not follow redirects
+   to a different host". A discovery GET follows a redirect only on the same
+   host, at most three (`MAX_DISCOVERY_REDIRECTS`), each `https` and each
+   resolved address admitted again. A signed request (a revocation POST or
+   poll, a federation request) follows none: the signature covers its path,
+   and its body goes only where it was admitted; a `3xx` answer is
+   `revocation_unavailable`.
+2. **Every resolved address.** A host resolves once. Every address it
+   resolves to must be admitted, or the fetch is refused before connecting;
+   the client then connects to the first admitted address that accepts, and
+   refuses a peer other than that address. An IPv4 address carried in an IPv6
+   form is judged as that IPv4 address, as the admission does.
+3. **Relaxing admission** is a builder call (`allow_restricted_addresses`,
+   `limits`, `resolver`, `transport`), never a default. Only `https` is ever
+   fetched; a custom transport receives the admitted address and must connect
+   only to it.
+4. **Discovery is not trust.** `KeyResolver` answers `UntrustedIssuer` before
+   any fetch unless the host named the issuer and its role document. A fetch
+   failure is `invalid_key` at the verifier; the metadata checks keep
+   `issuer_missing` and `issuer_mismatch`, and a missing `kid` is
+   `unknown_key`.
+5. **Freshness** comes from the JWKS response, by the `KeyCache` rules
+   (`s-maxage`, `max-age`, `Expires`, `Age`; five minutes without them; at
+   most 24 hours). The metadata document is fetched again each time the JWKS
+   is. A cache header the cache cannot read, such as `Expires: 0`, makes that
+   response usable for the lookup that fetched it and not reused. `no-store`
+   and `no-cache` are not reused either, even after a failed refresh; for the
+   next minute that issuer's keys are unavailable.
+6. **The once-a-minute floor** counts every fetch of an issuer and role,
+   failed ones included. An unknown `kid` in a fresh set fetches the set again
+   only once the minute has passed; inside it the answer is `unknown_key`.
+   Concurrent lookups of one issuer and role wait for one fetch.
+7. **A failed refresh** answers from the last reusable set fetched less than
+   24 hours earlier, never past that bound.
+8. **Recipient role documents.** The role names each recipient's metadata
+   document from its own records: a Resource is `aauth-resource.json` and an
+   Access Server `aauth-access.json`; a Resource sends a resource-token
+   revocation to `aauth-person.json` three-party, and to `aauth-access.json`
+   for the `aud` plus `aauth-person.json` for the `ps` four-party.
+9. **No `revocation_endpoint`** in a metadata document that passed the issuer
+   check is `revocation_unsupported`. Metadata that cannot be fetched or fails
+   the issuer check is `revocation_unavailable`.
+10. **Covered components.** A revocation covers `content-type` and
+    `content-digest` and, at a Resource, its `additional_signature_components`.
+    A listed header the request does not carry is `revocation_unavailable`.
+11. **`Prefer: wait`** is sent with the client timeout less two seconds, so a
+    recipient that honors it answers `202` before the caller gives up.
+12. **`202`.** Its single `Location` must be `https` on the same host and port
+    as the revocation endpoint; it may be an absolute path. The next delivery
+    of that revocation polls it with a signed GET with no body. A `202` from
+    the poll that names another `Location` is `revocation_unavailable`. A poll
+    answered `404` or `410` posts the revocation again; a poll that cannot
+    connect is `revocation_unavailable` and keeps the pending URL.
+13. **`429 rate_limited`** is not one of the two terminal failures, so it is
+    reported deferred, and the next delivery posts again.
+14. **Answer size.** A revocation answer is bounded like a discovery
+    document, 65536 bytes; a larger one is `revocation_unavailable`.

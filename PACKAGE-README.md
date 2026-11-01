@@ -21,11 +21,12 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-budgets` | Budget objects, narrowing, metering, and usage counters. |
 | `aauth-rust-r3` | Vocabularies, documents, grants, and proposals. |
 | `aauth-rust-resource` | Resource request verification and application admission policy. |
+| `aauth-rust-discovery` | Opt-in HTTPS: admitted metadata and JWKS fetching, a caching key resolver, and revocation delivery. |
 | `aauth-rust-supervision-server` | Supervision server decisions, standing reach and event records. |
 
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
-other eleven crates or the workspace's complete service guides. The root
+other twelve crates or the workspace's complete service guides. The root
 `README.md`, the `docs/` guides, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and
 `SPECIFICATIONS.md` in the full development checkout describe executable
 examples, host integration, the implemented subset and pinned protocol

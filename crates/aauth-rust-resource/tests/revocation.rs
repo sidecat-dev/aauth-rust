@@ -1,7 +1,8 @@
 //! Resource revocation endpoint, presentation, and resource-token cascade.
 use aauth_rust_core::{
     AgentKeyResolver, AuthClaims, CallOutcome, Confirmation, PersonClaims, RevocationDirectory,
-    TokenError, TrustedIssuerKeys, VerifiedAuthToken, mint_auth_token, mint_person_token,
+    RevocationSender, RevocationTarget, TokenError, TrustedIssuerKeys, VerifiedAuthToken,
+    mint_auth_token, mint_person_token,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_resource::{
@@ -483,11 +484,17 @@ fn resource_revocation_endpoint_records_without_deferral() {
 fn resource_token_cascade_calls_the_audience_and_the_person_server() {
     struct Recording(Mutex<Vec<(String, String, i64)>>);
     impl RevocationDirectory for Recording {
-        fn revoke(&self, recipient: &str, jti: &str, exp: i64) -> CallOutcome {
-            self.0
-                .lock()
-                .unwrap()
-                .push((recipient.to_owned(), jti.to_owned(), exp));
+        fn revoke(
+            &self,
+            sender: &RevocationSender<'_>,
+            target: &RevocationTarget<'_>,
+        ) -> CallOutcome {
+            assert_eq!(sender.dwk, "aauth-resource.json");
+            self.0.lock().unwrap().push((
+                target.recipient.to_owned(),
+                format!("{} {}", target.dwk, target.jti),
+                target.exp,
+            ));
             CallOutcome::Recorded
         }
     }
@@ -512,8 +519,8 @@ fn resource_token_cascade_calls_the_audience_and_the_person_server() {
     assert_eq!(
         recorded.0.lock().unwrap().as_slice(),
         [
-            (AS.into(), "challenge-1".into(), 1300),
-            (PS.into(), "challenge-1".into(), 1300)
+            (AS.into(), "aauth-access.json challenge-1".into(), 1300),
+            (PS.into(), "aauth-person.json challenge-1".into(), 1300)
         ]
     );
     let direct = Arc::new(Recording(Mutex::new(Vec::new())));
@@ -522,6 +529,6 @@ fn resource_token_cascade_calls_the_audience_and_the_person_server() {
     assert_eq!(once.status(), 200);
     assert_eq!(
         direct.0.lock().unwrap().as_slice(),
-        [(PS.into(), "challenge-2".into(), 1300)]
+        [(PS.into(), "aauth-person.json challenge-2".into(), 1300)]
     );
 }

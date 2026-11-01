@@ -16,15 +16,29 @@ response-time guarantee.
 
 ## Integration responsibilities
 
-The library does not fetch discovery documents. Applications explicitly trust
-an Agent Provider, Person Server or Resource, obtain its role metadata and
-JSON Web Key Set (JWKS) over verified
+The protocol and role crates do not fetch discovery documents. Applications
+explicitly trust an Agent Provider, Person Server or Resource, obtain its role
+metadata and JSON Web Key Set (JWKS) over verified
 HTTPS, and supply a retained snapshot or an `AgentKeyResolver` implementation.
 Before fetching, admit destinations and redirects, bound response sizes and
 timeouts, prevent DNS rebinding, and keep private network destinations outside
 an Internet-facing resolver's allowed set. Apply the same checks on refresh.
-Honor the pinned draft's cache and fetch-rate rules; this library supplies no
-shared cache or refresh loop.
+Honor the pinned draft's cache and fetch-rate rules.
+
+The opt-in `aauth-rust-discovery` crate does this: `DiscoveryClient` admits
+`https` only, resolves once and requires every address to be globally routable
+unicast, connects to an admitted address, follows at most three same-host
+redirects, reads at most 65536 bytes within ten seconds, and reads no proxy
+setting from the environment. `KeyResolver` fetches only for the issuers and
+roles you name with `trust` or admit with `trust_when`; every issuer a
+`trust_when` predicate admits can make it fetch, within those rules.
+`allow_restricted_addresses` is for development and tests; an Internet-facing
+service keeps it off. A custom `resolver` or `transport` takes on the part of
+these rules it replaces: a transport must connect only to the address it is
+given and verify the certificate for the request's host. `RevocationClient`
+signs each revocation with the key the role was configured with; protect that
+key as the role's own. Its calls block for at most the client timeout per
+exchange, and a role's cascade makes them one after another.
 
 Keep signing keys in application-controlled storage, use fresh unique token
 identifiers, and supply the correct Unix clock. `SigningKey::export_pkcs8_der`
@@ -32,8 +46,9 @@ returns the private key itself: write it only where the key's owner can read
 it, or keep the key in a keystore or HSM behind `SigningKey::external`, which
 never exports it. A valid signature proves a key
 and signed claims; the application's Resource policy decides access. Replay
-storage, enrollment, revocation transport and sub-agent delegation remain host
-responsibilities or unimplemented. The PS store supports binding revocation;
+storage, enrollment and sub-agent delegation remain host responsibilities or
+unimplemented; revocation transport is the host's unless it installs
+`aauth-rust-discovery`'s `RevocationClient`. The PS store supports binding revocation;
 it supplies no revocation endpoint or event delivery. The buffered profile signs and verifies SHA-256
 Content-Digest for nonempty content or a supplied digest, up to 1 MiB. It also
 covers Content-Type when present on nonempty content. Adapters must bound

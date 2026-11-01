@@ -295,7 +295,9 @@ blocking worker.
   `PolicyError::Denied`.
 - **Trust**: a [resolver](../how-aauth-works.md#what-the-library-leaves-to-you)
   for the Agent Providers and Resources you accept, built from their published
-  documents, as `Trust` above.
+  documents, as `Trust` above. `KeyResolver` in `aauth-rust-discovery` fetches
+  and caches those documents for you; see
+  [Discovery and revocation delivery](../discovery.md).
 - **A store** for issued tokens and person bindings. `MemoryStore` loses
   everything on restart. `aauth-rust-person-server-redb` stores them in a file
   on Unix; see
@@ -327,6 +329,7 @@ it holds that token's record, so keep the store when you restart.
 | `with_r3(...)` | Auth tokens for R3 documents | [R3](../features/r3.md) |
 | `with_budgets(...)` | Budgets on Auth tokens | [Budgets](../features/budgets.md) |
 | `with_revocation()` | A revocation endpoint; revoking a token also revokes the tokens obtained with it | [Make an immediate downstream call](../../USE-IN-YOUR-SERVICE.md#make-an-immediate-downstream-call) |
+| `with_revocation_directory(directory)` | Delivery of those revocations to each Resource and Access Server; `RevocationClient` sends them over HTTPS | [Discovery and revocation delivery](../discovery.md) |
 | `with_resource_interaction(config)` | A Resource's own sign-in step before consent | [Resolve a Resource's own interaction](../../USE-IN-YOUR-SERVICE.md#resolve-a-resources-own-interaction) |
 
 `Policy::bind_upstream` and `Policy::authorize_upstream` serve

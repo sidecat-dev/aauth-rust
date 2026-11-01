@@ -22,7 +22,7 @@ pub use client::{choose_presented_scheme, recognized_tokens, signature_error_cod
 pub use egress::{
     DiscoveryFetch, EgressLimits, MAX_DISCOVERY_REDIRECTS, MAX_DISCOVERY_RESPONSE,
     MAX_FETCH_TIMEOUT, OriginPseudonym, PinnedFetch, accept_pinned_peer, accept_response,
-    admit_fetch, admit_redirect, origin_is_allowed, origin_pseudonym,
+    admit_fetch, admit_redirect, admit_target, origin_is_allowed, origin_pseudonym,
 };
 pub use jkt::JktDelegation;
 pub use jwks::{JwksIdentity, JwksResolver};

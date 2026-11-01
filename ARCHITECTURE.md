@@ -19,9 +19,12 @@ unimplemented role surfaces as empty Rust crates.
 | `aauth-rust-supervision-server` | Supervision server role: connect, signed decisions, deferral and clarification, idempotence by `sdi`, standing reach of the person's answers, event and mission records | Core, Signature-Key, JOSE |
 | `aauth-rust-access-server` | Verified PS service proof and credential lineage before resource policy; verified call-chaining upstream tokens; bounded Core-scope AS grants and opt-in continuation policy; opt-in budget narrowing | Core, Signature-Key, Budgets, JOSE |
 | `aauth-rust-person-server-redb` | Durable binding, exact issuance and directed-identity indexes in one file-backed transaction | Person Server, redb, serialization |
+| `aauth-rust-discovery` | The one crate that opens connections, opt-in: an egress-admitted HTTPS client (rustls over `std::net`), a caching `AgentKeyResolver` for host-trusted issuers, and a `RevocationDirectory` that delivers cascades | Core, Signature-Key, JOSE, rustls, rustls-native-certs, httparse |
 
 Normal role dependencies never import one another; Resource dev-dependencies
-compose the roles for tests and examples. Examples import the roles and compose
+compose the roles for tests and examples. No role imports `aauth-rust-discovery`:
+a host passes its `KeyResolver` and `RevocationClient` to a role through the
+role's existing `AgentKeyResolver` and `RevocationDirectory` parameters. Examples import the roles and compose
 them without a cross-role lifecycle abstraction. The storage adapter imports the
 PS role; the role never imports a database engine. Bootstrap and R3 get
 boundaries as executing journeys require them. Events tokens live in Core and
@@ -45,7 +48,10 @@ checks exact metadata issuer equality and selects only the JWT's named key.
 It performs no network requests and makes no trust decision for its host.
 `TrustedIssuerKeys` adds exact role-document binding for PS and Resource snapshots.
 Production hosts implement egress admission and bounded cache/refresh behavior
-before supplying these snapshots or their own resolver.
+before supplying these snapshots or their own resolver, or use
+`aauth-rust-discovery`'s `KeyResolver`, which builds a `TrustedIssuerKeys` from
+each admitted fetch, keeps the Signature-Key cache rules through `KeyCache`, and
+fetches only for issuers and roles the host trusts.
 
 `PsAuthorizationResource` separates Person identity from authorization. It turns
 a verified Person token into a signed Resource challenge, then admits only a
@@ -134,10 +140,19 @@ Ownership retains token bytes without a universal shared store. Ed25519, ECDSA,
 RSA and SHA-256 use Rust implementations, and a caller's `ExternalSigner` can
 hold a private key outside the process; `sfv` owns Structured Fields grammar.
 
-TLS is example/test infrastructure. rustls uses ring because it is a supported,
-portable crypto provider; ring includes native code. The library dependency
-graph has no TLS provider or OpenSSL dependency. This exception is isolated in
-`aauth-rust-resource`'s dev-dependencies. Native CI jobs build the executable on each
+TLS appears in two places: example and test infrastructure, in
+`aauth-rust-resource`'s dev-dependencies, and the opt-in `aauth-rust-discovery`
+crate. Both use rustls with ring, because it is a supported, portable crypto
+provider; ring includes native code. No crate links OpenSSL, and the protocol
+and role crates have no TLS provider. `aauth-rust-discovery` keeps the egress
+rules in `aauth-rust-signature-key`: it resolves a host, admits every address
+with `admit_fetch` or `admit_redirect`, connects to an admitted address, checks
+the peer with `accept_pinned_peer` and the body with `accept_response`. It speaks
+one HTTP/1.1 request per connection with a bounded codec over `httparse`, and
+blocks the calling thread; name resolution runs on a short-lived thread so the
+fetch deadline covers it. The core `RevocationDirectory` call carries the
+sender (issuer, `dwk`, `kid` and signing key) and the recipient's role document,
+so a delivery is always signed as the role that computed the cascade. Native CI jobs build the executable on each
 enabled target rather than inferring that a library cross-build ran the journey.
 
 Discovery snapshots live in Core because they implement the AAuth token
