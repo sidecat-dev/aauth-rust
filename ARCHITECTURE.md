@@ -7,7 +7,7 @@ unimplemented role surfaces as empty Rust crates.
 
 | Crate | Owns | Depends on |
 | --- | --- | --- |
-| `aauth-rust-jose` | Public Ed25519 JWKs, RFC 7638 thumbprints, exact compact JWS bytes, strict JSON | Rust crypto and serialization |
+| `aauth-rust-jose` | Public Ed25519, EC and RSA JWKs; in-memory signing keys, external signers and PKCS #8 import and export; RFC 7638 thumbprints; exact Ed25519 and ES256 compact JWS bytes; strict JSON | Rust crypto and serialization |
 | `aauth-rust-signature-key` | Buffered HTTP signature bases, SHA-256 Content-Digest, selected-label correlation, `hwk`/`jwt`/explicit `jwks_uri` key conveyance, proof time; response signatures with `;req` components and a `Signature-Key` response field | JOSE, `http`, `sfv`, `sha2` |
 | `aauth-rust-core` | Identifiers; Agent, Person, Resource and Auth JWT syntax/minting/common verification; Events subscribe and event tokens; Supervision wire values; trusted issuer snapshots; bounded continuation wire types and atomic custody contract | JOSE |
 | `aauth-rust-agent-provider` | Host-approved token issuance, AP metadata/JWKS bytes; opt-in Events subscribe tokens, inbox and file-backed event store | Core, Signature-Key, JOSE |
@@ -130,8 +130,9 @@ buffered profile.
 
 The workspace is the distribution unit; crates are independently usable API
 units. `http` types avoid coupling a role to a server framework or async runtime.
-Ownership retains token bytes without a universal shared store. Ed25519 and
-SHA-256 use Rust implementations; `sfv` owns Structured Fields grammar.
+Ownership retains token bytes without a universal shared store. Ed25519, ECDSA,
+RSA and SHA-256 use Rust implementations, and a caller's `ExternalSigner` can
+hold a private key outside the process; `sfv` owns Structured Fields grammar.
 
 TLS is example/test infrastructure. rustls uses ring because it is a supported,
 portable crypto provider; ring includes native code. The library dependency

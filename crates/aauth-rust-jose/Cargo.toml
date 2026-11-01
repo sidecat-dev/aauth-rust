@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Ed25519, ECDSA and RSA JWKs, signing keys and thumbprints, and Ed25519 compact JWS primitives for AAuth"
+description = "Ed25519, ECDSA and RSA JWKs, signing keys, external signers and thumbprints, and Ed25519 and ES256 compact JWS primitives for AAuth"
 
 [dependencies]
 base64.workspace = true

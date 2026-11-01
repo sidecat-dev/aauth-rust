@@ -74,7 +74,7 @@ impl PreparedRequest {
     /// # Errors
     /// `invalid_key` when this request is not `jwks`. `unknown_key` when the
     /// resolver reports that kid. `unsupported_algorithm` when the resolved
-    /// key names an algorithm this profile does not implement.
+    /// key is not Ed25519 or ES256.
     /// `invalid_signature` when the HTTP signature does not match that key.
     pub fn verify_jwks(&self, resolver: &impl JwksResolver) -> Result<JwksIdentity, Error> {
         let KeyMaterial::Jwks { url, kid } = &self.key else {
@@ -86,9 +86,6 @@ impl PreparedRequest {
             aauth_rust_jose::Error::InvalidKey => Error::InvalidKey,
             _ => Error::InvalidKey,
         })?;
-        if key.alg != "Ed25519" {
-            return Err(Error::UnsupportedAlgorithm);
-        }
         self.verify(&key)?;
         Ok(JwksIdentity {
             url: url.clone(),

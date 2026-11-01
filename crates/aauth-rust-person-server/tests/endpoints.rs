@@ -61,9 +61,13 @@ impl Policy for Host {
     }
 }
 fn agent() -> (Agent, AgentProviderKeys) {
-    let ap =
-        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
-    let key = SigningKey::from_seed([2; 32]);
+    agent_with(
+        SigningKey::from_seed([1; 32]),
+        SigningKey::from_seed([2; 32]),
+    )
+}
+fn agent_with(ap_key: SigningKey, key: SigningKey) -> (Agent, AgentProviderKeys) {
+    let ap = AgentProvider::new("https://ap.example", "ap-1", ap_key).unwrap();
     let token = ap
         .issue(&AgentClaims {
             iss: "https://ap.example".into(),
@@ -103,10 +107,13 @@ fn value(response: &Response<Vec<u8>>) -> Value {
     serde_json::from_slice(response.body()).unwrap()
 }
 fn resource(agent: &Agent, person: &str, scope: &str) -> String {
+    resource_signed(&SigningKey::from_seed([4; 32]), agent, person, scope)
+}
+fn resource_signed(key: &SigningKey, agent: &Agent, person: &str, scope: &str) -> String {
     let person = PersonToken::parse(person).unwrap();
     let p = person.unverified_claims();
     mint_resource_token(
-        &SigningKey::from_seed([4; 32]),
+        key,
         "resource-1",
         &ResourceClaims {
             iss: "https://resource.example".into(),
@@ -249,6 +256,81 @@ fn person_binding_and_direct_grant_retain_identity_and_clip_parent_expiry() {
     let record = store.token(&reference).unwrap().unwrap();
     assert_eq!(record.person_id, "internal-person");
     assert!(record.presented.is_some());
+}
+
+#[test]
+fn an_es256_agent_receives_es256_person_and_auth_tokens() {
+    let (agent, ap) = agent_with(SigningKey::generate_es256(), SigningKey::generate_es256());
+    let resource_key = SigningKey::generate_es256();
+    let ids = AtomicUsize::new(0);
+    let server = PersonServer::new(
+        Config::new("https://ps.example", "ps-1", SigningKey::generate_es256()),
+        Keys {
+            ap,
+            resource: resource_key.public_jwk(),
+        },
+        MemoryStore::default(),
+        Host {
+            bound: Arc::default(),
+            authorized: Arc::default(),
+            now: Arc::new(AtomicI64::new(1000)),
+            late: false,
+        },
+        || 1000,
+        move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)),
+    )
+    .unwrap();
+    let pskeys = TrustedIssuerKeys::from_documents(
+        "https://ps.example",
+        "aauth-person.json",
+        &server.metadata(),
+        &server.jwks(),
+    )
+    .unwrap();
+    let response = server.handle(&signed(
+        &agent,
+        "/person",
+        json!({"resource":"https://resource.example"}),
+    ));
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let person = value(&response)["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let verified = PersonToken::parse(&person)
+        .unwrap()
+        .verify(&pskeys, 1000)
+        .unwrap();
+    assert_eq!(verified.claims().cnf.jwk.alg, "ES256");
+    let response = server.handle(&signed(
+        &agent,
+        "/token",
+        json!({
+            "resource_token": resource_signed(&resource_key, &agent, &person, "read"),
+            "presented_token": person,
+        }),
+    ));
+    assert_eq!(
+        response.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(response.body())
+    );
+    let auth = value(&response)["auth_token"].as_str().unwrap().to_owned();
+    let verified = AuthToken::parse(&auth)
+        .unwrap()
+        .verify(&pskeys, 1000)
+        .unwrap();
+    assert_eq!(verified.claims().cnf.jwk.alg, "ES256");
+    for compact in [&person, &auth] {
+        let header = aauth_rust_jose::Jws::parse(compact).unwrap();
+        assert_eq!(header.header()["alg"], "ES256");
+    }
 }
 
 #[test]

@@ -35,7 +35,7 @@ The code is in the `error` member of the `Signature-Error` header, for example
 | `invalid_key` | The key could not be parsed, or the token's issuer is not one the server trusts, or the issuer's metadata cannot be used. | Do not retry with the same issuer. The server does not accept your Agent Provider (or Person Server); that is a setup question between the parties. |
 | `unknown_key` | The issuer is trusted, but the keys the server holds for it have no key with this ID. | Retry later, once the server has refreshed the issuer's keys. |
 | `unsupported_scheme` | The key was presented in a way, or [scheme](how-aauth-works.md#signed-requests), the server does not accept. `Accept-Signature-Scheme` lists the schemes it does. | AAuth agents present their token under the `jwt` scheme, which `Agent::sign` does. |
-| `unsupported_algorithm` | The signing algorithm is not accepted. `Accept-Signature-Alg` lists those that are. | Sign with Ed25519. AAuth tokens and agent keys in this library are Ed25519. |
+| `unsupported_algorithm` | The signing algorithm is not accepted. `Accept-Signature-Alg` lists those that are: `Ed25519, ES256` from every server in this library. | Sign with an Ed25519 or ES256 key. AAuth tokens and agent keys in this library are Ed25519 or ES256; an ES384, RS256 or PS256 key cannot hold or sign one. |
 | `cache_miss` | The client sent a short identifier the server had issued in place of its token, and the server no longer knows it. | Send the full token again. |
 | `issuer_missing`, `issuer_mismatch` | The issuer's metadata has no `issuer`, or names another one. | Nothing on the agent's side: the issuer's metadata needs fixing. |
 
@@ -109,3 +109,10 @@ The Rust error types explain in their messages what to fix, and their
 `aauth_rust_signature_key::Error::code()`. A few codes never go on the wire:
 `invalid_configuration` is a configuration error in your service, and
 `store_unavailable` and `unsupported_store_schema` come from the redb store.
+
+`SigningFailed`, in `TokenError` and in `aauth_rust_signature_key::Error`,
+means a key held by an external signer could not sign: the keystore, device
+or service failed, or returned a signature that its public key does not
+verify. Nothing was minted or signed. The Person Server, Access Server and
+`PsAuthorizationResource` answer it with `500` `server_error`; an agent sends
+nothing. Check the signer, then try again.

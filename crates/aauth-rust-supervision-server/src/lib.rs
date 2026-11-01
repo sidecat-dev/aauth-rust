@@ -86,7 +86,8 @@ use serde_json::{Map, Value, json};
 pub struct Signing {
     /// Key identifier published in the JWKS.
     pub kid: String,
-    /// Host-owned Ed25519 signing key.
+    /// Host-owned signing key: Ed25519 or ES256, in this process or behind an
+    /// external signer.
     pub key: SigningKey,
 }
 

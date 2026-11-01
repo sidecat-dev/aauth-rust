@@ -30,8 +30,8 @@ pub struct DiscoveredJwt {
 /// either discovery claim is absent, or the issuer key does not verify it.
 /// `issuer_missing` and `issuer_mismatch` come from the metadata document.
 /// `unknown_key` when `kid` is not in the JWKS. `unsupported_algorithm` when
-/// the issuer key or `cnf.jwk` is not Ed25519, or the key `alg` differs from
-/// the header `alg`. `expired_jwt` when `exp` is not after `now`.
+/// the issuer key or `cnf.jwk` is not Ed25519 or ES256, or the key `alg`
+/// differs from the header `alg`. `expired_jwt` when `exp` is not after `now`.
 pub fn verify_discovered_jwt(
     compact: &str,
     metadata: &[u8],
@@ -58,8 +58,8 @@ pub fn verify_discovered_jwt(
 /// # Errors
 /// `invalid_jwt` when both discovery claims are present, the assertion is
 /// malformed, or `issuer_key` does not verify it. `unsupported_algorithm`
-/// when `issuer_key` or `cnf.jwk` is not Ed25519, or the key `alg` differs
-/// from the header `alg`. `expired_jwt` when `exp` is not after `now`.
+/// when `issuer_key` or `cnf.jwk` is not Ed25519 or ES256, or the key `alg`
+/// differs from the header `alg`. `expired_jwt` when `exp` is not after `now`.
 pub fn verify_application_jwt(compact: &str, issuer_key: &Jwk, now: i64) -> Result<Jwk, Error> {
     let checked = check(compact, now)?;
     if checked.discovery.is_some() {
@@ -164,7 +164,7 @@ fn select_kid(bytes: &[u8], kid: &str) -> Result<Jwk, Error> {
         return Err(Error::InvalidKey);
     }
     let key: Jwk = serde_json::from_value(value.clone()).map_err(|_| Error::InvalidKey)?;
-    if key.alg != "Ed25519" {
+    if !token_key(&key) {
         return Err(Error::UnsupportedAlgorithm);
     }
     key.validate().map_err(map_jose)?;
@@ -178,15 +178,21 @@ fn confirmation_jwk(cnf: Option<&Value>) -> Result<Jwk, Error> {
         return Err(Error::InvalidJwt);
     }
     let key: Jwk = serde_json::from_value(jwk.clone()).map_err(|_| Error::InvalidJwt)?;
-    if key.alg != "Ed25519" {
+    if !token_key(&key) {
         return Err(Error::UnsupportedAlgorithm);
     }
     Ok(key)
 }
 
+/// Issuer and confirmation keys of a `jwt` assertion use the compact JWS
+/// profile: Ed25519 or ES256.
+fn token_key(key: &Jwk) -> bool {
+    aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str())
+}
+
 fn require_issuer_alg(key: &Jwk, header: &Value) -> Result<(), Error> {
     let header_alg = header.get("alg").and_then(Value::as_str).unwrap_or("");
-    if key.alg != "Ed25519" || header_alg != key.alg {
+    if !token_key(key) || header_alg != key.alg {
         return Err(Error::UnsupportedAlgorithm);
     }
     Ok(())

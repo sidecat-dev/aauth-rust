@@ -10,7 +10,7 @@ publication; APIs and package names may change during the alpha series.
 
 | Crate | Responsibility |
 | --- | --- |
-| `aauth-rust-jose` | Ed25519 public JWKs, thumbprints and compact JWS primitives. |
+| `aauth-rust-jose` | Public JWKs, signing keys and external signers, thumbprints, and Ed25519 and ES256 compact JWS primitives. |
 | `aauth-rust-core` | Protocol claims, discovery documents and token verification. |
 | `aauth-rust-signature-key` | HTTP request signatures and Signature-Key proofs. |
 | `aauth-rust-agent-provider` | Agent Provider discovery and Agent token issuance. |

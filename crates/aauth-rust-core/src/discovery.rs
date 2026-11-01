@@ -128,7 +128,7 @@ impl AgentProviderKeys {
             return Err(TokenError::InvalidKey);
         }
         let key: Jwk = serde_json::from_value(value.clone()).map_err(|_| TokenError::InvalidKey)?;
-        crate::require_ed25519(&key)?;
+        crate::require_token_key(&key)?;
         Ok(key)
     }
 }

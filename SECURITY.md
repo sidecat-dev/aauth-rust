@@ -27,7 +27,10 @@ Honor the pinned draft's cache and fetch-rate rules; this library supplies no
 shared cache or refresh loop.
 
 Keep signing keys in application-controlled storage, use fresh unique token
-identifiers, and supply the correct Unix clock. A valid signature proves a key
+identifiers, and supply the correct Unix clock. `SigningKey::export_pkcs8_der`
+returns the private key itself: write it only where the key's owner can read
+it, or keep the key in a keystore or HSM behind `SigningKey::external`, which
+never exports it. A valid signature proves a key
 and signed claims; the application's Resource policy decides access. Replay
 storage, enrollment, revocation transport and sub-agent delegation remain host
 responsibilities or unimplemented. The PS store supports binding revocation;
