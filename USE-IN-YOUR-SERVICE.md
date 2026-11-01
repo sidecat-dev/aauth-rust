@@ -767,9 +767,9 @@ Return `None` for any whose execution is itself metered or billed, and set
 `R3Release::cost` on the release of the others; an unannotated operation's
 release states no cost. The proposal's Resource token offers exactly that cost
 in the first declared unit. A three-party Person Server narrows the offer and
-grants it on the per-call Auth token; a federated one refuses a proposal that
-carries an offer with `invalid_resource_token`, because the relay has no
-per-call budget profile. The poll that presents the per-call token draws the
+grants it on the per-call Auth token; a federated one sends its ceiling to the
+Access Server, which grants the budget on the per-call token, and releases that
+token only when its budget narrows the ceiling. The poll that presents the per-call token draws the
 cost down once: the released response carries `AAuth-Budget`, a replay reports
 `remaining` without metering again, and the ledger and usage counters show the
 charge. A per-call token without the budget is `403`. One whose budget is below

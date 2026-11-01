@@ -54,6 +54,9 @@ pub enum MissionStoreError {
 /// Existing stores default to unsupported. An independent check followed by an
 /// ordinary commit is not an implementation of this contract. Operations must
 /// enforce active owner/person bindings and materialize expiry permanently.
+/// A termination recorded in the same mission's [`MissionAudit`], such as a
+/// completion accepted through [`crate::Store::edit_mission_audit`], is a
+/// termination here too, read in the same atomic step.
 /// Stores supporting administrative binding replacement must invalidate old
 /// approvals even when the replacement has the same person ID.
 pub trait MissionStore: Send + Sync {

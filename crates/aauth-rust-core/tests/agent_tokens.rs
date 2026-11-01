@@ -138,6 +138,9 @@ fn identifiers_are_exact_and_do_not_accept_url_normalization() {
         "aauth:a b@ap.example",
         "agent@ap.example",
         "aauth:a@AP.example",
+        "aauth:+worker@ap.example",
+        "aauth:assistant+@ap.example",
+        "aauth:parent+worker+leaf@ap.example",
         &format!("aauth:{}@ap.example", "a".repeat(256)),
     ] {
         assert!(validate_agent_identifier(bad).is_err(), "{bad}");

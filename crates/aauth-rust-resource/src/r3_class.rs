@@ -586,14 +586,17 @@ where
         request: &Request<Vec<u8>>,
         now: i64,
     ) -> Result<(String, String), SignatureFailure> {
+        // Only a server's `jwks_uri` signature fetches; a refusal names that scheme.
+        let unsupported = || SignatureFailure::UnsupportedScheme(vec!["jwks_uri"]);
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
             .map_err(|error| match error {
             Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
             Error::InvalidInput => SignatureFailure::Input(required_components(request)),
+            Error::UnsupportedScheme => unsupported(),
             other => SignatureFailure::Proof(other),
         })?;
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
-            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+            return Err(unsupported());
         };
         let key = self
             .keys

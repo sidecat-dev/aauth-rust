@@ -437,6 +437,8 @@ pub trait Store: Send + Sync {
         Ok(None)
     }
     /// Append an update or accept completion on an active stored mission.
+    /// A store that also implements [`MissionStore`] then refuses issuance
+    /// under a completed mission.
     ///
     /// # Errors
     ///
@@ -566,9 +568,12 @@ impl MemoryStore {
     }
     /// Permanently terminate an owned mission using a host-supplied reason.
     /// This is host administration, not a protocol mission-management endpoint.
+    /// The mission's audit row, when there is one, records the same reason, so
+    /// the mission endpoint answers `mission_terminated` too.
     ///
     /// # Errors
     /// Absent/wrong-owner records are indistinguishable; storage fails closed.
+    /// An empty reason, or one longer than 256 bytes, is refused before any write.
     pub fn terminate_mission(
         &self,
         ps: &str,
@@ -578,7 +583,8 @@ impl MemoryStore {
     ) -> Result<(), MissionStoreError> {
         // An empty reason is not a termination record. The draft leaves the
         // empty string unspecified; this store refuses it before any write.
-        if reason.is_empty() {
+        // The audit row keeps at most 256 bytes of reason.
+        if reason.is_empty() || reason.len() > 256 {
             return Err(MissionStoreError::Conflict);
         }
         let mut state = self.0.lock().map_err(|_| StoreError::Unavailable)?;
@@ -586,8 +592,17 @@ impl MemoryStore {
             .missions
             .get_mut(&(ps.into(), owner.clone(), s256.into()))
             .ok_or(MissionStoreError::NotFound)?;
-        if record.state == MissionState::Active {
-            record.state = MissionState::Terminated(reason.into());
+        // An earlier termination keeps its reason.
+        let ended = match &record.state {
+            MissionState::Terminated(earlier) => earlier.clone(),
+            MissionState::Active => reason.to_owned(),
+        };
+        record.state = MissionState::Terminated(ended.clone());
+        // The mission endpoint reads the audit row; it reports the same end.
+        if let Some(audit) = state.audits.get_mut(&audit_key_of(ps, owner, s256))
+            && audit.termination_reason.is_none()
+        {
+            audit.termination_reason = Some(ended);
         }
         Ok(())
     }
@@ -599,10 +614,21 @@ fn active_mission_locked(
     s256: &str,
     at: i64,
 ) -> Result<MissionRecord, MissionStoreError> {
+    // A termination the mission endpoint recorded, such as an accepted
+    // completion, ends issuance under the mission in the same lock.
+    let recorded = state
+        .audits
+        .get(&audit_key_of(ps, owner, s256))
+        .and_then(|audit| audit.termination_reason.clone());
     let record = state
         .missions
         .get_mut(&(ps.into(), owner.clone(), s256.into()))
         .ok_or(MissionStoreError::NotFound)?;
+    if record.state == MissionState::Active
+        && let Some(reason) = recorded
+    {
+        record.state = MissionState::Terminated(reason);
+    }
     if record.state == MissionState::Active
         && record.document.expires_at().is_some_and(|exp| at >= exp)
     {
@@ -791,6 +817,15 @@ impl Store for MemoryStore {
         state.audits.insert(key, audit.clone());
         Ok(audit)
     }
+}
+
+fn audit_key_of(ps: &str, owner: &AgentIdentity, s256: &str) -> (String, String, String, String) {
+    (
+        ps.into(),
+        owner.issuer.clone(),
+        owner.subject.clone(),
+        s256.into(),
+    )
 }
 
 fn audit_key(audit: &MissionAudit) -> (String, String, String, String) {

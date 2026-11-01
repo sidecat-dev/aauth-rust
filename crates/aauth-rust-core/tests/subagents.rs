@@ -116,16 +116,23 @@ fn rejects_child_as_parent_and_malformed_child_naming() {
         .unwrap()
         .verify(&Keys, 1000)
         .unwrap();
-    for subject in [
-        "aauth:other+worker@ap.example",
-        "aauth:parent+@ap.example",
-        "aauth:parent@ap.example",
-        "aauth:parent+worker+leaf@ap.example",
+    for (subject, error) in [
+        ("aauth:other+worker@ap.example", TokenError::InvalidJwt),
+        ("aauth:parent@ap.example", TokenError::InvalidJwt),
+        // Refused as identifier syntax before the parent is compared.
+        (
+            "aauth:parent+@ap.example",
+            TokenError::InvalidAgentIdentifier,
+        ),
+        (
+            "aauth:parent+worker+leaf@ap.example",
+            TokenError::InvalidAgentIdentifier,
+        ),
     ] {
         child.sub = subject.into();
         assert_eq!(
             verify_subagent(&mint(&child), &parent, &Keys, 1000).unwrap_err(),
-            TokenError::InvalidJwt,
+            error,
             "{subject}"
         );
     }

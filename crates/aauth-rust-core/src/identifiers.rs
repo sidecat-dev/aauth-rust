@@ -30,8 +30,13 @@ pub fn validate_server_identifier(s: &str) -> Result<(), TokenError> {
 }
 /// Validate `aauth:local@domain` syntax without inferring delegation authority.
 ///
+/// A local part is a top-level name without `+`, or a sub-agent's name: a
+/// non-empty parent name, `+` and a non-empty discriminator without `+`.
+/// Which parent a sub-agent has is never read from here; `parent_agent` says.
+///
 /// # Errors
-/// Returns `InvalidAgentIdentifier` for invalid local characters/length or domain.
+/// Returns `InvalidAgentIdentifier` for invalid local characters/length, a
+/// misplaced `+`, or an invalid domain.
 pub fn validate_agent_identifier(s: &str) -> Result<(), TokenError> {
     let (local, domain) = s
         .strip_prefix("aauth:")
@@ -42,6 +47,12 @@ pub fn validate_agent_identifier(s: &str) -> Result<(), TokenError> {
         || !local
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_+.".contains(&c))
+    {
+        return Err(TokenError::InvalidAgentIdentifier);
+    }
+    // Delegation is one level deep, so a parent name never holds `+` itself.
+    if let Some((parent, discriminator)) = local.split_once('+')
+        && (parent.is_empty() || discriminator.is_empty() || discriminator.contains('+'))
     {
         return Err(TokenError::InvalidAgentIdentifier);
     }

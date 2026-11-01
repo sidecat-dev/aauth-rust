@@ -6,9 +6,10 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use aauth_rust_person_server::{
-    AgentIdentity, AuthorizationRequest, Binding, Config, Grant, MemoryStore, MissionRecord,
-    MissionState, MissionStore, MissionStoreError, Person, PersonRequest, PersonServer, Policy,
-    PolicyError, Store, StoreError, TokenKind, TokenRecord, TokenReference, TokenTie,
+    AgentIdentity, AuthorizationRequest, Binding, Config, Grant, MemoryStore, MissionAudit,
+    MissionAuditError, MissionEdit, MissionRecord, MissionState, MissionStore, MissionStoreError,
+    Person, PersonRequest, PersonServer, Policy, PolicyError, Store, StoreError, TokenKind,
+    TokenRecord, TokenReference, TokenTie,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{Request, Response};
@@ -142,6 +143,29 @@ impl Store for RacingStore {
     }
     fn retained(&self) -> Result<Vec<TokenRecord>, StoreError> {
         self.inner.retained()
+    }
+    fn write_mission_audit(&self, audit: &MissionAudit) -> Result<(), StoreError> {
+        self.inner.write_mission_audit(audit)
+    }
+    fn read_mission_audit(
+        &self,
+        ps: &str,
+        issuer: &str,
+        subject: &str,
+        s256: &str,
+    ) -> Result<Option<MissionAudit>, StoreError> {
+        self.inner.read_mission_audit(ps, issuer, subject, s256)
+    }
+    fn edit_mission_audit(
+        &self,
+        ps: &str,
+        issuer: &str,
+        subject: &str,
+        s256: &str,
+        edit: MissionEdit,
+    ) -> Result<MissionAudit, MissionAuditError> {
+        self.inner
+            .edit_mission_audit(ps, issuer, subject, s256, edit)
     }
 }
 impl MissionStore for RacingStore {
@@ -625,6 +649,45 @@ fn empty_termination_reason_leaves_the_active_mission_unchanged() {
         store.load_mission(PS, &owner, digest, 1000),
         Err(MissionStoreError::Terminated(reason)) if reason == "user"
     ));
+}
+
+#[test]
+fn completion_at_the_mission_endpoint_ends_issuance_under_the_mission() {
+    let (server, store, _, m) = fixture();
+    let server = server.with_missions();
+    store
+        .inner
+        .write_mission_audit(&MissionAudit {
+            person_server: PS.into(),
+            owner_issuer: owner().issuer,
+            owner_subject: owner().subject,
+            s256: m.document.s256().into(),
+            encoded: m.document.encoded().into(),
+            updates: Vec::new(),
+            summary: None,
+            termination_reason: None,
+        })
+        .unwrap();
+    let a = agent(PS);
+    let person_token = value(&person(&server, &a, &m))["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let completed = server.handle(&request(
+        &a,
+        &format!("/mission/{}", m.document.s256()),
+        json!({"action":"completion","summary":"Revision A is read"}),
+    ));
+    assert_eq!(completed.status(), 200);
+    let resource_token = resource(&a, &person_token, Some(m.document.s256()));
+    for refused in [
+        person(&server, &a, &m),
+        auth(&server, &a, &person_token, &resource_token),
+    ] {
+        assert_eq!(refused.status(), 403);
+        assert_eq!(value(&refused)["error"], "mission_terminated");
+        assert_eq!(value(&refused)["termination_reason"], "completed");
+    }
 }
 
 #[test]

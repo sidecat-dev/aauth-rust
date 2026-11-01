@@ -1027,6 +1027,42 @@ fn jwks_uri_service_proof_is_explicit_and_binds_identity_and_body() {
 }
 
 #[test]
+fn a_resolved_key_of_an_unimplemented_type_is_unsupported_algorithm() {
+    // Signature-Key Algorithm Determination; protocol Verification (Server)
+    // step 6. A jwks_uri member names no algorithm, so an ML-DSA-44 signature
+    // reaches key resolution rather than failing on its length.
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let key = SigningKey::from_seed([8; 32]);
+    let mut req = Request::builder()
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())
+        .unwrap();
+    let material = KeyMaterial::JwksUri {
+        id: "https://signer.example".into(),
+        dwk: "aauth-agent.json".into(),
+        kid: "pq-1".into(),
+    };
+    sign_request(&mut req, &key, material, 1000).unwrap();
+    req.headers_mut().insert(
+        "signature",
+        format!("sig=:{}:", STANDARD.encode(vec![1u8; 2420]))
+            .parse()
+            .unwrap(),
+    );
+    let proof =
+        PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks_uri"]).unwrap();
+    let pq: Jwk = serde_json::from_value(json!({
+        "kty": "AKP", "alg": "ML-DSA-44", "kid": "pq-1", "pub": "AAAA"
+    }))
+    .unwrap();
+    assert_eq!(proof.verify(&pq), Err(Error::UnsupportedAlgorithm));
+    assert_eq!(
+        proof.verify(&key.public_jwk()),
+        Err(Error::InvalidSignature)
+    );
+}
+
+#[test]
 fn jwks_uri_parameters_cannot_inject_headers_or_discovery_paths() {
     let key = SigningKey::from_seed([8; 32]);
     for (id, dwk, kid) in [

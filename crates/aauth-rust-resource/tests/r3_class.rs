@@ -763,6 +763,11 @@ fn signed_fetch_serves_exact_bytes_only_to_the_entitled_person_server() {
         .uri(record.reference.uri())
         .body(Vec::new())
         .unwrap();
+    // The refusal names the one scheme this endpoint accepts.
+    assert_eq!(
+        resource.r3_document(&agent_signed, NOW).headers()["accept-signature-scheme"],
+        "jwks_uri"
+    );
     for request in [
         fetch(&record, PS, "aauth-person.json", "ps-1", 9),
         agent_signed,

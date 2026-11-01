@@ -697,7 +697,10 @@ impl PreparedRequest {
         // `x509` names its HTTP algorithm only after the certificate is
         // checked. Ed25519 and ES256 are 64 bytes, ES384 is 96, and a
         // modulus-sized signature is accepted here so an RSA certificate can
-        // still be classified as `unsupported_algorithm`.
+        // still be classified as `unsupported_algorithm`. The other schemes
+        // name no algorithm until their key is resolved, so a key of a type
+        // this verifier does not implement is `unsupported_algorithm` then,
+        // not a length failure now; `verify` checks the length.
         let accepted_len = match &key {
             KeyMaterial::Hwk(jwk) => {
                 bytes.len()
@@ -709,7 +712,7 @@ impl PreparedRequest {
             KeyMaterial::X509 { .. } => {
                 matches!(bytes.len(), 64 | 96) || (256..=1024).contains(&bytes.len())
             }
-            _ => bytes.len() == 64,
+            _ => true,
         };
         if !accepted_len {
             return Err(Error::InvalidSignature);

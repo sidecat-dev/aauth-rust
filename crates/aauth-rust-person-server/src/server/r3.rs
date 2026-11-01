@@ -17,7 +17,8 @@
 //! class-R3 budget profile does not permit `r3_per_call` or `budget_consumed`.
 //! A proposal may carry one too, as a Resource that meters the release of a
 //! held result does: this PS narrows it and the per-call Auth token carries
-//! the grant. A relayed per-call grant carries no budget.
+//! the grant. With federation the PS relays its ceiling to the access server,
+//! which grants the budget on the per-call token, as for any budget offer.
 //! A Person token's approved mission composes with a class document: the grant
 //! ends no later than the mission and commits against the unchanged active
 //! mission, whether this PS signs it or relays it. Missions with proposals,
@@ -530,12 +531,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 )
             } else if let Some(proposal) = artifact.proposal() {
                 if context.mission.is_some() {
-                    return Err(Failure::parameter("invalid_resource_token"));
-                }
-                // A proposal's budget offer is granted on the per-call token this
-                // PS signs. The relay has no per-call budget profile, so it is
-                // refused rather than relayed without its offer.
-                if granted_budget.is_some() && self.federation.is_some() {
                     return Err(Failure::parameter("invalid_resource_token"));
                 }
                 // Release gating executed before approval: release consent, never

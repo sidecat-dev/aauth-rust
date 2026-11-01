@@ -278,6 +278,9 @@ impl R3DocumentStore for Documents {
 }
 
 type Resource = PsAuthorizationResource<Keys, BoxedAuthAdmissionPolicy<String>>;
+type HostServer = PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>;
+/// Called from inside the R3 audit commit.
+type Hook = Arc<dyn Fn() + Send + Sync>;
 
 fn operation(profile: &Profile, raw: &str) -> Operation {
     Operation::new(&profile.vocabulary, raw.as_bytes()).expect(raw)
@@ -322,17 +325,17 @@ fn resource_with_ledger(
         let calls = calls.clone();
         Box::new(
             move |token: &VerifiedAuthToken, _: &Request<Vec<u8>>| -> Result<String, Deny> {
-                if let Some(slot) = &revoke_during {
-                    if let Some(resource) = slot.lock().unwrap().clone() {
-                        let response = resource
-                            .revoke(&ps_revocation(&token.claims().jti, token.claims().exp), NOW);
-                        assert_eq!(
-                            response.status(),
-                            200,
-                            "{}",
-                            String::from_utf8_lossy(response.body())
-                        );
-                    }
+                if let Some(slot) = &revoke_during
+                    && let Some(resource) = slot.lock().unwrap().clone()
+                {
+                    let response = resource
+                        .revoke(&ps_revocation(&token.claims().jti, token.claims().exp), NOW);
+                    assert_eq!(
+                        response.status(),
+                        200,
+                        "{}",
+                        String::from_utf8_lossy(response.body())
+                    );
                 }
                 if deny_first
                     .as_ref()
@@ -704,12 +707,11 @@ fn class_resource_token_with_budget_offer_is_authorized() {
     assert_eq!(plain.status(), 200, "r3-only with budgets enabled");
     let plain_auth = member(&plain, "auth_token").expect("r3-only auth token");
     assert!(
-        aauth_rust_core::AuthToken::parse(&plain_auth)
+        !aauth_rust_core::AuthToken::parse(&plain_auth)
             .unwrap()
             .unverified_claims()
             .extra
-            .get("budget")
-            .is_none()
+            .contains_key("budget")
     );
 
     let stored = documents
@@ -1449,7 +1451,7 @@ struct ReleaseRecords {
 }
 enum ReleaseBound {
     Live {
-        token: R3CallToken,
+        token: Box<R3CallToken>,
         fence: String,
         result: Option<R3CallResult>,
     },
@@ -1491,10 +1493,10 @@ impl R3CallStore for ReleaseBook {
         if records.by_uri.contains_key(&uri) {
             return Err(R3StoreError::Conflict);
         }
-        if let Some(held) = &record.held {
-            if Self::pending_taken(&records, &held.pending_id) {
-                return Err(R3StoreError::Conflict);
-            }
+        if let Some(held) = &record.held
+            && Self::pending_taken(&records, &held.pending_id)
+        {
+            return Err(R3StoreError::Conflict);
         }
         records.order.push(uri.clone());
         records.by_uri.insert(uri, record.clone());
@@ -1554,7 +1556,7 @@ impl R3CallStore for ReleaseBook {
                 calls.insert(
                     uri.to_owned(),
                     ReleaseBound::Live {
-                        token: token.clone(),
+                        token: Box::new(token.clone()),
                         fence: format!("fence-{uri}"),
                         result: None,
                     },
@@ -2777,7 +2779,7 @@ fn core_budget_with_r3_enabled_skips_the_class_path_and_a_failed_commit_reserves
         .unverified_claims()
         .extra
         .clone();
-    assert!(extra.get("r3_uri").is_none());
+    assert!(!extra.contains_key("r3_uri"));
     assert_eq!(
         extra
             .get("budget")
@@ -3232,11 +3234,7 @@ fn revocation_after_issuance_withholds_the_class_token_without_reserving() {
     let vocabulary = profile.vocabulary.clone();
     let audits = Arc::new(AtomicUsize::new(0));
     let once = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let slot: Arc<
-        Mutex<
-            Option<&'static PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>>,
-        >,
-    > = Arc::new(Mutex::new(None));
+    let slot: Arc<Mutex<Option<&'static HostServer>>> = Arc::new(Mutex::new(None));
     let hook_slot = Arc::clone(&slot);
     let hook_once = Arc::clone(&once);
     let hook = Arc::new(Mutex::new(Some(Arc::new(move || {
@@ -5259,12 +5257,11 @@ fn r3_only_class_token_is_unchanged_when_budgets_are_enabled() {
     );
     let resource_token = member(&issued, "resource_token").expect("resource token");
     assert!(
-        ResourceToken::parse(&resource_token)
+        !ResourceToken::parse(&resource_token)
             .unwrap()
             .unverified_claims()
             .extra
-            .get("budget")
-            .is_none()
+            .contains_key("budget")
     );
     let exchanged = ps.handle(&post(
         &signer,
@@ -5279,12 +5276,11 @@ fn r3_only_class_token_is_unchanged_when_budgets_are_enabled() {
     );
     let auth = member(&exchanged, "auth_token").expect("auth token");
     assert!(
-        aauth_rust_core::AuthToken::parse(&auth)
+        !aauth_rust_core::AuthToken::parse(&auth)
             .unwrap()
             .unverified_claims()
             .extra
-            .get("budget")
-            .is_none()
+            .contains_key("budget")
     );
     match resource.authorize(&signed_call("/op/permit", &auth), NOW, "r3-only") {
         AuthDecision::Granted(admitted) => assert_eq!(admitted.admitted(), "receipt"),
@@ -5805,7 +5801,7 @@ impl aauth_rust_person_server::Store for GatedStore {
 
 struct HookAudit {
     audits: Arc<AtomicUsize>,
-    hook: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    hook: Arc<Mutex<Option<Hook>>>,
 }
 impl aauth_rust_r3::IssuanceStore for HookAudit {
     fn commit(
