@@ -62,17 +62,15 @@ pub enum TokenError {
     /// Token exp is not in the future.
     ExpiredJwt,
     #[error(
-        "no trusted issuer key matches kid: check the AP JWKS and refresh the host's retained key snapshot"
+        "no trusted issuer key matches kid: check the issuer's JWKS and refresh the host's retained key snapshot"
     )]
     /// No matching kid on a trusted issuer; configured refresh may help.
     UnknownKey,
-    #[error(
-        "AP metadata is missing its issuer string: publish the exact HTTPS Agent Provider identifier"
-    )]
+    #[error("metadata is missing its issuer string: publish the exact HTTPS server identifier")]
     /// Metadata lacks a string issuer member.
     IssuerMissing,
     #[error(
-        "AP metadata issuer differs from the configured issuer: use exact string equality, including case and trailing slash"
+        "metadata issuer differs from the expected issuer: use exact string equality, including case and trailing slash"
     )]
     /// Metadata or issuance issuer does not equal the expected identifier.
     IssuerMismatch,
@@ -99,7 +97,7 @@ pub enum TokenError {
     /// Discovery metadata has no usable HTTPS JWKS URL, or a display URL such
     /// as `logo_uri` is not `https`; a key refresh cannot fix it.
     #[error(
-        "invalid AP metadata jwks_uri or display URL: provide HTTPS URLs with a host and valid port, without userinfo; jwks_uri also without fragment"
+        "invalid metadata jwks_uri or display URL: provide HTTPS URLs with a host and valid port, without userinfo; jwks_uri also without fragment"
     )]
     InvalidDiscoveryMetadata,
     /// sub domain must match the Agent Provider issuer host.
