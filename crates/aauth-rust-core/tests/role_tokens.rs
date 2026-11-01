@@ -175,6 +175,35 @@ fn role_tokens_refuse_missing_null_and_wrongly_typed_required_claims() {
 }
 
 #[test]
+fn a_one_element_audience_array_names_its_recipient() {
+    // RFC 7519 allows the array form, which other implementations write.
+    let signer = SigningKey::from_seed([1; 32]);
+    for role in ["person", "resource", "auth"] {
+        let (issuer, dwk) = if role == "resource" {
+            ("https://resource.example", "aauth-resource.json")
+        } else {
+            ("https://ps.example", "aauth-person.json")
+        };
+        let mut value = payload(role);
+        let recipient = value["aud"].clone();
+        value["aud"] = json!([recipient]);
+        let claims = verify(
+            role,
+            &signed(role, &value, &signer),
+            &keys(issuer, dwk, &signer),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(claims["aud"], recipient, "{role}: written as a string");
+        value["aud"] = json!([recipient, "https://other.example"]);
+        assert!(
+            parse(role, &signed(role, &value, &signer)).is_err(),
+            "{role}: two recipients"
+        );
+    }
+}
+
+#[test]
 fn explicit_null_optional_claims_are_not_silently_treated_as_absent() {
     let signer = SigningKey::from_seed([1; 32]);
     for role in ["person", "resource", "auth"] {

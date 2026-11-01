@@ -265,6 +265,8 @@ impl PreparedResponse {
         if !signature.params.is_empty() {
             return Err(Error::InvalidSignature);
         }
+        // As for a request: a key resolved later is checked by `verify`, so a
+        // key type this verifier does not implement is `unsupported_algorithm`.
         let accepted_len = match &key {
             KeyMaterial::Hwk(jwk) => {
                 bytes.len()
@@ -273,7 +275,7 @@ impl PreparedResponse {
                         _ => Error::InvalidKey,
                     })?
             }
-            _ => bytes.len() == 64,
+            _ => true,
         };
         if !accepted_len {
             return Err(Error::InvalidSignature);

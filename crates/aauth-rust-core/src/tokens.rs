@@ -19,7 +19,9 @@ pub struct PersonClaims {
     pub iss: String,
     /// Exact well-known metadata document name for this issuer role.
     pub dwk: String,
-    /// Canonical HTTPS identifier of the intended recipient.
+    /// Canonical HTTPS identifier of the intended recipient. Read from a
+    /// string or a one-element array; written as a string.
+    #[serde(deserialize_with = "one_audience")]
     pub aud: String,
     /// Opaque Resource-directed person identifier; interpret with its issuer.
     pub sub: String,
@@ -64,7 +66,9 @@ pub struct ResourceClaims {
     pub iss: String,
     /// Exact well-known metadata document name for this issuer role.
     pub dwk: String,
-    /// Canonical HTTPS identifier of the intended recipient.
+    /// Canonical HTTPS identifier of the intended recipient. Read from a
+    /// string or a one-element array; written as a string.
+    #[serde(deserialize_with = "one_audience")]
     pub aud: String,
     /// Opaque Resource-directed person identifier; interpret with its issuer.
     pub sub: String,
@@ -134,7 +138,9 @@ pub struct AuthClaims {
     pub iss: String,
     /// Exact well-known metadata document name for this issuer role.
     pub dwk: String,
-    /// Canonical HTTPS identifier of the intended recipient.
+    /// Canonical HTTPS identifier of the intended recipient. Read from a
+    /// string or a one-element array; written as a string.
+    #[serde(deserialize_with = "one_audience")]
     pub aud: String,
     /// Opaque Resource-directed person identifier; interpret with its issuer.
     pub sub: String,
@@ -186,6 +192,24 @@ pub struct AuthClaims {
     /// Additive claims retained without conferring companion or application authority.
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
+}
+
+/// RFC 7519 lets `aud` be an array. These tokens name one recipient, so a
+/// one-element array is read as that recipient and any other array is refused.
+fn one_audience<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Audience {
+        One(String),
+        List(Vec<String>),
+    }
+    match Audience::deserialize(deserializer)? {
+        Audience::One(aud) => Ok(aud),
+        Audience::List(list) => match <[String; 1]>::try_from(list) {
+            Ok([aud]) => Ok(aud),
+            Err(_) => Err(serde::de::Error::custom("aud must name one recipient")),
+        },
+    }
 }
 
 struct CommonClaims<'a> {

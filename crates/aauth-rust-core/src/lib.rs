@@ -42,8 +42,8 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 /// Token, identifier or trusted discovery failure with a stable wire code.
 pub enum TokenError {
-    /// invalid Agent JWT: check compact encoding, required claim types and issuer signature.
-    #[error("invalid Agent JWT: check compact encoding, required claim types and issuer signature")]
+    /// invalid JWT: check compact encoding, required claim types and issuer signature.
+    #[error("invalid JWT: check compact encoding, required claim types and issuer signature")]
     InvalidJwt,
     /// A verified token targets another recipient; maps to the draft's invalid_jwt.
     #[error(
@@ -57,7 +57,7 @@ pub enum TokenError {
     /// Maps to `invalid_key` because the key does not meet server trust requirements.
     UntrustedIssuer,
     #[error(
-        "Agent token expired: obtain a fresh token; exp and the verifier clock use Unix seconds with no expiry leeway"
+        "token expired: obtain a fresh token; exp and the verifier clock use Unix seconds with no expiry leeway"
     )]
     /// Token exp is not in the future.
     ExpiredJwt,
@@ -92,9 +92,9 @@ pub enum TokenError {
     /// Agent subject or parent identifier has invalid syntax.
     InvalidAgentIdentifier,
     #[error(
-        "Agent token dwk must be exactly aauth-agent.json, the Agent Provider's well-known metadata document name"
+        "dwk must be exactly the issuer role's well-known metadata document name, such as aauth-agent.json in an Agent token"
     )]
-    /// Agent token dwk does not name aauth-agent.json.
+    /// A token's dwk does not name its issuer role's metadata document.
     InvalidDiscoveryDocument,
     /// Discovery metadata has no usable HTTPS JWKS URL, or a display URL such
     /// as `logo_uri` is not `https`; a key refresh cannot fix it.
@@ -128,8 +128,10 @@ pub enum TokenError {
     )]
     /// Top-level issuance was requested with a sub-agent profile.
     UnsupportedAgentProfile,
-    /// expected typ aa-agent+jwt: present an Agent token rather than another JWT type.
-    #[error("expected typ aa-agent+jwt: present an Agent token rather than another JWT type")]
+    /// The JWT `typ` is not the token type this verifier expects.
+    #[error(
+        "unexpected JWT typ: present the token type this verifier expects, such as aa-agent+jwt for an Agent token"
+    )]
     UnexpectedTokenType,
 }
 impl TokenError {

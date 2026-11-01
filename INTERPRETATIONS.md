@@ -28,6 +28,19 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
   terminated and an opaque termination_reason. The reason never permits
   reactivation. An empty reason is refused before the record changes; the draft
   does not define the empty string.
+- A completion the mission endpoint accepts ends issuance under that mission.
+  The draft has one mission state: Mission Completion (line 1505) terminates
+  the mission with reason `completed`, Mission Management (line 1514) and
+  Mission Status Errors (line 1550) refuse a terminated mission at every PS
+  endpoint, and Person Token Endpoint (line 810) and Resource Token
+  Verification step 4 (line 768) require it to be active. This library keeps
+  the endpoint's audit row and the issuance `MissionRecord` apart, so a
+  termination recorded in the audit row is read as a termination of the
+  issuance record in the same atomic step, and `/person` and `/token` answer
+  `403 mission_terminated` with `termination_reason` `completed`. The other
+  way round, `MemoryStore::terminate_mission` writes its reason into the
+  audit row, so the mission endpoint answers `mission_terminated` too; it
+  refuses a reason longer than the audit row's 256 bytes before any write.
 - Store::missions is optional and closed by default; mission checks and issuance
   retention must be atomic in the same store. Expiry/termination/revocation during
   policy or commit withholds credentials even if an internal issuance row was
@@ -106,9 +119,72 @@ the draft required each spelling.
   and the next grant sees the full cap. The conformance adapter calls it when
   a scenario starts, so one process does not carry the ceiling across
   scenarios. It is not an HTTP route.
+- A federated Person Server relays a per-call proposal that offers a budget,
+  as aauth-go does ("A per-call token's budget meters the release of a held
+  result" in its INTERPRETATIONS.md, main `0e2447b`). R3 Approving Release
+  Rather Than Execution (lines 688-723) and Budgets Resource Token, PS-to-AS
+  Token Request and Auth Token Extensions (lines 425-452, 542-572, 574-608)
+  do not say whether a per-call proposal's Resource token or its per-call
+  Auth token may carry `budget`; both libraries read that they may. Go's nine
+  steps, as this library takes them: (1) the Agent presents the proposal's
+  Resource token with the class Auth token it called with, and `budget` in
+  `capabilities`; (2) the PS verifies the Resource token's R3 reference and
+  `budget`, checks the offer against its declared units (`invalid_budget`
+  otherwise), fetches the proposal and asks `R3Policy::authorize_proposal`,
+  which sees the offer on the verified Resource token; (3) the ceiling is the
+  offer narrowed by `IssuerPolicy` (cap and outstanding grants), or nothing
+  above `omit_above`; (4) the PS-to-AS request carries `budget` with the
+  ceiling, and omits it when there is none; (5, 6) the Access Server checks
+  the offer, grants within the ceiling and signs the per-call token with
+  `budget`, which this library's Access Server does not do, since it has no
+  R3; (7) the PS verifies the per-call token with the budget profile when it
+  sent a ceiling and without it when it did not, and refuses a missing,
+  extra, wider or re-denominated `budget` with `502 as_unreachable`;
+  (8) an Access Server `202` or `402` is refused with `500 server_error` and
+  nothing is written when deferred custody is enabled, and is `502
+  as_unreachable` without it, as for any deferred answer the PS cannot hold;
+  (9) the Agent's R3 helpers leave the budget check to the host
+  (`verify_budget_resource_token`, `verify_budget_per_call_auth_token`). Where
+  Go keeps no allocation ledger across tokens, this PS counts the relayed
+  grant against its cap, as for every federated budget; that is not on the
+  wire. A three-party Person Server still grants the release budget itself.
 - This library is not an intermediary, so it does not implement a rule about
   rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
   with normative keywords sit in non-normative prior art and are not executed.
+
+# Selected token, identifier and signature interpretations
+
+Source: protocol and `draft-hardt-httpbis-signature-key` at the pins in
+SPECIFICATIONS.md.
+
+- **`aud` as an array.** Resource Token Structure (line 742), Person Token
+  Structure (line 867) and Auth Token Structure (line 1778) give `aud` one
+  URL, and Common JWT Verification (line 2313) verifies per RFC 7519, whose
+  `aud` may be an array. Person, Resource and Auth tokens are read with `aud`
+  as a string or a one-element array, which other implementations write; an
+  empty array or one with two or more members is `invalid_jwt`. Tokens this
+  library mints carry the string.
+- **`+` in an agent identifier.** Agent Identifiers (lines 488-490): a
+  top-level local part has no `+`, and a sub-agent's is its parent's local
+  part, `+` and a non-empty discriminator. Sub-Agents (line 1915) allows one
+  level, so a parent local part never holds `+`. `validate_agent_identifier`
+  therefore refuses a local part that starts or ends with `+` or holds more
+  than one. It checks syntax only: which parent a sub-agent has comes from
+  `parent_agent`, never from the identifier (line 490).
+- **A key whose type the verifier does not implement.** Signature-Key
+  Algorithm Determination (lines 225-233) and protocol Verification (Server)
+  step 6 (line 2249) make it `unsupported_algorithm`. Under `jwks_uri`,
+  `jwks`, `jwt`, `jkt-jwt`, `self-jwt` and `cached` the algorithm is known only
+  once the key is resolved, so `PreparedRequest` and `PreparedResponse` no
+  longer refuse a signature whose length is not 64 bytes before then; `verify`
+  checks the length against the resolved key. An ML-DSA-44 signature under a `jwks_uri` member that
+  selects an `AKP` key is `unsupported_algorithm`, not `invalid_signature`.
+- **`Accept-Signature-Scheme` per endpoint.** Verification (Server) step 4
+  (line 2247) names "the schemes the server accepts"; Signature-Key Scheme
+  Rejection (line 2266) says the header states what the server accepts from
+  any caller. The R3 document endpoint accepts only `jwks_uri` (R3 Document
+  Access Restriction, line 729), so its `unsupported_scheme` refusal names
+  `jwks_uri`, not the Resource's `jwt`.
 
 # Selected supervision interpretations
 

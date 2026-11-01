@@ -342,16 +342,31 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     )
                     .map_err(|_| failed(Reason::InvalidGrant))?;
                 }
+                // A per-call token carries `budget` exactly when this PS sent a
+                // ceiling; `verify_delivered` below checks that it narrows it.
                 RelayR3::Proposal(reference, exact_proposal) => {
-                    aauth_rust_r3::verify_per_call_auth_token(
-                        registry,
-                        compact,
-                        &self.resolver(),
-                        current,
-                        reference,
-                        exact_proposal,
-                    )
-                    .map_err(|_| failed(Reason::InvalidGrant))?;
+                    let verified = if sent.is_some() {
+                        aauth_rust_r3::verify_budget_per_call_auth_token(
+                            registry,
+                            compact,
+                            &self.resolver(),
+                            current,
+                            reference,
+                            exact_proposal,
+                        )
+                        .map(|_| ())
+                    } else {
+                        aauth_rust_r3::verify_per_call_auth_token(
+                            registry,
+                            compact,
+                            &self.resolver(),
+                            current,
+                            reference,
+                            exact_proposal,
+                        )
+                        .map(|_| ())
+                    };
+                    verified.map_err(|_| failed(Reason::InvalidGrant))?;
                 }
             }
         }

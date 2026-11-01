@@ -432,10 +432,10 @@ fn interrupt_write(bytes: &[u8], file: &mut fs::File) -> io::Result<bool> {
 }
 fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::File::open(parent)?.sync_all()?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::File::open(parent)?.sync_all()?;
     }
     let _ = path;
     Ok(())
@@ -727,10 +727,10 @@ impl R3CallStore for FileCalls {
         now: i64,
     ) -> std::result::Result<R3Claim, R3StoreError> {
         let _serial = self.1.lock().map_err(|_| unavailable("poisoned"))?;
-        if let Some(record) = self.load(uri)? {
-            if record.release_until.is_some_and(|until| now >= until) {
-                return Ok(R3Claim::Expired);
-            }
+        if let Some(record) = self.load(uri)?
+            && record.release_until.is_some_and(|until| now >= until)
+        {
+            return Ok(R3Claim::Expired);
         }
         let path = self.claim_path(uri);
         match read_record(&path) {
