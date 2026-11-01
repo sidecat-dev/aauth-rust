@@ -326,7 +326,7 @@ impl PersonClaims {
                 "account",
             ],
         )?;
-        crate::require_ed25519(&self.cnf.jwk)?;
+        crate::require_token_key(&self.cnf.jwk)?;
         Ok(())
     }
 }
@@ -384,7 +384,7 @@ impl AuthClaims {
         if self.dwk == "aauth-person.json" && self.iss != self.ps {
             return Err(TokenError::IssuerMismatch);
         }
-        crate::require_ed25519(&self.cnf.jwk)?;
+        crate::require_token_key(&self.cnf.jwk)?;
         validate_scope(self.scope.as_deref())?;
         reject_reserved(
             &self.extra,
@@ -461,8 +461,9 @@ pub(crate) fn mint<T: Serialize>(
     if !(0..=(1_i64 << 33) - 1).contains(&times.0) || !(0..=(1_i64 << 33) - 1).contains(&times.1) {
         return Err(TokenError::InvalidTokenLifetime);
     }
+    // Jws::sign refuses a key outside the Ed25519 and ES256 token profile.
     Jws::sign(
-        &json!({"alg":"Ed25519","typ":typ,"kid":kid}),
+        &json!({"alg":key.algorithm(),"typ":typ,"kid":kid}),
         &serde_json::to_vec(claims).map_err(|_| TokenError::InvalidJwt)?,
         key,
     )
@@ -540,10 +541,13 @@ macro_rules! role_token {
             }
         }
         /// Mint a role JWT after host policy has approved its claims and parent bounds.
-        /// Local iat/exp must be Unix seconds in 0..=8589934591.
+        /// Local iat/exp must be Unix seconds in 0..=8589934591. The header
+        /// `alg` is `key`'s own: Ed25519 or ES256.
         ///
         /// # Errors
-        /// Rejects malformed role claims, empty kid, local timestamp overflow or signing errors.
+        /// Rejects malformed role claims, empty kid, local timestamp overflow,
+        /// a key outside the token profile (`UnsupportedAlgorithm`) or a
+        /// signing failure (`SigningFailed`).
         pub fn $mint(key: &SigningKey, kid: &str, claims: &$claims) -> Result<String, TokenError> {
             claims.validate()?;
             mint(key, kid, $typ, claims, (claims.iat, claims.exp))

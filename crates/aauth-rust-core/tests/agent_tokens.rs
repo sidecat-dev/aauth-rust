@@ -222,27 +222,41 @@ fn selected_unknown_key_algorithm_has_defined_feedback() {
             .unwrap(),
         TokenError::UnsupportedAlgorithm
     );
-    let x = keys
-        .key("https://ap.example", "aauth-agent.json", "ap-1")
-        .unwrap()
-        .x;
+    // Tokens are compact JWS: an ES256 issuer key is selected, an ES384 one
+    // is outside the token profile.
+    let mut es256 = serde_json::to_value(SigningKey::generate_es256().public_jwk()).unwrap();
+    es256["kid"] = json!("es256");
+    let mut es384 = p384_jwk();
+    es384["kid"] = json!("es384");
     let ec = AgentProviderKeys::from_documents(
         "https://ap.example",
         br#"{"issuer":"https://ap.example","jwks_uri":"https://ap.example/keys"}"#,
-        serde_json::to_vec(&json!({"keys":[{
-            "kty":"EC","crv":"P-256","alg":"ES256","kid":"ec",
-            "x": x, "y": x
-        }]}))
-        .unwrap()
-        .as_slice(),
+        serde_json::to_vec(&json!({"keys":[es256, es384]}))
+            .unwrap()
+            .as_slice(),
     )
     .unwrap();
     assert_eq!(
-        ec.key("https://ap.example", "aauth-agent.json", "ec")
+        ec.key("https://ap.example", "aauth-agent.json", "es256")
+            .unwrap()
+            .alg,
+        "ES256"
+    );
+    assert_eq!(
+        ec.key("https://ap.example", "aauth-agent.json", "es384")
             .err()
             .unwrap(),
         TokenError::UnsupportedAlgorithm
     );
+}
+
+/// A valid P-384 public key: the curve's base point.
+fn p384_jwk() -> serde_json::Value {
+    json!({
+        "kty": "EC", "crv": "P-384", "alg": "ES384",
+        "x": "qofKIr6LBTeOscce8yCtdG4dO2KLp5uYWfdB4IJUKjhVAvJdv1UpbDpUXjhydgq3",
+        "y": "NhfeSpYmLG9dnpi_kpLcKfj0Hb0omhR86doxE7XwuMAKYLHOHX6BnXpDHXyQ6g5f",
+    })
 }
 
 #[test]
@@ -260,10 +274,8 @@ fn missing_confirmation_algorithm_is_not_inferred_or_misclassified() {
         AgentToken::parse(&raw).err().unwrap(),
         TokenError::UnsupportedAlgorithm
     );
-    value["cnf"]["jwk"]["alg"] = json!("ES256");
-    value["cnf"]["jwk"]["kty"] = json!("EC");
-    value["cnf"]["jwk"]["crv"] = json!("P-256");
-    value["cnf"]["jwk"]["y"] = value["cnf"]["jwk"]["x"].clone();
+    // A P-384 confirmation key is outside the token profile.
+    value["cnf"]["jwk"] = p384_jwk();
     let raw = Jws::sign(
         &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":"ap-1"}),
         &serde_json::to_vec(&value).unwrap(),

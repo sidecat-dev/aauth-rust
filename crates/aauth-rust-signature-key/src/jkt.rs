@@ -155,6 +155,12 @@ pub(crate) fn parse_jkt(jwt: &str, cache: bool) -> Result<JktDelegation, Error> 
         .get("alg")
         .and_then(Value::as_str)
         .ok_or(Error::UnsupportedAlgorithm)?;
+    // Compact JWS also takes ES256, but this scheme stays Ed25519: it serves
+    // only the Bootstrap key-refresh ceremony, and `ServerKeyBinding` and the
+    // assertion cache hold its keys as Ed25519.
+    if header_alg != "Ed25519" {
+        return Err(Error::UnsupportedAlgorithm);
+    }
     let jwk_value = header.get("jwk").ok_or(Error::InvalidJwt)?;
     if !jwk_value.is_object() {
         return Err(Error::InvalidJwt);

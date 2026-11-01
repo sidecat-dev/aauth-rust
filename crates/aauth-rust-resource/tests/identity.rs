@@ -1,16 +1,26 @@
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
 use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
-use aauth_rust_jose::SigningKey;
+use aauth_rust_jose::{ExternalSigner, Jwk, SigningKey};
 use aauth_rust_resource::{AgentIdentityResource, BoxedPolicy, Decision};
 use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 type TestResource = AgentIdentityResource<AgentProviderKeys, BoxedPolicy>;
 fn composition() -> (Agent, TestResource) {
-    let ap =
-        AgentProvider::new("https://ap.example", "ap-1", SigningKey::from_seed([1; 32])).unwrap();
-    let key = SigningKey::from_seed([2; 32]);
+    composition_with(
+        SigningKey::from_seed([1; 32]),
+        SigningKey::from_seed([2; 32]),
+    )
+}
+/// An Agent Provider signing with `ap_key`, an Agent proving with `key`, and a
+/// Resource that trusts the provider's published keys.
+fn composition_with(ap_key: SigningKey, key: SigningKey) -> (Agent, TestResource) {
+    let ap = AgentProvider::new("https://ap.example", "ap-1", ap_key).unwrap();
     let claims = AgentClaims {
         iss: "https://ap.example".into(),
         dwk: "aauth-agent.json".into(),
@@ -68,6 +78,102 @@ fn direct_identity_is_verified_before_policy_sees_it() {
         resource.authorize(&req, 2000),
         Decision::SignatureFailure(_)
     ));
+}
+
+/// A keystore stand-in: it holds the key and signs on request.
+struct Keystore {
+    key: SigningKey,
+    uses: Arc<AtomicUsize>,
+    available: bool,
+}
+impl ExternalSigner for Keystore {
+    fn public_jwk(&self) -> Jwk {
+        self.key.public_jwk()
+    }
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        if !self.available {
+            return Err("keystore locked".into());
+        }
+        self.uses.fetch_add(1, Ordering::SeqCst);
+        Ok(self.key.sign(message)?)
+    }
+}
+fn held(key: SigningKey, uses: &Arc<AtomicUsize>, available: bool) -> SigningKey {
+    SigningKey::external(Keystore {
+        key,
+        uses: uses.clone(),
+        available,
+    })
+    .unwrap()
+}
+
+#[test]
+fn es256_and_externally_held_keys_sign_agent_tokens_and_requests() {
+    let uses = Arc::new(AtomicUsize::new(0));
+    for (ap_key, key, alg) in [
+        (
+            SigningKey::generate_es256(),
+            SigningKey::generate_es256(),
+            "ES256",
+        ),
+        (
+            held(SigningKey::generate_es256(), &uses, true),
+            held(SigningKey::from_seed([2; 32]), &uses, true),
+            "Ed25519",
+        ),
+    ] {
+        let (agent, resource) = composition_with(ap_key, key);
+        assert_eq!(agent.public_jwk().alg, alg);
+        let mut req = request();
+        agent.sign(&mut req, 1000).unwrap();
+        let Decision::Granted(token) = resource.authorize(&req, 1000) else {
+            panic!("{alg} identity denied")
+        };
+        assert_eq!(token.claims().cnf.jwk.alg, alg);
+        let header = aauth_rust_jose::Jws::parse(token.compact()).unwrap();
+        assert_eq!(header.header()["alg"], "ES256");
+    }
+    // The provider's keystore signed the token and the agent's the request.
+    assert_eq!(uses.load(Ordering::SeqCst), 2);
+
+    // A locked keystore fails the signing itself: no token, no Signature.
+    let locked = AgentProvider::new(
+        "https://ap.example",
+        "ap-1",
+        held(SigningKey::generate_es256(), &uses, false),
+    )
+    .unwrap();
+    let refused = locked
+        .issue(&AgentClaims {
+            iss: "https://ap.example".into(),
+            dwk: "aauth-agent.json".into(),
+            sub: "aauth:Agent@ap.example".into(),
+            jti: "agent-2".into(),
+            iat: 1000,
+            exp: 2000,
+            cnf: Confirmation {
+                jwk: SigningKey::from_seed([2; 32]).public_jwk(),
+            },
+            ps: None,
+            parent_agent: None,
+            nbf: None,
+            extra: Default::default(),
+        })
+        .unwrap_err();
+    assert_eq!(refused, aauth_rust_core::TokenError::SigningFailed);
+    assert_eq!(refused.code(), "server_error");
+    let (agent, _) = composition();
+    let agent = Agent::new(
+        held(SigningKey::from_seed([2; 32]), &uses, false),
+        agent.token().into(),
+    )
+    .unwrap();
+    let mut req = request();
+    assert_eq!(
+        agent.sign(&mut req, 1000).unwrap_err(),
+        aauth_rust_signature_key::Error::SigningFailed
+    );
+    assert!(!req.headers().contains_key("signature"));
 }
 
 #[test]
@@ -219,6 +325,12 @@ fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
         assert!(!ACCEPTED_SIGNATURE_ALGS.contains(&banned));
         assert!(!advertised.split(',').any(|token| token.trim() == banned));
     }
+    // The roles verify `jwt` and `jwks_uri` keys, Ed25519 or ES256, and say
+    // exactly that.
+    assert_eq!(
+        role_signature_alg_header(),
+        aauth_rust_jose::JWS_ALGORITHMS.join(", ")
+    );
     let response =
         Decision::<()>::SignatureFailure(SignatureFailure::Token(TokenError::UnsupportedAlgorithm))
             .into_response();
@@ -234,10 +346,6 @@ fn prohibited_and_symmetric_signature_keys_are_rejected_and_not_advertised() {
 
 #[test]
 fn verification_failure_never_invokes_host_policy() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -377,10 +485,6 @@ fn provider_refuses_subagent_issuance_in_the_top_level_profile() {
 
 #[test]
 fn resource_binds_valid_proofs_to_its_configured_authority_and_path() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -450,7 +554,6 @@ fn decision_debug_support_does_not_print_the_compact_credential() {
 fn admission_policy_sees_the_authenticated_method_and_query() {
     let (agent, resource) = composition();
     use aauth_rust_resource::BoxedPolicy;
-    use std::sync::Arc;
     let policy: BoxedPolicy = Box::new(|_: &VerifiedAgentToken, req: &Request<Vec<u8>>| {
         req.method() == http::Method::GET && req.uri().query() == Some("scope=read")
     });
@@ -501,10 +604,6 @@ fn origin_form_refusal_explains_the_absolute_https_integration_requirement() {
 
 #[test]
 fn a_post_body_added_after_signing_is_refused_before_policy() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -658,10 +757,6 @@ fn refreshing_an_agents_token_reuses_the_key_and_keeps_the_old_agent_usable() {
 #[test]
 fn typed_policy_carries_verified_upstream_identity_to_the_handler_once() {
     use aauth_rust_resource::Deny;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -706,10 +801,6 @@ fn typed_policy_carries_verified_upstream_identity_to_the_handler_once() {
 
 #[test]
 fn identical_proofs_are_accepted_twice_inside_the_window_without_host_replay_policy() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -794,10 +885,6 @@ fn agent_public_jwk_supports_renewal_without_exposing_or_mutating_the_proof_key(
 
 #[test]
 fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, resource) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -883,10 +970,6 @@ fn metadata_failure_is_a_local_configuration_error() {
 
 #[test]
 fn published_identity_is_independent_of_the_signed_request_authority() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, _) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();
@@ -1004,10 +1087,6 @@ fn one_origin_resource_and_its_replaced_policy_serve_distinct_signed_paths() {
 
 #[test]
 fn origin_binding_still_requires_the_actual_signed_path_and_configured_authority() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     let (agent, _) = composition();
     let calls = Arc::new(AtomicUsize::new(0));
     let seen = calls.clone();

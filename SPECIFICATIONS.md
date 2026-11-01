@@ -17,7 +17,7 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
-four-party federation. The proof subset is Ed25519, ES256, ES384, RS256, and PS256 `hwk`, Ed25519 `jwt`, Ed25519 `jkt-s256+jwt`
+four-party federation. The proof subset is Ed25519, ES256, ES384, RS256, and PS256 `hwk`, Ed25519 and ES256 `jwt`, Ed25519 `jkt-s256+jwt`
 self-issued delegation, plus explicit
 `jwks_uri` service proofs. A `jkt-jwt` member is verified by recomputing
 `urn:jkt:sha-256:` from the header `jwk` and comparing it to `iss`, then
@@ -64,7 +64,7 @@ more than 86400 seconds left is not cached. `self-jwt` rejects `cache`. A
 caller presents `cid` only as the exact string issued, and does not present
 `cached` merely because `Accept-Signature-Scheme` lists it first. Direct agent
 identity, the person server, and the access server do not accept `cached`.
-Compact JWS remains Ed25519. When a request carries more than one signature,
+Compact JWS, and so every AAuth token, is Ed25519 or ES256. When a request carries more than one signature,
 the signer writes the complete Signature-Key dictionary before creating any
 signature, and each signature covers that field. The verifier still checks
 one selected label. A client that reads `Accept-Signature-Scheme` or
@@ -95,8 +95,8 @@ ephemeral confirmation key. `sign_request` does not keep this table. A
 metadata and JWKS. The library builds `{iss}/.well-known/{dwk}` and does not
 fetch it or the JWKS. `iss` is a bare HTTPS origin. `issuer` must equal
 `iss`. The header `kid` selects the issuer key, that key's `alg` must equal
-the header `alg`, and both the issuer key and `cnf.jwk` are Ed25519. When
-either claim is absent, the host supplies the Ed25519 issuer key itself.
+the header `alg`, and both the issuer key and `cnf.jwk` are Ed25519 or ES256.
+When either claim is absent, the host supplies that issuer key itself.
 Direct
 agent identity still accepts only `jwt`. A `keyid` parameter is accepted only when it equals
 the `kid` carried by that Signature-Key member; the key still comes from
@@ -286,8 +286,9 @@ See [CONFORMANCE.md](CONFORMANCE.md) and [INTERPRETATIONS.md](INTERPRETATIONS.md
 Full R3 compliance is postponed by vocabulary; general media/service vocabularies
 can grow on demand in both implementations, one test at a time. See [CONFORMANCE.md](CONFORMANCE.md).
 
-Underlying standards: RFC 7515 (compact JWS), RFC 7517 (JWK), RFC 7638
-(thumbprints), RFC 8032/8037 (Ed25519), RFC 9421 (HTTP Message Signatures),
+Underlying standards: RFC 7515 (compact JWS), RFC 7517 (JWK), RFC 7518
+(ES256), RFC 7638 (thumbprints), RFC 8032/8037 (Ed25519), RFC 5958 (PKCS #8
+keys), RFC 9421 (HTTP Message Signatures),
 RFC 9651 (Structured Fields), RFC 9864 (fully specified `Ed25519`).
 
 The HTTP profile requires `@method`, `@authority`, `@path`, `signature-key` and

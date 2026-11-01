@@ -8,7 +8,8 @@
 //! bind the response to the request it answers.
 use super::{
     DERIVED_COMPONENTS, Error, KeyMaterial, MAX_BODY_BYTES, RequestSignature, canonical_authority,
-    content_digest, field_component, field_value, key_identifier, parse_key, signature_member,
+    content_digest, field_component, field_value, key_identifier, parse_key, scheme_accepts,
+    signature_member,
 };
 use aauth_rust_jose::{Jwk, SigningKey};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -71,6 +72,8 @@ impl Component {
 /// component, or a listed field that neither message carries.
 /// [`Error::BodyTooLarge`] above 1 MiB, [`Error::InvalidClock`] for a clock
 /// outside the profile, and the key-material errors of request signing.
+/// [`Error::SigningFailed`] when the key's external signer fails; the
+/// response then carries no `Signature` field.
 pub fn sign_response(
     response: &mut Response<Vec<u8>>,
     request: &Request<Vec<u8>>,
@@ -140,7 +143,9 @@ pub fn sign_response(
         return Err(Error::InvalidInput);
     };
     let base = response_base(response, request, inner)?;
-    let signature = format!("sig=:{}:", STANDARD.encode(key.sign(&base)));
+    response.headers_mut().remove("signature");
+    let signature = key.sign(&base).map_err(|_| Error::SigningFailed)?;
+    let signature = format!("sig=:{}:", STANDARD.encode(signature));
     response.headers_mut().insert(
         "signature",
         signature.parse().map_err(|_| Error::InvalidInput)?,
@@ -309,11 +314,7 @@ impl PreparedResponse {
     /// # Errors
     /// Returns algorithm or key errors, or `InvalidSignature` for a bad signature.
     pub fn verify(&self, key: &Jwk) -> Result<(), Error> {
-        let allowed = match &self.key {
-            KeyMaterial::Hwk(header) => header.alg == key.alg,
-            _ => key.alg == "Ed25519",
-        };
-        if !allowed {
+        if !scheme_accepts(&self.key, key) {
             return Err(Error::UnsupportedAlgorithm);
         }
         key.verify(&self.base, &self.signature)

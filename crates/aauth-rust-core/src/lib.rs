@@ -77,9 +77,9 @@ pub enum TokenError {
     /// Metadata or issuance issuer does not equal the expected identifier.
     IssuerMismatch,
     #[error(
-        "unsupported or missing JWK/JWS alg: this implementation requires the fully specified Ed25519 algorithm"
+        "unsupported or missing JWK/JWS alg: AAuth tokens and their keys use the fully specified Ed25519 or ES256 algorithm"
     )]
-    /// The algorithm is absent or outside the fully specified Ed25519 profile.
+    /// The algorithm is absent or outside the token profile: Ed25519 or ES256.
     UnsupportedAlgorithm,
     #[error(
         "issuer must be a lowercase https:// DNS name with no port, path, trailing slash, query, fragment, userinfo or IP literal"
@@ -114,7 +114,7 @@ pub enum TokenError {
     #[error("kid must be a non-empty string naming the issuer's signing key in its JWKS")]
     InvalidKeyId,
     #[error(
-        "invalid public key or JWKS: check JSON, a unique selected kid, OKP/Ed25519 shape, public-only key members and canonical key bytes"
+        "invalid public key or JWKS: check JSON, a unique selected kid, an OKP Ed25519 or EC P-256 shape matching alg, public-only key members and canonical key bytes"
     )]
     /// Selected public key or JWKS is malformed or ambiguous.
     InvalidKey,
@@ -133,6 +133,12 @@ pub enum TokenError {
         "unexpected JWT typ: present the token type this verifier expects, such as aa-agent+jwt for an Agent token"
     )]
     UnexpectedTokenType,
+    /// The issuer's signing key could not sign: an external signer failed or
+    /// returned a signature its public key does not verify. Nothing was minted.
+    #[error(
+        "token signing failed: the issuer key's external signer failed or returned a signature its public key does not verify"
+    )]
+    SigningFailed,
 }
 impl TokenError {
     /// Stable protocol code. Display is intended for local developer diagnostics.
@@ -157,13 +163,15 @@ impl TokenError {
             Self::InvalidKey | Self::UntrustedIssuer | Self::InvalidDiscoveryMetadata => {
                 "invalid_key"
             }
+            Self::SigningFailed => "server_error",
         }
     }
 }
-/// Confirmation and issuer keys used outside `hwk` are Ed25519.
-pub(crate) fn require_ed25519(jwk: &Jwk) -> Result<(), TokenError> {
+/// Token issuer keys and `cnf.jwk` confirmation keys use the compact JWS
+/// profile: Ed25519 or ES256.
+pub(crate) fn require_token_key(jwk: &Jwk) -> Result<(), TokenError> {
     jwk.validate()?;
-    if jwk.alg == "Ed25519" {
+    if aauth_rust_jose::JWS_ALGORITHMS.contains(&jwk.alg.as_str()) {
         Ok(())
     } else {
         Err(TokenError::UnsupportedAlgorithm)
@@ -175,6 +183,7 @@ impl From<aauth_rust_jose::Error> for TokenError {
         match e {
             aauth_rust_jose::Error::UnsupportedAlgorithm => Self::UnsupportedAlgorithm,
             aauth_rust_jose::Error::InvalidKey => Self::InvalidKey,
+            aauth_rust_jose::Error::Signer(_) => Self::SigningFailed,
             _ => Self::InvalidJwt,
         }
     }
@@ -274,7 +283,7 @@ impl AgentClaims {
                 return Err(TokenError::InvalidJwt);
             }
         }
-        crate::require_ed25519(&self.cnf.jwk)?;
+        crate::require_token_key(&self.cnf.jwk)?;
         Ok(())
     }
 }

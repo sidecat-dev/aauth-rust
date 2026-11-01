@@ -72,7 +72,7 @@ pub enum Error {
     /// The selected key-conveyance scheme is not accepted.
     UnsupportedScheme,
     #[error(
-        "unsupported or missing key alg: use Ed25519, ES256, ES384, RS256, or PS256; algorithms are not inferred from key shape"
+        "unsupported or missing key alg: AAuth keys and tokens use Ed25519 or ES256, an hwk key may also be ES384, RS256 or PS256 and an x509 key ES384; algorithms are not inferred from key shape"
     )]
     /// The key algorithm is absent or unsupported.
     UnsupportedAlgorithm,
@@ -130,6 +130,12 @@ pub enum Error {
     #[error("Signature-Key cache identifier could not be resolved: resend the assertion in full")]
     /// The cache identifier is unknown, evicted, or failed to open.
     CacheMiss,
+    #[error(
+        "signing failed: the signing key's external signer failed or returned a signature its public key does not verify; nothing was signed"
+    )]
+    /// Local to the signer: its key could not sign. No verifier answers with
+    /// it; `code` is the `invalid_signature` of a message left unsigned.
+    SigningFailed,
 }
 impl Error {
     /// Stable Signature-Error code; Display is a local explanation.
@@ -140,7 +146,8 @@ impl Error {
             | Self::InvalidUri
             | Self::InvalidClock
             | Self::UnsupportedKeyId
-            | Self::TargetMismatch => "invalid_signature",
+            | Self::TargetMismatch
+            | Self::SigningFailed => "invalid_signature",
             Self::InvalidInput => "invalid_input",
             Self::BodyTooLarge => "invalid_request",
             Self::ClockSkew => "clock_skew",
@@ -215,9 +222,13 @@ pub enum KeyMaterial {
     },
 }
 
-/// Algorithms an `hwk` member may name. Compact JWS and the `jwt`, `jkt-jwt`,
-/// `self-jwt`, `jwks`, and `jwks_uri` schemes accept only Ed25519. Resource,
-/// person server, and access server advertise only Ed25519.
+/// Algorithms an `hwk` member may name, in preference order.
+///
+/// Other schemes accept fewer. An `x509` certificate key is Ed25519, ES256 or
+/// ES384. A key the `jwt`, `jwks_uri`, `jwks` or `self-jwt` scheme resolves
+/// is in [`aauth_rust_jose::JWS_ALGORITHMS`]: Ed25519 or ES256, the
+/// algorithms of compact JWS and so of AAuth tokens. `jkt-jwt` and `cached`
+/// keys are Ed25519.
 pub const ACCEPTED_SIGNATURE_ALGS: &[&str] = &["Ed25519", "ES256", "ES384", "RS256", "PS256"];
 
 /// `Accept-Signature-Alg` value for the `hwk` algorithm set, in preference order.
@@ -225,10 +236,32 @@ pub fn accept_signature_alg_header() -> String {
     ACCEPTED_SIGNATURE_ALGS.join(", ")
 }
 
-/// `Accept-Signature-Alg` value sent by the Resource, Person Server, and Access Server.
-/// Those roles accept Ed25519 proofs only.
+/// `Accept-Signature-Alg` value sent by the AAuth roles: the Resource, Person
+/// Server and Access Server, and the Events endpoints of an Agent Provider
+/// and a Resource. They verify `jwt`, `jwks_uri` and, for event deliveries,
+/// `self-jwt` keys, so the value names exactly
+/// [`aauth_rust_jose::JWS_ALGORITHMS`]: Ed25519 and ES256.
 pub fn role_signature_alg_header() -> &'static str {
-    "Ed25519"
+    "Ed25519, ES256"
+}
+
+/// Whether the key a selected member resolves to has an algorithm this
+/// verifier accepts for that scheme.
+pub(crate) fn scheme_accepts(material: &KeyMaterial, key: &Jwk) -> bool {
+    match material {
+        KeyMaterial::Hwk(header) => header.alg == key.alg,
+        KeyMaterial::X509 { .. } => matches!(key.alg.as_str(), "Ed25519" | "ES256" | "ES384"),
+        KeyMaterial::Jwt { .. }
+        | KeyMaterial::JwksUri { .. }
+        | KeyMaterial::Jwks { .. }
+        | KeyMaterial::SelfJwt { .. } => {
+            aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str())
+        }
+        // `jkt-jwt` serves only the Bootstrap key-refresh ceremony, which
+        // this library does not implement, and a cached assertion's seal
+        // holds an Ed25519 confirmation key. Both stay Ed25519.
+        KeyMaterial::JktJwt { .. } | KeyMaterial::Cached { .. } => key.alg == "Ed25519",
+    }
 }
 
 /// Maximum actual content bytes signed or verified by this buffered profile.
@@ -735,15 +768,15 @@ impl PreparedRequest {
     }
     /// Verify the captured request proof with the resolved public key.
     ///
+    /// The key's algorithm must be one the selected scheme accepts: the
+    /// `hwk` member's own, Ed25519, ES256 or ES384 for `x509`, Ed25519 or
+    /// ES256 for `jwt`, `jwks_uri`, `jwks` and `self-jwt`, and Ed25519 for
+    /// `jkt-jwt` and `cached`.
+    ///
     /// # Errors
     /// Returns algorithm/key errors or `InvalidSignature` for a bad proof.
     pub fn verify(&self, key: &Jwk) -> Result<(), Error> {
-        let allowed = match &self.key {
-            KeyMaterial::Hwk(header) => header.alg == key.alg,
-            KeyMaterial::X509 { .. } => matches!(key.alg.as_str(), "Ed25519" | "ES256" | "ES384"),
-            _ => key.alg == "Ed25519",
-        };
-        if !allowed {
+        if !scheme_accepts(&self.key, key) {
             return Err(Error::UnsupportedAlgorithm);
         }
         key.verify(&self.base, &self.signature)
@@ -783,6 +816,8 @@ pub struct RequestSignature<'a> {
 /// Rejects bodies over 1 MiB, non-HTTPS/invalid targets, invalid clocks, malformed
 /// JWT/key material, an inline public key that differs from the signer's key or
 /// algorithm, or `cache` on an assertion without `jti` and `exp` (`invalid_jwt`).
+/// [`Error::SigningFailed`] when the key's external signer fails; the request
+/// then carries no `Signature` field.
 pub fn sign_request(
     req: &mut Request<Vec<u8>>,
     key: &SigningKey,
@@ -912,6 +947,8 @@ pub fn sign_requests_with_components(
         "signature-input",
         input.parse().map_err(|_| Error::InvalidInput)?,
     );
+    // A signature from an earlier signing never stays beside the new input.
+    req.headers_mut().remove("signature");
     let mut signatures = Vec::with_capacity(parts.len());
     for part in parts {
         let inputs = dictionary(req, "signature-input")?;
@@ -919,11 +956,8 @@ pub fn sign_requests_with_components(
             return Err(Error::InvalidInput);
         };
         let base = build_base(req, inner)?;
-        signatures.push(format!(
-            "{}=:{}:",
-            part.label,
-            STANDARD.encode(part.key.sign(&base))
-        ));
+        let signature = part.key.sign(&base).map_err(|_| Error::SigningFailed)?;
+        signatures.push(format!("{}=:{}:", part.label, STANDARD.encode(signature)));
     }
     req.headers_mut().insert(
         "signature",

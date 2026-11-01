@@ -118,7 +118,7 @@ fn unknown_unselected_scheme_does_not_break_selected_proof() {
         "signature",
         format!(
             "sig=:{}:",
-            base64::engine::general_purpose::STANDARD.encode(key.sign(&base))
+            base64::engine::general_purpose::STANDARD.encode(key.sign(&base).unwrap())
         )
         .parse()
         .unwrap(),
@@ -410,7 +410,7 @@ fn resign(req: &mut Request<Vec<u8>>, key: &SigningKey) {
         .to_vec();
     req.headers_mut().insert(
         "signature",
-        format!("sig=:{}:", STANDARD.encode(key.sign(&base)))
+        format!("sig=:{}:", STANDARD.encode(key.sign(&base).unwrap()))
             .parse()
             .unwrap(),
     );
@@ -572,7 +572,7 @@ fn resign_with(req: &mut Request<Vec<u8>>, key: &SigningKey, schemes: &[&str]) {
         .to_vec();
     req.headers_mut().insert(
         "signature",
-        format!("sig=:{}:", STANDARD.encode(key.sign(&base)))
+        format!("sig=:{}:", STANDARD.encode(key.sign(&base).unwrap()))
             .parse()
             .unwrap(),
     );
@@ -2052,17 +2052,36 @@ fn direct_jwks_keeps_the_url_bytes_as_the_signer_identity() {
             .unwrap_err(),
         Error::UnsupportedAlgorithm
     );
-    let mut ec = key.public_jwk();
-    ec.kty = "EC".into();
-    ec.crv = "P-256".into();
-    ec.alg = "ES256".into();
-    ec.y = ec.x.clone();
+    // A direct JWKS key is Ed25519 or ES256; a valid P-384 key is refused.
+    let p384: Jwk = serde_json::from_value(json!({
+        "kty": "EC", "crv": "P-384", "alg": "ES384",
+        "x": "qofKIr6LBTeOscce8yCtdG4dO2KLp5uYWfdB4IJUKjhVAvJdv1UpbDpUXjhydgq3",
+        "y": "NhfeSpYmLG9dnpi_kpLcKfj0Hb0omhR86doxE7XwuMAKYLHOHX6BnXpDHXyQ6g5f",
+    }))
+    .unwrap();
     assert_eq!(
         prepared
-            .verify_jwks(&|_: &str, _: &str| Ok(ec.clone()))
+            .verify_jwks(&|_: &str, _: &str| Ok(p384.clone()))
             .unwrap_err(),
         Error::UnsupportedAlgorithm
     );
+    let es256 = SigningKey::generate_es256();
+    let mut req = request();
+    sign_request(
+        &mut req,
+        &es256,
+        KeyMaterial::Jwks {
+            url: url.into(),
+            kid: kid.into(),
+        },
+        1000,
+    )
+    .unwrap();
+    let identity = PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jwks"])
+        .unwrap()
+        .verify_jwks(&|_: &str, _: &str| Ok(es256.public_jwk()))
+        .unwrap();
+    assert_eq!(identity.key.alg, "ES256");
 }
 
 fn hwk_proof(header: &str, len: usize, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> Request<Vec<u8>> {
@@ -4030,8 +4049,10 @@ fn jwt_discovery_checks_issuer_metadata_before_the_signature() {
         verify_application_jwt(&application, &stranger.public_jwk(), 1_999).unwrap_err(),
         Error::InvalidJwt
     );
+    // The algorithm is checked before the key's shape: ES384 is outside the
+    // token profile.
     let mut ec_confirmation = confirmation.public_jwk();
-    ec_confirmation.alg = "ES256".into();
+    ec_confirmation.alg = "ES384".into();
     let ec_assertion = jwt(
         &issuer,
         json!({
@@ -4045,13 +4066,13 @@ fn jwt_discovery_checks_issuer_metadata_before_the_signature() {
         Error::UnsupportedAlgorithm
     );
     let mut ec_issuer = issuer.public_jwk();
-    ec_issuer.alg = "ES256".into();
+    ec_issuer.alg = "ES384".into();
     assert_eq!(
         verify_application_jwt(&application, &ec_issuer, 1_999).unwrap_err(),
         Error::UnsupportedAlgorithm
     );
     let mut ec_jwks: serde_json::Value = serde_json::from_slice(&jwks).unwrap();
-    ec_jwks["keys"][0]["alg"] = json!("ES256");
+    ec_jwks["keys"][0]["alg"] = json!("ES384");
     assert_eq!(
         verify_discovered_jwt(
             &compact,

@@ -213,7 +213,8 @@ R3, Budgets, Events and Supervision drafts, each with the limits listed in
 [CONFORMANCE.md](CONFORMANCE.md). The Bootstrap draft, which covers how an
 agent enrolls with its provider, is not implemented.
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
-in Go, makes the same choices where the drafts leave room, and is tested
+in Go, makes the same choices where the drafts leave room except for the
+differences listed in [INTERPRETATIONS.md](INTERPRETATIONS.md), and is tested
 against this library.
 
 ## License

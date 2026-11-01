@@ -204,6 +204,57 @@ SPECIFICATIONS.md.
   longer refuse a signature whose length is not 64 bytes before then; `verify`
   checks the length against the resolved key. An ML-DSA-44 signature under a `jwks_uri` member that
   selects an `AKP` key is `unsupported_algorithm`, not `invalid_signature`.
+- **ES256 for tokens and agent keys.** Signature Algorithms (line 2166) has
+  every party MUST support `Ed25519` and SHOULD support `ES256`, RECOMMENDED
+  for hardware keys without Ed25519 (line 2175); Common JWT Claims (line 2298)
+  makes `Ed25519` the RECOMMENDED token `alg`. Compact JWS here signs and
+  verifies `Ed25519` and `ES256`, so both work wherever AAuth conveys a key or
+  a token: Agent, Person, Resource, Auth and Events tokens and their issuer
+  keys, `cnf.jwk`, server keys under `jwks_uri` and `jwks`, `self-jwt`, and
+  response signatures. Ed25519 stays the default. The token profile is exactly
+  those two, the algorithms every party is asked to verify: an `ES384`,
+  `RS256` or `PS256` issuer key, header or `cnf.jwk` is
+  `unsupported_algorithm`, and those keys still sign `hwk` and `x509`
+  requests. The official aauth-go at the crawl pin makes the same choice
+  ("JWS and JWK alg is Ed25519 or ES256"). **Cross-language difference:** the
+  community aauth-go keeps AAuth tokens, compact JWS and the `jwt`, `jwks` and
+  `jwks_uri` keys at Ed25519 (its "Request-key algorithms are an endpoint
+  choice"). That is its current state, not a feature Go built first, so the
+  draft's SHOULD governs here. A Rust ES256 agent, or a token a Rust server
+  signs with an ES256 key, is refused by a Go verifier with
+  `unsupported_algorithm` and `Accept-Signature-Alg: Ed25519`; Ed25519 works
+  across both.
+- **`Accept-Signature-Alg` names `Ed25519, ES256`.** Algorithm Determination
+  (line 225) and Verification (Server) (line 2252) make the header the exact
+  set a verifier accepts. Every role here verifies `jwt` and `jwks_uri` keys,
+  and the Events endpoints also `self-jwt`, all at Ed25519 and ES256, so
+  `role_signature_alg_header()` is `Ed25519, ES256`. Left open: a Resource
+  built `with_further_schemes` hands those requests to its host as
+  `Decision::OtherScheme`, and the host's own verification decides which
+  algorithms they take. The library does not know that set, so its refusals
+  still name the AAuth set, which is narrower than an `hwk` or `x509` scheme
+  the host verifies with ES384, RS256 or PS256.
+- **`jkt-jwt` and `cached` stay Ed25519.** Keying Material (line 2196) uses
+  `jkt-jwt` only in the Bootstrap key-refresh ceremony, which this library
+  does not implement. `ServerKeyBinding` correlates on its Ed25519 enclave
+  thumbprint, and a cache identifier's seal holds an Ed25519 confirmation key.
+  Both stay Ed25519 until Bootstrap is implemented: an ES256 `jkt-jwt` is
+  `unsupported_algorithm`, and `CacheRequest` refuses to cache an assertion
+  whose `cnf.jwk` is ES256, so that agent presents its `jwt` in full.
+- **An EC key off its curve is `invalid_key`.** Verification (Server) step 5
+  (line 2248) answers `invalid_key` for a key that cannot be parsed.
+  `Jwk::validate` checks that an EC point lies on its curve, so an ES256
+  `cnf.jwk`, issuer key or external signer key that is not a P-256 point is
+  refused when it is first read, not when a signature fails.
+- **A key that cannot sign.** The drafts do not cover a signer's own failure.
+  A key held by an `ExternalSigner` can fail, and its signature is verified
+  under its public JWK before use, so a keystore that returns DER ECDSA fails
+  locally rather than as `invalid_signature` at the verifier. Minting then
+  fails with `TokenError::SigningFailed`, whose code is the `server_error` of
+  Token Endpoint Error Codes (line 2600); the Person Server, Access Server and
+  `PsAuthorizationResource` answer `500`. Request and response signing fail
+  with the Signature-Key `Error::SigningFailed` and leave no `Signature`
+  field; no verifier sends its code.
 - **`Accept-Signature-Scheme` per endpoint.** Verification (Server) step 4
   (line 2247) names "the schemes the server accepts"; Signature-Key Scheme
   Rejection (line 2266) says the header states what the server accepts from

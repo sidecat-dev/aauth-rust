@@ -285,13 +285,31 @@ selects the HTTP algorithm, so an RSA end entity is still
 ## Sign with ECDSA or RSA keys
 
 `SigningKey::generate()` and `SigningKey::from_seed(seed)` make Ed25519 keys,
-which every AAuth role and token uses. A client of a verifier that accepts other
-algorithms imports its key with `SigningKey::from_pkcs8_der(alg, der)`. `alg`
-is `Ed25519`, `ES256`, `ES384`, `RS256` or `PS256`, and `der` is an unencrypted
+the default for every AAuth role and token. `SigningKey::generate_es256()`
+makes an ES256 key (ECDSA P-256 with SHA-256), which every role and token here
+also accepts: compact JWS, Agent, Person, Resource, Auth and Events tokens,
+`cnf.jwk`, and server keys under `jwks_uri` and `jwks`. Each role answers
+`unsupported_algorithm` with `Accept-Signature-Alg: Ed25519, ES256`. Other
+keys are imported with `SigningKey::from_pkcs8_der(alg, der)`. `alg` is
+`Ed25519`, `ES256`, `ES384`, `RS256` or `PS256`, and `der` is an unencrypted
 PKCS #8 key, the body of a `PRIVATE KEY` PEM block. The algorithm is always
 explicit, because an RSA key names neither padding nor hash. A key that does not
 match `alg`, or an RSA modulus outside 256 to 512 bytes, is `InvalidKey`.
-`key.algorithm()` names the algorithm the key signs with.
+`key.algorithm()` names the algorithm the key signs with, and
+`key.export_pkcs8_der()` writes an in-memory key out in the form
+`from_pkcs8_der` reads; the exported bytes are zeroized when dropped.
+
+A key that a platform keystore, HSM, secure enclave or remote service holds
+signs through `SigningKey::external(signer)`, where `signer` implements
+`ExternalSigner`: `public_jwk()` returns its public key with a fully specified
+`alg`, and `sign(message)` returns the JWS-form signature, the fixed-size
+`R || S` for ECDSA rather than DER. The public key is validated like any
+other, and each signature is verified under it before use. Such a key signs
+everything an in-memory key does, including tokens when it is Ed25519 or
+ES256. It cannot be exported (`NotExportable`). Signing can fail, and then
+nothing is sent: `SigningKey::sign` and `Jws::sign` return `Error::Signer`,
+token minting returns `TokenError::SigningFailed`, and request and response
+signing return the Signature-Key `Error::SigningFailed`.
 
 Sign an `hwk` request with `sign_request(&mut request, &key,
 KeyMaterial::Hwk(key.public_jwk()), now)`. The member carries the members of
@@ -301,9 +319,11 @@ not the signing key under its own algorithm is `InvalidKey` before anything is
 sent. `jwk.thumbprint()` is the RFC 7638 thumbprint of an OKP, EC or RSA key;
 `urn:jkt:sha-256:` followed by it names a pseudonymous signer, and an RSA key has
 one thumbprint under RS256 and PS256. The same key signs an `x509` request whose
-certificate holds it. Compact JWS stays Ed25519: `Jws::sign` refuses another key
-with `UnsupportedAlgorithm`. AAuth tokens and their confirmation keys, and the
-`jkt-jwt` and `self-jwt` assertions, stay Ed25519, and `ServerKeyBinding`
+certificate holds it. Compact JWS is Ed25519 or ES256, with the header `alg`
+naming the key's own algorithm: `Jws::sign` refuses an ES384, RS256 or PS256
+key, or a header naming another algorithm, with `UnsupportedAlgorithm`. AAuth
+tokens, their confirmation keys and `self-jwt` assertions follow it. The
+`jkt-jwt` scheme and the assertion cache stay Ed25519, and `ServerKeyBinding`
 admits Ed25519 pseudonym keys only.
 
 ## Request a Signature-Key cache identifier
@@ -1227,7 +1247,7 @@ route, not a standardized AP bootstrap endpoint supplied by the library. It uses
 `AgentIdentityResource::for_origin` to verify the parent's actual issuer token
 and HTTP proof. Its explicit host policy allows the configured top-level parent
 only. The signed JSON body must contain exactly `discriminator` and `jwk`, fit
-within 2 KiB, and contain a public-only Ed25519 key distinct from the parent's.
+within 2 KiB, and contain a public-only Ed25519 or ES256 key distinct from the parent's.
 The discriminator has a 32-byte ASCII syntax limit and this fixture approves
 only the `worker` slot. The host constructs all child claims; caller-supplied
 parent, issuer, lifetime or posture claims are not accepted or inherited:

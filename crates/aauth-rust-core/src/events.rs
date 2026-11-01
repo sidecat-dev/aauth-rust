@@ -74,7 +74,7 @@ impl SubscribeClaims {
     /// Rejects an invalid issuer, Agent or Resource identifier, an Agent
     /// outside the issuer's domain, a wrong `dwk`, an empty `eid` or `jti`,
     /// `exp` not after `iat`, `max_uses` of zero, a reserved extra member or a
-    /// confirmation key that is not a public Ed25519 key.
+    /// confirmation key that is not a public Ed25519 or ES256 key.
     pub fn validate(&self) -> Result<(), TokenError> {
         validate_server_identifier(&self.iss)?;
         if self.dwk != SUBSCRIBE_TOKEN_DOCUMENT {
@@ -98,7 +98,7 @@ impl SubscribeClaims {
                 "iss", "dwk", "sub", "aud", "cnf", "eid", "jti", "iat", "exp", "max_uses",
             ],
         )?;
-        crate::require_ed25519(&self.cnf.jwk)
+        crate::require_token_key(&self.cnf.jwk)
     }
 }
 

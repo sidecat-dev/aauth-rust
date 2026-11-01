@@ -95,17 +95,13 @@ The claims:
 
 ## When the agent and the provider are separate programs
 
-The agent's private key never goes to the provider. The agent loads its key,
+The agent's private key never goes to the provider. The agent makes its key,
 sends the provider only the public half, `public_jwk()`, which is plain JSON,
-and keeps the token it gets back. A `SigningKey` cannot be written out: it has
-no method that returns the private key. So create the key outside the program,
-as a PKCS #8 file, and load it each time the agent starts:
+and keeps the token it gets back. The token names that key, so the agent keeps
+the key too: `export_pkcs8_der()` writes it out as PKCS #8 DER, and
+`SigningKey::from_pkcs8_der(algorithm, &der)` loads it each time the agent
+starts.
 
-```sh
-openssl genpkey -algorithm ed25519 -outform DER -out agent-key.der
-```
-
-<!-- checked: pkcs8-prefix -->
 ```rust
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
@@ -113,19 +109,17 @@ use aauth_rust_core::{AgentClaims, Confirmation};
 use aauth_rust_jose::{Jwk, SigningKey};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// An Ed25519 key in PKCS #8 DER: the test key from RFC 8410. Read yours from
-/// the file instead: `std::fs::read("agent-key.der")?`.
-const AGENT_KEY_DER: [u8; 48] = [
-    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
-    0xd4, 0xee, 0x72, 0xdb, 0xf9, 0x13, 0x58, 0x4a, 0xd5, 0xb6, 0xd8, 0xf1, 0xf7, 0x69, 0xf8, 0xad,
-    0x3a, 0xfe, 0x7c, 0x28, 0xcb, 0xf1, 0xd4, 0xfb, 0xe0, 0x97, 0xa8, 0x8f, 0x44, 0x75, 0x58, 0x42,
-];
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-    // The agent program: load its key, and send the public half to enroll.
-    let key = SigningKey::from_pkcs8_der("Ed25519", &AGENT_KEY_DER)?;
+    // The agent program, first start: make a key and save it. Write the bytes
+    // where only the agent can read them, such as
+    // std::fs::write("agent-key.der", saved.as_bytes())?. They are wiped from
+    // memory when `saved` is dropped.
+    let key = SigningKey::generate();
+    let saved = key.export_pkcs8_der()?;
+    let algorithm = key.algorithm(); // "Ed25519"; keep it with the file.
+    // Send only the public half to enroll.
     let enrollment = serde_json::to_string(&key.public_jwk())?;
 
     // The provider program: it receives only the public key.
@@ -145,12 +139,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         extra: Default::default(),
     })?;
 
-    // The agent program, started again: the same key file and the token it
-    // stored. Agent::new checks that the token names this key.
-    let agent = Agent::new(
-        SigningKey::from_pkcs8_der("Ed25519", &AGENT_KEY_DER)?,
-        token,
-    )?;
+    // The agent program, started again: the same key, read back with
+    // std::fs::read("agent-key.der")?, and the token it stored.
+    // Agent::new checks that the token names this key.
+    let agent = Agent::new(SigningKey::from_pkcs8_der(algorithm, saved.as_bytes())?, token)?;
     assert_eq!(
         agent.public_jwk().thumbprint()?,
         key.public_jwk().thumbprint()?
@@ -159,9 +151,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The provider's own signing key is loaded the same way. `SigningKey::from_seed`
-takes a 32-byte seed instead, if your key store holds seeds. Keep the key file
-readable only by the program that uses it.
+The provider's own signing key is kept the same way. A key made outside the
+program loads the same way too, for example one from
+`openssl genpkey -algorithm ed25519 -outform DER -out agent-key.der`.
+`SigningKey::from_seed` takes a 32-byte seed instead, if your key store holds
+seeds. Keep the key file readable only by the program that uses it.
+
+### ES256 and keys you cannot export
+
+Agent tokens and the keys they name are Ed25519 by default, and may be ES256
+(ECDSA on P-256 with SHA-256) instead: `SigningKey::generate_es256()` makes
+one, and `from_pkcs8_der("ES256", &der)` loads one. ES256 suits platforms
+whose secure hardware has no Ed25519. Servers in this library accept both and
+say so in `Accept-Signature-Alg: Ed25519, ES256`; another implementation may
+accept only Ed25519, so use ES256 where the parties you talk to accept it.
+
+A key in a platform keystore, an HSM, a secure enclave or a remote signing
+service never leaves it. Implement `ExternalSigner` for it, returning its
+public JWK and signing the bytes it is given, and wrap it with
+`SigningKey::external(signer)`. The result works wherever a `SigningKey` does:
+as the agent's key, and as the provider's. Its `export_pkcs8_der()` refuses
+with `NotExportable`, and a failure of the signer makes `issue` or
+`agent.sign` fail with `SigningFailed`.
 
 ## What your service supplies
 

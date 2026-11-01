@@ -38,6 +38,10 @@ pub enum Error {
     /// The host ledger file could not be read or replaced. The wire is unchanged.
     #[error("budget ledger file is unavailable")]
     Unavailable,
+    /// The resource's signing key could not sign: its external signer failed
+    /// or returned a signature its public key does not verify.
+    #[error("usage response signing failed")]
+    Signing,
 }
 
 /// One non-negative budget amount in a resource-selected unit and scale.

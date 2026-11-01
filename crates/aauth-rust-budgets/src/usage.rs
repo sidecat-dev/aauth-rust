@@ -488,7 +488,8 @@ pub fn usage_signature_covers(signature_input: &str) -> bool {
 /// `content-digest`, and the request `@authority` and `@path`.
 ///
 /// # Errors
-/// Returns [`Error::Malformed`] when `created` is negative or the path is empty.
+/// Returns [`Error::Malformed`] when `created` is negative or the path is empty,
+/// and [`Error::Signing`] when the key's external signer fails.
 pub fn sign_usage_response(
     key: &SigningKey,
     issuer: &str,
@@ -508,7 +509,7 @@ pub fn sign_usage_response(
     let base = format!(
         "\"@status\": 200\n\"content-type\": application/json\n\"content-digest\": {content_digest}\n\"@authority\";req: {authority}\n\"@path\";req: {path}\n\"@signature-params\": {params}"
     );
-    let signature = STANDARD.encode(key.sign(base.as_bytes()));
+    let signature = STANDARD.encode(key.sign(base.as_bytes()).map_err(|_| Error::Signing)?);
     Ok(SignedUsage {
         body: body.to_vec(),
         content_digest,

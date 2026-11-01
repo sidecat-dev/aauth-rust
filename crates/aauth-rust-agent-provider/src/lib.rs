@@ -19,7 +19,9 @@ pub struct AgentProvider {
     display: MetadataDisplay,
 }
 impl AgentProvider {
-    /// Configure the issuer identity, public JWKS kid and caller-owned signing key.
+    /// Configure the issuer identity, public JWKS kid and caller-owned signing
+    /// key. Agent tokens are compact JWS, so the key is Ed25519 or ES256, held
+    /// in this process or by an [`aauth_rust_jose::ExternalSigner`].
     ///
     /// # Errors
     /// Rejects a noncanonical server identifier or empty kid.
@@ -50,7 +52,9 @@ impl AgentProvider {
     ///
     /// # Errors
     /// Rejects malformed claims, a different issuer, nonpositive or over-24-hour
-    /// lifetime, sub-agent issuance, or token serialization/signing errors.
+    /// lifetime, sub-agent issuance, or token serialization/signing errors:
+    /// `UnsupportedAlgorithm` for a key that is not Ed25519 or ES256, and
+    /// `SigningFailed` when an external signer fails.
     pub fn issue(&self, claims: &AgentClaims) -> Result<String, TokenError> {
         self.validate_issuance(claims)?;
         if claims.parent_agent.is_some()
@@ -100,7 +104,7 @@ impl AgentProvider {
     }
     fn sign(&self, claims: &AgentClaims) -> Result<String, TokenError> {
         Jws::sign(
-            &json!({"alg":"Ed25519","typ":"aa-agent+jwt","kid":self.kid}),
+            &json!({"alg":self.key.algorithm(),"typ":"aa-agent+jwt","kid":self.kid}),
             &serde_json::to_vec(claims).map_err(|_| TokenError::InvalidJwt)?,
             &self.key,
         )

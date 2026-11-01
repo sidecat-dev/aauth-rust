@@ -1,4 +1,4 @@
-use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
+use aauth_rust_jose::{ExternalSigner, Jwk, Jws, SigningKey, strict_json};
 use serde_json::json;
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -19,13 +19,14 @@ fn rfc8032_empty_message_vector() {
         "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
     );
     assert_eq!(
-        key.sign(b"").as_slice(),
+        key.sign(b"").unwrap().as_slice(),
         unhex(
             "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
         )
     );
-    key.public_jwk().verify(b"", &key.sign(b"")).unwrap();
-    assert!(key.public_jwk().verify(b"changed", &key.sign(b"")).is_err());
+    let signature = key.sign(b"").unwrap();
+    key.public_jwk().verify(b"", &signature).unwrap();
+    assert!(key.public_jwk().verify(b"changed", &signature).is_err());
 }
 
 #[test]
@@ -270,7 +271,10 @@ fn pkcs8_keys_sign_only_under_their_own_algorithm() {
     ed25519.extend_from_slice(&seed);
     let imported = SigningKey::from_pkcs8_der("Ed25519", &ed25519).unwrap();
     assert_eq!(imported.algorithm(), "Ed25519");
-    assert_eq!(imported.sign(b"m"), SigningKey::from_seed(seed).sign(b"m"));
+    assert_eq!(
+        imported.sign(b"m").unwrap(),
+        SigningKey::from_seed(seed).sign(b"m").unwrap()
+    );
 
     let es256 = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng)
         .to_pkcs8_der()
@@ -287,7 +291,7 @@ fn pkcs8_keys_sign_only_under_their_own_algorithm() {
         assert_eq!(key.algorithm(), alg);
         assert_eq!((jwk.kty.as_str(), jwk.crv.as_str()), ("EC", crv));
         assert_eq!(jwk.alg, alg);
-        let signature = key.sign(b"signature base");
+        let signature = key.sign(b"signature base").unwrap();
         assert_eq!(signature.len(), len);
         jwk.verify(b"signature base", &signature).unwrap();
         assert!(jwk.verify(b"other base", &signature).is_err());
@@ -296,6 +300,34 @@ fn pkcs8_keys_sign_only_under_their_own_algorithm() {
             Err(UnsupportedAlgorithm)
         ));
     }
+
+    // Compact JWS, the token profile, is Ed25519 or ES256. An ES256 key signs
+    // under its own header only; a P-384 key is refused even under its own.
+    let es256_key = SigningKey::from_pkcs8_der("ES256", es256.as_bytes()).unwrap();
+    let compact = Jws::sign(&json!({"alg": "ES256", "kid": "k"}), b"{}", &es256_key).unwrap();
+    let parsed = Jws::parse(&compact).unwrap();
+    parsed.verify(&es256_key.public_jwk()).unwrap();
+    assert!(matches!(
+        parsed.verify(&SigningKey::from_seed(seed).public_jwk()),
+        Err(UnsupportedAlgorithm)
+    ));
+    assert!(matches!(
+        Jws::sign(&json!({"alg": "ES256"}), b"{}", &imported),
+        Err(UnsupportedAlgorithm)
+    ));
+    let es384_key = SigningKey::from_pkcs8_der("ES384", es384.as_bytes()).unwrap();
+    assert!(matches!(
+        Jws::sign(&json!({"alg": "ES384"}), b"{}", &es384_key),
+        Err(UnsupportedAlgorithm)
+    ));
+    let header = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        br#"{"alg":"ES384"}"#,
+    );
+    assert!(matches!(
+        Jws::parse(&format!("{header}.e30.AAAA")),
+        Err(UnsupportedAlgorithm)
+    ));
 
     for (alg, der) in [
         ("ES384", es256.as_bytes()),
@@ -317,5 +349,115 @@ fn pkcs8_keys_sign_only_under_their_own_algorithm() {
             ),
             "{alg}"
         );
+    }
+}
+
+/// A keystore stand-in: it holds its key and signs on request, the way a
+/// platform keystore, HSM or remote service would.
+struct Keystore {
+    key: SigningKey,
+    public: Jwk,
+    answer: Answer,
+}
+enum Answer {
+    Sign,
+    Der,
+    Fail,
+}
+impl Keystore {
+    fn new(key: SigningKey, answer: Answer) -> Self {
+        let public = key.public_jwk();
+        Self {
+            key,
+            public,
+            answer,
+        }
+    }
+}
+impl ExternalSigner for Keystore {
+    fn public_jwk(&self) -> Jwk {
+        self.public.clone()
+    }
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        match self.answer {
+            Answer::Sign => Ok(self.key.sign(message)?),
+            // An ECDSA keystore that returns DER instead of R || S.
+            Answer::Der => {
+                let raw = self.key.sign(message)?;
+                let signature = p256::ecdsa::Signature::from_slice(&raw)?;
+                Ok(signature.to_der().as_bytes().to_vec())
+            }
+            Answer::Fail => Err("device unavailable".into()),
+        }
+    }
+}
+
+#[test]
+fn an_external_signer_signs_jws_without_exporting_its_key() {
+    use aauth_rust_jose::Error::{InvalidKey, NotExportable, Signer, UnsupportedAlgorithm};
+
+    let mut public = SigningKey::generate_es256().public_jwk();
+    let held =
+        SigningKey::external(Keystore::new(SigningKey::generate_es256(), Answer::Sign)).unwrap();
+    assert_eq!(held.algorithm(), "ES256");
+    let compact = Jws::sign(&json!({"alg": "ES256", "kid": "hsm-1"}), b"{}", &held).unwrap();
+    Jws::parse(&compact)
+        .unwrap()
+        .verify(&held.public_jwk())
+        .unwrap();
+    assert!(matches!(held.export_pkcs8_der(), Err(NotExportable)));
+
+    // A signature that does not verify under the signer's public key, such as
+    // DER, and a failed device both fail the signing, never the verifier.
+    for answer in [Answer::Der, Answer::Fail] {
+        let broken =
+            SigningKey::external(Keystore::new(SigningKey::generate_es256(), answer)).unwrap();
+        assert!(matches!(broken.sign(b"base"), Err(Signer(_))));
+        assert!(matches!(
+            Jws::sign(&json!({"alg": "ES256"}), b"{}", &broken),
+            Err(Signer(_))
+        ));
+    }
+
+    // The public JWK is validated like any other, and extra members are dropped.
+    let claiming = |public: Jwk| Keystore {
+        public,
+        ..Keystore::new(SigningKey::generate_es256(), Answer::Sign)
+    };
+    public.extra.insert("kid".into(), json!("hsm-1"));
+    let named = SigningKey::external(claiming(public.clone())).unwrap();
+    assert!(named.public_jwk().extra.is_empty());
+    let mut off_curve = public.clone();
+    off_curve.y = off_curve.x.clone();
+    assert!(matches!(
+        SigningKey::external(claiming(off_curve)),
+        Err(InvalidKey)
+    ));
+    let mut private = public;
+    private.extra.insert("d".into(), json!("secret"));
+    assert!(matches!(
+        SigningKey::external(claiming(private)),
+        Err(InvalidKey)
+    ));
+    let mut polymorphic = SigningKey::generate().public_jwk();
+    polymorphic.alg = "EdDSA".into();
+    assert!(matches!(
+        SigningKey::external(claiming(polymorphic)),
+        Err(UnsupportedAlgorithm)
+    ));
+}
+
+#[test]
+fn an_exported_key_imports_as_the_same_key() {
+    for key in [SigningKey::generate(), SigningKey::generate_es256()] {
+        let exported = key.export_pkcs8_der().unwrap();
+        let imported = SigningKey::from_pkcs8_der(key.algorithm(), exported.as_bytes()).unwrap();
+        assert_eq!(
+            imported.public_jwk().thumbprint().unwrap(),
+            key.public_jwk().thumbprint().unwrap()
+        );
+        let signature = imported.sign(b"base").unwrap();
+        key.public_jwk().verify(b"base", &signature).unwrap();
+        assert!(!format!("{exported:?}").contains(&format!("{:?}", exported.as_bytes())));
     }
 }
