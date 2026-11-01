@@ -117,8 +117,12 @@ pub struct AuthorizationRequest {
     /// identifier and equals the presented token's. The issued Auth token
     /// carries it. Mission content and history stay with the Person Server.
     pub resource: VerifiedResourceToken,
-    /// Nonempty distinct requested Core scope values.
+    /// Nonempty distinct requested Core scope values: the Resource token's, or
+    /// the narrower `scope` the Person Server sent.
     pub scopes: Vec<String>,
+    /// The latest `exp` the Person Server allows, from its `exp` member. The
+    /// issued Auth token, and any wait for it, end no later.
+    pub expires_at: Option<i64>,
     /// Budget the person server asked to grant. `None` means issue no budget claim.
     pub budget: Option<Budget>,
     /// Verified `upstream_token` when an intermediary chains this request. It
@@ -407,6 +411,8 @@ impl<
                 "resource_token",
                 "presented_token",
                 "upstream_token",
+                "scope",
+                "exp",
             ]
             .contains(&k.as_str());
             let budget = self.budgets.is_some() && k == "budget";
@@ -486,12 +492,14 @@ impl<
         presented.matches(r)?;
         let requested_scopes = scopes(r.scope.as_deref().unwrap_or(""))
             .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
+        let (requested_scopes, expires_at) = narrowing(object, requested_scopes, now)?;
         let context = AuthorizationRequest {
             person_server: id.to_owned(),
             agent: agent.clone(),
             subagent,
             resource: resource.clone(),
             scopes: requested_scopes,
+            expires_at,
             budget: parameter,
             upstream,
         };
@@ -607,6 +615,9 @@ impl<
             expires_at = expires_at.min(upstream.expires_at());
         }
         if let Some(end) = self.budgets.as_ref().and_then(|policy| policy.period_end) {
+            expires_at = expires_at.min(end);
+        }
+        if let Some(end) = context.expires_at {
             expires_at = expires_at.min(end);
         }
         let claims = AuthClaims {
@@ -758,6 +769,38 @@ fn current(now: i64, context: &AuthorizationRequest, p: &Presented) -> Result<()
         return Err(Failure::parameter("expired_upstream_token"));
     }
     Ok(())
+}
+/// The narrowing a Person Server passes on from a supervision server's
+/// `allow` (Supervision, Auth Token): `scope`, a nonempty subset of the
+/// Resource token's scopes that replaces them, and `exp`, a NumericDate after
+/// the request that ends the token. Either may be absent; anything else in
+/// them is `invalid_request`.
+fn narrowing(
+    body: &serde_json::Map<String, Value>,
+    requested: Vec<String>,
+    now: i64,
+) -> Result<(Vec<String>, Option<i64>), Failure> {
+    let invalid = || Failure::parameter("invalid_request");
+    let scopes = match body.get("scope") {
+        None => requested,
+        Some(value) => {
+            let narrowed = value.as_str().and_then(scopes).ok_or_else(invalid)?;
+            if narrowed.iter().any(|scope| !requested.contains(scope)) {
+                return Err(invalid());
+            }
+            narrowed
+        }
+    };
+    let expires_at = match body.get("exp") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_i64()
+                .filter(|exp| *exp > now)
+                .ok_or_else(invalid)?,
+        ),
+    };
+    Ok((scopes, expires_at))
 }
 fn check_iat(iat: i64, now: i64) -> Result<(), Failure> {
     if iat > now.saturating_add(60) {

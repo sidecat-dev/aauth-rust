@@ -312,8 +312,9 @@ answers and the record of decisions.
 ## Limits
 
 - A Resource's own sign-in step is refused for a supervised agent.
-- In four-party access the Access Server takes no narrowing, so the Person
-  Server refuses its token when it is wider than your `allow`.
+- In four-party access the Person Server sends your narrowing to the Access
+  Server as `scope` and `exp`, and refuses a token wider than your `allow`
+  from an Access Server that ignored them.
 - An R3 request reaches you as an auth token act with its resource token. You
   cannot fetch the R3 document, and an `allow` grants all of its operations:
   answer `ask` when the person should see what the resource says it means.

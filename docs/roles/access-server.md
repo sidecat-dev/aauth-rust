@@ -318,7 +318,10 @@ fn main() -> Result<(), Box<dyn Error>> {
   token has been checked: the Person Server, the agent, the Resource token and
   the requested scopes. Return a `Decision` with a non-empty subset of the
   scopes and a lifetime of at most 3600 seconds, `PolicyError::Denied` for a
-  `403`, or `PolicyError::Unavailable` for a `500`.
+  `403`, or `PolicyError::Unavailable` for a `500`. When a supervision server
+  narrowed the person's approval, the Person Server sends a narrower `scope`
+  and an `exp` with its request: `scopes` is then that narrower set, and the
+  token ends no later than `expires_at`.
 - a clock in Unix seconds, and unique token IDs.
 
 `handle` serves `/.well-known/aauth-access.json`, `/.well-known/jwks.json` and

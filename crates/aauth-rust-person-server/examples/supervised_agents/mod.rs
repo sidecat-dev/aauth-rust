@@ -343,11 +343,14 @@ impl Supervision for Router {
 pub type Ps = PersonServer<Keys, MemoryStore, HostPolicy, BoxedClock, BoxedTokenIds>;
 
 /// The calendar's Access Server, in process. It defers while `defer` is
-/// set, and grants `grant` instead of the requested scopes when it is set.
+/// set. While `ignores_narrowing` is set it stands in for an Access Server
+/// that does not know the `scope` and `exp` members a Person Server sends
+/// with a supervision server's narrowing, and grants what the Resource token
+/// asked for.
 pub struct Access {
     now: Arc<AtomicI64>,
     defer: Arc<AtomicBool>,
-    grant: Arc<Mutex<Option<String>>>,
+    ignores_narrowing: Arc<AtomicBool>,
     pending: Arc<MemoryContinuations>,
     ids: Arc<AtomicUsize>,
 }
@@ -363,15 +366,20 @@ impl aauth_rust_person_server::Federation for Access {
         let mut deferred = aauth_rust_access_server::DeferredConfig::new(self.pending.clone());
         deferred.retry_after = 0;
         let (now, ids, defer) = (self.now.clone(), self.ids.clone(), self.defer.clone());
-        let grant = self.grant.lock().unwrap().clone();
+        let ignored;
+        let request = if self.ignores_narrowing.load(Ordering::SeqCst) && request.method() == "POST"
+        {
+            ignored = without_narrowing(request, self.now.load(Ordering::SeqCst));
+            &ignored
+        } else {
+            request
+        };
         let server = aauth_rust_access_server::AccessServer::new(
             aauth_rust_access_server::Config::new(AS, "as-1", SigningKey::from_seed([6; 32])),
             Keys,
             move |r: &aauth_rust_access_server::AuthorizationRequest| {
                 Ok(aauth_rust_access_server::Decision {
-                    scopes: grant
-                        .as_ref()
-                        .map_or_else(|| r.scopes.clone(), |scope| vec![scope.clone()]),
+                    scopes: r.scopes.clone(),
                     lifetime: 600,
                 })
             },
@@ -392,6 +400,34 @@ impl aauth_rust_person_server::Federation for Access {
     }
 }
 
+/// The Person Server's token request without `scope` and `exp`, signed again
+/// with the Person Server's key, as an Access Server that ignores those
+/// members would read it.
+fn without_narrowing(request: &Request<Vec<u8>>, now: i64) -> Request<Vec<u8>> {
+    let mut body: Value = serde_json::from_slice(request.body()).unwrap();
+    let members = body.as_object_mut().unwrap();
+    members.remove("scope");
+    members.remove("exp");
+    let mut stripped = Request::builder()
+        .method("POST")
+        .uri(request.uri().clone())
+        .header("content-type", "application/json")
+        .body(body.to_string().into_bytes())
+        .unwrap();
+    aauth_rust_signature_key::sign_request(
+        &mut stripped,
+        &SigningKey::from_seed([3; 32]),
+        aauth_rust_signature_key::KeyMaterial::JwksUri {
+            id: PS.into(),
+            dwk: "aauth-person.json".into(),
+            kid: "ps-1".into(),
+        },
+        now,
+    )
+    .unwrap();
+    stripped
+}
+
 /// Everything in one place.
 pub struct World {
     pub now: Arc<AtomicI64>,
@@ -403,8 +439,9 @@ pub struct World {
     pub defer_home: Arc<AtomicBool>,
     /// The Access Server defers while set, in a world built with one.
     pub defer_access: Arc<AtomicBool>,
-    /// The one scope the Access Server grants while set.
-    pub access_grant: Arc<Mutex<Option<String>>>,
+    /// While set, the Access Server ignores the narrowing the Person Server
+    /// sends with a supervision server's `allow`.
+    pub access_ignores_narrowing: Arc<AtomicBool>,
     /// The `expires_at` the person's own server sets on missions it approves.
     pub mission_expiry: Arc<Mutex<Option<String>>>,
     federated: bool,
@@ -526,7 +563,7 @@ impl World {
         let host_decisions = Arc::new(AtomicUsize::new(0));
         let ids = Arc::new(AtomicUsize::new(0));
         let defer_access = Arc::new(AtomicBool::new(false));
-        let access_grant: Arc<Mutex<Option<String>>> = Arc::default();
+        let access_ignores_narrowing = Arc::new(AtomicBool::new(false));
         let clock = now.clone();
         let mut ps = PersonServer::new(
             Config::new(PS, "ps-1", SigningKey::from_seed([3; 32])),
@@ -561,7 +598,7 @@ impl World {
                 .with_federation(Access {
                     now: now.clone(),
                     defer: defer_access.clone(),
-                    grant: access_grant.clone(),
+                    ignores_narrowing: access_ignores_narrowing.clone(),
                     pending: Arc::new(MemoryContinuations::new(1000)),
                     ids: Arc::default(),
                 })
@@ -578,7 +615,7 @@ impl World {
             host_decisions,
             defer_home,
             defer_access,
-            access_grant,
+            access_ignores_narrowing,
             mission_expiry,
             federated,
             mail: agent("mail", 11),

@@ -491,3 +491,59 @@ fn missing_presented_token_is_invalid_request_before_policy() {
     );
     assert_eq!(seen.load(Ordering::SeqCst), 0);
 }
+#[test]
+fn a_person_servers_narrowing_bounds_the_grant() {
+    // Supervision, Auth Token: the Person Server passes an allow's narrower
+    // `scope` and earlier `exp` on, and this Access Server issues within them.
+    let server = AccessServer::new(
+        Config::new(AS, "as", SigningKey::from_seed([4; 32])),
+        Keys,
+        |r: &aauth_rust_access_server::AuthorizationRequest| {
+            Ok(Decision {
+                scopes: r.scopes.clone(),
+                lifetime: 3600,
+            })
+        },
+        || 1000,
+        || "auth-1".into(),
+    )
+    .unwrap();
+    let mut narrowed = good();
+    narrowed["scope"] = json!("read");
+    narrowed["exp"] = json!(1500);
+    let response = server.handle(&request(narrowed));
+    assert_eq!(
+        response.status(),
+        200,
+        "{:?}",
+        String::from_utf8_lossy(response.body())
+    );
+    let value: Value = serde_json::from_slice(response.body()).unwrap();
+    let token = AuthToken::parse(value["auth_token"].as_str().unwrap())
+        .unwrap()
+        .verify(&Keys, 1000)
+        .unwrap();
+    assert_eq!(token.claims().scope.as_deref(), Some("read"));
+    assert_eq!(token.claims().exp, 1500);
+    // A scope outside the Resource token's, an empty one, or an exp that is
+    // not after the request is refused before policy.
+    for (scope, exp) in [
+        (json!("read admin"), json!(1500)),
+        (json!(""), json!(1500)),
+        (json!("read"), json!(1000)),
+        (json!("read"), json!("1500")),
+    ] {
+        let mut refused = good();
+        refused["scope"] = scope.clone();
+        refused["exp"] = exp.clone();
+        let response = server.handle(&request(refused));
+        assert_eq!(
+            (
+                response.status().as_u16(),
+                serde_json::from_slice::<Value>(response.body()).unwrap()["error"].clone()
+            ),
+            (400, json!("invalid_request")),
+            "{scope} {exp}"
+        );
+    }
+}

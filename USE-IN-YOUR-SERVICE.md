@@ -2120,10 +2120,12 @@ called for it. Its resource-initiated interactions are refused with
 asking permission before its first person token, is decided by host policy.
 
 - `allow` proceeds. An auth token takes the SS's narrower `scope`, and every
-  token is capped at its `exp`. The Access Server cannot be told about a
-  four-party narrowing, so its token is checked when it arrives: one wider
-  than the `allow` is refused, `403 access_denied` (or `403 denied` at a
-  poll). A mission proposal's `allow` carries the approved terms: the PS mints
+  token is capped at its `exp`. In four-party access the PS sends the
+  narrowing to the Access Server as `scope` (only when narrower) and `exp`
+  members of the token request; this library's Access Server issues within
+  them. The token is still checked when it arrives: one wider than the
+  `allow`, from an Access Server that ignored the members, is refused,
+  `403 access_denied` (or `403 denied` at a poll). A mission proposal's `allow` carries the approved terms: the PS mints
   the blob with them and answers `200` with `s256` and `mission`.
 - An R3 auth token request is an auth token act like the others. The SS sees
   the request as the agent sent it; it cannot fetch the R3 document. Its

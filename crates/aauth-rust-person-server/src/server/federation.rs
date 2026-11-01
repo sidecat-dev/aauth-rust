@@ -127,6 +127,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(sent) = &sent {
             body["budget"] = sent.to_value();
         }
+        // A supervision server's narrowing goes to the Access Server, which
+        // may apply it (Supervision, Auth Token): `scope` only when narrower
+        // than the Resource token's, `exp` whenever the allow has one. The
+        // delivered token is still checked against it.
+        if let Some(allowed) = allowed {
+            if let Some(scope) = &allowed.scope
+                && (scope.len() != context.scopes.len()
+                    || context.scopes.iter().any(|value| !scope.contains(value)))
+            {
+                body["scope"] = json!(scope.join(" "));
+            }
+            if let Some(exp) = allowed.exp {
+                body["exp"] = json!(exp);
+            }
+        }
         let mut request = Request::builder()
             .method("POST")
             .uri(uri)
@@ -392,7 +407,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 }
             }
         }
-        // A supervision server's narrowing, which the Access Server was not told.
+        // A supervision server's narrowing, which an Access Server that does not
+        // know `scope` and `exp` ignores.
         if let Some(allowed) = allowed {
             allowed.check(&granted, c.exp)?;
         }

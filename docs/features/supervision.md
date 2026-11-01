@@ -127,8 +127,9 @@ them to later acts of the same kind by the same agent.
 ## Limits
 
 - A Resource's own sign-in step is refused for a supervised agent.
-- In four-party access the Access Server is not told about a narrowing: a
-  token wider than the `allow` is refused when it arrives.
+- In four-party access the narrowing goes to the Access Server as `scope` and
+  `exp`. An Access Server that ignores them can issue a wider token, and the
+  Person Server refuses it when it arrives.
 - An `allow` for an R3 request grants every operation of the document; the
   supervision server cannot leave some per call.
 - A mission your service terminates is reported when the Person Server next

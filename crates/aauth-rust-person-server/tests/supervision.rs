@@ -562,13 +562,21 @@ fn a_four_party_request_is_put_to_the_supervisor_before_the_access_server() {
     assert_eq!(reported["jti"], json!(token.unverified_claims().jti));
     assert_eq!(reported["issuer"], world::AS);
 
-    // The Access Server cannot be told about a narrowing, so its token must fit it.
+    // The person's own server narrows to calendar.read until START + 900. The
+    // Person Server passes that to the Access Server, which issues within it.
     world.connect_home();
     world.route(&world.travel, Some(HOME));
-    *world.access_grant.lock().unwrap() = Some("calendar.read".into());
     let fits = world.auth_token(&world.travel, "calendar.read calendar.write");
     assert_eq!(fits.status(), 200, "{}", text(&fits));
-    *world.access_grant.lock().unwrap() = None;
+    let narrowed = AuthToken::parse(body(&fits)["auth_token"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        narrowed.unverified_claims().scope.as_deref(),
+        Some("calendar.read")
+    );
+    assert!(narrowed.unverified_claims().exp <= START + 900);
+    // An Access Server that ignores the narrowing issues what the Resource
+    // token asked for; the Person Server refuses that token.
+    world.access_ignores_narrowing.store(true, Ordering::SeqCst);
     let wider = world.auth_token(&world.travel, "calendar.read calendar.write");
     assert_eq!(
         (wider.status().as_u16(), body(&wider)["error"].clone()),

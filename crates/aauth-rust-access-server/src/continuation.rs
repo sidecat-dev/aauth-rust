@@ -115,7 +115,8 @@ impl<
                     .upstream
                     .as_ref()
                     .map_or(i64::MAX, UpstreamToken::expires_at),
-            );
+            )
+            .min(input.authorization.expires_at.unwrap_or(i64::MAX));
         let released = (self.clock)();
         current(released, &input.authorization, &presented)?;
         if released >= deadline {

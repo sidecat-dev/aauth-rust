@@ -367,10 +367,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// and completions are put to that server, after the request passes
     /// every check it passes today:
     ///
-    /// - `allow` proceeds, narrowed to the server's `scope` and `exp`. The
-    ///   Access Server cannot be told about a four-party narrowing, so its
-    ///   token is refused when it is wider (`403 access_denied`, or `denied`
-    ///   at a poll).
+    /// - `allow` proceeds, narrowed to the server's `scope` and `exp`. In
+    ///   four-party access the narrowing goes to the Access Server as `scope`
+    ///   and `exp` members of the token request, and its token is refused
+    ///   when it is wider all the same (`403 access_denied`, or `denied` at a
+    ///   poll).
     /// - `deny` refuses: a token request with `403 access_denied`, a
     ///   permission with `permission: denied` and the server's `reason`, a
     ///   mission request with `403 access_denied` and a `reason` member.
@@ -898,9 +899,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         );
     }
 
-    /// A four-party request. The Access Server takes no narrowing from this
-    /// server, so the token it issues is held to what the supervision server
-    /// allowed when it is delivered, and reported then.
+    /// A four-party request. The supervision server's narrowing is sent to
+    /// the Access Server, and the token it issues is held to that narrowing
+    /// when it is delivered, and reported then.
     pub(super) fn federate_supervised(
         &self,
         agent: &VerifiedAgentToken,
