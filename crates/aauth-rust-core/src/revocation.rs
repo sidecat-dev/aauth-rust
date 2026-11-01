@@ -1,11 +1,11 @@
 //! Revocation request, ledger and response shapes shared by PS, AS and Resource.
 //!
-//! Transport stays with the host. A [`RevocationDirectory`] records one downstream
-//! call; this module does not open a connection. The ledger is process memory:
+//! Transport stays with the host. A [`RevocationDirectory`] delivers one
+//! downstream call; this module does not open a connection. The ledger is process memory:
 //! an entry is `(iss, jti) -> exp`, and `iss` is the verified caller, never a
 //! request field.
 
-use aauth_rust_jose::strict_json;
+use aauth_rust_jose::{SigningKey, strict_json};
 use http::{Response, StatusCode};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -214,11 +214,58 @@ pub enum CallOutcome {
     Deferred,
 }
 
-/// Host transport for one signed revocation POST. `recipient` is the server
-/// identifier, not a URL. The host discovers `revocation_endpoint` and signs.
+/// The server that sends a revocation, as it signs under the `jwks_uri` scheme.
+///
+/// The role fills this from its own configuration, so a revocation is always
+/// signed as the server whose tokens it names. `issuer` and `dwk` are the `id`
+/// and `dwk` of the `Signature-Key` member; `kid` names `key` in the JWKS the
+/// server publishes.
+#[derive(Clone, Copy)]
+pub struct RevocationSender<'a> {
+    /// The sending server's `issuer`, the namespace of the revoked `jti`.
+    pub issuer: &'a str,
+    /// Its metadata document name, such as `aauth-person.json`.
+    pub dwk: &'a str,
+    /// Identifier of `key` in its published JWKS.
+    pub kid: &'a str,
+    /// The key it signs with.
+    pub key: &'a SigningKey,
+}
+impl std::fmt::Debug for RevocationSender<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RevocationSender")
+            .field("issuer", &self.issuer)
+            .field("dwk", &self.dwk)
+            .field("kid", &self.kid)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One downstream revocation: the token, in the sender's namespace, and the
+/// server that is to refuse it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RevocationTarget<'a> {
+    /// The recipient's server identifier, not a URL.
+    pub recipient: &'a str,
+    /// The recipient's metadata document name, such as `aauth-resource.json`,
+    /// whose `revocation_endpoint` receives the revocation.
+    pub dwk: &'a str,
+    /// The revoked token's `jti`.
+    pub jti: &'a str,
+    /// The revoked token's `exp`, Unix seconds.
+    pub exp: i64,
+}
+
+/// Delivery of one signed revocation POST.
+///
+/// The role calls it once per downstream target and maps the answer into its
+/// cascade. An implementation discovers the recipient's `revocation_endpoint`
+/// from `{recipient}/.well-known/{dwk}`, signs as `sender`, sends, and reads the
+/// answer with [`read_call_outcome`]. `aauth-rust-discovery` provides one over
+/// HTTPS; without any, each target is [`CallOutcome::Unavailable`].
 pub trait RevocationDirectory: Send + Sync {
-    /// Revoke `jti` at `recipient`. `exp` is the revoked token's expiration.
-    fn revoke(&self, recipient: &str, jti: &str, exp: i64) -> CallOutcome;
+    /// Revoke `target.jti` at `target.recipient`, signed as `sender`.
+    fn revoke(&self, sender: &RevocationSender<'_>, target: &RevocationTarget<'_>) -> CallOutcome;
 }
 
 /// JSON object for a non-empty downstream report. `None` means an empty body.

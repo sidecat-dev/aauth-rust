@@ -1,7 +1,8 @@
 //! Bounded cache of JWKS documents the host has already fetched.
 //!
 //! This type does not open a connection. `store` records a fetch the host
-//! already made and cannot retract it; call `lookup` before fetching. A
+//! already made and cannot retract it; call `lookup`, or `refresh` for an
+//! unknown `kid`, before fetching, and `record_failure` after a failed one. A
 //! `jwks_uri` entry is keyed by issuer and `dwk`. Freshness is at most 86400
 //! seconds, then reduced by `Age`. A quoted `max-age` or `s-maxage` delta is
 //! accepted. `Expires` applies when `Cache-Control` sets no lifetime. The same
@@ -139,6 +140,78 @@ impl KeyCache {
             return Ok(KeyCacheAnswer::Full);
         }
         Ok(KeyCacheAnswer::Fetch)
+    }
+
+    /// Permission to fetch `target` again, whatever its stored freshness.
+    ///
+    /// Use it when a fresh document lacks what the caller needs, such as an
+    /// unknown `kid`. Inside the one-minute floor the answer is
+    /// [`KeyCacheAnswer::Wait`], past it [`KeyCacheAnswer::Fetch`], and a new
+    /// target over the bound is [`KeyCacheAnswer::Full`]. It is never `Fresh`.
+    ///
+    /// # Errors
+    /// `invalid_key` when `target` is not an HTTPS URL without userinfo or a fragment.
+    pub fn refresh(
+        &mut self,
+        target: CachedDocument<'_>,
+        now: u64,
+    ) -> Result<KeyCacheAnswer, Error> {
+        let key = cache_key(target)?;
+        self.reclaim(now);
+        if let Some(entry) = self.entries.get(&key) {
+            let until = entry.last_fetch.saturating_add(MIN_REFETCH_INTERVAL);
+            if now < until {
+                return Ok(KeyCacheAnswer::Wait { until });
+            }
+            return Ok(KeyCacheAnswer::Fetch);
+        }
+        if self.entries.len() >= self.max_entries {
+            return Ok(KeyCacheAnswer::Full);
+        }
+        Ok(KeyCacheAnswer::Fetch)
+    }
+
+    /// Record a fetch of `target` that produced no document to store.
+    ///
+    /// The one-minute floor counts it, so the target is not fetched again
+    /// for sixty seconds. A document stored earlier keeps its body and
+    /// freshness. A fetch inside the floor is refused as [`KeyCacheStore::Wait`].
+    ///
+    /// # Errors
+    /// `invalid_key` when `target` is not an HTTPS URL without userinfo or a fragment.
+    pub fn record_failure(
+        &mut self,
+        target: CachedDocument<'_>,
+        now: u64,
+    ) -> Result<KeyCacheStore, Error> {
+        let key = cache_key(target)?;
+        self.reclaim(now);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            let until = entry.last_fetch.saturating_add(MIN_REFETCH_INTERVAL);
+            if now < until {
+                return Ok(KeyCacheStore::Wait { until });
+            }
+            entry.last_fetch = now;
+            return Ok(KeyCacheStore::Stored {
+                expires_at: entry.expires_at,
+                fresh: now < entry.expires_at,
+            });
+        }
+        if self.entries.len() >= self.max_entries {
+            return Ok(KeyCacheStore::Full);
+        }
+        self.entries.insert(
+            key,
+            Entry {
+                body: Vec::new(),
+                last_fetch: now,
+                expires_at: now,
+            },
+        );
+        Ok(KeyCacheStore::Stored {
+            expires_at: now,
+            fresh: false,
+        })
     }
 
     /// Record `body` for `target` using `cache_control` at `now`.

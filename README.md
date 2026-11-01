@@ -12,16 +12,20 @@ that vouches for it, the API (called a Resource), and the servers that speak
 for the person or for the API. [How AAuth works](docs/how-aauth-works.md)
 introduces them.
 
-The libraries open no network connections. Your service sends and receives the
-HTTP messages, fetches other servers' keys and stores state; the libraries
-sign, check and decide.
+The protocol libraries open no network connections. Your service sends and
+receives the HTTP messages, fetches other servers' keys and stores state; the
+libraries sign, check and decide. One opt-in crate, `aauth-rust-discovery`,
+does open connections: it fetches other servers' keys and delivers
+revocations over HTTPS, refusing private addresses and other unsafe
+destinations unless you allow them.
 
 ## Get started
 
 You need [git](https://git-scm.com/), [rustup](https://rustup.rs/) and a C
 compiler: `build-essential` on Linux, the Xcode Command Line Tools on macOS, or
-the Visual Studio C++ Build Tools on Windows. The examples' TLS library uses
-the compiler; the libraries themselves are pure Rust.
+the Visual Studio C++ Build Tools on Windows. The TLS library of the examples
+and of `aauth-rust-discovery` uses the compiler; the other libraries are pure
+Rust.
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
@@ -49,6 +53,7 @@ From git, list each crate you use with the repository and the tag:
 aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
+aauth-rust-discovery = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 http = "1"
@@ -165,7 +170,8 @@ Then build it, and keep the new `Cargo.lock` with your source:
 <!-- consumer-bootstrap-build:end -->
 
 The first build downloads crates from crates.io. To run a Person Server or an
-Access Server as well, add these lines to the `[dependencies]` table in
+Access Server as well, and to fetch keys and deliver revocations over HTTPS,
+add these lines to the `[dependencies]` table in
 `../aauth-service/Cargo.toml`, run `cargo generate-lockfile` there again, and
 build:
 
@@ -173,6 +179,7 @@ build:
 ```toml
 aauth-rust-person-server = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-person-server" }
 aauth-rust-access-server = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-access-server" }
+aauth-rust-discovery = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-discovery" }
 ```
 
 | Crate | What it does | Guide |
@@ -184,6 +191,7 @@ aauth-rust-access-server = { version = "0.1.0-alpha.18", path = "../aauth-rust/c
 | `aauth-rust-person-server-redb` | File-backed storage for a Person Server, on Unix | [Person Server](docs/roles/person-server.md) |
 | `aauth-rust-access-server` | Decides access for an API from the API's own rules | [Access Server](docs/roles/access-server.md) |
 | `aauth-rust-supervision-server` | Approves or refuses an agent's requests for the person | [Supervision Server](docs/roles/supervision-server.md) |
+| `aauth-rust-discovery` | Fetches other servers' keys and delivers revocations over HTTPS; the only crate that opens connections | [Discovery](docs/discovery.md) |
 | `aauth-rust-r3`, `aauth-rust-budgets` | Operation lists and spending caps, used by the roles | [R3](docs/features/r3.md), [Budgets](docs/features/budgets.md) |
 | `aauth-rust-core`, `aauth-rust-signature-key`, `aauth-rust-jose` | Tokens, HTTP signatures and keys, used by the roles | |
 
@@ -222,3 +230,8 @@ MIT; see [LICENSE](LICENSE). Every crate in the workspace carries the same
 license file. Most direct dependencies are MIT OR Apache-2.0. These locked
 direct dependencies are not MIT-only: `ed25519-dalek` 2.2.0 is BSD-3-Clause,
 `ring` 0.17.14 is Apache-2.0 AND ISC, and `rustls-webpki` 0.103.15 is ISC.
+`aauth-rust-discovery` adds `rustls` 0.23.46 and `rustls-native-certs` 0.8.3,
+both Apache-2.0 OR ISC OR MIT. To find the platform's root certificates,
+`rustls-native-certs` uses `openssl-probe` (MIT OR Apache-2.0) on Unix, which
+only locates certificate files and links no OpenSSL, `security-framework`
+(MIT OR Apache-2.0) on macOS, and `schannel` (MIT) on Windows.

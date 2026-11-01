@@ -7,6 +7,7 @@ use aauth_rust_core::revocation::{
 };
 use aauth_rust_core::{
     CallOutcome, DownstreamReport, RevocationDirectory, RevocationLedger, RevocationLimits,
+    RevocationSender, RevocationTarget,
 };
 use aauth_rust_signature_key::KeyMaterial;
 use http::StatusCode;
@@ -30,6 +31,8 @@ struct Job {
 #[derive(Clone)]
 struct Target {
     recipient: String,
+    /// The recipient's metadata document, which names its `revocation_endpoint`.
+    dwk: &'static str,
     jti: String,
     exp: i64,
 }
@@ -83,6 +86,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     }
     /// Install the host that delivers downstream revocations.
     /// Enables revocation when it was off.
+    ///
+    /// Each call names its recipient's role document (`aauth-resource.json`
+    /// or `aauth-access.json`) and is signed as this server: its issuer,
+    /// `aauth-person.json`, its `kid` and signing key. `RevocationClient` in
+    /// `aauth-rust-discovery` delivers them over HTTPS.
     pub fn with_revocation_directory(mut self, directory: Arc<dyn RevocationDirectory>) -> Self {
         if self.revocation.is_none() {
             self = self.with_revocation();
@@ -293,6 +301,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .revocation
             .as_ref()
             .and_then(|gate| gate.directory.as_ref());
+        let sender = RevocationSender {
+            issuer: &self.config.issuer,
+            dwk: "aauth-person.json",
+            kid: &self.config.kid,
+            key: &self.config.signing_key,
+        };
         targets
             .iter()
             .map(|target| {
@@ -305,7 +319,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     return kept.clone();
                 }
                 let outcome = directory
-                    .map(|directory| directory.revoke(&target.recipient, &target.jti, target.exp))
+                    .map(|directory| directory.revoke(&sender, &target.as_call()))
                     .unwrap_or(CallOutcome::Unavailable);
                 let report = DownstreamReport::from_outcome(&target.recipient, outcome);
                 TargetState {
@@ -378,6 +392,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             self.remember(&self.config.issuer, jti, person.expires_at);
             targets.push(Target {
                 recipient: person.resource.clone(),
+                dwk: "aauth-resource.json",
                 jti: jti.clone(),
                 exp: person.expires_at,
             });
@@ -404,6 +419,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                         if access_servers.insert(record.token.reference.issuer.clone()) {
                             targets.push(Target {
                                 recipient: record.token.reference.issuer.clone(),
+                                dwk: "aauth-access.json",
                                 jti: jti.clone(),
                                 exp: person.expires_at,
                             });
@@ -413,6 +429,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     {
                         targets.push(Target {
                             recipient: record.resource.clone(),
+                            dwk: "aauth-resource.json",
                             jti: record.token.reference.jti.clone(),
                             exp: record.expires_at,
                         });
@@ -512,6 +529,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 struct Caller {
     id: String,
     dwk: String,
+}
+impl Target {
+    fn as_call(&self) -> RevocationTarget<'_> {
+        RevocationTarget {
+            recipient: &self.recipient,
+            dwk: self.dwk,
+            jti: &self.jti,
+            exp: self.exp,
+        }
+    }
 }
 pub(super) fn revoked_parameter(parameter: &'static str) -> Failure {
     Failure::parameter(match parameter {

@@ -33,6 +33,8 @@ it.
 
 ## Reference
 
+- [Discovery and revocation delivery](discovery.md): `aauth-rust-discovery`
+  fetches other servers' keys and delivers revocations over HTTPS.
 - [Errors](errors.md): the refusals the servers send, and what the caller does
   about each.
 - [USE-IN-YOUR-SERVICE.md](../USE-IN-YOUR-SERVICE.md): the full reference for

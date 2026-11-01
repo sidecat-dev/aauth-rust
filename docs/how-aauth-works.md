@@ -183,7 +183,9 @@ The libraries sign, check and decide, and open no connections. Your service:
   fetches their metadata and keys with its own limits and timeouts, and
   refreshes them. It gives the library a **resolver**: an object that returns
   a trusted server's public key, given the server's identifier, its metadata
-  document's name and the key ID;
+  document's name and the key ID. The opt-in `aauth-rust-discovery` crate
+  supplies one that fetches and caches over HTTPS, and delivers revocations;
+  see [Discovery and revocation delivery](discovery.md);
 - signs people in and records their consent;
 - stores what the Person Server and Access Server must remember, using the
   store interfaces the crates define;

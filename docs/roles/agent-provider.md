@@ -177,6 +177,10 @@ readable only by the program that uses it.
   own key ID, until the old tokens expire.
 - **Renewal.** Issue a new token before the old one expires, naming the same
   public key. The agent switches with `agent.with_token(new_token)`.
+- **Revocation.** To withdraw an Agent token early, revoke it at the agent's
+  Person Server. `RevocationClient::deliver` in `aauth-rust-discovery` sends
+  it, signed as the provider (its issuer, `aauth-agent.json`, key ID and
+  signing key); see [Discovery and revocation delivery](../discovery.md).
 
 ## Also in this crate
 

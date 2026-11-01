@@ -6,6 +6,7 @@ use aauth_rust_core::revocation::{
 };
 use aauth_rust_core::{
     CallOutcome, DownstreamReport, RevocationDirectory, RevocationLedger, RevocationLimits,
+    RevocationSender, RevocationTarget,
 };
 use aauth_rust_signature_key::required_components;
 use std::sync::Arc;
@@ -52,6 +53,10 @@ where
 
     /// Deliver revocations of resource tokens this Resource issued.
     /// Enables revocation when it was off.
+    ///
+    /// Each call is signed as this Resource: its issuer, `aauth-resource.json`,
+    /// its `kid` and signing key. `RevocationClient` in `aauth-rust-discovery`
+    /// delivers them over HTTPS.
     pub fn with_revocation_directory(mut self, directory: Arc<dyn RevocationDirectory>) -> Self {
         if self.revocation.is_none() {
             self = self.with_revocation();
@@ -102,7 +107,9 @@ where
         {
             return problem(StatusCode::BAD_REQUEST, "invalid_request", None);
         }
-        let mut recipients = vec![audience.to_owned()];
+        // Three-party, the audience is the Person Server; four-party, it is the
+        // Access Server and the Person Server is called as well.
+        let mut recipients = vec![(audience.to_owned(), "aauth-person.json")];
         if self.access_server.is_some() {
             let Some(person_server) = person_server else {
                 return problem(StatusCode::BAD_REQUEST, "invalid_request", None);
@@ -110,20 +117,33 @@ where
             if validate_server_identifier(person_server).is_err() {
                 return problem(StatusCode::BAD_REQUEST, "invalid_request", None);
             }
+            recipients[0].1 = "aauth-access.json";
             if person_server != audience {
-                recipients.push(person_server.to_owned());
+                recipients.push((person_server.to_owned(), "aauth-person.json"));
             }
         }
+        let sender = RevocationSender {
+            issuer: &self.config.issuer,
+            dwk: "aauth-resource.json",
+            kid: &self.config.kid,
+            key: &self.config.signing_key,
+        };
         let directory = self
             .revocation
             .as_ref()
             .and_then(|gate| gate.directory.clone());
         let reports: Vec<DownstreamReport> = recipients
             .iter()
-            .map(|recipient| {
+            .map(|(recipient, dwk)| {
+                let target = RevocationTarget {
+                    recipient,
+                    dwk,
+                    jti,
+                    exp,
+                };
                 let outcome = directory
                     .as_ref()
-                    .map(|directory| directory.revoke(recipient, jti, exp))
+                    .map(|directory| directory.revoke(&sender, &target))
                     .unwrap_or(CallOutcome::Unavailable);
                 DownstreamReport::from_outcome(recipient, outcome)
             })

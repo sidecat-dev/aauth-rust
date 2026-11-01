@@ -1,0 +1,32 @@
+[package]
+name = "aauth-rust-discovery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "Opt-in HTTPS client for AAuth discovery: admitted metadata and JWKS fetching, a caching key resolver, and revocation cascade delivery"
+
+[dependencies]
+aauth-rust-jose.workspace = true
+aauth-rust-core.workspace = true
+aauth-rust-signature-key.workspace = true
+http.workspace = true
+httparse.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+aauth-rust-agent.workspace = true
+aauth-rust-agent-provider.workspace = true
+aauth-rust-access-server = { version = "0.1.0-alpha.18", path = "../aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.18", path = "../aauth-rust-person-server" }
+aauth-rust-resource = { version = "0.1.0-alpha.18", path = "../aauth-rust-resource" }
+rcgen = "0.13"

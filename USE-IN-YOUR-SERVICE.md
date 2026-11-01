@@ -177,6 +177,10 @@ document. Server identifiers have no port or path. In local deployments,
 map those logical identities to admitted sockets while preserving HTTPS names,
 SNI and certificate verification. Temporary loopback ports belong to that map,
 not to the token's `iss`. JWKS endpoint URLs are distinct from server identifiers.
+`aauth-rust-discovery` builds that map into its client: `DiscoveryClient::builder()`
+with `resolver`, `root_certificates` and `allow_restricted_addresses`, and its
+`KeyResolver` fetches and refreshes trusted issuers' documents; see
+[Discovery and revocation delivery](docs/discovery.md).
 
 ## Publish display metadata
 
@@ -894,7 +898,8 @@ issuance; `with_missions` adds the Agent's mission endpoint, and
 `with_interaction_relay` relays interactions through them. `with_r3`
 issues for R3 class documents and per-call proposals, and `with_budgets` grants
 and accounts for budgets. `with_revocation` adds the revocation endpoint and
-its cascades, and `with_revocation_directory` delivers their downstream calls.
+its cascades, and `with_revocation_directory` delivers their downstream calls;
+`RevocationClient` in `aauth-rust-discovery` delivers them over HTTPS.
 `with_resource_interaction` resolves a Resource's own interaction. AS
 federation, with optional deferred responses, is described below, and one-level
 parent-mediated child issuance in the sub-agent section. Step-up orchestration

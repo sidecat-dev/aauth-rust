@@ -6,6 +6,7 @@ use aauth_rust_core::revocation::{
 };
 use aauth_rust_core::{
     CallOutcome, DownstreamReport, RevocationDirectory, RevocationLedger, RevocationLimits,
+    RevocationSender, RevocationTarget,
 };
 use aauth_rust_signature_key::KeyMaterial;
 use std::collections::BTreeMap;
@@ -112,6 +113,10 @@ impl<
         self
     }
     /// Deliver downstream auth-token revocations. Enables revocation when it was off.
+    ///
+    /// Each call names a Resource (`aauth-resource.json`) and is signed as this
+    /// server: its issuer, `aauth-access.json`, its `kid` and signing key.
+    /// `RevocationClient` in `aauth-rust-discovery` delivers them over HTTPS.
     pub fn with_revocation_directory(mut self, directory: Arc<dyn RevocationDirectory>) -> Self {
         if self.revocation.is_none() {
             self = self.with_revocation();
@@ -317,7 +322,13 @@ impl<
             .ok()
             .and_then(|attempts| attempts.get(&key).cloned())
             .unwrap_or_default();
-        let states = dispatch(gate, &targets, &previous);
+        let sender = RevocationSender {
+            issuer: &self.config.issuer,
+            dwk: "aauth-access.json",
+            kid: &self.config.kid,
+            key: &self.config.signing_key,
+        };
+        let states = dispatch(gate, &sender, &targets, &previous);
         if let Ok(mut attempts) = gate.attempts.lock() {
             attempts.insert(key.clone(), states.clone());
         }
@@ -402,7 +413,12 @@ struct Caller {
     dwk: String,
 }
 
-fn dispatch(gate: &Gate, targets: &[Target], previous: &[TargetState]) -> Vec<TargetState> {
+fn dispatch(
+    gate: &Gate,
+    sender: &RevocationSender<'_>,
+    targets: &[Target],
+    previous: &[TargetState],
+) -> Vec<TargetState> {
     targets
         .iter()
         .map(|target| {
@@ -417,7 +433,17 @@ fn dispatch(gate: &Gate, targets: &[Target], previous: &[TargetState]) -> Vec<Ta
             let outcome = gate
                 .directory
                 .as_ref()
-                .map(|directory| directory.revoke(&target.recipient, &target.jti, target.exp))
+                .map(|directory| {
+                    directory.revoke(
+                        sender,
+                        &RevocationTarget {
+                            recipient: &target.recipient,
+                            dwk: "aauth-resource.json",
+                            jti: &target.jti,
+                            exp: target.exp,
+                        },
+                    )
+                })
                 .unwrap_or(CallOutcome::Unavailable);
             let report = DownstreamReport::from_outcome(&target.recipient, outcome);
             TargetState {
