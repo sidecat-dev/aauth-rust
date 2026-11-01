@@ -21,6 +21,7 @@ dependencies = [
 name = "aauth-rust-agent"
 version = "0.1.0-alpha.18"
 dependencies = [
+ "aauth-rust-budgets",
  "aauth-rust-core",
  "aauth-rust-jose",
  "aauth-rust-r3",

@@ -53,7 +53,7 @@ service. Run each from the checkout.
 | `cargo run --locked -p aauth-rust-resource --example getting-started` | an agent calling an API over TLS, with its Agent token |
 | `cargo run --locked -p aauth-rust-resource --example library` | the same check in one process, with no network |
 | `cargo run --locked -p aauth-rust-resource --example axum` | the Resource check inside the axum web framework |
-| `cargo run --locked -p aauth-rust-resource --example direct-identity` | fourteen checks of agent identity over TLS, refusals included |
+| `cargo run --locked -p aauth-rust-resource --example direct-identity` | fifteen checks of agent identity over TLS, the Resource's metadata and refusals included |
 | `cargo run --locked -p aauth-rust-resource --example three-party` | a Person Server's consent, and one API calling another, over TLS |
 | `cargo run --locked -p aauth-rust-resource --example four-party` | an Access Server's decision over TLS |
 | `cargo run --locked -p aauth-rust-resource --example four-party -- --deferred` | the same, with payment and approval while the agent waits |

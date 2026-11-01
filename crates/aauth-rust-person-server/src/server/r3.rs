@@ -18,7 +18,9 @@
 //! A proposal may carry one too, as a Resource that meters the release of a
 //! held result does: this PS narrows it and the per-call Auth token carries
 //! the grant. With federation the PS relays its ceiling to the access server,
-//! which grants the budget on the per-call token, as for any budget offer.
+//! which grants the budget on the class or per-call token, as for any budget
+//! offer; a token whose budget is missing, unasked for, wider or in another
+//! unit or scale is not released.
 //! A Person token's approved mission composes with a class document: the grant
 //! ends no later than the mission and commits against the unchanged active
 //! mission, whether this PS signs it or relays it. Missions with proposals,

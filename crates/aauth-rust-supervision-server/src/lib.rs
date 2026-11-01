@@ -77,7 +77,7 @@ use aauth_rust_core::{AgentKeyResolver, MetadataDisplay, TokenError, validate_se
 use aauth_rust_jose::{SigningKey, strict_json};
 use aauth_rust_signature_key::{
     Error as ProofError, KeyMaterial, PreparedRequest, accept_signature_components,
-    canonical_authority, sign_response,
+    canonical_authority, role_signature_alg_header, sign_response,
 };
 use http::{Request, Response, StatusCode};
 use serde_json::{Map, Value, json};
@@ -340,8 +340,19 @@ impl<K: AgentKeyResolver, P: Policy, S: ContinuationStore, C: Fn() -> i64>
             Err(TokenError::UntrustedIssuer) => {
                 return Err(refuse(SupervisionError::UnsupportedIss));
             }
-            Err(TokenError::UnknownKey) => return Err(signature_error(ProofError::UnknownKey)),
-            Err(_) => return Err(signature_error(ProofError::InvalidKey)),
+            // A key type or algorithm this server does not implement is
+            // unsupported_algorithm; a metadata document failing its issuer
+            // check is issuer_missing or issuer_mismatch (protocol
+            // Verification (Server), steps 5 and 6).
+            Err(error) => {
+                return Err(signature_error(match error {
+                    TokenError::UnknownKey => ProofError::UnknownKey,
+                    TokenError::UnsupportedAlgorithm => ProofError::UnsupportedAlgorithm,
+                    TokenError::IssuerMissing => ProofError::IssuerMissing,
+                    TokenError::IssuerMismatch => ProofError::IssuerMismatch,
+                    _ => ProofError::InvalidKey,
+                }));
+            }
         };
         proof.verify(&key).map_err(signature_error)?;
         Ok(id.clone())
@@ -499,6 +510,11 @@ pub(crate) fn signature_error(error: ProofError) -> Refusal {
             "accept-signature-scheme",
             http::HeaderValue::from_static("jwks_uri"),
         );
+    }
+    if matches!(error, ProofError::UnsupportedAlgorithm)
+        && let Ok(value) = role_signature_alg_header().parse()
+    {
+        response.headers_mut().insert("accept-signature-alg", value);
     }
     Box::new(response)
 }

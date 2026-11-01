@@ -1,15 +1,17 @@
 //! A Resource's `additional_signature_components` are covered on every
-//! request the Agent signs for it, or signing is refused.
+//! request the Agent signs for it, or signing is refused. The Agent reads
+//! them from the Resource's metadata document or from an `invalid_input`
+//! refusal.
 use std::collections::BTreeMap;
 
-use aauth_rust_agent::{Agent, PollError, PollSession, R3AgentError};
+use aauth_rust_agent::{Agent, PollError, PollSession, R3AgentError, SignatureComponentsError};
 use aauth_rust_core::continuation::{PendingResponse, Requirement};
 use aauth_rust_core::{Confirmation, PersonClaims, mint_person_token};
 use aauth_rust_jose::{Jws, SigningKey};
 use aauth_rust_r3::standard_registry;
 use aauth_rust_signature_key::{Error, PreparedRequest};
-use http::Request;
-use serde_json::{Value, json};
+use http::{HeaderMap, Request};
+use serde_json::json;
 
 const NOW: i64 = 1_700_000_000;
 const RESOURCE: &str = "https://resource.example";
@@ -61,16 +63,6 @@ fn person(agent: &Agent) -> String {
     .unwrap()
 }
 
-/// The published array, read from the Resource's metadata document.
-fn published(metadata: &Value) -> Vec<&str> {
-    metadata["additional_signature_components"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|component| component.as_str().unwrap())
-        .collect()
-}
-
 fn covered(request: &Request<Vec<u8>>) -> &str {
     request.headers()["signature-input"].to_str().unwrap()
 }
@@ -88,7 +80,9 @@ fn an_agent_covers_a_resources_additional_signature_components() {
         "issuer": RESOURCE,
         "additional_signature_components": ["x-tenant", "content-digest"]
     });
-    let agent = plain.with_additional_signature_components(published(&metadata));
+    let agent = plain
+        .with_resource_metadata(RESOURCE, metadata.to_string().as_bytes())
+        .unwrap();
 
     // An application call carrying the listed field.
     let mut call = Request::get("https://resource.example/records?id=7")
@@ -238,4 +232,152 @@ fn r3_authorization_and_polls_cover_the_listed_components() {
         ),
         Err(PollError::Signing)
     ));
+}
+
+#[test]
+fn metadata_is_used_only_when_it_is_the_resources_own() {
+    let plain = agent();
+    // aauth-go's agent-identity Resource can list content-digest, so an empty
+    // GET must carry a digest of the empty body.
+    let metadata =
+        br#"{"issuer":"https://resource.example","additional_signature_components":["content-digest"]}"#;
+    let agent = plain.with_resource_metadata(RESOURCE, metadata).unwrap();
+    let mut call = Request::get("https://resource.example/hello")
+        .body(Vec::new())
+        .unwrap();
+    agent.sign(&mut call, NOW).unwrap();
+    assert_eq!(
+        covered(&call),
+        format!(
+            "sig=(\"@method\" \"@authority\" \"@path\" \"content-digest\" \"signature-key\");created={NOW}"
+        )
+    );
+    base(&call, &agent, NOW);
+
+    // A document without the member lists nothing, replacing the earlier list.
+    let bare = agent
+        .with_resource_metadata(RESOURCE, br#"{"issuer":"https://resource.example"}"#)
+        .unwrap();
+    let mut call = Request::get("https://resource.example/hello")
+        .body(Vec::new())
+        .unwrap();
+    bare.sign(&mut call, NOW).unwrap();
+    assert!(!covered(&call).contains("content-digest"));
+
+    let refused: [(&[u8], SignatureComponentsError); 6] = [
+        (
+            br#"{"additional_signature_components":["content-digest"]}"#,
+            SignatureComponentsError::IssuerMissing,
+        ),
+        (
+            br#"{"issuer":"https://resource.example/","additional_signature_components":[]}"#,
+            SignatureComponentsError::IssuerMismatch,
+        ),
+        (
+            br#"{"issuer":"https://other.example"}"#,
+            SignatureComponentsError::IssuerMismatch,
+        ),
+        (
+            br#"{"issuer":"https://resource.example","additional_signature_components":"content-digest"}"#,
+            SignatureComponentsError::MalformedMetadata,
+        ),
+        (
+            br#"{"issuer":"https://resource.example","additional_signature_components":[7]}"#,
+            SignatureComponentsError::MalformedMetadata,
+        ),
+        (
+            br#"["https://resource.example"]"#,
+            SignatureComponentsError::MalformedMetadata,
+        ),
+    ];
+    for (document, error) in refused {
+        assert_eq!(
+            plain.with_resource_metadata(RESOURCE, document).err(),
+            Some(error),
+            "{}",
+            String::from_utf8_lossy(document)
+        );
+    }
+}
+
+fn refusal(field: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("signature-error", field.parse().unwrap());
+    headers
+}
+
+#[test]
+fn an_invalid_input_refusal_adds_what_the_refused_signature_missed() {
+    let plain = agent();
+    let mut call = Request::get("https://resource.example/records")
+        .header("x-tenant", "acme")
+        .body(Vec::new())
+        .unwrap();
+    plain.sign(&mut call, NOW).unwrap();
+    // As a Resource requiring a digest and a tenant header answers.
+    let refused = refusal(
+        r#"error=invalid_input, required_input=("@method" "@authority" "@path" "signature-key" "content-digest" "x-tenant")"#,
+    );
+    let retry = plain.with_required_input(&call, &refused).unwrap();
+    retry.sign(&mut call, NOW).unwrap();
+    assert_eq!(
+        covered(&call),
+        format!(
+            "sig=(\"@method\" \"@authority\" \"@path\" \"content-digest\" \"x-tenant\" \"signature-key\");created={NOW}"
+        )
+    );
+    base(&call, &retry, NOW);
+    // The retried request covers it all, so the same refusal teaches nothing.
+    assert_eq!(
+        retry.with_required_input(&call, &refused).err(),
+        Some(SignatureComponentsError::AlreadyCovered)
+    );
+    // A component the signature covered because the request had it is not
+    // added: a later call without a query still signs.
+    let mut queried = Request::get("https://resource.example/records?id=7")
+        .body(Vec::new())
+        .unwrap();
+    plain.sign(&mut queried, NOW).unwrap();
+    let learned = plain
+        .with_required_input(
+            &queried,
+            &refusal(
+                r#"error=invalid_input, required_input=("@method" "@authority" "@path" "@query" "signature-key" "content-digest")"#,
+            ),
+        )
+        .unwrap();
+    let mut later = Request::get("https://resource.example/records")
+        .body(Vec::new())
+        .unwrap();
+    learned.sign(&mut later, NOW).unwrap();
+    assert!(!covered(&later).contains("@query"));
+    assert!(covered(&later).contains("content-digest"));
+
+    for (headers, error) in [
+        (
+            refusal("error=invalid_signature"),
+            SignatureComponentsError::NoRequiredInput,
+        ),
+        (
+            refusal("error=invalid_input"),
+            SignatureComponentsError::NoRequiredInput,
+        ),
+        (
+            refusal(r#"error=invalid_input, required_input=(content-digest)"#),
+            SignatureComponentsError::NoRequiredInput,
+        ),
+        (HeaderMap::new(), SignatureComponentsError::NoRequiredInput),
+    ] {
+        assert_eq!(
+            plain.with_required_input(&queried, &headers).err(),
+            Some(error)
+        );
+    }
+    let unsigned = Request::get("https://resource.example/records")
+        .body(Vec::<u8>::new())
+        .unwrap();
+    assert_eq!(
+        plain.with_required_input(&unsigned, &refused).err(),
+        Some(SignatureComponentsError::Unsigned)
+    );
 }

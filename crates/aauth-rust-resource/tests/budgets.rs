@@ -967,7 +967,14 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
         NOW,
     )
     .unwrap();
-    assert_eq!(resource.usage(&wrong_scheme, NOW).status(), 401);
+    // A refusal is a Signature-Error naming the one scheme this endpoint takes.
+    let refused = resource.usage(&wrong_scheme, NOW);
+    assert_eq!(refused.status(), 401);
+    assert_eq!(
+        refused.headers()["signature-error"],
+        "error=unsupported_scheme"
+    );
+    assert_eq!(refused.headers()["accept-signature-scheme"], "jwks_uri");
 
     let mut missing_digest = Request::builder()
         .method("POST")
@@ -989,7 +996,14 @@ fn usage_answers_the_caller_that_appears_on_the_token() {
     missing_digest
         .headers_mut()
         .insert("content-type", "application/json".parse().unwrap());
-    assert_eq!(resource.usage(&missing_digest, NOW).status(), 401);
+    let refused = resource.usage(&missing_digest, NOW);
+    assert_eq!(refused.status(), 401);
+    assert!(
+        refused.headers()["signature-error"]
+            .to_str()
+            .unwrap()
+            .starts_with("error=invalid_input, required_input=(")
+    );
 
     let mut foreign = Request::builder()
         .method("POST")

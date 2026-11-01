@@ -302,5 +302,22 @@ fn signature_problem(code: &str, required: Option<&[&str]>) -> Response<Vec<u8>>
     if let Ok(value) = signature.parse() {
         response.headers_mut().insert("signature-error", value);
     }
+    // Callers are servers signing under `jwks_uri`; that is all this endpoint
+    // accepts (Verification (Server), steps 4 and 6).
+    let headers = response.headers_mut();
+    match code {
+        "unsupported_scheme" => {
+            headers.insert(
+                "accept-signature-scheme",
+                http::HeaderValue::from_static("jwks_uri"),
+            );
+        }
+        "unsupported_algorithm" => {
+            if let Ok(value) = aauth_rust_signature_key::role_signature_alg_header().parse() {
+                headers.insert("accept-signature-alg", value);
+            }
+        }
+        _ => {}
+    }
     response
 }

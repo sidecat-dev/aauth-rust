@@ -141,10 +141,83 @@ empty, `sign` adds a `Content-Digest` header and covers it, and covers
 afterwards breaks the signature. Signing a request again replaces the old
 signature.
 
-If a Resource's metadata, at `/.well-known/aauth-resource.json`, lists
-`additional_signature_components`, make the agent for that Resource with
-`agent.with_additional_signature_components(list)`, so that its signatures
-cover them.
+## Signing what a Resource requires
+
+A Resource can require a signature to cover more than this. It lists the
+extra components as `additional_signature_components` in its metadata, at
+`/.well-known/aauth-resource.json`, and names everything it requires in the
+`required_input` of an `invalid_input` refusal. This library opens no
+connections, so your program fetches the metadata, or keeps the request it
+sent, and gives it to the agent:
+
+- `agent.with_resource_metadata(resource, &body)` checks that the document is
+  that Resource's own: its `issuer` must be exactly the identifier you fetched
+  it from. It returns an agent whose signatures cover what the document lists.
+  Use that agent for that Resource only.
+- `agent.with_required_input(&request, response.headers())` reads the
+  refusal's `Signature-Error` and returns an agent that also covers each listed
+  component the refused request's signature left out. Sign the request again
+  with it. It returns `SignatureComponentsError::AlreadyCovered` when nothing
+  was left out, since signing again would not help.
+
+A listed component is never left out. If it names a header the request does
+not have, such as a tenant header, `sign` fails with `InvalidInput`: add the
+header and sign again. A listed `content-digest` is computed even for an
+empty body.
+
+```rust
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, Confirmation};
+use aauth_rust_jose::SigningKey;
+use http::{HeaderMap, Request};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = 1_700_000_000;
+    let key = SigningKey::generate();
+    let provider = AgentProvider::new("https://ap.example", "ap-key-1", SigningKey::generate())?;
+    let token = provider.issue(&AgentClaims {
+        iss: "https://ap.example".into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:assistant@ap.example".into(),
+        jti: "assistant-1".into(),
+        iat: now,
+        exp: now + 600,
+        cnf: Confirmation {
+            jwk: key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    let agent = Agent::new(key, token)?;
+
+    // The body your program fetched from
+    // https://api.example/.well-known/aauth-resource.json.
+    let metadata = br#"{"issuer":"https://api.example","additional_signature_components":["content-digest"]}"#;
+    let for_api = agent.with_resource_metadata("https://api.example", metadata)?;
+    let mut request = Request::get("https://api.example/notes").body(Vec::new())?;
+    for_api.sign(&mut request, now)?;
+    assert!(request.headers()["signature-input"].to_str()?.contains("\"content-digest\""));
+
+    // A refusal from an API that also requires its tenant header to be signed.
+    let mut request = Request::get("https://api.example/notes")
+        .header("x-tenant", "acme")
+        .body(Vec::new())?;
+    agent.sign(&mut request, now)?;
+    let mut refusal = HeaderMap::new();
+    refusal.insert(
+        "signature-error",
+        r#"error=invalid_input, required_input=("@method" "@authority" "@path" "signature-key" "x-tenant")"#
+            .parse()?,
+    );
+    let retry = agent.with_required_input(&request, &refusal)?;
+    retry.sign(&mut request, now)?;
+    assert!(request.headers()["signature-input"].to_str()?.contains("\"x-tenant\""));
+    Ok(())
+}
+```
 
 ## Checking what servers send
 

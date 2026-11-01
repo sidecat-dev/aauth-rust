@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use aauth_rust_agent::{Agent, R3AgentError};
+use aauth_rust_budgets::{Budget, ConsumptionRecord};
 use aauth_rust_core::{
     AgentKeyResolver, AuthClaims, Confirmation, PersonClaims, ResourceClaims, TokenError,
     mint_auth_token, mint_person_token,
@@ -17,7 +18,9 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, Jws, SigningKey};
 use aauth_rust_r3::{
     Grant, GrantedOperations, McpCodec, Operation, Parameter, Parameters, Proposal,
-    ProposalOptions, Registry, mint_direct_auth_token, mint_per_call_auth_token,
+    ProposalOptions, Reference, Registry, digest, mint_budget_auth_token,
+    mint_budget_per_call_auth_token, mint_budget_proposal_resource_token,
+    mint_budget_resource_token, mint_direct_auth_token, mint_per_call_auth_token,
     mint_proposal_resource_token, mint_resource_token, standard_registry, verify_resource_token,
 };
 use serde_json::json;
@@ -699,5 +702,183 @@ fn a_mission_resource_token_never_outlives_its_person_token() -> Result<(), Test
         &world.keys,
         NOW,
     )?;
+    Ok(())
+}
+
+/// An access server's class grant for `records.read`, with `budget` or none.
+fn budgeted_class_grant(world: &World, budget: Option<&Budget>) -> Result<String, TestError> {
+    let reference = Reference::new(CLASS_URI, digest(CLASS))?;
+    let parsed = world.registry.parse_document(CLASS)?;
+    let vocabulary = McpCodec::vocabulary()?;
+    let operation = Operation::new(&vocabulary, br#"{"tool":"records.read"}"#)?;
+    let grant = Grant::new(&GrantedOperations::new(&vocabulary, &[operation])?, &parsed)?;
+    let claims = auth_claims(world, AS, ACCESS_DOCUMENT, "class-grant", NOW + 600)?;
+    Ok(match budget {
+        Some(budget) => mint_budget_auth_token(
+            &world.registry,
+            &world.access_key,
+            "as-key",
+            &claims,
+            &reference,
+            CLASS,
+            &grant,
+            budget,
+        )?,
+        None => mint_direct_auth_token(
+            &world.registry,
+            &world.access_key,
+            "as-key",
+            &claims,
+            &reference,
+            CLASS,
+            &grant,
+        )?,
+    })
+}
+
+#[test]
+fn a_budget_offered_in_the_resource_token_bounds_the_grant() -> Result<(), TestError> {
+    let world = world()?;
+    let offer = Budget::new(5_000, "USD", 2)?;
+    let (offered, _) = mint_budget_resource_token(
+        &world.registry,
+        &world.resource_key,
+        "resource-1",
+        &resource_claims(&world, AS, "resource-offer")?,
+        CLASS_URI,
+        CLASS,
+        &offer,
+        None,
+    )?;
+    let verified = world.agent.verify_r3_resource_token(
+        &offered,
+        RESOURCE,
+        PS,
+        &world.person,
+        None,
+        &world.keys,
+        NOW,
+    )?;
+    let deliver = |compact: &str, resource: &aauth_rust_r3::VerifiedR3ResourceToken| {
+        world.agent.verify_r3_auth_delivery(
+            compact,
+            RESOURCE,
+            resource,
+            &world.person,
+            &world.registry,
+            &world.keys,
+            NOW,
+        )
+    };
+    // Within the offer, or omitted by its issuer.
+    let within = Budget::new(2_000, "USD", 2)?;
+    deliver(&budgeted_class_grant(&world, Some(&within))?, &verified)?;
+    deliver(&budgeted_class_grant(&world, None)?, &verified)?;
+    // Wider, or in another unit or scale.
+    for budget in [
+        Budget::new(5_001, "USD", 2)?,
+        Budget::new(2_000, "EUR", 2)?,
+        Budget::new(2_000, "USD", 3)?,
+    ] {
+        assert!(
+            is_context(deliver(
+                &budgeted_class_grant(&world, Some(&budget))?,
+                &verified
+            )),
+            "{budget:?}"
+        );
+    }
+    // Without an offer, a granted budget is refused.
+    let plain = world.agent.verify_r3_resource_token(
+        &resource_token(&world, AS, "resource-plain")?,
+        RESOURCE,
+        PS,
+        &world.person,
+        None,
+        &world.keys,
+        NOW,
+    )?;
+    assert!(matches!(
+        deliver(&budgeted_class_grant(&world, Some(&within))?, &plain),
+        Err(R3AgentError::R3(_))
+    ));
+    // A class token answers a Person token, so it carries no consumption record.
+    let (recorded, _) = mint_budget_resource_token(
+        &world.registry,
+        &world.resource_key,
+        "resource-1",
+        &resource_claims(&world, AS, "resource-recorded")?,
+        CLASS_URI,
+        CLASS,
+        &offer,
+        Some(&ConsumptionRecord::new("person-1", 10)?),
+    )?;
+    assert!(is_context(world.agent.verify_r3_resource_token(
+        &recorded,
+        RESOURCE,
+        PS,
+        &world.person,
+        None,
+        &world.keys,
+        NOW,
+    )));
+
+    // A proposal whose release the Resource meters: the per-call grant is
+    // bounded by that offer the same way.
+    let exact = serde_json::to_vec(&Proposal::new(
+        &Operation::new(&McpCodec::vocabulary()?, br#"{"tool":"records.delete"}"#)?,
+        &Parameters::new(Vec::<(String, Parameter)>::new())?,
+        ProposalOptions {
+            account: None,
+            result: None,
+            display: None,
+        },
+    )?)?;
+    let class = mint_auth_token(
+        &world.access_key,
+        "as-key",
+        &auth_claims(&world, AS, ACCESS_DOCUMENT, "class-as", NOW + 3600)?,
+    )?;
+    let (proposal_token, reference) = mint_budget_proposal_resource_token(
+        &world.registry,
+        &world.resource_key,
+        "resource-1",
+        &proposal_claims(&world, AS, "class-as")?,
+        PROPOSAL_URI,
+        &exact,
+        &offer,
+    )?;
+    let challenge = world.agent.verify_r3_proposal_challenge(
+        &proposal_token,
+        RESOURCE,
+        PS,
+        &class,
+        &world.keys,
+        NOW,
+    )?;
+    let per_call = |amount| -> Result<String, TestError> {
+        Ok(mint_budget_per_call_auth_token(
+            &world.registry,
+            &world.access_key,
+            "as-key",
+            &auth_claims(&world, AS, ACCESS_DOCUMENT, "per-call", NOW + 600)?,
+            &reference,
+            &exact,
+            &Budget::new(amount, "USD", 2)?,
+        )?)
+    };
+    let release = |compact: &str| {
+        world.agent.verify_r3_per_call_delivery(
+            compact,
+            RESOURCE,
+            &challenge,
+            &class,
+            &world.registry,
+            &world.keys,
+            NOW,
+        )
+    };
+    release(&per_call(5_000)?)?;
+    assert!(is_context(release(&per_call(5_001)?)));
     Ok(())
 }

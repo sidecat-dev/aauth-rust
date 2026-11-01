@@ -423,6 +423,20 @@ fn signed_revocation_names_jti_exp_and_the_verified_issuer() {
             .unwrap()
             .contains("error=invalid_input")
     );
+    // An agent's signature is not one this endpoint accepts, and the refusal
+    // names the one it does.
+    let (agent, _) = agent_token("revoker");
+    let by_agent = server.handle(&signed_agent(
+        &agent,
+        "/revoke",
+        json!({"jti":"x","exp":1500}),
+    ));
+    assert_eq!(by_agent.status(), 401);
+    assert_eq!(
+        by_agent.headers()["signature-error"],
+        "error=unsupported_scheme"
+    );
+    assert_eq!(by_agent.headers()["accept-signature-scheme"], "jwks_uri");
 
     for body in [
         json!({"exp":1500}),

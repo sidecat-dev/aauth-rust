@@ -1,8 +1,9 @@
 //! Product qualification of federated R3. The Person Server fetches the
 //! artifact, takes the matching consent, and relays the original tokens.
 //! The access server signs the Auth token. A changed reference, subject, or
-//! issuer is not released. A per-call proposal that offers a budget is relayed
-//! with this Person Server's ceiling, and only a grant within it is released.
+//! issuer is not released. A class document or a per-call proposal that
+//! offers a budget is relayed with this Person Server's ceiling, and only a
+//! grant within it is released.
 
 use aauth_rust_agent::Agent;
 use aauth_rust_agent_provider::AgentProvider;
@@ -20,9 +21,10 @@ use aauth_rust_person_server::{
 use aauth_rust_r3::{
     Authorization, FetchBody, FetchLimits, FetchResponse, FetchTransport, IssuanceError,
     IssuanceRecord, IssuanceStore, Parameters, Proposal, ProposalOptions, Reference,
-    mint_auth_token as mint_class_auth_token, mint_budget_per_call_auth_token,
-    mint_budget_proposal_resource_token, mint_direct_auth_token, mint_per_call_auth_token,
-    mint_proposal_resource_token, mint_resource_token, standard_registry,
+    mint_auth_token as mint_class_auth_token, mint_budget_auth_token,
+    mint_budget_per_call_auth_token, mint_budget_proposal_resource_token,
+    mint_budget_resource_token, mint_direct_auth_token, mint_per_call_auth_token,
+    mint_proposal_resource_token, mint_resource_token, standard_registry, verify_budget_auth_token,
     verify_budget_per_call_auth_token,
 };
 use http::{Request, Response};
@@ -1218,4 +1220,217 @@ fn federated_budgeted_proposal_relays_the_ceiling_and_releases_only_a_grant_with
     );
     assert_eq!(server.budget_accounted(), Some(2_000_000));
     assert_eq!(consent.proposals.load(Ordering::SeqCst), 3);
+}
+
+/// An access server as aauth-go's for a class document: it signs the class
+/// grant with `grant` as its budget, or with none, and records the `budget`
+/// member of every request it receives.
+struct ClassAccess {
+    template: AuthClaims,
+    grant: Mutex<Option<Budget>>,
+    ceilings: Mutex<Vec<Option<Value>>>,
+    issued: AtomicUsize,
+}
+struct ClassRelay(Arc<ClassAccess>);
+impl aauth_rust_person_server::Federation for ClassRelay {
+    fn endpoint(&self, issuer: &str) -> Result<String, aauth_rust_person_server::FederationError> {
+        if issuer != ACCESS {
+            return Err(aauth_rust_person_server::FederationError);
+        }
+        Ok("https://as.example/token".into())
+    }
+    fn send(
+        &self,
+        request: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
+        let access = &self.0;
+        let body: Value = serde_json::from_slice(request.body()).unwrap();
+        access
+            .ceilings
+            .lock()
+            .unwrap()
+            .push(body.get("budget").cloned());
+        let registry = standard_registry().unwrap();
+        let document = registry.parse_document(CLASS).unwrap();
+        let read = registry.parse_grant(READ, &document).unwrap();
+        let reference = Reference::new(CLASS_URI, aauth_rust_r3::digest(CLASS)).unwrap();
+        let mut claims = access.template.clone();
+        claims.jti = format!("class-{}", access.issued.fetch_add(1, Ordering::SeqCst));
+        let key = SigningKey::from_seed([7; 32]);
+        let token = match &*access.grant.lock().unwrap() {
+            Some(budget) => mint_budget_auth_token(
+                &registry, &key, "as-key", &claims, &reference, CLASS, &read, budget,
+            ),
+            None => {
+                mint_direct_auth_token(&registry, &key, "as-key", &claims, &reference, CLASS, &read)
+            }
+        }
+        .unwrap();
+        Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&json!({"auth_token": token, "expires_in": 600})).unwrap())
+            .unwrap())
+    }
+}
+
+#[test]
+fn federated_budgeted_class_grant_is_released_only_within_the_ceiling() {
+    let registry = standard_registry().unwrap();
+    let holder = agent();
+    let access = Arc::new(ClassAccess {
+        template: auth_base(&holder, "unused"),
+        grant: Mutex::new(None),
+        ceilings: Mutex::new(Vec::new()),
+        issued: AtomicUsize::new(0),
+    });
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let consent = Arc::new(Consent {
+        order: order.clone(),
+        core: AtomicUsize::new(0),
+        documents: AtomicUsize::new(0),
+        proposals: AtomicUsize::new(0),
+        deny_proposal: Mutex::new(false),
+    });
+    let server = PersonServer::new(
+        Config::new(PS, "ps-key", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        Box::new(ConsentGate(consent.clone())) as BoxedPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(|| "ps-token".into()) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_federation(ClassRelay(access.clone()))
+    .with_r3(R3IssuerConfig {
+        registry: registry.clone(),
+        egress: Box::new(|_: &str, _: Instant| Ok(())),
+        transport: Box::new(Documents {
+            artifacts: Arc::new(Mutex::new(std::collections::BTreeMap::from([(
+                CLASS_URI.to_owned(),
+                CLASS.to_vec(),
+            )]))),
+            order,
+            status: Arc::new(Mutex::new(200)),
+            fail: Arc::new(Mutex::new(false)),
+        }),
+        limits: FetchLimits::default(),
+        policy: Box::new(R3Gate(consent.clone())) as _,
+        audit: Arc::new(NoAudit),
+    })
+    .unwrap()
+    .with_budgets(IssuerPolicy::capped(
+        2_000_000,
+        vec![UnitDeclaration::with_max("USD", 2, 10_000_000, "dollars").unwrap()],
+    ))
+    .unwrap();
+    let post = |path: &str, body: Value| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("{PS}{path}"))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        holder.sign(&mut request, NOW).unwrap();
+        server.handle(&request)
+    };
+    let person = post("/person", json!({"resource": RESOURCE}));
+    let person_token = serde_json::from_slice::<Value>(person.body()).unwrap()["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut claims = ResourceClaims {
+        iss: RESOURCE.into(),
+        dwk: "aauth-resource.json".into(),
+        aud: ACCESS.into(),
+        ps: PS.into(),
+        sub: "person-1".into(),
+        jti: "resource-offered".into(),
+        presented_jti: aauth_rust_core::PersonToken::parse(&person_token)
+            .unwrap()
+            .unverified_claims()
+            .jti
+            .clone(),
+        agent_jkt: holder.public_jwk().thumbprint().unwrap(),
+        iat: NOW,
+        exp: NOW + 300,
+        scope: Some("records.read".into()),
+        account: None,
+        login_hint: None,
+        nbf: None,
+        tenant: None,
+        mission_s256: None,
+        extra: Default::default(),
+    };
+    let resource_key = SigningKey::from_seed([4; 32]);
+    let (offered, _) = mint_budget_resource_token(
+        &registry,
+        &resource_key,
+        "resource-key",
+        &claims,
+        CLASS_URI,
+        CLASS,
+        &Budget::new(5_000_000, "USD", 2).unwrap(),
+        None,
+    )
+    .unwrap();
+    let exchange = |resource_token: &str| {
+        post(
+            "/token",
+            json!({"resource_token": resource_token, "presented_token": person_token}),
+        )
+    };
+    // A missing, wider or re-denominated budget is not released.
+    for grant in [
+        None,
+        Some(Budget::new(2_000_001, "USD", 2).unwrap()),
+        Some(Budget::new(1_000_000, "EUR", 2).unwrap()),
+        Some(Budget::new(1_000_000, "USD", 3).unwrap()),
+    ] {
+        *access.grant.lock().unwrap() = grant.clone();
+        let refused = exchange(&offered);
+        assert_eq!(refused.status(), 502, "{grant:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(refused.body()).unwrap()["error"],
+            "as_unreachable"
+        );
+    }
+    *access.grant.lock().unwrap() = Some(Budget::new(2_000_000, "USD", 2).unwrap());
+    let funded = exchange(&offered);
+    assert_eq!(
+        funded.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(funded.body())
+    );
+    let delivered = serde_json::from_slice::<Value>(funded.body()).unwrap()["auth_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, budget) = verify_budget_auth_token(&registry, &delivered, &Keys, NOW).unwrap();
+    assert_eq!(budget.amount(), 2_000_000);
+    assert_eq!(server.budget_accounted(), Some(2_000_000));
+    // Each exchange sent the offer narrowed to this Person Server's cap.
+    let ceiling = Budget::new(2_000_000, "USD", 2).unwrap().to_value();
+    assert_eq!(
+        access.ceilings.lock().unwrap().as_slice(),
+        vec![Some(ceiling); 5].as_slice()
+    );
+
+    // Without an offer no ceiling is sent, and a budget the access server
+    // adds anyway is not released.
+    claims.jti = "resource-plain".into();
+    let (plain, _) = mint_resource_token(
+        &registry,
+        &resource_key,
+        "resource-key",
+        &claims,
+        CLASS_URI,
+        CLASS,
+    )
+    .unwrap();
+    let refused = exchange(&plain);
+    assert_eq!(refused.status(), 502);
+    assert_eq!(access.ceilings.lock().unwrap().last(), Some(&None));
+    assert_eq!(server.budget_accounted(), Some(2_000_000));
 }
