@@ -14,6 +14,23 @@ pub(super) struct Failure {
     federation: Option<Box<crate::FederationFailure>>,
     mission_reason: Option<String>,
     detail: Option<&'static str>,
+    /// What `Accept-Signature-Scheme` names on `unsupported_scheme`.
+    scheme: Scheme,
+}
+/// The one Signature-Key scheme an endpoint accepts: `jwt` from agents, or
+/// `jwks_uri` from servers.
+#[derive(Clone, Copy)]
+enum Scheme {
+    Jwt,
+    JwksUri,
+}
+impl Scheme {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Jwt => "jwt",
+            Self::JwksUri => "jwks_uri",
+        }
+    }
 }
 impl Failure {
     pub(super) fn mission_terminated(reason: &str) -> Self {
@@ -30,6 +47,7 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
         }
     }
     pub(super) fn policy(error: PolicyError) -> Self {
@@ -48,6 +66,7 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
         }
     }
     pub(super) fn internal() -> Self {
@@ -94,6 +113,15 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
+        }
+    }
+    /// As [`Self::proof`], at an endpoint that accepts only a server's
+    /// `jwks_uri` signature: `unsupported_scheme` names that scheme.
+    pub(super) fn server_proof(error: ProofError, request: &Request<Vec<u8>>, now: i64) -> Self {
+        Self {
+            scheme: Scheme::JwksUri,
+            ..Self::proof(error, request, now)
         }
     }
     pub(super) fn revoked_jwt() -> Self {
@@ -105,6 +133,7 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
         }
     }
     pub(super) fn credential(error: TokenError) -> Self {
@@ -117,6 +146,7 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
         }
     }
     pub(super) fn clock(now: i64) -> Self {
@@ -128,6 +158,7 @@ impl Failure {
             federation: None,
             mission_reason: None,
             detail: None,
+            scheme: Scheme::Jwt,
         }
     }
     pub(super) fn with_federation(mut self, diagnostic: crate::FederationFailure) -> Self {
@@ -184,9 +215,10 @@ impl Failure {
                 .insert("signature-error", signature.parse().unwrap());
         }
         if local_signature_failure && self.code == "unsupported_scheme" {
-            response
-                .headers_mut()
-                .insert("accept-signature-scheme", "jwt".parse().unwrap());
+            response.headers_mut().insert(
+                "accept-signature-scheme",
+                self.scheme.name().parse().unwrap(),
+            );
         }
         if local_signature_failure && self.code == "unsupported_algorithm" {
             response.headers_mut().insert(

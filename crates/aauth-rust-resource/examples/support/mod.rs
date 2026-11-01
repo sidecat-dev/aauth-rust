@@ -132,7 +132,18 @@ pub fn run() -> Result<Vec<Observation>> {
             detail: "Ed25519 issuer key".into(),
         },
     ];
-    let valid = agent(&ap, SigningKey::generate(), "Agent", 1000, 2000)?;
+    // The agent reads the Resource's metadata before calling, as aauth-go's
+    // does, and covers any components it lists.
+    let metadata = resource_tls.send(&request(
+        "https://resource.example/.well-known/aauth-resource.json",
+    ))?;
+    let valid = agent(&ap, SigningKey::generate(), "Agent", 1000, 2000)?
+        .with_resource_metadata("https://resource.example", metadata.body())?;
+    observations.push(Observation {
+        scenario: "resource-metadata",
+        status: metadata.status().as_u16(),
+        detail: "issuer https://resource.example".into(),
+    });
     let send = |name, req: &Request<Vec<u8>>| -> Result<Observation> {
         Ok(observe(name, resource_tls.send(req)?))
     };

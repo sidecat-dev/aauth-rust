@@ -13,6 +13,7 @@ fn direct_agent_identity_over_verified_loopback_tls() {
         vec![
             ("ap-metadata", 200, "issuer and jwks_uri"),
             ("ap-jwks", 200, "Ed25519 issuer key"),
+            ("resource-metadata", 200, "issuer https://resource.example"),
             ("unsigned", 401, "requirement=agent-token"),
             ("valid-identity", 200, "aauth:Agent@ap.example"),
             ("hwk-proof", 200, "pseudonymous proof verified"),

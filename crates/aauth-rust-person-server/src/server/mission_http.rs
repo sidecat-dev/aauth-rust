@@ -521,9 +521,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         now: i64,
     ) -> Result<(), Failure> {
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
-            .map_err(|error| Failure::proof(error, request, now))?;
+            .map_err(|error| Failure::server_proof(error, request, now))?;
         let base = std::str::from_utf8(proof.signature_base())
-            .map_err(|_| Failure::proof(ProofError::InvalidInput, request, now))?;
+            .map_err(|_| Failure::server_proof(ProofError::InvalidInput, request, now))?;
         if !base
             .lines()
             .any(|line| line.starts_with("\"content-digest\":"))
@@ -531,13 +531,21 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                 .lines()
                 .any(|line| line.starts_with("\"content-type\":"))
         {
-            return Err(Failure::proof(ProofError::InvalidInput, request, now));
+            return Err(Failure::server_proof(
+                ProofError::InvalidInput,
+                request,
+                now,
+            ));
         }
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
-            return Err(Failure::proof(ProofError::UnsupportedScheme, request, now));
+            return Err(Failure::server_proof(
+                ProofError::UnsupportedScheme,
+                request,
+                now,
+            ));
         };
         if id != &self.config.issuer || dwk != "aauth-person.json" || kid != &self.config.kid {
-            return Err(Failure::proof(ProofError::InvalidKey, request, now));
+            return Err(Failure::server_proof(ProofError::InvalidKey, request, now));
         }
         let key = self
             .resolver()
@@ -545,7 +553,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(Failure::credential)?;
         proof
             .verify(&key)
-            .map_err(|error| Failure::proof(error, request, now))?;
+            .map_err(|error| Failure::server_proof(error, request, now))?;
         Ok(())
     }
 

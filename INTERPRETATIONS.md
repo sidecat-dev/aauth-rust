@@ -143,11 +143,36 @@ the draft required each spelling.
   (8) an Access Server `202` or `402` is refused with `500 server_error` and
   nothing is written when deferred custody is enabled, and is `502
   as_unreachable` without it, as for any deferred answer the PS cannot hold;
-  (9) the Agent's R3 helpers leave the budget check to the host
-  (`verify_budget_resource_token`, `verify_budget_per_call_auth_token`). Where
+  (9) the Agent's R3 helpers check it: `verify_r3_proposal_challenge` accepts
+  the offer and `verify_r3_per_call_delivery` a `budget` no wider than it. Where
   Go keeps no allocation ledger across tokens, this PS counts the relayed
   grant against its cap, as for every federated budget; that is not on the
   wire. A three-party Person Server still grants the release budget itself.
+- A federated Person Server relays a class document that offers a budget the
+  same way. Go's Access Server signs the class grant with `budget`, and Go's
+  Person Server verifies it with the budget profile when it sent a ceiling
+  (`verifyR3BudgetAccessResult`, main `65c49b2`). PS-to-AS Token Request
+  Extensions (line 570) is the check: `budget` is present when the PS
+  sent one, in its unit and scale and no higher, and absent when it sent none.
+  This Person Server verifies the class token with the budget profile when it
+  sent a ceiling and with the plain R3 profile, which refuses `budget`, when
+  it did not, then compares the grant with the ceiling. A missing, extra,
+  wider or re-denominated `budget` is `502 as_unreachable`, and only a
+  released grant counts against the cap. The class-R3 budget profile carries
+  no `r3_per_call`, as before.
+- The Agent's R3 helpers read a budget the same way, against the Resource
+  token's offer, since the Agent never sees the ceiling. Auth Token Extensions
+  (lines 578 and 607) make `budget` OPTIONAL in an Auth token and have the
+  Resource apply its own default when it is absent, and PS-to-AS Token
+  Request Extensions (line 572) has the Access Server omit it when the PS sent
+  no ceiling. So a class or per-call grant without `budget` is accepted after
+  an offer; with one, its unit and scale are the offer's and its amount no
+  higher (Context otherwise). Without an offer, `budget` is refused. Go's
+  agent requires the budget on an R3 grant after an offer
+  (`VerifyBudgetAuthToken`); this library takes the draft's permission to omit
+  it. A Resource token that carries `budget_consumed` with an R3 reference is
+  refused (Context): it answers a Person token or a class Auth token, which
+  have no spend to report here, and Go's agent refuses it on a proposal.
 - This library is not an intermediary, so it does not implement a rule about
   rewriting `AAuth-Budget` in transit. The RateLimit and TPX passages cited
   with normative keywords sit in non-normative prior art and are not executed.
@@ -184,7 +209,40 @@ SPECIFICATIONS.md.
   Rejection (line 2266) says the header states what the server accepts from
   any caller. The R3 document endpoint accepts only `jwks_uri` (R3 Document
   Access Restriction, line 729), so its `unsupported_scheme` refusal names
-  `jwks_uri`, not the Resource's `jwt`.
+  `jwks_uri`, not the Resource's `jwt`. A server calling in its own right uses
+  `jwks_uri` (Keying Material, line 2187), so every endpoint only servers call
+  names `jwks_uri`: the Person Server's revocation endpoint and its
+  server-signed mission approval and interaction decision endpoints, the
+  Resource's revocation and budget usage endpoints, the Access Server and the
+  Supervision Server. Endpoints agents call name `jwt`; the Agent Provider's
+  event inbox, where Resources sign with event tokens, names `self-jwt`.
+- **A trusted issuer's key the verifier cannot use.** Where a server resolves
+  the caller's key from its trusted-issuer keys, a key type or algorithm it
+  does not implement is `unsupported_algorithm` with `Accept-Signature-Alg`
+  (step 6, line 2249), and a metadata document that fails its issuer check is
+  `issuer_missing` or `issuer_mismatch` (step 5, line 2248); any other
+  unusable key is `invalid_key`. The Supervision Server's authenticate step
+  now answers so. An issuer it does not trust stays `403 unsupported_iss`
+  (Supervision). The Resource's usage endpoint answers these as any signed
+  request is answered, with `Signature-Error`, where it used
+  `invalid_signature`, `invalid_key` or `untrusted_issuer` in the body only.
+- **What an Agent signs for a Resource.** Covered Components (line 2216): an
+  agent learns further components "from server metadata or from an
+  `invalid_input` error response that includes `required_input`". The library
+  opens no connections, so the host passes what it received.
+  `Agent::with_resource_metadata` takes the document fetched from
+  `{resource}/.well-known/aauth-resource.json` and the identifier it was
+  fetched for, refuses it unless its `issuer` equals that identifier byte for
+  byte (Metadata Documents, line 1981: `issuer_missing` or `issuer_mismatch`),
+  and covers `additional_signature_components` (Resource Metadata, line
+  2133), none when the member is absent. `Agent::with_required_input` takes
+  the refused request and the refusal's headers and adds the listed
+  components the refused signature did not cover. It does not add the whole
+  list: `required_input` names what that request needed, including `@query`,
+  `authorization` and a body's `content-type`, which the signer covers
+  whenever a request has them, and as standing entries they would refuse a
+  later request without them. A refusal whose every entry was covered is
+  `AlreadyCovered`, and a list that is not plain strings is not read.
 
 # Selected supervision interpretations
 

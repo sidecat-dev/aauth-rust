@@ -227,6 +227,7 @@ fn agent_proposal_requires_a_signed_jwt_post() {
     let refused = fixture.server.handle(&server_signed);
     assert_eq!(refused.status(), 401);
     assert_eq!(error_of(&refused), "unsupported_scheme");
+    assert_eq!(refused.headers()["accept-signature-scheme"], "jwt");
     let created = fixture.server.handle(&signed(
         &fixture.owner,
         "POST",
@@ -270,6 +271,7 @@ fn approval_requires_the_server_signature_before_returning_the_blob() {
             .handle(&signed(&fixture.owner, "POST", &path, Some(body.clone())));
     assert_eq!(by_agent.status(), 401);
     assert_eq!(error_of(&by_agent), "unsupported_scheme");
+    assert_eq!(by_agent.headers()["accept-signature-scheme"], "jwks_uri");
     let wrong_key = fixture.server.handle(&approver(&path, body, [9; 32]));
     assert_eq!(wrong_key.status(), 401);
     let approved = approve(&fixture, &proposal);

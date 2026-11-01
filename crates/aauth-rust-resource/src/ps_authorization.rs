@@ -1956,10 +1956,59 @@ where
         };
         mint_resource_token(&self.config.signing_key, &self.config.kid, &challenge).map_err(|_| ())
     }
+    /// The Person Server or Access Server that signed a usage request, under
+    /// `jwks_uri` and covering the body. A failure is answered as any signed
+    /// request's is (protocol Verification (Server)).
+    fn usage_caller(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<(String, KeyRole), SignatureFailure> {
+        let accepted = || SignatureFailure::UnsupportedScheme(vec!["jwks_uri"]);
+        let input = || {
+            let mut required = required_components(request);
+            for name in ["content-type", "content-digest"] {
+                if !required.contains(&name) {
+                    required.push(name);
+                }
+            }
+            SignatureFailure::Input(required)
+        };
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
+            .map_err(|error| match error {
+            Error::UnsupportedScheme => accepted(),
+            Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+            Error::InvalidInput => input(),
+            other => SignatureFailure::Proof(other),
+        })?;
+        let base = std::str::from_utf8(proof.signature_base()).map_err(|_| input())?;
+        if !["\"content-type\":", "\"content-digest\":"]
+            .iter()
+            .all(|name| base.lines().any(|line| line.starts_with(name)))
+        {
+            return Err(input());
+        }
+        let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
+            return Err(accepted());
+        };
+        let role = match dwk.as_str() {
+            "aauth-person.json" => KeyRole::PersonServer,
+            "aauth-access.json" => KeyRole::AccessServer,
+            _ => return Err(SignatureFailure::Proof(Error::InvalidKey)),
+        };
+        let key = self
+            .keys
+            .key(id, dwk, kid)
+            .map_err(SignatureFailure::Token)?;
+        proof.verify(&key).map_err(SignatureFailure::Proof)?;
+        Ok((id.clone(), role))
+    }
     /// Answer `POST` on the configured usage endpoint.
     ///
     /// The caller proves a person-server or access-server key with `jwks_uri`
-    /// and covers `content-type` and `content-digest`. Figures are limited to
+    /// and covers `content-type` and `content-digest`; a request that does not
+    /// is answered `401` with `Signature-Error`, and `Accept-Signature-Scheme:
+    /// jwks_uri` for another scheme. Figures are limited to
     /// tokens whose `iss` or `ps` names the caller. An unrecognized scope key,
     /// including a caller who has not appeared, is `200` with `usage` omitted.
     /// An unrecognized thumbprint is omitted from `jkts`. The response is signed.
@@ -1974,36 +2023,14 @@ where
         if request.method() != http::Method::POST || request.uri().path() != endpoint.path() {
             return problem(StatusCode::NOT_FOUND, "not_found");
         }
-        let proof =
-            match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"]) {
-                Ok(proof) => proof,
-                Err(_) => return problem(StatusCode::UNAUTHORIZED, "invalid_signature"),
-            };
-        let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
-            return problem(StatusCode::UNAUTHORIZED, "invalid_key");
+        let (id, role) = match self.usage_caller(request, now) {
+            Ok(caller) => caller,
+            Err(failure) => {
+                let mut response = Decision::<()>::SignatureFailure(failure).into_response();
+                response.headers_mut().remove("aauth-requirement");
+                return response;
+            }
         };
-        let role = match dwk.as_str() {
-            "aauth-person.json" => KeyRole::PersonServer,
-            "aauth-access.json" => KeyRole::AccessServer,
-            _ => return problem(StatusCode::UNAUTHORIZED, "invalid_key"),
-        };
-        let base = std::str::from_utf8(proof.signature_base()).unwrap_or("");
-        if !base
-            .lines()
-            .any(|line| line.starts_with("\"content-type\":"))
-            || !base
-                .lines()
-                .any(|line| line.starts_with("\"content-digest\":"))
-        {
-            return problem(StatusCode::UNAUTHORIZED, "invalid_input");
-        }
-        let key = match self.keys.key(id, dwk, kid) {
-            Ok(key) => key,
-            Err(_) => return problem(StatusCode::UNAUTHORIZED, "untrusted_issuer"),
-        };
-        if proof.verify(&key).is_err() {
-            return problem(StatusCode::UNAUTHORIZED, "invalid_signature");
-        }
         let Ok(body) = strict_json(request.body()) else {
             return problem(StatusCode::BAD_REQUEST, "invalid_request");
         };
@@ -2014,7 +2041,7 @@ where
             return problem(StatusCode::INTERNAL_SERVER_ERROR, "server_error");
         };
         let caller = aauth_rust_budgets::Caller {
-            id: id.clone(),
+            id,
             role,
             ps: query.ps.clone(),
         };

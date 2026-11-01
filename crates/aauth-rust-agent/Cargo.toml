@@ -13,6 +13,7 @@ documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Sign AAuth Agent requests using caller-owned keys and exact token bytes"
 
 [dependencies]
+aauth-rust-budgets.workspace = true
 aauth-rust-jose.workspace = true
 aauth-rust-core.workspace = true
 aauth-rust-r3.workspace = true

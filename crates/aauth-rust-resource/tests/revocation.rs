@@ -453,6 +453,30 @@ fn resource_revocation_endpoint_records_without_deferral() {
         json!({"jti":"nope","exp":1500}),
     );
     assert_eq!(resource.revoke(&wrong_role, NOW).status(), 401);
+    // An agent's signature is refused, naming the one scheme accepted here.
+    let mut by_agent = Request::builder()
+        .method("POST")
+        .uri(format!("{ORIGIN}/revoke"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(&json!({"jti":"nope","exp":1500})).unwrap())
+        .unwrap();
+    sign_request(
+        &mut by_agent,
+        &SigningKey::from_seed([2; 32]),
+        KeyMaterial::Jwt {
+            jwt: person("agent-signed", NOW, NOW + 300),
+            cache: false,
+        },
+        NOW,
+    )
+    .unwrap();
+    let refused = resource.revoke(&by_agent, NOW);
+    assert_eq!(refused.status(), 401);
+    assert_eq!(
+        refused.headers()["signature-error"],
+        "error=unsupported_scheme"
+    );
+    assert_eq!(refused.headers()["accept-signature-scheme"], "jwks_uri");
 }
 
 #[test]

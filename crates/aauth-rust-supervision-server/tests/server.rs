@@ -18,6 +18,9 @@ use std::sync::{
 const SS: &str = "https://ss.example";
 const PS: &str = "https://ps.example";
 const OTHER_PS: &str = "https://other-ps.example";
+/// A trusted Person Server whose published key is of a type this library
+/// does not implement.
+const PQ_PS: &str = "https://pq-ps.example";
 const NOW: i64 = 1_800_000_000;
 const SUB: &str = "person-at-ss";
 const AGENT: &str = "aauth:assistant@agent.example";
@@ -28,6 +31,7 @@ impl AgentKeyResolver for PersonServers {
         let seed = match (issuer, dwk, kid) {
             (PS, "aauth-person.json", "ps-1") => 3,
             (OTHER_PS, "aauth-person.json", "ps-1") => 4,
+            (PQ_PS, "aauth-person.json", "ps-1") => return Err(TokenError::UnsupportedAlgorithm),
             _ => return Err(TokenError::UntrustedIssuer),
         };
         Ok(SigningKey::from_seed([seed; 32]).public_jwk())
@@ -242,6 +246,23 @@ fn only_a_connected_person_at_an_admitted_person_server_is_answered() {
     assert_eq!(
         (stranger.status().as_u16(), body(&stranger)["error"].clone()),
         (403, json!("unsupported_iss"))
+    );
+    // A trusted issuer's key of a type this server does not implement.
+    let post_quantum = fixture.server.handle(&signed_by(
+        PQ_PS,
+        5,
+        "POST",
+        &format!("{SS}/decision"),
+        Some(&json!({})),
+    ));
+    assert_eq!(post_quantum.status(), 401);
+    assert_eq!(
+        post_quantum.headers()["signature-error"],
+        "error=unsupported_algorithm"
+    );
+    assert_eq!(
+        post_quantum.headers()["accept-signature-alg"],
+        aauth_rust_signature_key::role_signature_alg_header()
     );
     let mut unsigned = permission("d-1", "Read");
     unsigned.headers_mut().remove("signature");

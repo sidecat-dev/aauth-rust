@@ -4,6 +4,7 @@
 //! Transport, response-header extraction and retries belong to hosts.
 #![deny(missing_docs)]
 mod access;
+mod components;
 mod credentials;
 mod events;
 pub use credentials::FederatedContext;
@@ -26,6 +27,7 @@ use aauth_rust_signature_key::{
 };
 pub use access::AccessSession;
 pub use attempts::ResourceTokenAttempts;
+pub use components::SignatureComponentsError;
 pub use governance::{ChannelError, InteractionCompletion, PermissionDecision};
 use http::Request;
 pub use missions::{MissionTerminated, Missions};
@@ -72,7 +74,10 @@ impl Agent {
     /// Cover a Resource's `additional_signature_components` on every request
     /// this Agent signs, including R3 authorization requests and polls. The
     /// list replaces any earlier one, and [`Self::with_token`] keeps it.
-    /// The Agent does not fetch Resource metadata: pass the published array.
+    /// The Agent does not fetch Resource metadata: pass the published array,
+    /// or the fetched document to [`Self::with_resource_metadata`], which
+    /// checks its `issuer` first. [`Self::with_required_input`] adds what an
+    /// `invalid_input` refusal lists.
     ///
     /// Use the returned Agent only for that Resource. Signing fails with
     /// `InvalidInput` rather than omit a listed component: an entry must be a

@@ -13,13 +13,23 @@
 //! when it is an Access Server. The signed `dwk` selects the role, including
 //! when the Person Server and Access Server identifiers are the same. A
 //! per-call grant uses the class grant's `dwk`. A mission is carried through
-//! unchanged and checked against the Person token; budgets are not handled here.
+//! unchanged and checked against the Person token.
+//!
+//! A class Resource token may offer a budget (`draft-hardt-aauth-budgets`,
+//! Resource Token Extensions), as may a proposal whose release the Resource
+//! meters. The grant then carries a `budget` in the offer's unit and scale
+//! and no higher, or none when its issuer omitted it (Auth Token
+//! Extensions). Without an offer the grant carries none.
 use crate::Agent;
 use crate::credentials::{PresentedAuthRole, challenge_context, narrowed_scope, verify_parent};
-use aauth_rust_core::{AgentKeyResolver, AuthToken, TokenError, validate_server_identifier};
+use aauth_rust_budgets::{Budget, parse_resource_claims, validate_narrowing};
+use aauth_rust_core::{
+    AgentKeyResolver, AuthToken, ResourceToken, TokenError, validate_server_identifier,
+};
 use aauth_rust_r3::{
     OperationSet, R3TokenError, Registry, VerifiedR3AuthToken, VerifiedR3ResourceToken,
-    verify_auth_token_claims, verify_resource_token,
+    verify_auth_token_claims, verify_budget_auth_token, verify_budget_resource_token,
+    verify_resource_token,
 };
 use aauth_rust_signature_key::signature_error_code;
 use http::{HeaderMap, Request, Response, StatusCode};
@@ -91,6 +101,39 @@ fn signature_error(headers: &HeaderMap) -> Option<String> {
         return None;
     }
     signature_error_code(&field).ok()
+}
+
+/// Verify an R3 Resource token, with its budget offer when it carries one. A
+/// consumption record is refused: the token answers a Person token or a class
+/// Auth token, neither of which reports spend here (Go refuses it too).
+fn r3_resource_token(
+    compact: &str,
+    keys: &dyn AgentKeyResolver,
+    now: i64,
+) -> Result<VerifiedR3ResourceToken, R3AgentError> {
+    let parsed =
+        ResourceToken::parse(compact).map_err(|e| R3AgentError::R3(R3TokenError::Core(e)))?;
+    if !parsed.unverified_claims().extra.contains_key("budget") {
+        return verify_resource_token(compact, keys, now).map_err(R3AgentError::R3);
+    }
+    let (token, _, consumed) =
+        verify_budget_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
+    if consumed.is_some() {
+        return Err(R3AgentError::Context);
+    }
+    Ok(token)
+}
+
+/// The budget a verified R3 Resource token offers, read from its signed bytes.
+fn offered_budget(resource: &VerifiedR3ResourceToken) -> Result<Option<Budget>, R3AgentError> {
+    let parsed = ResourceToken::parse(resource.compact())?;
+    let claims = parsed.unverified_claims();
+    if !claims.extra.contains_key("budget") {
+        return Ok(None);
+    }
+    parse_resource_claims(&claims.extra, &claims.presented_jti)
+        .map(|budget| budget.budget)
+        .map_err(|error| R3AgentError::R3(R3TokenError::Budget(error)))
 }
 
 /// Core scope on an R3 grant: absent grants none, which is never broader than
@@ -220,7 +263,8 @@ impl Agent {
     /// issued inside that Person token's validity, carry no `interaction` or
     /// `account`, and carry `scope` only within `requested_scope`. A
     /// mission-bound token must also expire no later than that Person token. With no
-    /// requested scope, any `scope` is refused. The document is not fetched:
+    /// requested scope, any `scope` is refused. It may offer a `budget`; a
+    /// `budget_consumed` record is refused. The document is not fetched:
     /// Agents are not entitled to read it.
     ///
     /// # Errors
@@ -244,7 +288,7 @@ impl Agent {
             now,
             PresentedAuthRole::PersonServer,
         )?;
-        let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
+        let token = r3_resource_token(compact, keys, now)?;
         let claims = token.claims();
         validate_server_identifier(&claims.aud)?;
         challenge_context(
@@ -284,6 +328,12 @@ impl Agent {
     /// the Resource. The Agent cannot prove either set against the document it
     /// may not read; the Person Server and Resource each do that.
     ///
+    /// When the Resource token offered a budget, a granted `budget` must have
+    /// the offer's unit and scale and an amount no higher, and the grant then
+    /// carries no `r3_per_call`. A grant without `budget` is accepted: its
+    /// issuer may omit it, and the Resource then applies its own default.
+    /// Without an offer, a `budget` is refused.
+    ///
     /// # Errors
     /// [`R3AgentError::R3`] for invalid R3 claims,
     /// [`R3AgentError::Context`] for any mismatch.
@@ -320,7 +370,9 @@ impl Agent {
     /// `presented_jti`, carry its subject, tenant, mission and account, bind
     /// this Agent's key, be issued and expire within the class token's
     /// lifetime, carry no `interaction`, and carry `scope` only within the
-    /// class token's scope. The proposal is not fetched.
+    /// class token's scope. It may offer a `budget` for a release the
+    /// Resource meters; a `budget_consumed` record is refused. The proposal
+    /// is not fetched.
     ///
     /// # Errors
     /// [`R3AgentError::Token`] or [`R3AgentError::R3`] for verification
@@ -337,7 +389,7 @@ impl Agent {
         validate_server_identifier(person_server)?;
         let parent = verify_parent(class_compact, keys, now, PresentedAuthRole::R3Class)?;
         let class = AuthToken::parse(class_compact)?.verify(keys, now)?;
-        let token = verify_resource_token(compact, keys, now).map_err(R3AgentError::R3)?;
+        let token = r3_resource_token(compact, keys, now)?;
         let claims = token.claims();
         let class_claims = class.claims();
         challenge_context(
@@ -367,7 +419,8 @@ impl Agent {
     /// Auth token as the presented credential, so the per-call token expires no
     /// later than it and uses that class token's `dwk`. The token must echo
     /// the proposal reference, grant exactly one operation, and carry no
-    /// `r3_per_call`.
+    /// `r3_per_call`. A budget the proposal offered is checked as for a class
+    /// grant.
     ///
     /// # Errors
     /// [`R3AgentError::R3`] for invalid R3 claims,
@@ -430,8 +483,24 @@ impl Agent {
             &requested.aud,
         )
         .map_err(|_| R3AgentError::Context)?;
-        let token =
-            verify_auth_token_claims(registry, compact, keys, now).map_err(R3AgentError::R3)?;
+        let granted_budget = AuthToken::parse(compact)
+            .map_err(|e| R3AgentError::R3(R3TokenError::Core(e)))?
+            .unverified_claims()
+            .extra
+            .contains_key("budget");
+        let token = match offered_budget(resource)? {
+            Some(offer) if granted_budget => {
+                let (token, grant) = verify_budget_auth_token(registry, compact, keys, now)
+                    .map_err(R3AgentError::R3)?;
+                validate_narrowing(&offer, &grant).map_err(|_| R3AgentError::Context)?;
+                token
+            }
+            // No offer, or an issuer that omitted the grant: the plain profile
+            // refuses any budget member.
+            _ => {
+                verify_auth_token_claims(registry, compact, keys, now).map_err(R3AgentError::R3)?
+            }
+        };
         if per_call {
             let operations = token.operations();
             let granted = operations

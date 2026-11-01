@@ -81,9 +81,15 @@ metadata; the verifier helper does not supply those roles. Point agents at this 
 Use the configured canonical HTTPS identity; a caller-supplied Host is not that
 identity. The Rust Agent does not fetch metadata automatically.
 
-When a Resource's metadata lists `additional_signature_components`, pass that
-array to `agent.with_additional_signature_components(list)` and use the
-returned Agent for that Resource. Every request it signs, including R3
+When a Resource's metadata lists `additional_signature_components`, pass the
+fetched document to `agent.with_resource_metadata(resource, &body)`, which
+first checks that its `issuer` is exactly the Resource identifier it was
+fetched from, or pass the array itself to
+`agent.with_additional_signature_components(list)`. Use the returned Agent for
+that Resource. After an `invalid_input` refusal,
+`agent.with_required_input(&request, response.headers())` adds each component
+the refusal's `required_input` lists that the refused signature left out; sign
+the request again with that Agent. Every request such an Agent signs, including R3
 authorization requests and polls, covers each listed component after the base
 set, and `with_token` keeps the list. An entry must be a lowercase field name
 present on the request, or `@method`, `@authority`, `@path` or `@query`. A

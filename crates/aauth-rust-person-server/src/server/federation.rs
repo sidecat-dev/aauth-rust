@@ -332,13 +332,27 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if let Some(relay) = relay {
             let registry = &self.r3.as_ref().ok_or_else(Failure::internal)?.registry;
             match relay {
+                // A class token carries `budget` exactly when this PS sent a
+                // ceiling, as in Go's Access Server; `verify_delivered` below
+                // checks that it narrows it. The class-R3 budget profile has
+                // no `r3_per_call`.
                 RelayR3::Document(reference, document) => {
-                    let verified = aauth_rust_r3::verify_auth_token_claims(
-                        registry,
-                        compact,
-                        &self.resolver(),
-                        current,
-                    )
+                    let verified = if sent.is_some() {
+                        aauth_rust_r3::verify_budget_auth_token(
+                            registry,
+                            compact,
+                            &self.resolver(),
+                            current,
+                        )
+                        .map(|(verified, _)| verified)
+                    } else {
+                        aauth_rust_r3::verify_auth_token_claims(
+                            registry,
+                            compact,
+                            &self.resolver(),
+                            current,
+                        )
+                    }
                     .map_err(|_| failed(Reason::InvalidGrant))?;
                     if verified.reference() != reference {
                         return Err(failed(Reason::InvalidGrant));

@@ -80,9 +80,11 @@ sequenceDiagram
 The four lines of output are four requests:
 
 1. **`metadata: 200 issuer=https://api.example`.** The agent reads the API's
-   metadata: its identifier and what it accepts. This library's agent does not
-   need it to sign, but other clients, such as aauth-go's, read it before
-   calling, so serve it from every API.
+   metadata: its identifier and what it accepts. This library's agent needs it
+   only when an API lists more for requests to cover, which this one does not;
+   [Signing what a Resource requires](roles/agent.md#signing-what-a-resource-requires)
+   shows how. Other clients, such as aauth-go's, read it before calling, so
+   serve it from every API.
 2. **`unsigned: 401 requirement=agent-token`.** The request had no signature.
    The API answers `401` with an `AAuth-Requirement` header that says what it
    needs: an Agent token.

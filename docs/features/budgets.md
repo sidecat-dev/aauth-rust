@@ -277,6 +277,13 @@ Person Server, as for any Auth token. `AAuth-Budget` is sent on refusals too.
 - `usage()` answers the Person Server's or Access Server's query at your
   `usage_endpoint`; they build the query with `usage_request` and read it with
   `read_usage`. See [Read usage counters](../../USE-IN-YOUR-SERVICE.md#read-usage-counters).
+- Budgets compose with [R3](r3.md): a class document's Resource token can
+  offer a budget, and so can a per-call proposal whose release you meter. The
+  Person Server grants it on the Auth token, or in four-party access sends its
+  ceiling to the Access Server and releases only a token whose budget is
+  within it. The agent's `verify_r3_auth_delivery` and
+  `verify_r3_per_call_delivery` refuse a granted budget in another unit or
+  scale, or above the offer.
 - By default the meter is in memory. `with_budget_ledger` with
   `aauth_rust_budgets::Ledger::open_directory` keeps it in a directory, so
   that a restart does not forget what was spent.

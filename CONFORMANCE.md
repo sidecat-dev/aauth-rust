@@ -1115,6 +1115,34 @@ Added on 2026-11-01:
   Server finds it ended, whether it expired, was terminated by the host, or
   was completed. Resource-initiated interaction for a supervised agent is
   still refused. API change: `SupervisionHold` gains `r3_document`.
+- alpha.18 leftovers. An `unsupported_scheme` refusal names the scheme the
+  endpoint accepts: `jwks_uri` at the Person Server's revocation, mission
+  approval and interaction decision endpoints, which named `jwt`, and at the
+  Resource's revocation and usage endpoints, which named none. The usage
+  endpoint answers every signature failure with `Signature-Error`, as any
+  signed request is answered, in place of `invalid_signature`, `invalid_key`
+  or `untrusted_issuer` in the body. The Supervision Server answers a trusted
+  Person Server key of a type it does not implement with
+  `unsupported_algorithm` and `Accept-Signature-Alg`, and a failed issuer
+  check with `issuer_missing` or `issuer_mismatch`, where it answered
+  `invalid_key`; the Resource's revocation endpoint now sends
+  `Accept-Signature-Alg` with `unsupported_algorithm` too. A federated Person
+  Server relays a class document that offers a budget with its ceiling and
+  releases the Access Server's class token only when its `budget` narrows
+  that ceiling (`502 as_unreachable` for a missing, extra, wider or
+  re-denominated one), as aauth-go's Person Server checks
+  (`tests/federated_r3.rs`). The Agent's R3 helpers accept a Resource token
+  that offers a budget and check the grant's `budget` against the offer, on
+  the class and the per-call path (`tests/r3_delivery.rs`). The Agent takes
+  what a Resource requires it to sign from the Resource's metadata document,
+  after the issuer check (`Agent::with_resource_metadata`), or from an
+  `invalid_input` refusal (`Agent::with_required_input`)
+  (`tests/signature_components.rs`); the `direct-identity` example's agent
+  reads the Resource's metadata that way before calling. API changes: the two
+  `Agent` methods and `SignatureComponentsError` are new;
+  `verify_r3_resource_token`, `verify_r3_proposal_challenge`,
+  `verify_r3_auth_delivery` and `verify_r3_per_call_delivery` accept budgets
+  where they refused them. The readings are in INTERPRETATIONS.md.
 
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
