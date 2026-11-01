@@ -26,7 +26,7 @@ the compiler; the libraries themselves are pure Rust.
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.17
+git checkout v0.1.0-alpha.18
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
@@ -46,11 +46,11 @@ From git, list each crate you use with the repository and the tag:
 <!-- checked: git-dependencies -->
 ```toml
 [dependencies]
-aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
-aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
-aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
-aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
-aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
+aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
+aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
+aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.18" }
 http = "1"
 ```
 
@@ -141,11 +141,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-agent = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
+aauth-rust-core = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-core" }
+aauth-rust-jose = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-jose" }
+aauth-rust-resource = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-resource" }
 http = "1"
 TOML
 cd ../aauth-service
@@ -171,8 +171,8 @@ build:
 
 <!-- checked: role-crates -->
 ```toml
-aauth-rust-person-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-person-server" }
-aauth-rust-access-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-person-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.18", path = "../aauth-rust/crates/aauth-rust-access-server" }
 ```
 
 | Crate | What it does | Guide |
@@ -205,7 +205,7 @@ aauth-rust-access-server = { version = "0.1.0-alpha.17", path = "../aauth-rust/c
 
 ## Status
 
-This is an alpha, version `v0.1.0-alpha.17`. APIs can change from one release
+This is an alpha, version `v0.1.0-alpha.18`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the
