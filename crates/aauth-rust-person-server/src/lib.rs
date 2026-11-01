@@ -84,3 +84,13 @@ pub use store::{
     AgentIdentity, Binding, MemoryStore, R3IssuanceAudit, Store, StoreError, TokenKind,
     TokenRecord, TokenReference, TokenTie,
 };
+
+// Rust samples in docs/ that need the supervision server run as doctests of
+// this crate. The others run in aauth-rust-resource.
+#[cfg(doctest)]
+mod docs {
+    #[doc = include_str!("../../../docs/roles/supervision-server.md")]
+    mod supervision_server {}
+    #[doc = include_str!("../../../docs/features/supervision.md")]
+    mod supervision {}
+}

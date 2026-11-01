@@ -97,7 +97,15 @@ pub fn run() -> Result<Vec<Observation>> {
             token.claims().sub != "aauth:Denied@ap.example"
         },
     )?;
+    // Published for clients that read it before calling, such as aauth-go's.
+    let metadata = resource.metadata()?;
     let resource_tls = tls::TlsServer::start("resource.example", move |req| {
+        if req.uri().path() == "/.well-known/aauth-resource.json" {
+            return Response::builder()
+                .header("content-type", "application/json")
+                .body(metadata.clone())
+                .unwrap();
+        }
         if req.uri().path() == "/proof" {
             let valid = PreparedRequest::prepare(&req, "sig", 1000, 60).is_ok_and(|proof| {
                 match proof.key() {

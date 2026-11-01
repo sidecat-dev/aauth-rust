@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nbf: None,
         extra: Default::default(),
     })?;
-    // This application trusts this provider; a network host supplies admitted documents.
+    // This program trusts this provider. A service fetches these documents over HTTPS.
     let keys = AgentProviderKeys::from_documents(issuer, &provider.metadata()?, &provider.jwks()?)?;
     let resource = AgentIdentityResource::new(
         "https://resource.example/whoami",

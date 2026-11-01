@@ -26,9 +26,10 @@ publication; APIs and package names may change during the alpha series.
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
 other eleven crates or the workspace's complete service guides. The root
-`README.md`, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and `SPECIFICATIONS.md`
-in the full development checkout describe executable examples, host integration,
-the implemented subset and pinned protocol sources. This is a partial protocol
+`README.md`, the `docs/` guides, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and
+`SPECIFICATIONS.md` in the full development checkout describe executable
+examples, host integration, the implemented subset and pinned protocol
+sources. This is a partial protocol
 implementation, not a full-profile conformance claim.
 
 ## Use and verify development sources
@@ -42,8 +43,15 @@ checkout. For example, in an application next to an `aauth-rust` checkout:
 aauth-rust-resource = { version = "0.1.0-alpha.17", path = "../aauth-rust/crates/aauth-rust-resource" }
 ```
 
-Adjust the path to your checkout. A single archive cannot supply its unpublished
-sibling dependencies. To create and compile-verify all twelve archives together,
+Adjust the path to your checkout. Cargo can also fetch the crates from the
+release tag instead:
+
+```toml
+[dependencies]
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.17" }
+```
+
+A single archive cannot supply its unpublished sibling dependencies. To create and compile-verify all twelve archives together,
 run this from the full workspace with its lockfile:
 
 ```sh
