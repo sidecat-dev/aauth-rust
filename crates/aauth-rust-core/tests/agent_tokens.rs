@@ -522,3 +522,56 @@ fn invalid_jwks_metadata_never_advertises_a_key_refresh() {
         assert_ne!(error, TokenError::UnknownKey);
     }
 }
+
+#[test]
+fn a_failed_issuer_signature_asks_the_resolver_once_for_a_fresher_key() {
+    use aauth_rust_core::AgentKeyResolver;
+    use aauth_rust_jose::Jwk;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Holds the provider's old key under `ap-1`; a refresh finds the key
+    // it was replaced with, under the same kid.
+    struct Rotating {
+        old: Jwk,
+        fresh: Option<Jwk>,
+        refreshes: AtomicUsize,
+    }
+    impl AgentKeyResolver for Rotating {
+        fn key(&self, _: &str, _: &str, _: &str) -> Result<Jwk, TokenError> {
+            Ok(self.old.clone())
+        }
+        fn refreshed_key(&self, _: &str, _: &str, _: &str) -> Result<Option<Jwk>, TokenError> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Ok(self.fresh.clone())
+        }
+    }
+    let (old, _, claims, keys) = fixture();
+    let replaced = SigningKey::from_seed([8; 32]);
+    let token = AgentToken::parse(&mint(&replaced, &claims, "aa-agent+jwt")).unwrap();
+    let rotating = Rotating {
+        old: old.public_jwk(),
+        fresh: Some(replaced.public_jwk()),
+        refreshes: AtomicUsize::new(0),
+    };
+    token.verify(&rotating, 1000).unwrap();
+    assert_eq!(rotating.refreshes.load(Ordering::SeqCst), 1);
+    // A signature that verifies asks for nothing.
+    AgentToken::parse(&mint(&old, &claims, "aa-agent+jwt"))
+        .unwrap()
+        .verify(&rotating, 1000)
+        .unwrap();
+    assert_eq!(rotating.refreshes.load(Ordering::SeqCst), 1);
+    // No fresher key, or a fixed snapshot: the failure stands.
+    let stale = Rotating {
+        fresh: None,
+        ..rotating
+    };
+    assert_eq!(
+        token.verify(&stale, 1000).unwrap_err(),
+        TokenError::InvalidJwt
+    );
+    assert_eq!(stale.refreshes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        token.verify(&keys, 1000).unwrap_err(),
+        TokenError::InvalidJwt
+    );
+}

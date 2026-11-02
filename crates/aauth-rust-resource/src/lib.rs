@@ -10,7 +10,8 @@ use aauth_rust_core::{
     AgentKeyResolver, AgentToken, MetadataDisplay, TokenError, VerifiedAgentToken,
 };
 use aauth_rust_signature_key::{
-    Error, KeyMaterial, PreparedRequest, required_components, role_signature_alg_header,
+    Error, KeyMaterial, PreparedRequest, is_coverable_component, required_components_with,
+    role_signature_alg_header,
 };
 pub use held::{HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
@@ -34,12 +35,16 @@ pub enum ConfigurationError {
     InvalidIssuer,
     /// A further scheme is `jwt`, repeated, or not a Signature-Key scheme.
     InvalidScheme,
+    /// An additional signature component is not one a signature can cover.
+    InvalidComponent,
 }
 impl ConfigurationError {
     /// Local configuration code; this is not a `Signature-Error` response code.
     pub fn code(&self) -> &'static str {
         match self {
-            Self::InvalidIssuer | Self::InvalidScheme => "invalid_configuration",
+            Self::InvalidIssuer | Self::InvalidScheme | Self::InvalidComponent => {
+                "invalid_configuration"
+            }
         }
     }
 }
@@ -51,6 +56,9 @@ impl std::fmt::Display for ConfigurationError {
             }
             Self::InvalidScheme => {
                 "invalid further scheme: name each of hwk, jkt-jwt, self-jwt, jwks, jwks_uri, x509 or cached once; jwt is always accepted"
+            }
+            Self::InvalidComponent => {
+                "invalid additional signature component: name @method, @authority, @path, @query or a lowercase HTTP field other than signature and signature-input"
             }
         })
     }
@@ -69,8 +77,10 @@ pub enum SignatureFailure {
     Proof(Error),
     /// Issuer JWT or trusted discovery failed.
     Token(TokenError),
-    /// Missing coverage, with the complete request-specific component list.
-    Input(Vec<&'static str>),
+    /// Missing coverage, with the complete request-specific component list:
+    /// the profile's, then any the Resource lists in
+    /// `additional_signature_components`.
+    Input(Vec<String>),
     /// The selected Signature-Key scheme is not accepted. Lists every scheme
     /// this Resource accepts, for `Accept-Signature-Scheme`.
     UnsupportedScheme(Vec<&'static str>),
@@ -92,6 +102,46 @@ impl SignatureFailure {
         }
     }
 }
+/// The refusal for a request [`PreparedRequest::prepare_with_components`]
+/// refused at an endpoint that accepts `accepted` and requires `additional`:
+/// `unsupported_scheme` names `accepted`, and `invalid_input` lists every
+/// component this request needs.
+pub(crate) fn prepare_failure(
+    error: Error,
+    request: &Request<Vec<u8>>,
+    now: i64,
+    accepted: &[&'static str],
+    additional: &[&str],
+) -> SignatureFailure {
+    match error {
+        Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
+        Error::InvalidInput => {
+            SignatureFailure::Input(required_components_with(request, additional))
+        }
+        Error::UnsupportedScheme => SignatureFailure::UnsupportedScheme(accepted.to_vec()),
+        other => SignatureFailure::Proof(other),
+    }
+}
+
+/// Checked `additional_signature_components`, in order, each once.
+pub(crate) fn additional_components<I, S>(components: I) -> Option<Vec<String>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut checked: Vec<String> = Vec::new();
+    for component in components {
+        let component = component.as_ref();
+        if !is_coverable_component(component) {
+            return None;
+        }
+        if !checked.iter().any(|known| known == component) {
+            checked.push(component.to_owned());
+        }
+    }
+    Some(checked)
+}
+
 impl std::fmt::Display for SignatureFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -284,11 +334,7 @@ impl<T> Decision<T> {
                         role_signature_alg_header().parse().unwrap(),
                     );
                 }
-                if matches!(failure, SignatureFailure::Proof(Error::UnsupportedScheme)) {
-                    response
-                        .headers_mut()
-                        .insert("accept-signature-scheme", "jwt".parse().unwrap());
-                }
+                // Each endpoint names the schemes it accepts; there is no default.
                 if let SignatureFailure::UnsupportedScheme(accepted) = &failure {
                     response.headers_mut().insert(
                         "accept-signature-scheme",
@@ -342,6 +388,7 @@ pub struct AgentIdentityResource<K, P> {
     path: Option<String>,
     display: MetadataDisplay,
     further_schemes: Vec<&'static str>,
+    additional_components: Vec<String>,
 }
 impl<K: AgentKeyResolver, P, O> AgentIdentityResource<K, P>
 where
@@ -367,6 +414,7 @@ where
             path: Some(uri.path().to_owned()),
             display: MetadataDisplay::new(),
             further_schemes: Vec::new(),
+            additional_components: Vec::new(),
         })
     }
     /// Also serve clients outside AAuth that sign under `schemes`
@@ -398,6 +446,31 @@ where
             further.push(known);
         }
         self.further_schemes = further;
+        Ok(self)
+    }
+    /// Require every signature to cover `components` as well, and list them
+    /// in [`Self::metadata`] as `additional_signature_components`
+    /// (`draft-hardt-oauth-aauth-protocol`, Covered Components and Resource
+    /// Metadata). A request that leaves one uncovered is refused
+    /// `invalid_input`, and its `required_input` lists them after the
+    /// profile's components. Each is required on every request: a listed
+    /// header field must be present and covered. The list replaces any
+    /// earlier one; a repeated entry counts once.
+    ///
+    /// # Errors
+    /// [`ConfigurationError::InvalidComponent`] for an entry other than
+    /// `@method`, `@authority`, `@path`, `@query` or a lowercase HTTP field
+    /// name, or for `signature` or `signature-input`.
+    pub fn with_additional_signature_components<I, S>(
+        mut self,
+        components: I,
+    ) -> Result<Self, ConfigurationError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.additional_components =
+            additional_components(components).ok_or(ConfigurationError::InvalidComponent)?;
         Ok(self)
     }
     /// Every scheme this Resource accepts, `jwt` first.
@@ -461,6 +534,10 @@ where
         let mut metadata = serde_json::json!({
             "issuer":issuer, "access_mode":"agent-token", "signature_window":60
         });
+        if !self.additional_components.is_empty() {
+            metadata["additional_signature_components"] =
+                serde_json::json!(self.additional_components);
+        }
         for (member, value) in self.display.members() {
             metadata[member] = serde_json::json!(value);
         }
@@ -479,6 +556,7 @@ where
             path: self.path,
             display: self.display,
             further_schemes: self.further_schemes,
+            additional_components: self.additional_components,
         }
     }
     /// Check a buffered absolute HTTPS request at `now` in Unix seconds.
@@ -522,23 +600,29 @@ where
             return Decision::AgentTokenRequired;
         }
         let accepted = self.accepted_schemes();
-        let proof = match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &accepted)
-        {
+        let additional: Vec<&str> = self
+            .additional_components
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let proof = match PreparedRequest::prepare_with_components(
+            request,
+            "sig",
+            now,
+            60,
+            &accepted,
+            &additional,
+        ) {
             Ok(v) => v,
-            Err(Error::UnsupportedScheme) => {
-                return Decision::SignatureFailure(SignatureFailure::UnsupportedScheme(accepted));
-            }
-            Err(Error::ClockSkew) => {
-                return Decision::SignatureFailure(SignatureFailure::ClockSkew {
-                    server_time: now,
-                });
-            }
-            Err(Error::InvalidInput) => {
-                return Decision::SignatureFailure(SignatureFailure::Input(required_components(
+            Err(e) => {
+                return Decision::SignatureFailure(prepare_failure(
+                    e,
                     request,
-                )));
+                    now,
+                    &accepted,
+                    &additional,
+                ));
             }
-            Err(e) => return Decision::SignatureFailure(SignatureFailure::Proof(e)),
         };
         if !matches!(proof.key(), KeyMaterial::Jwt { .. }) {
             return Decision::OtherScheme(Box::new(proof));

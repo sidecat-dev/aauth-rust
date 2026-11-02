@@ -267,8 +267,14 @@ where
             return Err(ProofFailure::Proof(Error::UnsupportedScheme));
         };
         validate_server_identifier(id).map_err(|_| ProofFailure::Proof(Error::InvalidKey))?;
-        let key = self.keys.key(id, dwk, kid).map_err(ProofFailure::Token)?;
-        proof.verify(&key).map_err(ProofFailure::Proof)?;
+        aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(ProofFailure::Token)?
+        .map_err(ProofFailure::Proof)?;
         Ok(Caller {
             id: id.clone(),
             dwk: dwk.clone(),

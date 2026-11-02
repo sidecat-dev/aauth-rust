@@ -1718,3 +1718,62 @@ fn proactive_scope_may_be_a_subset_while_an_auth_token_must_name_every_scope() {
             .any(|bytes| bytes == b"invalid_scope")
     );
 }
+
+#[test]
+fn listed_signature_components_are_published_and_required_of_agents() {
+    let listing = resource(Arc::new(AtomicUsize::new(0)), true)
+        .with_additional_signature_components(["x-tenant"])
+        .unwrap();
+    let metadata: Value = serde_json::from_slice(&listing.metadata().unwrap()).unwrap();
+    assert_eq!(
+        metadata["additional_signature_components"],
+        json!(["x-tenant"])
+    );
+    let with_tenant = || {
+        let mut req = request();
+        req.headers_mut()
+            .insert("x-tenant", "blue".parse().unwrap());
+        req
+    };
+    // Base coverage only: refused, with the components to add.
+    let mut plain = with_tenant();
+    agent().sign(&mut plain, NOW).unwrap();
+    let refused = listing
+        .authorize(&plain, NOW, "challenge-1")
+        .into_response();
+    assert_eq!(refused.status(), 401);
+    assert_eq!(
+        refused.headers()["signature-error"],
+        "error=invalid_input, required_input=(\"@method\" \"@authority\" \"@path\" \"signature-key\" \"x-tenant\")"
+    );
+    let mut covered = with_tenant();
+    agent()
+        .with_additional_signature_components(["x-tenant"])
+        .sign(&mut covered, NOW)
+        .unwrap();
+    let response = listing
+        .authorize(&covered, NOW, "challenge-1")
+        .into_response();
+    assert_eq!(
+        response.headers()["aauth-requirement"],
+        "requirement=person-token"
+    );
+    // A scheme other than jwt is refused, naming jwt, the one it accepts.
+    let mut hwk = request();
+    let key = SigningKey::from_seed([2; 32]);
+    sign_request(&mut hwk, &key, KeyMaterial::Hwk(key.public_jwk()), NOW).unwrap();
+    let refused = resource(Arc::new(AtomicUsize::new(0)), true)
+        .authorize(&hwk, NOW, "challenge-1")
+        .into_response();
+    assert_eq!(
+        refused.headers()["signature-error"],
+        "error=unsupported_scheme"
+    );
+    assert_eq!(refused.headers()["accept-signature-scheme"], "jwt");
+    assert_eq!(
+        listing
+            .with_additional_signature_components(["@status"])
+            .err(),
+        Some(PsConfigurationError::InvalidComponent)
+    );
+}

@@ -20,7 +20,7 @@ use aauth_rust_core::{
 };
 use aauth_rust_jose::{Jws, SigningKey, strict_json};
 use aauth_rust_signature_key::{
-    Error, KeyMaterial, PreparedRequest, canonical_authority, required_components,
+    Error, KeyMaterial, PreparedRequest, canonical_authority, required_components_with,
 };
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json};
@@ -93,6 +93,8 @@ pub enum PsConfigurationError {
     InvalidBudgetProfile,
     /// R3 definitions, registry or composition are not a usable class profile.
     InvalidR3Profile,
+    /// An additional signature component is not one a signature can cover.
+    InvalidComponent,
 }
 impl std::fmt::Display for PsConfigurationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,6 +117,9 @@ impl std::fmt::Display for PsConfigurationError {
             }
             Self::InvalidR3Profile => {
                 "R3 needs registered authoritative definitions; missions compose only with direct class R3"
+            }
+            Self::InvalidComponent => {
+                "additional signature components must be @method, @authority, @path, @query or lowercase HTTP field names other than signature and signature-input"
             }
         })
     }
@@ -712,6 +717,7 @@ pub struct PsAuthorizationResource<K, P> {
     /// Proposal URIs whose held execution grant the host still holds.
     executing: Arc<Mutex<BTreeSet<String>>>,
     display: MetadataDisplay,
+    additional_components: Vec<String>,
 }
 impl<K: AgentKeyResolver, P, O> PsAuthorizationResource<K, P>
 where
@@ -781,6 +787,7 @@ where
             r3: None,
             executing: Arc::new(Mutex::new(BTreeSet::new())),
             display: MetadataDisplay::new(),
+            additional_components: Vec::new(),
         })
     }
     /// Publish `name`, `description`, `logo_uri` and the other display
@@ -790,6 +797,32 @@ where
     pub fn with_display(mut self, display: MetadataDisplay) -> Self {
         self.display = display;
         self
+    }
+    /// Require every agent signature to cover `components` as well, and list
+    /// them in [`Self::metadata`] as `additional_signature_components`
+    /// (`draft-hardt-oauth-aauth-protocol`, Covered Components and Resource
+    /// Metadata). A request that leaves one uncovered is refused
+    /// `invalid_input`, and its `required_input` lists them after the
+    /// profile's components. Each is required on every agent request: a
+    /// listed header field must be present and covered. Server-to-server
+    /// requests, such as a usage query, keep their own profile. The list
+    /// replaces any earlier one; a repeated entry counts once.
+    ///
+    /// # Errors
+    /// [`PsConfigurationError::InvalidComponent`] for an entry other than
+    /// `@method`, `@authority`, `@path`, `@query` or a lowercase HTTP field
+    /// name, or for `signature` or `signature-input`.
+    pub fn with_additional_signature_components<I, S>(
+        mut self,
+        components: I,
+    ) -> Result<Self, PsConfigurationError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.additional_components = crate::additional_components(components)
+            .ok_or(PsConfigurationError::InvalidComponent)?;
+        Ok(self)
     }
     /// Construct a Resource that trusts the named AS's policy verdict. Challenges
     /// target this AS; only its aauth-access.json Auth tokens may grant access,
@@ -986,6 +1019,9 @@ where
         if let Some(vocabularies) = self.r3_metadata() {
             metadata["r3_vocabularies"] = vocabularies;
         }
+        if !self.additional_components.is_empty() {
+            metadata["additional_signature_components"] = json!(self.additional_components);
+        }
         for (member, value) in self.display.members() {
             metadata[member] = json!(value);
         }
@@ -1176,6 +1212,21 @@ where
             Err(error) => AuthDecision::SignatureFailure(error),
         }
     }
+    /// An agent's request proof: `jwt`, covering the profile's components
+    /// and [`Self::with_additional_signature_components`].
+    fn agent_proof(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<PreparedRequest, SignatureFailure> {
+        let additional: Vec<&str> = self
+            .additional_components
+            .iter()
+            .map(String::as_str)
+            .collect();
+        PreparedRequest::prepare_with_components(request, "sig", now, 60, &["jwt"], &additional)
+            .map_err(|error| crate::prepare_failure(error, request, now, &["jwt"], &additional))
+    }
     fn authorize_proved(
         &self,
         request: &Request<Vec<u8>>,
@@ -1188,14 +1239,9 @@ where
         if self.r3_composition_refused() {
             return Ok(AuthDecision::InternalError);
         }
-        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
-            .map_err(|error| match error {
-                Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
-                Error::InvalidInput => SignatureFailure::Input(required_components(request)),
-                other => SignatureFailure::Proof(other),
-            })?;
+        let proof = self.agent_proof(request, now)?;
         let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
-            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+            return Err(SignatureFailure::UnsupportedScheme(vec!["jwt"]));
         };
         let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;
         match parsed.header().get("typ").and_then(|value| value.as_str()) {
@@ -1517,14 +1563,9 @@ where
         now: i64,
         challenge_jti: &str,
     ) -> Result<ProactiveDecision, SignatureFailure> {
-        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
-            .map_err(|error| match error {
-                Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
-                Error::InvalidInput => SignatureFailure::Input(required_components(request)),
-                other => SignatureFailure::Proof(other),
-            })?;
+        let proof = self.agent_proof(request, now)?;
         let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
-            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+            return Err(SignatureFailure::UnsupportedScheme(vec!["jwt"]));
         };
         let parsed = Jws::parse(compact).map_err(|error| SignatureFailure::Token(error.into()))?;
         match parsed.header().get("typ").and_then(|value| value.as_str()) {
@@ -1966,13 +2007,10 @@ where
     ) -> Result<(String, KeyRole), SignatureFailure> {
         let accepted = || SignatureFailure::UnsupportedScheme(vec!["jwks_uri"]);
         let input = || {
-            let mut required = required_components(request);
-            for name in ["content-type", "content-digest"] {
-                if !required.contains(&name) {
-                    required.push(name);
-                }
-            }
-            SignatureFailure::Input(required)
+            SignatureFailure::Input(required_components_with(
+                request,
+                &["content-type", "content-digest"],
+            ))
         };
         let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
             .map_err(|error| match error {
@@ -1996,11 +2034,14 @@ where
             "aauth-access.json" => KeyRole::AccessServer,
             _ => return Err(SignatureFailure::Proof(Error::InvalidKey)),
         };
-        let key = self
-            .keys
-            .key(id, dwk, kid)
-            .map_err(SignatureFailure::Token)?;
-        proof.verify(&key).map_err(SignatureFailure::Proof)?;
+        aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(SignatureFailure::Token)?
+        .map_err(SignatureFailure::Proof)?;
         Ok((id.clone(), role))
     }
     /// Answer `POST` on the configured usage endpoint.

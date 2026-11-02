@@ -17,7 +17,7 @@ use aauth_rust_core::{
 use aauth_rust_jose::{Jwk, SigningKey, strict_json};
 use aauth_rust_signature_key::{
     DiscoveryFetch, EgressLimits, Error, KeyMaterial, PinnedFetch, PreparedRequest, admit_fetch,
-    canonical_authority, required_components, role_signature_alg_header, sign_request,
+    canonical_authority, role_signature_alg_header, sign_request,
 };
 use http::{Method, Request, Response, StatusCode};
 use serde_json::{Value, json};
@@ -465,10 +465,11 @@ impl RegistrationDecision {
                 response
                     .headers_mut()
                     .insert("signature-error", error.parse().unwrap());
-                if matches!(failure, SignatureFailure::Proof(Error::UnsupportedScheme)) {
-                    response
-                        .headers_mut()
-                        .insert("accept-signature-scheme", "jwt".parse().unwrap());
+                if let SignatureFailure::UnsupportedScheme(accepted) = &failure {
+                    response.headers_mut().insert(
+                        "accept-signature-scheme",
+                        accepted.join(", ").parse().unwrap(),
+                    );
                 }
                 if matches!(
                     failure,
@@ -796,18 +797,10 @@ impl<K: AgentKeyResolver, S: SubscriptionStore> EventsResource<K, S> {
             Ok(_) => return Err(SignatureFailure::Proof(Error::TargetMismatch)),
             Err(error) => return Err(SignatureFailure::Proof(error)),
         }
-        let proof = match PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"]) {
-            Ok(proof) => proof,
-            Err(Error::ClockSkew) => {
-                return Err(SignatureFailure::ClockSkew { server_time: now });
-            }
-            Err(Error::InvalidInput) => {
-                return Err(SignatureFailure::Input(required_components(request)));
-            }
-            Err(error) => return Err(SignatureFailure::Proof(error)),
-        };
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwt"])
+            .map_err(|error| crate::prepare_failure(error, request, now, &["jwt"], &[]))?;
         let KeyMaterial::Jwt { jwt: compact, .. } = proof.key() else {
-            return Err(SignatureFailure::Proof(Error::UnsupportedScheme));
+            return Err(SignatureFailure::UnsupportedScheme(vec!["jwt"]));
         };
         let token = SubscribeToken::parse(compact)
             .and_then(|token| token.verify(&self.keys, now))

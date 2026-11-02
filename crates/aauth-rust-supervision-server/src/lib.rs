@@ -336,8 +336,14 @@ impl<K: AgentKeyResolver, P: Policy, S: ContinuationStore, C: Fn() -> i64>
         if dwk != "aauth-person.json" || validate_server_identifier(id).is_err() {
             return Err(signature_error(ProofError::InvalidKey));
         }
-        let key = match self.keys.key(id, dwk, kid) {
-            Ok(key) => key,
+        let verified = aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == ProofError::InvalidSignature,
+        );
+        let verified = match verified {
+            Ok(verified) => verified,
             Err(TokenError::UntrustedIssuer) => {
                 return Err(refuse(SupervisionError::UnsupportedIss));
             }
@@ -355,7 +361,7 @@ impl<K: AgentKeyResolver, P: Policy, S: ContinuationStore, C: Fn() -> i64>
                 }));
             }
         };
-        proof.verify(&key).map_err(signature_error)?;
+        verified.map_err(signature_error)?;
         Ok(id.clone())
     }
 

@@ -521,13 +521,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         };
         validate_server_identifier(id)
             .map_err(|_| Failure::server_proof(ProofError::InvalidKey, request, now))?;
-        let key = self
-            .resolver()
-            .key(id, dwk, kid)
-            .map_err(Failure::credential)?;
-        proof
-            .verify(&key)
-            .map_err(|error| Failure::server_proof(error, request, now))?;
+        aauth_rust_core::verify_with_refresh(
+            &self.resolver(),
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(Failure::credential)?
+        .map_err(|error| Failure::server_proof(error, request, now))?;
         Ok(Caller {
             id: id.clone(),
             dwk: dwk.clone(),

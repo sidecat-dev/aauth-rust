@@ -5,7 +5,7 @@
 //! The host fetches the metadata and sends the requests; this module reads
 //! what they returned.
 use crate::Agent;
-use aauth_rust_signature_key::signature_error_code;
+use aauth_rust_signature_key::parse_signature_error;
 use http::{HeaderMap, Request};
 use serde_json::Value;
 use sfv::{BareItem, Dictionary, ListEntry, Parser};
@@ -168,11 +168,9 @@ fn strings(entry: Option<&ListEntry>) -> Option<Vec<String>> {
 fn required_input(refusal: &HeaderMap) -> Result<Vec<String>, SignatureComponentsError> {
     let missing = SignatureComponentsError::NoRequiredInput;
     let field = combined(refusal, "signature-error").ok_or(missing)?;
-    if signature_error_code(&field).ok().as_deref() != Some("invalid_input") {
-        return Err(missing);
-    }
-    let dictionary: Dictionary = Parser::new(&field).parse().map_err(|_| missing)?;
-    strings(dictionary.get("required_input"))
+    parse_signature_error(&field)
+        .ok()
+        .and_then(|error| error.required_input)
         .filter(|required| !required.is_empty())
         .ok_or(missing)
 }

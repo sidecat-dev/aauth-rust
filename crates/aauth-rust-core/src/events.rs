@@ -252,8 +252,11 @@ impl SubscribeToken {
         if now < 0 {
             return Err(TokenError::InvalidJwt);
         }
-        let key = keys.key(&self.claims.iss, &self.claims.dwk, &self.kid)?;
-        self.jws.verify(&key)?;
+        crate::discovery::verify_jws(
+            &self.jws,
+            keys,
+            (&self.claims.iss, &self.claims.dwk, &self.kid),
+        )?;
         if self.claims.exp <= now {
             return Err(TokenError::ExpiredJwt);
         }
@@ -343,8 +346,11 @@ impl EventToken {
         if now < 0 {
             return Err(TokenError::InvalidJwt);
         }
-        let key = keys.key(&self.claims.iss, &self.claims.dwk, &self.kid)?;
-        self.jws.verify(&key)?;
+        let key = crate::discovery::verify_jws(
+            &self.jws,
+            keys,
+            (&self.claims.iss, &self.claims.dwk, &self.kid),
+        )?;
         if self.claims.exp <= now {
             return Err(TokenError::ExpiredJwt);
         }

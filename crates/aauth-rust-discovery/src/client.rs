@@ -191,6 +191,14 @@ pub enum DiscoveryError {
         /// The role document asked for.
         dwk: String,
     },
+    /// The host trusts no such direct `jwks` URL, so nothing was fetched.
+    #[error(
+        "{url} is not a trusted jwks signer: add it with KeyResolver::trust_jwks before discovery fetches it"
+    )]
+    UntrustedJwks {
+        /// The URL as presented.
+        url: String,
+    },
     /// The client was built with unusable settings.
     #[error("invalid discovery client configuration: {0}")]
     Configuration(String),
@@ -204,9 +212,32 @@ impl DiscoveryError {
     /// of them are `401` with a `Signature-Error` at the role.
     pub fn token_error(&self) -> TokenError {
         match self {
-            Self::Untrusted { .. } => TokenError::UntrustedIssuer,
+            Self::Untrusted { .. } | Self::UntrustedJwks { .. } => TokenError::UntrustedIssuer,
             Self::Document { error, .. } => *error,
             _ => TokenError::InvalidKey,
+        }
+    }
+
+    /// The `Signature-Error` code a verifier reports for this failure, for
+    /// the `jwks` and `self-jwt` schemes, which resolve keys for a request
+    /// signature (Signature-Key, Error Codes).
+    ///
+    /// A key absent from the set is `unknown_key`, a metadata document
+    /// without the right `issuer` is `issuer_missing` or `issuer_mismatch`,
+    /// a key of another algorithm is `unsupported_algorithm`, and an
+    /// untrusted signer, or one whose keys cannot be fetched or used, is
+    /// `invalid_key`: its key does not meet this server's trust requirements.
+    pub fn signature_error(&self) -> aauth_rust_signature_key::Error {
+        use aauth_rust_signature_key::Error;
+        match self {
+            Self::Document { error, .. } => match error {
+                TokenError::UnknownKey => Error::UnknownKey,
+                TokenError::IssuerMissing => Error::IssuerMissing,
+                TokenError::IssuerMismatch => Error::IssuerMismatch,
+                TokenError::UnsupportedAlgorithm => Error::UnsupportedAlgorithm,
+                _ => Error::InvalidKey,
+            },
+            _ => Error::InvalidKey,
         }
     }
 }

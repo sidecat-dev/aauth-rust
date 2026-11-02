@@ -47,8 +47,8 @@ impl CacheRequest {
     /// # Errors
     /// `invalid_jwt` when the compact assertion, `iss`, `jti`, `exp`, or
     /// confirmation is unusable. `unsupported_algorithm` when `cnf.jwk` is
-    /// not Ed25519. `invalid_key` when the issuer signature fails as a key
-    /// error.
+    /// not Ed25519 or ES256. `invalid_key` when the issuer signature fails as
+    /// a key error.
     pub fn verified_jwt(
         label: &str,
         compact: &str,
@@ -81,8 +81,9 @@ impl CacheRequest {
         let payload =
             aauth_rust_jose::strict_json(parsed.payload()).map_err(|_| Error::InvalidJwt)?;
         let request = Self::from_verified("jkt-jwt", label, compact, &payload, retain_until, now)?;
+        let thumbprint = |key: &Jwk| key.thumbprint().map_err(|_| Error::InvalidKey);
         if request.issuer != delegation.issuer
-            || request.confirmation.x != delegation.confirmation.x
+            || thumbprint(&request.confirmation)? != thumbprint(&delegation.confirmation)?
         {
             return Err(Error::InvalidJwt);
         }
@@ -127,10 +128,10 @@ impl CacheRequest {
             .filter(|exp| *exp >= 0)
             .ok_or(Error::InvalidJwt)?;
         let confirmation = confirmation_jwk(payload.get("cnf"))?;
-        confirmation.validate().map_err(|_| Error::InvalidKey)?;
-        if confirmation.alg != "Ed25519" {
+        if !aauth_rust_jose::JWS_ALGORITHMS.contains(&confirmation.alg.as_str()) {
             return Err(Error::UnsupportedAlgorithm);
         }
+        confirmation.validate().map_err(|_| Error::InvalidKey)?;
         let digested = Sha256::digest(compact.as_bytes());
         let mut assertion_sha256 = [0u8; 32];
         assertion_sha256.copy_from_slice(&digested);
@@ -316,7 +317,7 @@ impl AssertionCache {
             "jti": jti,
             "exp": assertion_exp,
             "retain": retain_until,
-            "x": confirmation.x,
+            "jwk": sealed_key(&confirmation),
         });
         if let Some(subject) = &subject {
             plain["sub"] = json!(subject);
@@ -582,21 +583,7 @@ fn unseal(key: &[u8; 32], cid: &str) -> Result<CachedAssertion, Error> {
         .get("retain")
         .and_then(Value::as_i64)
         .ok_or(Error::CacheMiss)?;
-    let x = value
-        .get("x")
-        .and_then(Value::as_str)
-        .ok_or(Error::CacheMiss)?;
-    let confirmation = Jwk {
-        kty: "OKP".into(),
-        crv: "Ed25519".into(),
-        x: x.to_owned(),
-        y: String::new(),
-        n: String::new(),
-        e: String::new(),
-        alg: "Ed25519".into(),
-        extra: Default::default(),
-    };
-    confirmation.validate().map_err(|_| Error::CacheMiss)?;
+    let confirmation = opened_key(value.get("jwk").ok_or(Error::CacheMiss)?)?;
     Ok(CachedAssertion {
         scheme,
         issuer,
@@ -607,6 +594,45 @@ fn unseal(key: &[u8; 32], cid: &str) -> Result<CachedAssertion, Error> {
         assertion_exp,
         retain_until,
     })
+}
+
+/// The public members of a confirmation key, as sealed: `kty`, `crv`, `x`,
+/// `alg`, and `y` for an EC key.
+fn sealed_key(key: &Jwk) -> Value {
+    let mut sealed = json!({ "kty": key.kty, "crv": key.crv, "x": key.x, "alg": key.alg });
+    if !key.y.is_empty() {
+        sealed["y"] = json!(key.y);
+    }
+    sealed
+}
+
+/// The confirmation key a seal holds, checked again as on issuance.
+fn opened_key(value: &Value) -> Result<Jwk, Error> {
+    let member = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(Error::CacheMiss)
+    };
+    let key = Jwk {
+        kty: member("kty")?,
+        crv: member("crv")?,
+        x: member("x")?,
+        y: value
+            .get("y")
+            .map(|y| y.as_str().map(str::to_owned).ok_or(Error::CacheMiss))
+            .transpose()?
+            .unwrap_or_default(),
+        n: String::new(),
+        e: String::new(),
+        alg: member("alg")?,
+        extra: Default::default(),
+    };
+    if !aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str()) || key.validate().is_err() {
+        return Err(Error::CacheMiss);
+    }
+    Ok(key)
 }
 
 pub(crate) fn token(label: &str) -> Result<(), Error> {

@@ -98,12 +98,14 @@ impl SupervisionRecord {
         if dwk != SUPERVISOR_DOCUMENT {
             return Err(RecordError::BadSignature);
         }
-        let key = keys
-            .key(id, dwk, kid)
-            .map_err(|_| RecordError::BadSignature)?;
-        prepared
-            .verify(&key)
-            .map_err(|_| RecordError::BadSignature)?;
+        aauth_rust_core::verify_with_refresh(
+            keys,
+            (id, dwk, kid),
+            |key| prepared.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(|_| RecordError::BadSignature)?
+        .map_err(|_| RecordError::BadSignature)?;
         let body = strict_json(response.body()).map_err(|_| RecordError::Malformed)?;
         let decision =
             Decision::parse(&body, &self.sdi, self.act).map_err(|_| RecordError::Malformed)?;

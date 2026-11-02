@@ -13,7 +13,9 @@ Crate: `aauth-rust-discovery`. It has three parts:
 - `KeyResolver` is an `AgentKeyResolver` for the issuers you trust. Pass it
   to any role in place of a key snapshot. It fetches `{iss}/.well-known/{dwk}`,
   checks its `issuer`, fetches its `jwks_uri`, selects the `kid`, and caches
-  the key set.
+  the key set. It also resolves the keys of clients outside AAuth that a
+  Resource built `with_further_schemes` hands you: a `jwks` signer whose URL
+  you trust, and a `self-jwt` signer whose issuer you trust.
 - `RevocationClient` is a `RevocationDirectory`. Install it on a Person Server,
   Access Server or Resource with `with_revocation_directory`, and each
   revocation the role cascades from its own records reaches its recipient.
@@ -160,8 +162,28 @@ protocol:
   included;
 - a `kid` missing from a fresh set fetches the set again, once that minute
   has passed;
+- when a signature fails under a cached key, the set is fetched again once,
+  in case the issuer replaced the key under the same `kid`, within the same
+  once-a-minute limit;
 - when a fetch fails, a set fetched less than 24 hours ago still answers;
-- at most 1024 issuers and roles are held; `with_capacity` changes that.
+- at most 1024 issuers, roles and URLs are held; `with_capacity` changes that.
+
+## Signers outside AAuth
+
+A Resource built `with_further_schemes(&["jwks", "self-jwt"])` returns those
+requests as `Decision::OtherScheme(proof)`. The same `KeyResolver` verifies
+them:
+
+- `jwks`: the URL in the request is the signer's identity. Trust it with
+  `trust_jwks(url)`, or `trust_jwks_when(|url| ...)` for a rule, then call
+  `proof.verify_jwks(&keys)`. The URL is fetched as presented, through the
+  client's rules, and cached by URL.
+- `self-jwt`: trust the issuer and role with `trust(iss, dwk)`, then call
+  `keys.verify_self_jwt(&proof, now, typ)`, with the JWT `typ` your
+  deployment uses.
+
+A signer you did not trust is never fetched; its request is refused with
+`invalid_key`.
 
 ## What a delivery reports
 

@@ -1,7 +1,8 @@
 //! Client reading of advisory signature headers.
 //!
-//! Unknown list tokens are skipped. `Signature-Error` contributes only its
-//! `error` member. The response body is not an input.
+//! Unknown list tokens are skipped. `Signature-Error` contributes its `error`
+//! member and, for `invalid_input`, its `required_input` member. The response
+//! body is not an input.
 use super::{Error, select_presented_scheme};
 use sfv::{BareItem, Dictionary, List, ListEntry, Parser};
 
@@ -68,4 +69,51 @@ pub fn signature_error_code(field: &str) -> Result<String, Error> {
         },
         _ => Err(Error::InvalidInput),
     }
+}
+
+/// A `Signature-Error` field as a client reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignatureErrorField {
+    /// The `error` token, such as `invalid_input`.
+    pub code: String,
+    /// For `invalid_input`, the components the server requires, in the
+    /// order of its `required_input` member. `None` when the member is
+    /// absent, is not an inner list of plain strings, or the code is another:
+    /// the member is defined only for `invalid_input`, and a client then has
+    /// to learn the components by other means, such as the server's metadata.
+    pub required_input: Option<Vec<String>>,
+}
+
+/// Read `Signature-Error`: the `error` token and, for `invalid_input`, the
+/// `required_input` member (`draft-hardt-httpbis-signature-key`,
+/// Signature-Error, invalid_input). Other members are ignored.
+///
+/// # Errors
+/// As for [`signature_error_code`].
+pub fn parse_signature_error(field: &str) -> Result<SignatureErrorField, Error> {
+    let code = signature_error_code(field)?;
+    let required_input = if code == "invalid_input" {
+        let dictionary = Parser::new(field)
+            .parse::<Dictionary>()
+            .map_err(|_| Error::InvalidInput)?;
+        match dictionary.get("required_input") {
+            Some(ListEntry::InnerList(list)) => list
+                .items
+                .iter()
+                .map(|item| match &item.bare_item {
+                    BareItem::String(name) if item.params.is_empty() => {
+                        Some(name.as_str().to_owned())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    Ok(SignatureErrorField {
+        code,
+        required_input,
+    })
 }

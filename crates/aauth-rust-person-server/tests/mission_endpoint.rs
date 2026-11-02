@@ -349,6 +349,67 @@ fn denial_removes_the_proposal_without_a_mission_document() {
 }
 
 #[test]
+fn an_approval_may_set_the_missions_expiry() {
+    let fixture = fixture(true);
+    let proposal = propose(&fixture, "draft the note");
+    let path = format!("/mission/proposal/{proposal}/approval");
+    // The clock reads 1000 (1970-01-01T00:16:40Z). An expiry that is not a
+    // string, not RFC 3339, not after now, or sent with a denial is refused
+    // and the proposal stays pending.
+    for body in [
+        serde_json::json!({ "decision": "approve", "expires_at": 1200 }),
+        serde_json::json!({ "decision": "approve", "expires_at": "tomorrow" }),
+        serde_json::json!({ "decision": "approve", "expires_at": "1970-01-01T00:16:40Z" }),
+        serde_json::json!({ "decision": "approve", "expires_at": "1970-01-01T00:10:00Z" }),
+        serde_json::json!({ "decision": "deny", "expires_at": "1970-01-01T00:20:00Z" }),
+    ] {
+        let refused = fixture
+            .server
+            .handle(&approver(&path, body.clone(), [3; 32]));
+        assert_eq!(refused.status(), 400, "{body}");
+        assert_eq!(error_of(&refused), "invalid_request", "{body}");
+        let poll = fixture.server.handle(&signed(
+            &fixture.owner,
+            "GET",
+            &format!("/mission/proposal/{proposal}"),
+            None,
+        ));
+        assert_eq!(poll.status(), 202, "{body}");
+    }
+    let approved = fixture.server.handle(&approver(
+        &path,
+        serde_json::json!({ "decision": "approve", "expires_at": "1970-01-01T00:20:00Z" }),
+        [3; 32],
+    ));
+    assert_eq!(approved.status(), 200, "{}", error_of(&approved));
+    let poll = fixture.server.handle(&signed(
+        &fixture.owner,
+        "GET",
+        &format!("/mission/proposal/{proposal}"),
+        None,
+    ));
+    assert_eq!(poll.status(), 200, "{}", error_of(&poll));
+    let body = json_body(&poll);
+    let mission = aauth_rust_core::ApprovedMission::decode(
+        body["s256"].as_str().unwrap(),
+        body["mission"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mission.approved_at(), 1000);
+    assert_eq!(mission.expires_at(), Some(1200));
+    let blob: Value = serde_json::from_slice(mission.exact_json()).unwrap();
+    assert_eq!(blob["expires_at"], "1970-01-01T00:20:00Z");
+    // Without one, the mission runs until it is completed or revoked.
+    let open = approve(&fixture, &propose(&fixture, "draft another note"));
+    let open = aauth_rust_core::ApprovedMission::decode(
+        open["s256"].as_str().unwrap(),
+        open["mission"].as_str().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(open.expires_at(), None);
+}
+
+#[test]
 fn mission_actions_reject_a_missing_or_unknown_action() {
     let fixture = fixture(true);
     let approved = approve(&fixture, &propose(&fixture, "draft the note"));

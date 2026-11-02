@@ -11,6 +11,7 @@ use aauth_rust_signature_key::{
     sign_requests_with_components, signature_error_code, verify_application_jwt,
     verify_discovered_jwt,
 };
+use aauth_rust_signature_key::{parse_signature_error, required_components_with};
 use http::Request;
 use serde_json::json;
 
@@ -1563,14 +1564,14 @@ fn jkt_jwt_delegates_signing_and_binds_the_enclave_thumbprint() {
     .unwrap();
     assert_eq!(
         verify_presented_jkt(&delegated, &ephemeral).unwrap_err(),
-        Error::UnsupportedAlgorithm,
-        "jkt confirmation is Ed25519"
+        Error::InvalidKey,
+        "an ES256 confirmation key off its curve"
     );
 
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let foreign = format!(
         "{}.{}.{}",
-        URL_SAFE_NO_PAD.encode(r#"{"alg":"ES256","typ":"jkt-s256+jwt"}"#),
+        URL_SAFE_NO_PAD.encode(r#"{"alg":"ES384","typ":"jkt-s256+jwt"}"#),
         URL_SAFE_NO_PAD.encode(b"{}"),
         URL_SAFE_NO_PAD.encode([1u8; 64])
     );
@@ -3330,6 +3331,91 @@ fn client_ignores_unknown_accept_tokens_and_signature_error_members() {
 }
 
 #[test]
+fn a_client_reads_the_components_an_invalid_input_refusal_requires() {
+    let refusal = parse_signature_error(
+        "error=invalid_input, required_input=(\"@method\" \"@authority\" \"@path\" \"signature-key\" \"content-digest\"), note=1",
+    )
+    .unwrap();
+    assert_eq!(refusal.code, "invalid_input");
+    assert_eq!(
+        refusal.required_input.unwrap(),
+        [
+            "@method",
+            "@authority",
+            "@path",
+            "signature-key",
+            "content-digest"
+        ]
+    );
+    // Absent, malformed, or on another code, there is no list to read.
+    for field in [
+        "error=invalid_input",
+        "error=invalid_input, required_input=\"@method\"",
+        "error=invalid_input, required_input=(\"@method\" path)",
+        "error=invalid_input, required_input=(\"@method\";x=1)",
+        "error=invalid_signature, required_input=(\"@method\")",
+    ] {
+        assert_eq!(
+            parse_signature_error(field).unwrap().required_input,
+            None,
+            "{field}"
+        );
+    }
+    assert_eq!(
+        parse_signature_error("required_input=(\"@method\")").unwrap_err(),
+        Error::InvalidInput
+    );
+}
+
+#[test]
+fn a_verifier_requires_the_components_its_server_lists() {
+    let key = SigningKey::from_seed([7; 32]);
+    let part = || RequestSignature {
+        label: "sig",
+        key: &key,
+        material: KeyMaterial::Hwk(key.public_jwk()),
+    };
+    let listed = ["x-tenant", "content-digest"];
+    let mut base = request();
+    base.headers_mut()
+        .insert("x-tenant", "acme".parse().unwrap());
+    let mut plain = base.clone();
+    sign_requests(&mut plain, &[part()], 1000).unwrap();
+    assert_eq!(
+        PreparedRequest::prepare_with_components(&plain, "sig", 1000, 60, &["hwk"], &listed)
+            .unwrap_err(),
+        Error::InvalidInput
+    );
+    assert_eq!(
+        required_components_with(&plain, &listed),
+        [
+            "@method",
+            "@authority",
+            "@path",
+            "signature-key",
+            "@query",
+            "x-tenant",
+            "content-digest"
+        ]
+    );
+    let mut covering = base.clone();
+    sign_requests_with_components(&mut covering, &[part()], &listed, 1000).unwrap();
+    PreparedRequest::prepare_with_components(&covering, "sig", 1000, 60, &["hwk"], &listed)
+        .unwrap()
+        .verify(&key.public_jwk())
+        .unwrap();
+    // A component no signature can cover is never satisfied.
+    for listed in [["signature"], ["@status"], ["X-Tenant"]] {
+        assert_eq!(
+            PreparedRequest::prepare_with_components(&covering, "sig", 1000, 60, &["hwk"], &listed)
+                .unwrap_err(),
+            Error::InvalidInput,
+            "{listed:?}"
+        );
+    }
+}
+
+#[test]
 fn key_cache_expires_and_refuses_a_refetch_inside_one_minute() {
     assert_eq!(KeyCache::open(0).unwrap_err(), Error::InvalidInput);
     let mut cache = KeyCache::open(2).unwrap();
@@ -3888,6 +3974,94 @@ fn egress_admission_pins_a_public_address_and_a_parsed_origin_is_not_authorizati
 }
 
 #[test]
+fn jkt_jwt_takes_es256_enclave_and_confirmation_keys_and_caches_them() {
+    // A hardware enclave commonly holds a P-256 key, and so may the
+    // ephemeral key it delegates to; each combination verifies.
+    for (identity, ephemeral) in [
+        (SigningKey::generate_es256(), SigningKey::generate_es256()),
+        (SigningKey::generate_es256(), SigningKey::from_seed([5; 32])),
+        (SigningKey::from_seed([4; 32]), SigningKey::generate_es256()),
+    ] {
+        let issuer = format!(
+            "urn:jkt:sha-256:{}",
+            identity.public_jwk().thumbprint().unwrap()
+        );
+        let jwt = Jws::sign(
+            &json!({"alg":identity.algorithm(),"typ":"jkt-s256+jwt","jwk":identity.public_jwk()}),
+            &serde_json::to_vec(&json!({
+                "iss": issuer, "iat": 1000, "exp": 2000, "jti": "delegation-1",
+                "cnf": {"jwk": ephemeral.public_jwk()}
+            }))
+            .unwrap(),
+            &identity,
+        )
+        .unwrap();
+        let mut req = request();
+        sign_request(
+            &mut req,
+            &ephemeral,
+            KeyMaterial::JktJwt {
+                jwt: jwt.clone(),
+                cache: true,
+            },
+            1000,
+        )
+        .unwrap();
+        let prepared =
+            PreparedRequest::prepare_with_schemes(&req, "sig", 1000, 60, &["jkt-jwt"]).unwrap();
+        let delegation = prepared.verify_jkt_jwt(1000).unwrap();
+        assert_eq!(delegation.issuer, issuer);
+        assert_eq!(delegation.identity.alg, identity.algorithm());
+        assert_eq!(delegation.confirmation.alg, ephemeral.algorithm());
+        // The seal keeps the whole confirmation key, so a later `cached`
+        // request signed by the same ephemeral key verifies.
+        let mut cache = AssertionCache::open([9; 32], 8, 8).unwrap();
+        let grant = cache
+            .issue_requested(
+                prepared.cache_requested(),
+                CacheRequest::verified_jkt("sig", &jwt, 1500, 1000).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let mut cached = request();
+        sign_request(
+            &mut cached,
+            &ephemeral,
+            KeyMaterial::Cached {
+                cid: grant.cid.clone(),
+            },
+            1000,
+        )
+        .unwrap();
+        let resolved = PreparedRequest::prepare_with_schemes(&cached, "sig", 1000, 60, &["cached"])
+            .unwrap()
+            .verify_cached(&cache, 1000)
+            .unwrap();
+        assert_eq!(resolved.scheme, "jkt-jwt");
+        assert_eq!(resolved.confirmation.alg, ephemeral.algorithm());
+        assert_eq!(
+            resolved.confirmation.thumbprint().unwrap(),
+            ephemeral.public_jwk().thumbprint().unwrap()
+        );
+        let mut other = request();
+        sign_request(
+            &mut other,
+            &SigningKey::generate_es256(),
+            KeyMaterial::Cached { cid: grant.cid },
+            1000,
+        )
+        .unwrap();
+        assert_eq!(
+            PreparedRequest::prepare_with_schemes(&other, "sig", 1000, 60, &["cached"])
+                .unwrap()
+                .verify_cached(&cache, 1000)
+                .unwrap_err(),
+            Error::InvalidSignature
+        );
+    }
+}
+
+#[test]
 fn pseudonym_keys_are_distinct_for_distinct_servers() {
     let mut binding = ServerKeyBinding::open();
     let one = SigningKey::from_seed([1; 32]).public_jwk();
@@ -3926,6 +4100,12 @@ fn pseudonym_keys_are_distinct_for_distinct_servers() {
         Error::InvalidUri
     );
     binding.admit("https://two.example", &two).unwrap();
+    let p256 = SigningKey::generate_es256().public_jwk();
+    binding.admit("https://fresh.example", &p256).unwrap();
+    assert_eq!(
+        binding.admit("https://two.example", &p256).unwrap_err(),
+        Error::InvalidKey
+    );
 }
 
 #[test]

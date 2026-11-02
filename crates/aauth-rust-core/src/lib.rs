@@ -17,7 +17,9 @@ pub mod session;
 pub mod supervision;
 pub use mission::{ApprovedMission, MissionError};
 mod tokens;
-pub use discovery::{AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri};
+pub use discovery::{
+    AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri, verify_with_refresh,
+};
 pub use identifiers::{validate_agent_identifier, validate_server_identifier};
 pub use metadata::{DISPLAY_URI_MEMBERS, DisplayError, MetadataDisplay};
 pub use revocation::{
@@ -335,8 +337,11 @@ impl AgentToken {
         if now < 0 {
             return Err(TokenError::InvalidJwt);
         }
-        let key = keys.key(&self.claims.iss, &self.claims.dwk, &self.kid)?;
-        self.jws.verify(&key)?;
+        discovery::verify_jws(
+            &self.jws,
+            keys,
+            (&self.claims.iss, &self.claims.dwk, &self.kid),
+        )?;
         if self.claims.exp <= now {
             return Err(TokenError::ExpiredJwt);
         }

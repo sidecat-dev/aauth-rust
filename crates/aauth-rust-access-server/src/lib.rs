@@ -224,6 +224,14 @@ impl<K: AgentKeyResolver> AgentKeyResolver for Resolver<'_, K> {
             self.host.key(issuer, dwk, kid)
         }
     }
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        // This server's own key is not fetched, so it has no fresher copy.
+        if issuer == self.config.issuer && dwk == "aauth-access.json" {
+            Ok(None)
+        } else {
+            self.host.refreshed_key(issuer, dwk, kid)
+        }
+    }
 }
 impl<
     K: AgentKeyResolver,
@@ -378,10 +386,14 @@ impl<
         if dwk != "aauth-person.json" {
             return Err(Failure::proof(ProofError::InvalidKey, request, now));
         }
-        let ps_key = self.keys.key(id, dwk, kid).map_err(Failure::credential)?;
-        proof
-            .verify(&ps_key)
-            .map_err(|e| Failure::proof(e, request, now))?;
+        aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(Failure::credential)?
+        .map_err(|e| Failure::proof(e, request, now))?;
         if body_required
             && request
                 .headers()

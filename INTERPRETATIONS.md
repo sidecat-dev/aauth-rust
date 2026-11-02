@@ -41,6 +41,16 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
   way round, `MemoryStore::terminate_mission` writes its reason into the
   audit row, so the mission endpoint answers `mission_terminated` too; it
   refuses a reason longer than the audit row's 256 bytes before any write.
+- The person sets a mission's expiry at approval. Mission Approval (lines
+  1425 and 3588) makes `expires_at` an optional blob member "which the person
+  can see at approval time", and leaves the approval's own form to the PS.
+  Here the approval POST, signed as this Person Server, may carry
+  `expires_at` beside `"decision": "approve"`; the blob carries those exact
+  bytes. It must be an RFC 3339 string after the approval time, or the answer
+  is `400 invalid_request` and the proposal stays pending; a denial carrying
+  it is refused the same way. The mission is then terminated (`expired`) at
+  every endpoint that acts on it (line 1425), and Person and Auth tokens
+  under it expire no later (lines 863 and 1775).
 - Store::missions is optional and closed by default; mission checks and issuance
   retention must be atomic in the same store. Expiry/termination/revocation during
   policy or commit withholds credentials even if an internal issuance row was
@@ -234,13 +244,47 @@ SPECIFICATIONS.md.
   algorithms they take. The library does not know that set, so its refusals
   still name the AAuth set, which is narrower than an `hwk` or `x509` scheme
   the host verifies with ES384, RS256 or PS256.
-- **`jkt-jwt` and `cached` stay Ed25519.** Keying Material (line 2196) uses
-  `jkt-jwt` only in the Bootstrap key-refresh ceremony, which this library
-  does not implement. `ServerKeyBinding` correlates on its Ed25519 enclave
-  thumbprint, and a cache identifier's seal holds an Ed25519 confirmation key.
-  Both stay Ed25519 until Bootstrap is implemented: an ES256 `jkt-jwt` is
-  `unsupported_algorithm`, and `CacheRequest` refuses to cache an assertion
-  whose `cnf.jwk` is ES256, so that agent presents its `jwt` in full.
+- **`jkt-jwt` and `cached` take Ed25519 and ES256.** Signature-Key's
+  `jkt-jwt` scheme (line 307) roots trust in a hardware enclave key, which is
+  commonly P-256, and Algorithm Determination (lines 227 and 1247) takes the
+  algorithm from each JWK's `alg`. So the enclave key, its header `jwk` and
+  the delegated `cnf.jwk` may each be Ed25519 or ES256, the compact JWS set;
+  `ServerKeyBinding` admits either as a pseudonym key; and a cache
+  identifier's seal holds the whole public confirmation key (`kty`, `crv`,
+  `x`, `y`, `alg`). An identifier sealed by an earlier release held only an
+  Ed25519 `x`; it no longer opens, so it is `cache_miss` and the caller
+  resends its assertion in full (Signature-Key `cache_miss`, line 1006).
+- **Required components a server lists.** Covered Components (line 2216) and
+  Verification (Server) step 2 (line 2245) let a server require components
+  beyond the base set and refuse a signature without them with
+  `invalid_input` and `required_input`. `PreparedRequest::prepare_with_components`
+  takes that list, and a Resource built `with_additional_signature_components`
+  publishes it as `additional_signature_components` and requires it on every
+  agent request. A listed header field must be present and covered: the
+  metadata states what every request covers, so it is not conditional on the
+  request. `required_input` then lists the base components, then the listed
+  ones, each once. A client reads the list with `parse_signature_error`. It
+  is read only for `invalid_input`, the one code that defines it (line
+  1028), and a malformed list reads as absent, so the client falls back to
+  the server's metadata (line 1028 allows a server to omit it).
+- **One refresh after a failed signature.** Protocol JWKS Discovery and
+  Caching (line 2286) and Signature-Key Caching and Performance (line 1218)
+  ask a verifier whose cached key for a `kid` fails a signature to refresh
+  the issuer's JWKS once and retry, under the once-a-minute floor. Each token
+  verification and each `jwks_uri` request or response signature here calls
+  `AgentKeyResolver::refreshed_key` once when the signature does not verify
+  (`verify_with_refresh`); `JwksResolver` and `IssuerKeyResolver` have the
+  same method for the direct `jwks` and `self-jwt` paths (line 1054 asks the
+  same for `unknown_key`). A key of another algorithm or type is not a
+  failed signature and is not retried. A resolver that holds a fixed
+  snapshot answers `None`, and the failure stands.
+- **Unsupported scheme names what the endpoint accepts.** Verification
+  (Server) step 4 (line 2247) and Signature-Key `unsupported_scheme` (line
+  993) make `Accept-Signature-Scheme` the schemes that endpoint accepts.
+  Every Resource endpoint now names its own list, with no default: `jwt` at
+  the agent endpoints, `jwt` and the further schemes at an
+  `AgentIdentityResource` that has them, and `jwks_uri` at the R3 document,
+  revocation and usage endpoints.
 - **An EC key off its curve is `invalid_key`.** Verification (Server) step 5
   (line 2248) answers `invalid_key` for a key that cannot be parsed.
   `Jwk::validate` checks that an EC point lies on its curve, so an ES256
@@ -376,7 +420,11 @@ crate.
    any fetch unless the host named the issuer and its role document. A fetch
    failure is `invalid_key` at the verifier; the metadata checks keep
    `issuer_missing` and `issuer_mismatch`, and a missing `kid` is
-   `unknown_key`.
+   `unknown_key`. A direct `jwks` URL is the signer's identity (Signature-Key
+   jwks scheme), so it is trusted by exact URL (`trust_jwks`) or by the host's
+   test (`trust_jwks_when`); an untrusted one is never fetched and is
+   `invalid_key`, a key that "does not meet the server's trust requirements"
+   (line 1046). A `self-jwt` issuer is trusted as any issuer and role.
 5. **Freshness** comes from the JWKS response, by the `KeyCache` rules
    (`s-maxage`, `max-age`, `Expires`, `Age`; five minutes without them; at
    most 24 hours). The metadata document is fetched again each time the JWKS
@@ -389,7 +437,10 @@ crate.
    only once the minute has passed; inside it the answer is `unknown_key`.
    Concurrent lookups of one issuer and role wait for one fetch.
 7. **A failed refresh** answers from the last reusable set fetched less than
-   24 hours earlier, never past that bound.
+   24 hours earlier, never past that bound. A refresh after a failed
+   signature is different: the cached key already failed, so inside the
+   floor, or when the refetch fails, it answers that no fresher key is
+   available and the verifier keeps its original error.
 8. **Recipient role documents.** The role names each recipient's metadata
    document from its own records: a Resource is `aauth-resource.json` and an
    Access Server `aauth-access.json`; a Resource sends a resource-token

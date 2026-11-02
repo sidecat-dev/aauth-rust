@@ -174,6 +174,13 @@ request:
 - Serve `metadata()` at `/.well-known/aauth-resource.json`. The library does
   not route it for you.
 
+- If every request must also sign a header of yours, such as `x-tenant`, build
+  the Resource `with_additional_signature_components(["x-tenant"])`. The
+  metadata then lists it as `additional_signature_components`, and a request
+  that does not sign it is refused with `invalid_input`, whose `required_input`
+  names it. A Rust agent signs it after `Agent::with_resource_metadata`, or
+  after `Agent::with_required_input` on that refusal.
+
 The `axum` example does all of this:
 `cargo run --locked -p aauth-rust-resource --example axum`. Its adapter is
 [`examples/framework/mod.rs`](../../crates/aauth-rust-resource/examples/framework/mod.rs).
@@ -432,7 +439,9 @@ Options, each described in its guide: `with_mission_context`
 
 - The Agent Providers, Person Servers and Access Servers you trust, and their
   keys, which you fetch, and refresh when an `UnknownKey` error says a key is
-  missing, or which `KeyResolver` fetches and refreshes for you.
+  missing or a signature fails under a key you hold
+  (`AgentKeyResolver::refreshed_key`), or which `KeyResolver` fetches and
+  refreshes for you.
 - With `with_revocation_directory`, the delivery of the Resource-token
   revocations `revoke_issued_resource_token` cascades; `RevocationClient`
   sends them over HTTPS.

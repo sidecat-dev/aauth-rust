@@ -72,7 +72,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// proposes with a signed `jwt` POST and receives `202` with `Location`.
     /// The approval POST must be signed as this server (`jwks_uri`,
     /// `aauth-person.json`, this server's kid). A missing or different signature
-    /// leaves the proposal unchanged. The proposing agent polls `Location` once
+    /// leaves the proposal unchanged. Its body is `{"decision":"approve"}` or
+    /// `{"decision":"deny"}`; an approval may add `expires_at`, an RFC 3339
+    /// time after now that the mission document carries, after which the
+    /// mission is terminated (`expired`). A malformed or past `expires_at` is
+    /// `400 invalid_request` and leaves the proposal pending. The proposing agent polls `Location` once
     /// to receive `s256` and `mission`; a later poll is `410 gone`. A denied
     /// proposal's first poll is `403 access_denied` and the next is `410 gone`.
     /// The first approval claims the proposal before the audit write, so a
@@ -212,11 +216,13 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         id: &str,
     ) -> Result<Response<Vec<u8>>, Failure> {
         self.verify_approver(request, now)?;
-        let decision = match json_object(request)?.get("decision") {
+        let body = json_object(request)?;
+        let decision = match body.get("decision") {
             Some(Value::String(value)) if value == "approve" || value == "deny" => value.clone(),
             _ => return Err(Failure::parameter("invalid_request")),
         };
-        let (owner_subject, owner_issuer, description) = {
+        let expires_at = approval_expiry(&body, &decision)?;
+        let (owner_subject, owner_issuer, document) = {
             let mut proposals = self.proposals()?;
             let Some(proposal) = find_proposal(&mut proposals, id) else {
                 return Err(mission_not_found());
@@ -231,11 +237,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                     json!({ "decision": "denied" }),
                 ));
             }
+            // Minted before the claim, so an expiry that is not RFC 3339 or
+            // not after now leaves the proposal pending.
+            let terms = aauth_rust_core::supervision::MissionTerms {
+                expires_at: expires_at.clone(),
+                ..aauth_rust_core::supervision::MissionTerms::described(&proposal.description)
+            };
+            let document = match ApprovedMission::mint_terms(&proposal.owner_subject, now, &terms) {
+                Ok(document) => document,
+                Err(_) if expires_at.is_some() => {
+                    return Err(Failure::parameter("invalid_request"));
+                }
+                Err(_) => return Err(Failure::internal()),
+            };
             proposal.status = Status::Approving;
             (
                 proposal.owner_subject.clone(),
                 proposal.owner_issuer.clone(),
-                proposal.description.clone(),
+                document,
             )
         };
         let owner = AgentIdentity {
@@ -243,8 +262,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             subject: owner_subject.clone(),
         };
         let written = (|| -> Result<(String, String), Failure> {
-            let document = ApprovedMission::mint(&owner_subject, now, &description)
-                .map_err(|_| Failure::internal())?;
             let audit = MissionAudit {
                 person_server: self.config.issuer.clone(),
                 owner_issuer,
@@ -547,13 +564,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if id != &self.config.issuer || dwk != "aauth-person.json" || kid != &self.config.kid {
             return Err(Failure::server_proof(ProofError::InvalidKey, request, now));
         }
-        let key = self
-            .resolver()
-            .key(id, dwk, kid)
-            .map_err(Failure::credential)?;
-        proof
-            .verify(&key)
-            .map_err(|error| Failure::server_proof(error, request, now))?;
+        aauth_rust_core::verify_with_refresh(
+            &self.resolver(),
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(Failure::credential)?
+        .map_err(|error| Failure::server_proof(error, request, now))?;
         Ok(())
     }
 
@@ -636,6 +654,20 @@ fn json_object(request: &Request<Vec<u8>>) -> Result<serde_json::Map<String, Val
     match value {
         Value::Object(object) => Ok(object),
         _ => Err(Failure::parameter("invalid_request")),
+    }
+}
+
+/// The approval's `expires_at`, as sent (protocol Mission Approval, line
+/// 1425). Only an approval carries one, and it must be a string; minting
+/// checks that it is RFC 3339 and after the approval time.
+fn approval_expiry(
+    body: &serde_json::Map<String, Value>,
+    decision: &str,
+) -> Result<Option<String>, Failure> {
+    match body.get("expires_at") {
+        None => Ok(None),
+        Some(Value::String(text)) if decision == "approve" => Ok(Some(text.clone())),
+        Some(_) => Err(Failure::parameter("invalid_request")),
     }
 }
 

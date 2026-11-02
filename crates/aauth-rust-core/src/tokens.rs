@@ -435,8 +435,7 @@ fn verify_signature(
     keys: &dyn AgentKeyResolver,
     now: i64,
 ) -> Result<(), TokenError> {
-    let key = keys.key(claims.iss, claims.dwk, kid)?;
-    jws.verify(&key)?;
+    crate::discovery::verify_jws(jws, keys, (claims.iss, claims.dwk, kid))?;
     if now < 0 {
         return Err(TokenError::InvalidJwt);
     }

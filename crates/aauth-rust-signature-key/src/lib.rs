@@ -18,7 +18,10 @@ pub use cache::{
     AssertionCache, CacheGrant, CacheRequest, CachedAssertion, MAX_CACHEABLE_LIFETIME,
     present_issued_cid, select_presented_scheme,
 };
-pub use client::{choose_presented_scheme, recognized_tokens, signature_error_code};
+pub use client::{
+    SignatureErrorField, choose_presented_scheme, parse_signature_error, recognized_tokens,
+    signature_error_code,
+};
 pub use egress::{
     DiscoveryFetch, EgressLimits, MAX_DISCOVERY_REDIRECTS, MAX_DISCOVERY_RESPONSE,
     MAX_FETCH_TIMEOUT, OriginPseudonym, PinnedFetch, accept_pinned_peer, accept_response,
@@ -225,10 +228,9 @@ pub enum KeyMaterial {
 /// Algorithms an `hwk` member may name, in preference order.
 ///
 /// Other schemes accept fewer. An `x509` certificate key is Ed25519, ES256 or
-/// ES384. A key the `jwt`, `jwks_uri`, `jwks` or `self-jwt` scheme resolves
-/// is in [`aauth_rust_jose::JWS_ALGORITHMS`]: Ed25519 or ES256, the
-/// algorithms of compact JWS and so of AAuth tokens. `jkt-jwt` and `cached`
-/// keys are Ed25519.
+/// ES384. A key the `jwt`, `jkt-jwt`, `jwks_uri`, `jwks`, `self-jwt` or
+/// `cached` scheme resolves is in [`aauth_rust_jose::JWS_ALGORITHMS`]:
+/// Ed25519 or ES256, the algorithms of compact JWS and so of AAuth tokens.
 pub const ACCEPTED_SIGNATURE_ALGS: &[&str] = &["Ed25519", "ES256", "ES384", "RS256", "PS256"];
 
 /// `Accept-Signature-Alg` value for the `hwk` algorithm set, in preference order.
@@ -251,16 +253,15 @@ pub(crate) fn scheme_accepts(material: &KeyMaterial, key: &Jwk) -> bool {
     match material {
         KeyMaterial::Hwk(header) => header.alg == key.alg,
         KeyMaterial::X509 { .. } => matches!(key.alg.as_str(), "Ed25519" | "ES256" | "ES384"),
+        // Each of these resolves a JWK whose `alg` names the algorithm
+        // (Algorithm Determination): an issuer's key, a `cnf.jwk` or a
+        // cached one.
         KeyMaterial::Jwt { .. }
+        | KeyMaterial::JktJwt { .. }
         | KeyMaterial::JwksUri { .. }
         | KeyMaterial::Jwks { .. }
-        | KeyMaterial::SelfJwt { .. } => {
-            aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str())
-        }
-        // `jkt-jwt` serves only the Bootstrap key-refresh ceremony, which
-        // this library does not implement, and a cached assertion's seal
-        // holds an Ed25519 confirmation key. Both stay Ed25519.
-        KeyMaterial::JktJwt { .. } | KeyMaterial::Cached { .. } => key.alg == "Ed25519",
+        | KeyMaterial::SelfJwt { .. }
+        | KeyMaterial::Cached { .. } => aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str()),
     }
 }
 
@@ -287,6 +288,30 @@ pub fn required_components(req: &Request<Vec<u8>>) -> Vec<&'static str> {
         }
     }
     required
+}
+
+/// Components a verifier requires of this request: [`required_components`],
+/// then each of `additional` the profile does not already require, in list
+/// order and once. This is the `required_input` list of an `invalid_input`
+/// refusal from a server that also requires `additional`.
+pub fn required_components_with(req: &Request<Vec<u8>>, additional: &[&str]) -> Vec<String> {
+    let mut required: Vec<String> = required_components(req)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    for name in additional {
+        if !required.iter().any(|known| known == name) {
+            required.push((*name).to_owned());
+        }
+    }
+    required
+}
+
+/// Whether `name` is a component a server may require beyond the profile:
+/// one of `@method`, `@authority`, `@path` and `@query`, or a lowercase
+/// HTTP field name other than `signature` and `signature-input`.
+pub fn is_coverable_component(name: &str) -> bool {
+    DERIVED_COMPONENTS.contains(&name) || field_component(name)
 }
 
 fn header(req: &Request<Vec<u8>>, name: &str) -> Result<String, Error> {
@@ -648,6 +673,27 @@ impl PreparedRequest {
         window: i64,
         accepted: &[&str],
     ) -> Result<Self, Error> {
+        Self::prepare_with_components(req, label, now, window, accepted, &[])
+    }
+    /// Also require the signature to cover `additional`, the components this
+    /// server lists in its `additional_signature_components` metadata
+    /// (`draft-hardt-oauth-aauth-protocol`, Covered Components and
+    /// Verification (Server) step 2). Each must be covered on every request.
+    /// [`required_components_with`] gives the `required_input` list for the
+    /// refusal.
+    ///
+    /// # Errors
+    /// As for [`PreparedRequest::prepare_with_schemes`], and
+    /// [`Error::InvalidInput`] when the signature leaves one of `additional`
+    /// uncovered or names one that [`is_coverable_component`] refuses.
+    pub fn prepare_with_components(
+        req: &Request<Vec<u8>>,
+        label: &str,
+        now: i64,
+        window: i64,
+        accepted: &[&str],
+        additional: &[&str],
+    ) -> Result<Self, Error> {
         if req.body().len() > MAX_BODY_BYTES {
             return Err(Error::BodyTooLarge);
         }
@@ -671,7 +717,11 @@ impl PreparedRequest {
         };
         let covered = components(input)?;
         let required = required_components(req);
-        if required.iter().any(|s| !covered.contains(s)) {
+        if required.iter().any(|s| !covered.contains(s))
+            || additional
+                .iter()
+                .any(|name| !is_coverable_component(name) || !covered.contains(name))
+        {
             return Err(Error::InvalidInput);
         }
         if covered.contains(&"content-digest") {
@@ -769,9 +819,8 @@ impl PreparedRequest {
     /// Verify the captured request proof with the resolved public key.
     ///
     /// The key's algorithm must be one the selected scheme accepts: the
-    /// `hwk` member's own, Ed25519, ES256 or ES384 for `x509`, Ed25519 or
-    /// ES256 for `jwt`, `jwks_uri`, `jwks` and `self-jwt`, and Ed25519 for
-    /// `jkt-jwt` and `cached`.
+    /// `hwk` member's own, Ed25519, ES256 or ES384 for `x509`, and Ed25519 or
+    /// ES256 for `jwt`, `jkt-jwt`, `jwks_uri`, `jwks`, `self-jwt` and `cached`.
     ///
     /// # Errors
     /// Returns algorithm/key errors or `InvalidSignature` for a bad proof.

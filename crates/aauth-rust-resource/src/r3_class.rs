@@ -21,7 +21,7 @@ use aauth_rust_r3::{
     OperationAccess, OperationSet, Reference, Registry, VocabularyUri, digest,
     validate_document_account, verify_auth_token_claims, verify_budget_auth_token,
 };
-use aauth_rust_signature_key::{Error, KeyMaterial, PreparedRequest, required_components};
+use aauth_rust_signature_key::{KeyMaterial, PreparedRequest};
 use http::{Request, Response, StatusCode};
 use serde_json::{Value, json, value::RawValue};
 
@@ -587,22 +587,21 @@ where
         now: i64,
     ) -> Result<(String, String), SignatureFailure> {
         // Only a server's `jwks_uri` signature fetches; a refusal names that scheme.
-        let unsupported = || SignatureFailure::UnsupportedScheme(vec!["jwks_uri"]);
-        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &["jwks_uri"])
-            .map_err(|error| match error {
-            Error::ClockSkew => SignatureFailure::ClockSkew { server_time: now },
-            Error::InvalidInput => SignatureFailure::Input(required_components(request)),
-            Error::UnsupportedScheme => unsupported(),
-            other => SignatureFailure::Proof(other),
-        })?;
+        let accepted = ["jwks_uri"];
+        let unsupported = || SignatureFailure::UnsupportedScheme(accepted.to_vec());
+        let proof = PreparedRequest::prepare_with_schemes(request, "sig", now, 60, &accepted)
+            .map_err(|error| crate::prepare_failure(error, request, now, &accepted, &[]))?;
         let KeyMaterial::JwksUri { id, dwk, kid } = proof.key() else {
             return Err(unsupported());
         };
-        let key = self
-            .keys
-            .key(id, dwk, kid)
-            .map_err(SignatureFailure::Token)?;
-        proof.verify(&key).map_err(SignatureFailure::Proof)?;
+        aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| proof.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(SignatureFailure::Token)?
+        .map_err(SignatureFailure::Proof)?;
         Ok((id.clone(), dwk.clone()))
     }
 

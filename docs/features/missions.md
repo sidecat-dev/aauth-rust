@@ -233,7 +233,10 @@ names it in the metadata as `mission_endpoint`:
    The answer is `202` with a `Location` for the proposal.
 2. The person approves on your consent screen. Your service then sends the
    approval: a `POST` to `{Location}/approval`, signed with the Person Server's
-   own key. Without that signature the proposal stays pending.
+   own key, with `{"decision":"approve"}` or `{"decision":"deny"}`. Without
+   that signature the proposal stays pending. If the person set an end date,
+   add it as `expires_at`, an RFC 3339 time such as `"2026-12-01T00:00:00Z"`:
+   the mission document carries it, and after it the mission is terminated.
 3. The agent polls `Location` once and receives `s256` and the mission
    document. A denied proposal answers `403 access_denied`.
 4. The agent reports progress with an update, and finishes with a completion,

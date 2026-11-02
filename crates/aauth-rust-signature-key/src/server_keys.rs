@@ -1,7 +1,7 @@
 //! One pseudonym key for one server.
 //!
-//! The correlator is the Ed25519 JWK thumbprint. For `jkt-jwt` the caller
-//! passes the enclave key. The ephemeral confirmation key rotates and is not
+//! The correlator is the JWK thumbprint of an Ed25519 or ES256 key. For
+//! `jkt-jwt` the caller passes the enclave key. The ephemeral confirmation key rotates and is not
 //! the correlator. Identity schemes are not bound here.
 use std::collections::BTreeMap;
 
@@ -31,14 +31,14 @@ impl ServerKeyBinding {
     /// is the only one it may sign. The same server may use another key.
     ///
     /// # Errors
-    /// `invalid_uri` when `server` is not HTTPS. `invalid_key` when `key` has
-    /// no Ed25519 thumbprint, or that thumbprint was already admitted for a
-    /// different authority.
+    /// `invalid_uri` when `server` is not HTTPS. `invalid_key` when `key` is
+    /// not an Ed25519 or ES256 key, or its thumbprint was already admitted
+    /// for a different authority.
     pub fn admit(&mut self, server: &str, key: &Jwk) -> Result<(), Error> {
         let server = server_id(server)?;
         // Thumbprints exist for every request-key algorithm; this binding
-        // keeps its Ed25519 pseudonym profile.
-        if key.alg != "Ed25519" {
+        // keeps the pseudonym keys of `jkt-jwt`, Ed25519 and ES256.
+        if !aauth_rust_jose::JWS_ALGORITHMS.contains(&key.alg.as_str()) {
             return Err(Error::InvalidKey);
         }
         let thumbprint = key.thumbprint().map_err(|_| Error::InvalidKey)?;

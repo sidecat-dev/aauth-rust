@@ -326,9 +326,9 @@ one thumbprint under RS256 and PS256. The same key signs an `x509` request whose
 certificate holds it. Compact JWS is Ed25519 or ES256, with the header `alg`
 naming the key's own algorithm: `Jws::sign` refuses an ES384, RS256 or PS256
 key, or a header naming another algorithm, with `UnsupportedAlgorithm`. AAuth
-tokens, their confirmation keys and `self-jwt` assertions follow it. The
-`jkt-jwt` scheme and the assertion cache stay Ed25519, and `ServerKeyBinding`
-admits Ed25519 pseudonym keys only.
+tokens, their confirmation keys, `self-jwt` and `jkt-jwt` assertions and
+the keys the assertion cache seals follow it, and `ServerKeyBinding` admits
+Ed25519 and ES256 pseudonym keys.
 
 ## Request a Signature-Key cache identifier
 

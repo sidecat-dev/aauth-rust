@@ -141,6 +141,13 @@ impl<K: AgentKeyResolver> AgentKeyResolver for LocalKeys<'_, K> {
         }
         self.host.key(issuer, dwk, kid)
     }
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        // This server's own key is not fetched, so it has no fresher copy.
+        if issuer == self.config.issuer && dwk == "aauth-person.json" {
+            return Ok(None);
+        }
+        self.host.refreshed_key(issuer, dwk, kid)
+    }
 }
 #[derive(Clone)]
 struct Presented {

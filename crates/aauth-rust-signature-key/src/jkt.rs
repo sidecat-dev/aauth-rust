@@ -155,10 +155,10 @@ pub(crate) fn parse_jkt(jwt: &str, cache: bool) -> Result<JktDelegation, Error> 
         .get("alg")
         .and_then(Value::as_str)
         .ok_or(Error::UnsupportedAlgorithm)?;
-    // Compact JWS also takes ES256, but this scheme stays Ed25519: it serves
-    // only the Bootstrap key-refresh ceremony, and `ServerKeyBinding` and the
-    // assertion cache hold its keys as Ed25519.
-    if header_alg != "Ed25519" {
+    // The enclave key signs a compact JWS: Ed25519, or ES256 as hardware
+    // enclaves commonly hold (Signature-Key jkt-jwt and Algorithm
+    // Determination). Its header `jwk` must name the same algorithm.
+    if !aauth_rust_jose::JWS_ALGORITHMS.contains(&header_alg) {
         return Err(Error::UnsupportedAlgorithm);
     }
     let jwk_value = header.get("jwk").ok_or(Error::InvalidJwt)?;
@@ -220,7 +220,7 @@ fn confirmation_jwk(cnf: Option<&Value>) -> Result<Jwk, Error> {
         return Err(Error::InvalidJwt);
     }
     let parsed: Jwk = serde_json::from_value(jwk.clone()).map_err(|_| Error::InvalidJwt)?;
-    if parsed.alg != "Ed25519" {
+    if !aauth_rust_jose::JWS_ALGORITHMS.contains(&parsed.alg.as_str()) {
         return Err(Error::UnsupportedAlgorithm);
     }
     Ok(parsed)

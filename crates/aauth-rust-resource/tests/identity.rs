@@ -623,7 +623,7 @@ fn a_post_body_added_after_signing_is_refused_before_policy() {
     };
     assert_eq!(error.code(), "invalid_input");
     assert!(
-        matches!(error, aauth_rust_resource::SignatureFailure::Input(ref fields) if fields.contains(&"content-digest"))
+        matches!(error, aauth_rust_resource::SignatureFailure::Input(ref fields) if fields.iter().any(|field| field == "content-digest"))
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     req.body_mut().clear();
@@ -925,6 +925,79 @@ fn signed_json_content_reaches_policy_only_after_actual_digest_verification() {
         "error=invalid_signature"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_resource_requires_and_lists_its_additional_signature_components() {
+    let (plain, resource) = composition();
+    let resource = resource
+        .with_additional_signature_components(["x-tenant", "content-digest", "x-tenant"])
+        .unwrap();
+    let metadata = resource.metadata().unwrap();
+    let published: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+    assert_eq!(
+        published["additional_signature_components"],
+        serde_json::json!(["x-tenant", "content-digest"])
+    );
+    let get = || {
+        Request::builder()
+            .uri("https://resource.example/whoami")
+            .header("x-tenant", "blue")
+            .body(Vec::new())
+            .unwrap()
+    };
+    // An agent that signs only the base components is told what to add.
+    let mut refused = get();
+    plain.sign(&mut refused, 1000).unwrap();
+    let response = resource.authorize(&refused, 1000).into_response();
+    assert_eq!(response.status(), 401);
+    let field = response.headers()["signature-error"].to_str().unwrap();
+    let error = aauth_rust_signature_key::parse_signature_error(field).unwrap();
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(
+        error.required_input.unwrap(),
+        [
+            "@method",
+            "@authority",
+            "@path",
+            "signature-key",
+            "x-tenant",
+            "content-digest"
+        ]
+    );
+    // Through the refusal, and through the metadata, the agent then passes.
+    let retried = plain
+        .with_required_input(&refused, response.headers())
+        .unwrap();
+    let informed = plain
+        .with_resource_metadata("https://resource.example", &metadata)
+        .unwrap();
+    for agent in [retried, informed] {
+        let mut request = get();
+        agent.sign(&mut request, 1000).unwrap();
+        assert!(matches!(
+            resource.authorize(&request, 1000),
+            Decision::Granted(_)
+        ));
+    }
+    // A listed field is required on every request.
+    let mut bare = Request::builder()
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())
+        .unwrap();
+    plain.sign(&mut bare, 1000).unwrap();
+    assert_eq!(
+        resource.authorize(&bare, 1000).into_response().status(),
+        401
+    );
+    for bad in ["Signature", "signature-input", "@status", ""] {
+        let (_, resource) = composition();
+        assert_eq!(
+            resource.with_additional_signature_components([bad]).err(),
+            Some(aauth_rust_resource::ConfigurationError::InvalidComponent),
+            "{bad}"
+        );
+    }
 }
 
 #[test]

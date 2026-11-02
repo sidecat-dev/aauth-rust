@@ -17,7 +17,7 @@ The six AAuth sources are byte-identical at 28e8258 and 70d6737.
 
 Agent, Person, Resource and PS/AS Auth tokens execute, with person binding,
 three-party authorization, an immediate direct downstream chain and immediate
-four-party federation. The proof subset is Ed25519, ES256, ES384, RS256, and PS256 `hwk`, Ed25519 and ES256 `jwt`, Ed25519 `jkt-s256+jwt`
+four-party federation. The proof subset is Ed25519, ES256, ES384, RS256, and PS256 `hwk`, Ed25519 and ES256 `jwt`, Ed25519 and ES256 `jkt-s256+jwt`
 self-issued delegation, plus explicit
 `jwks_uri` service proofs. A `jkt-jwt` member is verified by recomputing
 `urn:jkt:sha-256:` from the header `jwk` and comparing it to `iss`, then
@@ -33,11 +33,14 @@ present, and `cnf` is absent, the metadata document's `issuer` must equal
 `iss` or the resolver is not called. The host resolver is then asked for that
 exact `iss`, `dwk`, and `kid`. That key verifies the JWT and then the HTTP
 signature. A `cache` parameter is rejected and no cache identifier is issued.
-The library does not fetch the issuer. A direct `jwks` member names an HTTPS
+The signature-key crate does not fetch the issuer; the opt-in discovery
+crate's `KeyResolver` resolves a trusted one. A direct `jwks` member names an HTTPS
 JWKS `url` and a `kid`. The URL is the signer identity and is passed to the
 host resolver unchanged: host case, an explicit port, a trailing slash, and a
 query are not rewritten. Byte-different URLs are different identities. The
-library does not fetch the JWKS. An EC header key carries `kty`, `crv`,
+signature-key crate does not fetch the JWKS; `KeyResolver` fetches a URL the
+host trusts. When a signature fails under the resolved key, each resolver is
+asked once for a fresher key. An EC header key carries `kty`, `crv`,
 `x`, `y`, and `alg` (`ES256` with `P-256`, or `ES384` with `P-384`). An RSA
 header key carries `kty`, `n`, `e`, and an `alg` that names both padding and
 hash (`RS256` or `PS256`). `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. A missing parameter or a curve that disagrees with
@@ -144,7 +147,9 @@ An agent helper remembers a resource token refused as `revoked_resource_token`. 
 Opt-in mission creation, update, completion, approval and owner audit execute.
 The agent proposes with a signed `jwt` POST and receives `202` with `Location`,
 `Retry-After`, and `Cache-Control: no-store`. Approval is a separate POST signed
-as this Person Server; a missing or different signature does not approve.
+as this Person Server; a missing or different signature does not approve. The
+approval may carry `expires_at`, an RFC 3339 time after it, which the mission
+bytes then carry.
 The proposing agent polls that location once and receives `s256` and the base64url
 mission bytes the server persists. A later poll is `410 gone`. A denied proposal's
 first poll is `403 access_denied` and the next is `410 gone`. The approval POST

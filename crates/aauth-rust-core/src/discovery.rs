@@ -12,6 +12,70 @@ pub trait AgentKeyResolver: Send + Sync {
     /// Reserve `UnknownKey` for missing kid on a trusted issuer, so a host may
     /// refresh only its configured source after checking the issuer allowlist.
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError>;
+
+    /// Resolve `kid` again from a fresh fetch, because a signature failed
+    /// under the key [`Self::key`] answered (protocol line 2286;
+    /// Signature-Key line 1218): the issuer may have replaced the key and
+    /// kept its `kid`. [`verify_with_refresh`] calls this at most once per
+    /// verification.
+    ///
+    /// `Ok(None)` means no fresher key is available, and the failure
+    /// stands: the resolver does not fetch, or already fetched this issuer
+    /// within the last minute. The default answers `Ok(None)`, as a fixed
+    /// snapshot does.
+    ///
+    /// # Errors
+    /// As for [`Self::key`]; `UnknownKey` when the fresh key set no longer
+    /// has `kid`.
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        let _ = (issuer, dwk, kid);
+        Ok(None)
+    }
+}
+
+/// Verify with the key `keys` resolves for (`issuer`, `dwk`, `kid`), and once
+/// more with [`AgentKeyResolver::refreshed_key`] when `verify` fails with an
+/// error `signature_failed` accepts (protocol line 2286; Signature-Key line
+/// 1218). Use it for a token signature and for a `jwks_uri` request
+/// signature alike.
+///
+/// The outer `Err` is the key lookup's: the first one, or the refresh's,
+/// such as `UnknownKey` when the refreshed set no longer has `kid`. The inner
+/// result is `verify`'s, from the refreshed key when there was one.
+///
+/// # Errors
+/// As described: resolver errors outside, `verify` errors inside.
+pub fn verify_with_refresh<T, E>(
+    keys: &dyn AgentKeyResolver,
+    (issuer, dwk, kid): (&str, &str, &str),
+    verify: impl Fn(&Jwk) -> Result<T, E>,
+    signature_failed: impl Fn(&E) -> bool,
+) -> Result<Result<T, E>, TokenError> {
+    let key = keys.key(issuer, dwk, kid)?;
+    match verify(&key) {
+        Err(error) if signature_failed(&error) => match keys.refreshed_key(issuer, dwk, kid)? {
+            Some(fresh) => Ok(verify(&fresh)),
+            None => Ok(Err(error)),
+        },
+        result => Ok(result),
+    }
+}
+
+/// Verify a compact JWS with the key `keys` resolves, refreshing it once
+/// when the signature does not verify ([`verify_with_refresh`]). Returns the
+/// key that verified it.
+pub(crate) fn verify_jws(
+    jws: &aauth_rust_jose::Jws,
+    keys: &dyn AgentKeyResolver,
+    names: (&str, &str, &str),
+) -> Result<Jwk, TokenError> {
+    verify_with_refresh(
+        keys,
+        names,
+        |key| jws.verify(key).map(|()| key.clone()),
+        |error| matches!(error, aauth_rust_jose::Error::InvalidJws),
+    )?
+    .map_err(Into::into)
 }
 
 /// Validate issuer binding and return the HTTPS JWKS location from metadata.
@@ -154,15 +218,24 @@ impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for &T {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         (**self).key(issuer, dwk, kid)
     }
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        (**self).refreshed_key(issuer, dwk, kid)
+    }
 }
 impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for std::sync::Arc<T> {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         (**self).key(issuer, dwk, kid)
     }
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        (**self).refreshed_key(issuer, dwk, kid)
+    }
 }
 impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for Box<T> {
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         (**self).key(issuer, dwk, kid)
+    }
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, TokenError> {
+        (**self).refreshed_key(issuer, dwk, kid)
     }
 }
 

@@ -754,8 +754,14 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if id != &metadata.issuer || dwk != SUPERVISOR_DOCUMENT {
             return Err(());
         }
-        let key = self.keys.key(id, dwk, kid).map_err(|_| ())?;
-        prepared.verify(&key).map_err(|_| ())
+        aauth_rust_core::verify_with_refresh(
+            &self.keys,
+            (id, dwk, kid),
+            |key| prepared.verify(key),
+            |error| *error == aauth_rust_signature_key::Error::InvalidSignature,
+        )
+        .map_err(|_| ())?
+        .map_err(|_| ())
     }
 
     /// A request to the SS, signed as this server. A supervision request or

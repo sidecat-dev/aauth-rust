@@ -23,6 +23,22 @@ pub trait IssuerKeyResolver {
     /// [`Error::UnknownKey`] when the kid is absent. Other [`Error`] values
     /// propagate unchanged.
     fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, Error>;
+
+    /// Resolve `kid` again from a fresh fetch, because the assertion's
+    /// signature failed under the key [`Self::key`] answered (Signature-Key
+    /// line 1218 and unknown_key, line 1054). Called at most once per
+    /// verification.
+    ///
+    /// `Ok(None)` means no fresher key is available and the failure stands:
+    /// the resolver does not fetch, or fetched this issuer within the last
+    /// minute. The default answers `Ok(None)`.
+    ///
+    /// # Errors
+    /// As for [`Self::key`].
+    fn refreshed_key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Option<Jwk>, Error> {
+        let _ = (issuer, dwk, kid);
+        Ok(None)
+    }
 }
 
 impl<F> IssuerKeyResolver for F
@@ -242,22 +258,37 @@ impl PreparedRequest {
         if documented != checked.issuer {
             return Err(Error::IssuerMismatch);
         }
-        let key = resolver.key(
-            &checked.issuer,
-            &checked.discovery_document,
-            &checked.key_id,
-        )?;
         let header_alg = checked
             .parsed
             .header()
             .get("alg")
             .and_then(Value::as_str)
             .ok_or(Error::UnsupportedAlgorithm)?;
-        key.validate().map_err(map_jose)?;
-        if key.alg != header_alg {
-            return Err(Error::InvalidKey);
+        let check = |key: &Jwk| {
+            key.validate().map_err(map_jose)?;
+            if key.alg != header_alg {
+                return Err(Error::InvalidKey);
+            }
+            checked.parsed.verify(key).map_err(map_jws)
+        };
+        let names = (
+            checked.issuer.as_str(),
+            checked.discovery_document.as_str(),
+            checked.key_id.as_str(),
+        );
+        let mut key = resolver.key(names.0, names.1, names.2)?;
+        // A failed assertion signature may mean a replaced key under the
+        // same kid: one refresh, then `invalid_jwt` stands.
+        match check(&key) {
+            Err(Error::InvalidJwt) => match resolver.refreshed_key(names.0, names.1, names.2)? {
+                Some(fresh) => {
+                    check(&fresh)?;
+                    key = fresh;
+                }
+                None => return Err(Error::InvalidJwt),
+            },
+            other => other?,
         }
-        checked.parsed.verify(&key).map_err(map_jws)?;
         self.verify(&key)?;
         Ok(SelfJwtAssertion {
             issuer: checked.issuer,
