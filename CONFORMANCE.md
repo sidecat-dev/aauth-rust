@@ -1076,7 +1076,8 @@ Added on 2026-10-31:
   Server takes no narrowing; `auth_token.issued` after an Access Server
   deferral, `revocation.received` for resource tokens, `interaction.requested`,
   and mission terminations other than completion were not reported. All but
-  resource-initiated interaction came on 2026-11-01; see below. The draft
+  resource-initiated interaction came on 2026-11-01, and resource-initiated
+  interaction in alpha.21; see below. The draft
   choices the library made are in INTERPRETATIONS.md and USE-IN-YOUR-SERVICE.md.
 - Fixes from the aauth-conformance suite (main `332f645`). A completion at the
   mission endpoint ends issuance under the mission; a resolved key of a type the
@@ -1239,7 +1240,7 @@ Added on 2026-11-02 (alpha.20):
   resolve_jwks, verify_self_jwt}`. A cache identifier issued by an earlier
   release is `cache_miss`. The readings are in INTERPRETATIONS.md.
 
-Added on 2026-11-02, after alpha.20 (not released):
+Added on 2026-11-02 (alpha.21):
 
 - Resource-initiated interaction under supervision. A supervised agent's
   `/token` request whose resource token carries `interaction` is put to its

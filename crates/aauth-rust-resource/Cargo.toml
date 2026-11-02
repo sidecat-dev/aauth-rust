@@ -23,7 +23,7 @@ httpdate = "1"
 serde_json = { workspace = true, features = ["raw_value"] }
 
 [dev-dependencies]
-aauth-rust-person-server = { version = "0.1.0-alpha.20", path = "../aauth-rust-person-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.21", path = "../aauth-rust-person-server" }
 aauth-rust-agent.workspace = true
 aauth-rust-agent-provider.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
@@ -33,4 +33,4 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
-aauth-rust-access-server = { version = "0.1.0-alpha.20", path = "../aauth-rust-access-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.21", path = "../aauth-rust-access-server" }
