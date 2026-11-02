@@ -172,6 +172,25 @@ struct PreparedAuthorization {
     binding_context: BindingContext,
     offer: Option<Budget>,
 }
+/// The `auth_token` act a prepared direct request puts to a supervisor.
+fn auth_act<'a>(
+    agent: &'a VerifiedAgentToken,
+    prepared: &'a PreparedAuthorization,
+) -> ActInput<'a> {
+    let r = prepared.resource.claims();
+    ActInput {
+        act: Act::AuthToken,
+        agent,
+        person_id: &prepared.retained.person_id,
+        mission_s256: r.mission_s256.as_deref(),
+        parameters: &prepared.context.parameters,
+        members: act_members(Act::AuthToken, agent),
+        path: "/token",
+        requested_scopes: Some(&prepared.context.scopes),
+        deadline: r.exp.min(prepared.presented.exp),
+        r3: None,
+    }
+}
 struct Issuance<'a> {
     parent_agent: Option<AgentIdentity>,
     /// Generation of the principal's binding this credential is issued under.
@@ -1042,14 +1061,24 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             {
                 return Err(Failure::parameter("invalid_request"));
             }
-            // Its consent step is host consent; a supervised agent is refused.
-            if self
-                .deciding(&prepared.retained.person_id, &Self::identity(&agent))
-                .is_some()
-            {
-                return Err(Failure::policy(PolicyError::Denied));
-            }
-            return self.open_resource_interaction(&agent, &prepared, interaction);
+            Self::declared_interaction(&prepared.context.parameters)?;
+            // A supervised agent's request is put to its supervisor first
+            // (Supervision: the PS makes no supervision decision of its own).
+            // A deny ends it before the person is sent anywhere; an allow
+            // runs the Resource's flow and is issued within the allowance.
+            return match self.supervise(auth_act(&agent, &prepared), resumed)? {
+                Supervised::Host => {
+                    self.open_resource_interaction(&agent, &prepared, interaction, None)
+                }
+                Supervised::Allowed { sdi, allowance } => self.open_resource_interaction(
+                    &agent,
+                    &prepared,
+                    interaction,
+                    Some(Resumed { sdi, allowance }),
+                ),
+                Supervised::Denied { .. } => Err(Failure::policy(PolicyError::Denied)),
+                Supervised::Held(response) => Ok(response),
+            };
         }
         self.grant_auth(&agent, prepared, resumed)
     }
@@ -1060,6 +1089,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         prepared: PreparedAuthorization,
         resumed: Option<&Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
+        let supervised = self.supervise(auth_act(agent, &prepared), resumed)?;
         let PreparedAuthorization {
             resource,
             presented,
@@ -1070,21 +1100,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         } = prepared;
         let r = resource.claims();
         let upstream = context.upstream.as_ref();
-        let supervised = self.supervise(
-            ActInput {
-                act: Act::AuthToken,
-                agent,
-                person_id: &retained.person_id,
-                mission_s256: r.mission_s256.as_deref(),
-                parameters: &context.parameters,
-                members: act_members(Act::AuthToken, agent),
-                path: "/token",
-                requested_scopes: Some(&context.scopes),
-                deadline: r.exp.min(presented.exp),
-                r3: None,
-            },
-            resumed,
-        )?;
         let (sdi, grant, allowed_exp) = match supervised {
             Supervised::Host => {
                 let grant = if upstream.is_some() {

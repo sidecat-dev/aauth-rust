@@ -3,13 +3,20 @@
 #[path = "../examples/supervised_agents/mod.rs"]
 mod world;
 
-use aauth_rust_core::continuation::MemoryContinuations;
+use aauth_rust_agent::Agent;
+use aauth_rust_core::continuation::{MemoryContinuations, PendingResponse, Requirement};
+use aauth_rust_core::interaction::{
+    InteractionOutcome, ResourceInteraction, completion_redirect, parse_interaction_query,
+};
 use aauth_rust_core::supervision::{Answer, Decision};
-use aauth_rust_core::{ApprovedMission, AuthToken, PersonToken, ResourceClaims};
+use aauth_rust_core::{
+    ApprovedMission, AuthToken, PersonToken, ResourceClaims, mint_resource_token,
+};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_person_server::{
     FederationInput, InteractionRelay, InteractionRelayConfig, PolicyError, R3AuthorizationRequest,
     R3Decision, R3IssuerConfig, R3Policy, RelayChannel, RelayError, RelayUnavailable,
+    ResourceInteractionCallback, ResourceInteractionConfig, ResourceInteractionError,
     SupervisionHostError, Unconsulted, Waiting,
 };
 use aauth_rust_r3::{
@@ -848,5 +855,237 @@ fn a_relayed_interaction_reaches_the_person_and_the_supervisor_is_told() {
     assert_eq!(kinds, ["interaction", "interaction", "question"]);
     assert_eq!(requested[0]["url"], "https://calendar.example/confirm");
     assert!(requested.iter().all(|event| event.get("code").is_none()));
+    assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
+}
+
+/// A world whose Person Server resolves resource-initiated interaction.
+fn interaction_world() -> World {
+    World::extended(false, |ps| {
+        ps.with_resource_interaction(ResourceInteractionConfig::new(
+            MemoryContinuations::new(64),
+            &format!("{PS}/consent"),
+            &format!("{PS}/resource-callback"),
+            |url: &str| url.starts_with(CALENDAR),
+        ))
+        .unwrap()
+    })
+}
+
+const CONNECT: &str = "https://calendar.example/connect";
+
+/// `/token` for `scope` with a resource token whose `interaction` claim
+/// names the calendar's own sign-in. Returns the answer and the code the
+/// calendar expects back.
+fn interaction_request(world: &World, agent: &Agent, scope: &str) -> (Response<Vec<u8>>, String) {
+    let person = world.person_token(agent, None);
+    assert_eq!(person.status(), 200, "{}", text(&person));
+    let person = body(&person)["person_token"].as_str().unwrap().to_owned();
+    let p = PersonToken::parse(&person).unwrap();
+    let p = p.unverified_claims();
+    let mut claims = ResourceClaims {
+        iss: CALENDAR.into(),
+        dwk: "aauth-resource.json".into(),
+        aud: PS.into(),
+        sub: p.sub.clone(),
+        jti: format!("rt-{}-interaction", p.jti),
+        iat: world.time(),
+        exp: world.time() + 300,
+        ps: PS.into(),
+        presented_jti: p.jti.clone(),
+        agent_jkt: agent.public_jwk().thumbprint().unwrap(),
+        nbf: None,
+        tenant: p.tenant.clone(),
+        mission_s256: None,
+        scope: Some(scope.into()),
+        account: None,
+        login_hint: None,
+        extra: Default::default(),
+    };
+    let interaction = ResourceInteraction::open(CONNECT).unwrap();
+    interaction.insert_into(&mut claims);
+    let resource = mint_resource_token(&SigningKey::from_seed([5; 32]), "cal-1", &claims).unwrap();
+    let answer = world.post(
+        agent,
+        "/token",
+        json!({
+            "resource_token": resource,
+            "presented_token": person,
+            "capabilities": ["interaction"],
+            "justification": "Find a free afternoon.",
+        }),
+    );
+    (answer, interaction.code().to_owned())
+}
+
+/// The interaction id and code of a `202` with `requirement=interaction`.
+fn interaction_of(response: &Response<Vec<u8>>) -> (String, String) {
+    assert_eq!(response.status(), 202, "{}", text(response));
+    let parsed = PendingResponse::parse(PS, response).unwrap();
+    let Requirement::Interaction { url, code } = parsed.requirement else {
+        panic!("expected requirement=interaction: {}", text(response));
+    };
+    let id = url
+        .strip_prefix(&format!("{PS}/consent/"))
+        .expect("this server's own interaction page")
+        .to_owned();
+    (id, code)
+}
+
+/// The person passes the interstitial and completes the calendar's flow.
+/// Returns the callback's outcome.
+fn person_completes_the_resource_flow(
+    world: &World,
+    id: &str,
+    code: &str,
+    resource_code: &str,
+) -> ResourceInteractionCallback {
+    let shown = world.ps.resource_interaction(id).unwrap();
+    assert!(shown.supervised, "the host shows no consent of its own");
+    assert_eq!(shown.resource, CALENDAR);
+    let redirect = world
+        .ps
+        .redirect_to_resource(id, &format!("code={code}"))
+        .unwrap();
+    assert_eq!(redirect.status(), 302);
+    let target = location(&redirect);
+    let arrived =
+        parse_interaction_query(target.strip_prefix(&format!("{CONNECT}?")).unwrap()).unwrap();
+    assert_eq!(arrived.code, resource_code);
+    let callback = arrived.callback.unwrap();
+    let back = location(&completion_redirect(&callback, InteractionOutcome::Completed).unwrap());
+    let flow = back
+        .strip_prefix(&format!("{PS}/resource-callback/"))
+        .unwrap();
+    world.ps.resource_interaction_callback(flow, None).unwrap()
+}
+
+#[test]
+fn a_supervised_resource_interaction_is_decided_first_and_issued_within_the_allow() {
+    let world = interaction_world();
+    world.route(&world.travel, Some(HOME));
+    world.connect_home();
+    // The person's own server allows at once, narrowed to calendar.read until
+    // START + 900. Only then is the person sent to the calendar.
+    let (opened, resource_code) =
+        interaction_request(&world, &world.travel, "calendar.read calendar.write");
+    let pending = location(&opened);
+    assert!(pending.starts_with(&format!("{PS}/token/interaction/")));
+    let (id, code) = interaction_of(&opened);
+    assert!(
+        world
+            .home
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _)| path.ends_with("/decision")),
+        "the supervisor decided before the person was sent anywhere"
+    );
+    let ResourceInteractionCallback::Completed { redirect } =
+        person_completes_the_resource_flow(&world, &id, &code, &resource_code)
+    else {
+        panic!("a supervised callback issues within the allow");
+    };
+    assert!(redirect.is_none());
+    assert_eq!(
+        world.ps.decide_resource_interaction(&id, true).unwrap_err(),
+        ResourceInteractionError::InvalidCode
+    );
+    let granted = world.poll(&world.travel, &pending);
+    assert_eq!(granted.status(), 200, "{}", text(&granted));
+    let token = AuthToken::parse(body(&granted)["auth_token"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        token.unverified_claims().scope.as_deref(),
+        Some("calendar.read")
+    );
+    assert_eq!(token.unverified_claims().exp, START + 900);
+    assert_eq!(world.poll(&world.travel, &pending).status(), 410);
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    let issued = observed(&world.home, "auth_token.issued");
+    let reported = issued
+        .iter()
+        .find(|event| event["jti"] == json!(token.unverified_claims().jti))
+        .unwrap_or_else(|| panic!("{issued:?}"));
+    let sdi = reported["sdi"].as_str().unwrap();
+    assert!(
+        world.ps.supervision_record(sdi).unwrap().is_some(),
+        "reported under the decision's sdi"
+    );
+    assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_held_resource_interaction_is_relayed_at_the_one_pending_url() {
+    let world = interaction_world();
+    world.route(&world.mail, Some(ORG));
+    assert_eq!(world.person_token(&world.mail, None).status(), 200);
+
+    // The organization asks the person. A deny ends the request; nobody is
+    // sent to the calendar.
+    let (asked, _) = interaction_request(&world, &world.mail, "calendar.write");
+    assert_eq!(asked.status(), 202, "{}", text(&asked));
+    let held = hold(&asked);
+    assert!(location(&asked).starts_with(&format!("{PS}/pending/")));
+    world.person_answers(&held, Answer::Deny, None);
+    let refused = world.poll(&world.mail, &location(&asked));
+    assert_eq!(
+        (refused.status().as_u16(), body(&refused)["error"].clone()),
+        (403, json!("denied"))
+    );
+
+    // The person allows. The agent's next poll of the same URL starts the
+    // calendar's flow, and it polls that URL to the token.
+    let (asked, resource_code) = interaction_request(&world, &world.mail, "calendar.write");
+    let pending = location(&asked);
+    let held = hold(&asked);
+    world.person_answers(&held, Answer::Allow, None);
+    let opened = world.poll(&world.mail, &pending);
+    assert_eq!(location(&opened), pending);
+    let (id, code) = interaction_of(&opened);
+    let again = world.poll(&world.mail, &pending);
+    assert_eq!(again.status(), 202, "{}", text(&again));
+    assert_eq!(location(&again), pending);
+    let ResourceInteractionCallback::Completed { .. } =
+        person_completes_the_resource_flow(&world, &id, &code, &resource_code)
+    else {
+        panic!("a supervised callback issues within the allow");
+    };
+    let granted = world.poll(&world.mail, &pending);
+    assert_eq!(granted.status(), 200, "{}", text(&granted));
+    let token = AuthToken::parse(body(&granted)["auth_token"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        token.unverified_claims().scope.as_deref(),
+        Some("calendar.write")
+    );
+    assert_eq!(world.poll(&world.mail, &pending).status(), 410);
+    assert_eq!(world.ps.deliver_supervision().unwrap(), 0);
+    assert!(
+        observed(&world.org, "auth_token.issued")
+            .iter()
+            .any(|event| event["sdi"] == json!(held.sdi)
+                && event["jti"] == json!(token.unverified_claims().jti))
+    );
+
+    // A cancellation at that URL ends the calendar's flow too.
+    let (asked, _) = interaction_request(&world, &world.mail, "calendar.write");
+    let pending = location(&asked);
+    world.person_answers(&hold(&asked), Answer::Allow, None);
+    let (id, code) = interaction_of(&world.poll(&world.mail, &pending));
+    let mut cancel = Request::builder()
+        .method("DELETE")
+        .uri(&pending)
+        .body(Vec::new())
+        .unwrap();
+    world.mail.sign(&mut cancel, world.time()).unwrap();
+    let cancelled = world.ps.handle(&cancel);
+    assert_eq!(cancelled.status(), 200, "{}", text(&cancelled));
+    assert_eq!(world.poll(&world.mail, &pending).status(), 410);
+    assert_eq!(
+        world
+            .ps
+            .redirect_to_resource(&id, &format!("code={code}"))
+            .unwrap_err(),
+        ResourceInteractionError::InvalidCode
+    );
     assert_eq!(world.host_decisions.load(Ordering::SeqCst), 0);
 }

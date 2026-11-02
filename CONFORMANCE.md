@@ -59,7 +59,7 @@ executable scenes; those tests are outside the workspace test total.
 | Immediate AS federation | Admitted PS jwks_uri proof plus independent Agent/Resource/presented verification before AS policy; context/scope/parent bounds; a Person Server's `scope` (a nonempty subset of the Resource token's) and `exp` (after the request) narrow the grant and any wait, anything else in them is `400 invalid_request`; PS consent, exact forwarding, returned-grant verification/retention and AS Auth step-up; no direct-mode fallback under collocation | AS endpoint base cases (9, including omitted presented_token and the narrowing), PS authorization tests, Resource federation/role test and `four_party_tls.rs` (2 tests: immediate and deferred, including exact forwarded bytes and problem codes) |
 | Federated retained namespace | AS issuer/JTI identifies the credential; explicit PS namespace owns binding/directed identity; exact presented ancestry, conflicts/revocation and reopen | Updated public storetest and persistence contract, MemoryStore and RedbStore |
 | Call chaining / original person | Exact upstream ties in Person, Auth and Auth step-up; three-party and four-party chaining, with the Person Server passing `upstream_token` to its Access Server and retaining the chained receipt; missions carried down three- and four-party chains; original binding revocation and hop-by-hop chain revocation; intermediary self-issued identity; separate directed subjects; no intermediary binding; default-denied chain hooks, including `Policy::consent_upstream` | PS authorization tests; `aauth-rust-resource/tests/three_party_tls.rs` (2 application/TLS tests, including identical-POST replay) |
-| Supervision | Supervision server role (metadata, JWKS, connect, mission, decision and event endpoints, signed terminal decisions, idempotence by `sdi`, event deduplication, standing `once`/`mission`/`always` reach) and the Person Server's consulting side (`with_supervision`): one decision point, so a routed agent's acts are never decided by host policy; `allow` narrowed to the answer's scope and `exp`, `deny` refused, ask, deferral, clarification or an unavailable SS held for the person; in-order event outbox, journal replay to a new SS, `unknown_sub` and `unknown_mission` recovery, and a stored decision record verifiable with public keys. A four-party `allow` that narrows is sent to the Access Server as `scope` and `exp`, which this library's Access Server applies, and is enforced on the token delivered, which is reported once released, also after the Access Server deferred. An R3 request is an `auth_token` act. `revocation.received` for agent and resource tokens, `interaction.requested` for relays and questions, and `terminated` for every mission end the PS finds, once. Response signatures with `;req` components in Signature-Key. Resource-initiated interaction for a supervised agent is refused | PS `tests/supervision.rs` (16), SS `tests/server.rs` (7), Signature-Key `tests/responses.rs` (2), `supervised-agents` example |
+| Supervision | Supervision server role (metadata, JWKS, connect, mission, decision and event endpoints, signed terminal decisions, idempotence by `sdi`, event deduplication, standing `once`/`mission`/`always` reach) and the Person Server's consulting side (`with_supervision`): one decision point, so a routed agent's acts are never decided by host policy; `allow` narrowed to the answer's scope and `exp`, `deny` refused, ask, deferral, clarification or an unavailable SS held for the person; in-order event outbox, journal replay to a new SS, `unknown_sub` and `unknown_mission` recovery, and a stored decision record verifiable with public keys. A four-party `allow` that narrows is sent to the Access Server as `scope` and `exp`, which this library's Access Server applies, and is enforced on the token delivered, which is reported once released, also after the Access Server deferred. An R3 request is an `auth_token` act. `revocation.received` for agent and resource tokens, `interaction.requested` for relays and questions, and `terminated` for every mission end the PS finds, once. Response signatures with `;req` components in Signature-Key. A supervised agent's resource-initiated interaction is decided by the SS before the person is sent to the Resource and issued within the allow at the Resource's callback | PS `tests/supervision.rs` (18), SS `tests/server.rs` (7), Signature-Key `tests/responses.rs` (2), `supervised-agents` example |
 
 Snapshot ownership and absence of network fetching are architecture properties
 checked by source inspection of `aauth-rust-core/src/discovery.rs`; they are not
@@ -1238,6 +1238,25 @@ Added on 2026-11-02 (alpha.20):
   `KeyResolver::{trust_jwks, trust_jwks_when, trusts_jwks, refresh,
   resolve_jwks, verify_self_jwt}`. A cache identifier issued by an earlier
   release is `cache_miss`. The readings are in INTERPRETATIONS.md.
+
+Added on 2026-11-02, after alpha.20 (not released):
+
+- Resource-initiated interaction under supervision. A supervised agent's
+  `/token` request whose resource token carries `interaction` is put to its
+  supervision server first, as every auth token act is (Supervision, line 79:
+  the PS makes no supervision decision of its own). A deny is `403
+  access_denied` and the person is never sent anywhere. An allow, or the
+  person's allow after an ask, runs Core's steps unchanged (Protocol, lines
+  986-997): this server's interaction URL, the interstitial, the Resource's
+  flow and the callback. The callback issues the Auth token within the allow
+  (`scope`, `exp`) with no consent of the host's, and `auth_token.issued` is
+  reported under the decision's `sdi`. A held act's pending URL relays the
+  flow once allowed: its polls answer as `/token/interaction/{id}` does, and
+  a `DELETE` there ends the flow. API change: `ResourceInteractionCallback`
+  gains `Completed`, and `PendingResourceInteraction` gains `supervised`
+  (`tests/supervision.rs`,
+  `a_supervised_resource_interaction_is_decided_first_and_issued_within_the_allow`,
+  `a_held_resource_interaction_is_relayed_at_the_one_pending_url`).
 
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and

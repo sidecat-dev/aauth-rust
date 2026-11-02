@@ -733,6 +733,18 @@ host serves four steps:
    authenticated person's decision. Approval re-verifies the stored tokens and
    runs `Policy::authorize` and issuance as an immediate `/token` request does.
 
+For an agent routed to a supervision server, the server decides before step 1,
+and your host shows no consent. A deny answers the `/token` request
+`403 access_denied`, and the person is never sent anywhere. An ask or a
+deferral holds the request at `/pending/{id}`. Once it is allowed, the agent's
+next poll there answers the `202` with `requirement=interaction`, and the agent
+keeps polling that one URL; a `DELETE` there ends the flow. In step 1
+`resource_interaction(id)` reports `supervised: true`: show the interstitial
+only. In step 3 a callback without `error` returns `Completed { redirect }`:
+the Auth token is issued within the allow, its `scope` and `exp`, and
+`auth_token.issued` is reported under the decision's `sdi`.
+`decide_resource_interaction` is never called for it.
+
 The agent's next poll receives the token or the refusal once, and `410` after
 that. When the agent appended its own `callback` to the interaction URL, steps 3
 and 4 return the redirect back to it, with `error` when the request did not
@@ -2115,8 +2127,9 @@ after the request passes every check it passes today. `Policy::bind_person` and
 `bind_upstream` still identify the person and derive subjects; do not consent
 there for a routed agent. `authorize`, `authorize_upstream`, `consent`,
 `Governance::permit`, `R3Policy` and the signed mission approval are not
-called for it. Its resource-initiated interactions are refused with
-`403 access_denied`. An agent the PS cannot tie to a person yet, such as one
+called for it. Its resource-initiated interaction is put to the SS before the
+person is sent to the Resource; see "Resolve a resource's own interaction"
+for what your host shows. An agent the PS cannot tie to a person yet, such as one
 asking permission before its first person token, is decided by host policy.
 
 - `allow` proceeds. An auth token takes the SS's narrower `scope`, and every

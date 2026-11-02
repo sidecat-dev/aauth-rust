@@ -6,6 +6,7 @@
 //! [`PersonServer::resolve_supervision`] and polls a deciding server with
 //! [`PersonServer::advance_supervision`]. Once allowed, the agent's next
 //! poll carries out the act through the same checks as the original request.
+use super::super::resource_interaction::interaction_reference;
 use super::*;
 use aauth_rust_core::supervision::{EventKind, Resolution, Resolved};
 use journal::Report;
@@ -254,6 +255,9 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if record["state"] == "federating" {
             return self.federation_relay(request, now, id, &record);
         }
+        if record["state"] == "resource_interaction" {
+            return self.resource_interaction_relay(&caller, method, now, id, &record);
+        }
         if record["deadline"].as_i64().is_none_or(|at| now >= at) {
             self.expire(&key, snapshot.revision, &record);
             return Err(Failure::status(StatusCode::REQUEST_TIMEOUT, "expired"));
@@ -311,6 +315,15 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
                             {
                                 record["state"] = json!("federating");
                                 record["federation"] = json!(federation);
+                                update(config.store.as_ref(), &key, |_| Some(record.clone()))
+                                    .map_err(|_| Failure::internal())?;
+                                return Ok(relocated(response, &self.config.signed_origin, id));
+                            }
+                            if let Some(interaction) =
+                                interaction_reference(&self.config.signed_origin, &response)
+                            {
+                                record["state"] = json!("resource_interaction");
+                                record["interaction"] = json!(interaction);
                                 update(config.store.as_ref(), &key, |_| Some(record.clone()))
                                     .map_err(|_| Failure::internal())?;
                                 return Ok(relocated(response, &self.config.signed_origin, id));
@@ -776,6 +789,48 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             let _ = update(config.store.as_ref(), &held_key(id), |_| None);
         }
         result.map(|response| relocated(response, &self.config.signed_origin, id))
+    }
+
+    /// Answer the agent at an allowed act's own URL while the Resource's
+    /// flow runs: a poll is the pending interaction's, and a cancellation
+    /// ends it. The agent polls one URL throughout.
+    fn resource_interaction_relay(
+        &self,
+        caller: &VerifiedAgentToken,
+        method: &str,
+        now: i64,
+        id: &str,
+        record: &Value,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let interaction = record["interaction"]
+            .as_str()
+            .ok_or_else(Failure::internal)?;
+        let done = || {
+            if let Some(config) = self.gate() {
+                let _ = update(config.store.as_ref(), &held_key(id), |_| None);
+            }
+        };
+        match method {
+            "DELETE" => {
+                self.cancel_resource_interaction(interaction)?;
+                done();
+                Ok(json_response(
+                    StatusCode::OK,
+                    json!({ "status": "cancelled" }),
+                ))
+            }
+            // The flow takes no updated request; the allow was for this one.
+            "POST" => Err(Failure::parameter("invalid_request")),
+            _ => {
+                let result = self.resource_interaction_poll_at(caller, interaction, now);
+                let pending =
+                    matches!(&result, Ok(response) if response.status() == StatusCode::ACCEPTED);
+                if !pending {
+                    done();
+                }
+                result.map(|response| relocated(response, &self.config.signed_origin, id))
+            }
+        }
     }
 }
 

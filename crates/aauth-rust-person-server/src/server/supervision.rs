@@ -389,8 +389,12 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// [`crate::Governance::permit`] and the signed mission approval are not
     /// consulted for it, and neither is [`crate::R3Policy`]: an R3 request is an auth
     /// token act, and its `allow` grants every operation of the R3 document,
-    /// or the proposed call. Its resource-initiated interactions are refused
-    /// with `403 access_denied`: their consent step is host consent.
+    /// or the proposed call. A resource-initiated interaction
+    /// ([`Self::with_resource_interaction`]) is an auth token act decided
+    /// before the person is sent to the Resource: its `allow` replaces this
+    /// server's consent step, and the Auth token is issued within it when the
+    /// Resource returns the person. Once a held act is allowed, its pending
+    /// URL relays the flow's polls and a cancellation.
     ///
     /// Every exchange is logged by `sdi` ([`Self::supervision_record`]).
     /// What happened afterwards is reported to the agent's deciding server
@@ -420,11 +424,6 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
 
     fn gate(&self) -> Option<&SupervisionConfig> {
         self.supervision.as_ref().map(|gate| &gate.config)
-    }
-
-    /// The deciding SS for an agent, when supervision is on.
-    pub(super) fn deciding(&self, person_id: &str, agent: &AgentIdentity) -> Option<String> {
-        self.gate()?.host.route(person_id, agent)
     }
 
     /// The person bound to an agent, when supervision is on: the person a

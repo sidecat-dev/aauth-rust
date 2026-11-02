@@ -18,6 +18,11 @@
 //! 4. [`PersonServer::decide_resource_interaction`] records the person's
 //!    consent decision and, on approval, issues the Auth token through host
 //!    policy. The agent's next poll receives the token or the error once.
+//!
+//! For an agent routed to a supervision server, the server's decision comes
+//! before step 1 and stands in for step 4 (`draft-hardt-aauth-supervision`:
+//! the PS makes no supervision decision of its own). The callback of step 3
+//! issues the Auth token within the allowance, and the host shows no consent.
 use super::*;
 use aauth_rust_core::continuation::{
     ContinuationStore, PendingResponse, Requirement, canonical_interaction_code,
@@ -27,6 +32,7 @@ use aauth_rust_core::interaction::{
     CallbackError, CallbackReceipt, InteractionOutcome, ResourceInteraction, completion_redirect,
     parse_interaction_query, person_server_redirect, receive_callback,
 };
+use aauth_rust_core::supervision::Decision;
 use std::sync::Arc;
 
 /// Failed code presentations after which the pending interaction is dead.
@@ -115,6 +121,9 @@ pub struct PendingResourceInteraction {
     /// The agent's `justification`, when it sent one. Agent-asserted Markdown:
     /// sanitize it and present it as the agent's claim.
     pub justification: Option<String>,
+    /// The agent's supervision server already allowed the request. Show the
+    /// interstitial, but no consent of this server's: the callback issues.
+    pub supervised: bool,
 }
 
 /// How the resource's flow ended, read from its callback.
@@ -125,6 +134,15 @@ pub enum ResourceInteractionCallback {
     Consent {
         /// The pending request, for the decision.
         id: String,
+    },
+    /// No `error`, for a supervised agent: the request is finished within
+    /// its supervision server's allowance, with no consent of the host's. The
+    /// agent's next poll receives the Auth token, or the refusal if issuance
+    /// failed. `redirect` returns the browser to the agent's own callback,
+    /// with `error` when no token was issued, when it sent one.
+    Completed {
+        /// Redirect to the agent's callback, when present.
+        redirect: Option<Response<Vec<u8>>>,
     },
     /// The callback carried `error`. The request is not completable; the
     /// agent's next poll receives `polling_error`. `redirect` returns the
@@ -200,7 +218,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     ///
     /// The agent must declare `interaction` in the request's `capabilities`
     /// parameter, since this server reaches the person only through the agent;
-    /// otherwise the answer is `403` `user_unreachable`. Such a request is
+    /// otherwise the answer is `403` `user_unreachable`. For an agent routed
+    /// to a supervision server ([`Self::with_supervision`]), the request is
+    /// put to that server first: a deny refuses it before the person is sent
+    /// anywhere, a held act's pending URL relays this flow once allowed, and
+    /// the callback issues within the allowance. Such a request is
     /// answered `202` with `requirement=interaction`, this server's
     /// interaction URL and a fresh code, and a pending URL under
     /// `/token/interaction/`. The flow refuses call chaining, sub-agents and
@@ -238,25 +260,40 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .ok_or(ResourceInteractionError::Disabled)
     }
 
-    /// Step 1: custody for a verified request and its `202`.
+    /// The agent declared it can send the person to an interaction URL.
+    pub(super) fn declared_interaction(parameters: &Value) -> Result<(), Failure> {
+        let declared = parameters
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|values| values.iter().any(|value| value == "interaction"));
+        if declared {
+            Ok(())
+        } else {
+            Err(Failure::policy(PolicyError::UserUnreachable))
+        }
+    }
+
+    /// Step 1: custody for a verified request and its `202`. `supervision` is
+    /// the allowance of the agent's supervision server, when it has one.
     pub(super) fn open_resource_interaction(
         &self,
         agent: &VerifiedAgentToken,
         prepared: &PreparedAuthorization,
         interaction: ResourceInteraction,
+        supervision: Option<Resumed>,
     ) -> Result<Response<Vec<u8>>, Failure> {
         let gate = self
             .resource_interaction
             .as_ref()
             .ok_or_else(Failure::internal)?;
         let parameters = &prepared.context.parameters;
-        let declared = parameters
-            .get("capabilities")
-            .and_then(Value::as_array)
-            .is_some_and(|values| values.iter().any(|value| value == "interaction"));
-        if !declared {
-            return Err(Failure::policy(PolicyError::UserUnreachable));
-        }
+        Self::declared_interaction(parameters)?;
+        let supervision = match supervision {
+            Some(Resumed { sdi, allowance }) => {
+                json!({"sdi": sdi, "allowance": Decision::Allow(allowance).to_value(&sdi)})
+            }
+            None => Value::Null,
+        };
         let now = (self.clock)();
         let deadline = now
             .saturating_add(gate.config.lifetime)
@@ -280,6 +317,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             "agent_callback": null,
             "resource_url": interaction.url(),
             "resource_code": interaction.code(),
+            "supervision": supervision,
             "result": null,
         });
         let store = &gate.config.store;
@@ -317,21 +355,33 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         request: &Request<Vec<u8>>,
         now: i64,
     ) -> Result<Response<Vec<u8>>, Failure> {
-        let gate = self
-            .resource_interaction
-            .as_ref()
-            .ok_or_else(Failure::internal)?;
         if request.method() != "GET" || request.uri().query().is_some() {
             return Err(Failure::parameter("invalid_request"));
         }
         let caller = self.verify_agent(request, now, false)?;
-        let gone = || Failure::status(StatusCode::GONE, "gone");
         let id = request
             .uri()
             .path()
             .strip_prefix("/token/interaction/")
-            .filter(|id| !id.is_empty() && id.len() <= 64 && !id.contains('/'))
             .ok_or_else(gone)?;
+        self.resource_interaction_poll_at(&caller, id, now)
+    }
+
+    /// A poll of the pending interaction `id` by `caller`, at its own URL or
+    /// relayed from a supervised act's pending URL.
+    pub(super) fn resource_interaction_poll_at(
+        &self,
+        caller: &VerifiedAgentToken,
+        id: &str,
+        now: i64,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let gate = self
+            .resource_interaction
+            .as_ref()
+            .ok_or_else(Failure::internal)?;
+        if id.is_empty() || id.len() > 64 || id.contains('/') {
+            return Err(gone());
+        }
         let store = &gate.config.store;
         let snapshot = store
             .load(&pending_key(id))
@@ -447,6 +497,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             justification: value["parameters"]["justification"]
                 .as_str()
                 .map(str::to_owned),
+            supervised: !value["supervision"].is_null(),
         })
     }
 
@@ -571,6 +622,11 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             return Err(ResourceInteractionError::Expired);
         }
         match receive_callback(query) {
+            CallbackReceipt::Continue if !value["supervision"].is_null() => {
+                // The supervision server's allow was this request's decision.
+                let redirect = self.settle(store.as_ref(), &id, snapshot.revision, value, true)?;
+                Ok(ResourceInteractionCallback::Completed { redirect })
+            }
             CallbackReceipt::Continue => {
                 value["state"] = json!("consenting");
                 update(store.as_ref(), &id, snapshot.revision, value)?;
@@ -599,6 +655,8 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
     /// the browser to the agent's own callback, with `error` when the request
     /// did not complete, if the agent sent one.
     ///
+    /// A supervised agent's request never waits here: its callback issues.
+    ///
     /// # Errors
     /// [`ResourceInteractionError::InvalidCode`] for an unknown or finished
     /// request, [`ResourceInteractionError::NotReady`] before the resource's
@@ -621,16 +679,30 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         if value["state"] != "consenting" {
             return Err(ResourceInteractionError::NotReady);
         }
-        let now = (self.clock)();
-        if now >= number(&value, "deadline")? {
+        if (self.clock)() >= number(&value, "deadline")? {
             value["result"] = polling_failure("expired");
             update(store.as_ref(), id, snapshot.revision, value)?;
             return Err(ResourceInteractionError::Expired);
         }
+        self.settle(store.as_ref(), id, snapshot.revision, value, approved)
+    }
+
+    /// Decide the request at `revision`: issue on `approved`, else `denied`.
+    /// The result is kept for the agent's next poll, and the redirect to the
+    /// agent's own callback is returned.
+    fn settle(
+        &self,
+        store: &dyn ContinuationStore,
+        id: &str,
+        revision: u64,
+        mut value: Value,
+        approved: bool,
+    ) -> Result<Option<Response<Vec<u8>>>, ResourceInteractionError> {
+        let now = (self.clock)();
         // Claim the request before policy and issuance, so a concurrent
         // decision cannot issue a second token.
         value["state"] = json!("deciding");
-        update(store.as_ref(), id, snapshot.revision, value.clone())?;
+        update(store, id, revision, value.clone())?;
         let revision = store
             .load(&pending_key(id))
             .map_err(|_| ResourceInteractionError::Unavailable)?
@@ -662,7 +734,7 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
         value["state"] = json!("decided");
         value["result"] = result;
         let redirect = agent_redirect(&value, error);
-        update(store.as_ref(), id, revision, value)?;
+        update(store, id, revision, value)?;
         Ok(redirect)
     }
 
@@ -676,8 +748,57 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             .map_err(Failure::credential)?;
         let prepared =
             self.prepare_authorization(&agent, value["parameters"].clone(), now, None)?;
-        self.grant_auth(&agent, prepared, None)
+        let resumed = match &value["supervision"] {
+            Value::Null => None,
+            supervision => {
+                let sdi = required_string(supervision, "sdi")?.to_owned();
+                let Ok(Decision::Allow(allowance)) =
+                    Decision::parse(&supervision["allowance"], &sdi, Act::AuthToken)
+                else {
+                    return Err(Failure::internal());
+                };
+                Some(Resumed { sdi, allowance })
+            }
+        };
+        self.grant_auth(&agent, prepared, resumed.as_ref())
     }
+
+    /// End the pending interaction `id` for an agent that withdrew its
+    /// request. Later polls of it are `410`.
+    pub(super) fn cancel_resource_interaction(&self, id: &str) -> Result<(), Failure> {
+        let gate = self
+            .resource_interaction
+            .as_ref()
+            .ok_or_else(Failure::internal)?;
+        let store = gate.config.store.as_ref();
+        if let Some(snapshot) = store
+            .load(&pending_key(id))
+            .map_err(|_| Failure::internal())?
+        {
+            if let Some(flow) = snapshot.value["callback"].as_str() {
+                let _ = remove(store, &callback_key(flow));
+            }
+            store
+                .replace(&pending_key(id), snapshot.revision, None)
+                .map_err(|_| Failure::internal())?;
+        }
+        Ok(())
+    }
+}
+
+fn gone() -> Failure {
+    Failure::status(StatusCode::GONE, "gone")
+}
+
+/// The pending interaction id of a `202` that opened a resource's flow.
+pub(super) fn interaction_reference(origin: &str, response: &Response<Vec<u8>>) -> Option<String> {
+    if response.status() != StatusCode::ACCEPTED {
+        return None;
+    }
+    let location = response.headers().get("location")?.to_str().ok()?;
+    location
+        .strip_prefix(&format!("{origin}/token/interaction/"))
+        .map(str::to_owned)
 }
 
 fn update(
