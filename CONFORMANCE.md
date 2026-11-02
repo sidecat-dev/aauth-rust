@@ -1259,7 +1259,7 @@ Added on 2026-11-02 (alpha.21):
   `a_supervised_resource_interaction_is_decided_first_and_issued_within_the_allow`,
   `a_held_resource_interaction_is_relayed_at_the_one_pending_url`).
 
-Added on 2026-11-02, after alpha.21 (not released):
+Added on 2026-11-02 (alpha.22 and alpha.23):
 
 - Person identity access. `PersonIdentityResource` serves on a verified
   Person token alone (Protocol, Person Identity Access). A request with no

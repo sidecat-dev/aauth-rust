@@ -30,5 +30,5 @@ thiserror.workspace = true
 aauth-rust-agent.workspace = true
 aauth-rust-agent-provider.workspace = true
 
-aauth-rust-access-server = { version = "0.1.0-alpha.21", path = "../aauth-rust-access-server" }
-aauth-rust-supervision-server = { version = "0.1.0-alpha.21", path = "../aauth-rust-supervision-server" }
+aauth-rust-access-server = { version = "0.1.0-alpha.24", path = "../aauth-rust-access-server" }
+aauth-rust-supervision-server = { version = "0.1.0-alpha.24", path = "../aauth-rust-supervision-server" }
