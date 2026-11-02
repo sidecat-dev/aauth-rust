@@ -193,6 +193,7 @@ A signer you did not trust is never fetched; its request is refused with
 | --- | --- |
 | answers `200` | recorded |
 | publishes no `revocation_endpoint`, or answers `unsupported_iss` | `revocation_unsupported` |
+| is a Resource that publishes no metadata: `aauth-resource.json` answers `404` | `revocation_unsupported` |
 | times out, answers `5xx`, another error, or a body that is not a JSON object | `revocation_unavailable` |
 | answers `202` | deferred: the role answers `202` too, and its next attempt polls the `Location` with a signed GET |
 | answers `429 rate_limited` | deferred: the next attempt posts again |

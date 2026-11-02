@@ -330,7 +330,10 @@ SPECIFICATIONS.md.
   fetched for, refuses it unless its `issuer` equals that identifier byte for
   byte (Metadata Documents, line 1981: `issuer_missing` or `issuer_mismatch`),
   and covers `additional_signature_components` (Resource Metadata, line
-  2133), none when the member is absent. `Agent::with_required_input` takes
+  2133), none when the member is absent. A Resource MAY publish no metadata
+  (line 2101): a host whose fetch is answered `404` passes nothing, and the
+  Agent covers the base components only, every member taking its default.
+  `Agent::with_required_input` takes
   the refused request and the refusal's headers and adds the listed
   components the refused signature did not cover. It does not add the whole
   list: `required_input` names what that request needed, including `@query`,
@@ -473,8 +476,16 @@ crate.
    revocation to `aauth-person.json` three-party, and to `aauth-access.json`
    for the `aud` plus `aauth-person.json` for the `ps` four-party.
 9. **No `revocation_endpoint`** in a metadata document that passed the issuer
-   check is `revocation_unsupported`. Metadata that cannot be fetched or fails
-   the issuer check is `revocation_unavailable`.
+   check is `revocation_unsupported` (Revocation, lines 2668 and 2707).
+   Metadata that cannot be fetched or fails the issuer check is
+   `revocation_unavailable`. A Resource MAY publish no metadata (Resource
+   Metadata, line 2101), and one that publishes none has no
+   `revocation_endpoint` either, so a `404` for `aauth-resource.json` is
+   `revocation_unsupported` too, with the cause `NoMetadata`. Only Resource
+   metadata is optional: a `404` for any other role's document, and a `410`
+   or any other status for any role, is `revocation_unavailable`. Key
+   discovery is unchanged, since a Resource that signs anything publishes
+   `jwks_uri`, so a `404` there is still a failure.
 10. **Covered components.** A revocation covers `content-type` and
     `content-digest` and, at a Resource, its `additional_signature_components`.
     A listed header the request does not carry is `revocation_unavailable`.

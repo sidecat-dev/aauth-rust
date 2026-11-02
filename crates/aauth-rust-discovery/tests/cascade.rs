@@ -9,7 +9,9 @@ use aauth_rust_core::{
     AgentClaims, AuthToken, CallOutcome, Confirmation, PersonToken, RevocationDirectory,
     RevocationSender, RevocationTarget, VerifiedAuthToken,
 };
-use aauth_rust_discovery::{DeliveryCause, DiscoveryClient, KeyResolver, RevocationClient};
+use aauth_rust_discovery::{
+    DeliveryCause, DiscoveryClient, DiscoveryError, KeyResolver, RevocationClient,
+};
 use aauth_rust_jose::SigningKey;
 use aauth_rust_person_server::{
     AuthorizationRequest, Config, Federation, FederationError, Grant, MemoryStore, Person,
@@ -282,7 +284,7 @@ fn person_server_cascade_reaches_every_recipient_over_tls() {
 
 #[test]
 fn a_deferred_revocation_is_polled_with_a_signed_get() {
-    let mut net = Net::new(&["slow.test", "bare.test"]);
+    let mut net = Net::new(&["slow.test", "bare.test", "unpublished.test", "gone.test"]);
     let sender_key = SigningKey::generate();
     let sender_public = sender_key.public_jwk();
     let verified = Arc::new(AtomicUsize::new(0));
@@ -324,6 +326,8 @@ fn a_deferred_revocation_is_polled_with_a_signed_get() {
     net.serve("bare.test", |_| {
         json(200, json!({ "issuer": "https://bare.test" }).to_string())
     });
+    net.serve("unpublished.test", |_| json(404, "{}"));
+    net.serve("gone.test", |_| json(410, "{}"));
     let revocations = RevocationClient::new(net.client());
     let sender = RevocationSender {
         issuer: PS,
@@ -358,4 +362,38 @@ fn a_deferred_revocation_is_polled_with_a_signed_get() {
     );
     assert_eq!(unsupported.outcome, CallOutcome::Unsupported);
     assert!(matches!(unsupported.cause, Some(DeliveryCause::NoEndpoint)));
+
+    // Core, Resource Metadata: a Resource MAY publish no metadata, and then it
+    // has no revocation_endpoint. Only a Resource's 404 means that.
+    let resource = RevocationTarget {
+        recipient: "https://unpublished.test",
+        dwk: "aauth-resource.json",
+        ..target
+    };
+    let unpublished = revocations.deliver(&sender, &resource);
+    assert_eq!(unpublished.outcome, CallOutcome::Unsupported);
+    assert!(matches!(unpublished.cause, Some(DeliveryCause::NoMetadata)));
+    for (recipient, dwk, status) in [
+        ("https://unpublished.test", "aauth-access.json", 404),
+        ("https://gone.test", "aauth-resource.json", 410),
+    ] {
+        let failed = revocations.deliver(
+            &sender,
+            &RevocationTarget {
+                recipient,
+                dwk,
+                ..target
+            },
+        );
+        assert_eq!(
+            failed.outcome,
+            CallOutcome::Unavailable,
+            "{recipient} {dwk}"
+        );
+        assert!(
+            matches!(failed.cause, Some(DeliveryCause::Discovery(DiscoveryError::Status { status: got, .. })) if got == status),
+            "{recipient} {dwk}: {:?}",
+            failed.cause
+        );
+    }
 }

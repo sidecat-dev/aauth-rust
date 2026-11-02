@@ -30,7 +30,10 @@ type Clock = Box<dyn Fn() -> i64 + Send + Sync>;
 /// `with_revocation_directory`. For each downstream target it fetches
 /// `{recipient}/.well-known/{dwk}` through the [`DiscoveryClient`], checks
 /// its `issuer`, and reads `revocation_endpoint`; a recipient that publishes
-/// none is `revocation_unsupported`. It POSTs `{"jti","exp"}` signed as the
+/// none is `revocation_unsupported`. A Resource MAY publish no metadata
+/// (Core, Resource Metadata), so a `404` for `aauth-resource.json` means the
+/// same: no `revocation_endpoint`. Any other role's `404`, and a `410` or any
+/// other status for any role, is unavailable. It POSTs `{"jti","exp"}` signed as the
 /// calling server under the `jwks_uri` scheme, covering `content-type` and
 /// `content-digest` and, for a Resource, its `additional_signature_components`,
 /// with `Prefer: wait` set inside the client's timeout. The answer is read
@@ -81,6 +84,9 @@ pub enum DeliveryCause {
     Discovery(DiscoveryError),
     /// The recipient's metadata names no `revocation_endpoint`.
     NoEndpoint,
+    /// The recipient is a Resource that publishes no metadata: its
+    /// `aauth-resource.json` answered `404`, so it has no `revocation_endpoint`.
+    NoMetadata,
     /// The metadata's `revocation_endpoint` or a `202` `Location` is unusable.
     InvalidUrl(String),
     /// The request could not be signed, such as for an advertised component
@@ -101,6 +107,9 @@ impl fmt::Display for DeliveryCause {
         match self {
             Self::Discovery(error) => error.fmt(f),
             Self::NoEndpoint => f.write_str("the recipient publishes no revocation_endpoint"),
+            Self::NoMetadata => {
+                f.write_str("the Resource publishes no metadata, so no revocation_endpoint")
+            }
             Self::InvalidUrl(url) => write!(f, "unusable revocation URL {url}"),
             Self::Signing(error) => write!(f, "could not sign the revocation: {error}"),
             Self::Answer {
@@ -186,6 +195,19 @@ impl RevocationClient {
         }
         let metadata = match self.client.fetch_metadata(target.recipient, target.dwk) {
             Ok(metadata) => metadata,
+            // A Resource MAY publish no metadata; one that publishes none has
+            // no revocation_endpoint, as a document without the member.
+            Err(DiscoveryError::Status { status: 404, .. })
+                if target.dwk == "aauth-resource.json" =>
+            {
+                return (
+                    Delivery {
+                        outcome: CallOutcome::Unsupported,
+                        cause: Some(DeliveryCause::NoMetadata),
+                    },
+                    None,
+                );
+            }
             Err(error) => return unavailable(DeliveryCause::Discovery(error)),
         };
         let endpoint = match metadata.member("revocation_endpoint") {

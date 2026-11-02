@@ -1279,6 +1279,18 @@ Added on 2026-11-02, after alpha.21 (not released):
   without `alg`, such as the RFC 8037 example key. `Jwk::thumbprint` still
   refuses such a key. The suite's `vector.jwk-thumbprint.no-alg` clause
   grades it.
+- A Resource that publishes no metadata (Protocol, Resource Metadata, line
+  2101). `RevocationClient` reads a `404` for `aauth-resource.json` as no
+  `revocation_endpoint`, as for a document without the member: the
+  Person Server, Access Server and Resource cascades report that Resource
+  `revocation_unsupported` (Revocation, line 2707), with the new
+  `DeliveryCause::NoMetadata`. A `404` for Person Server or Access Server
+  metadata, and a `410` or any other status, stays
+  `revocation_unavailable` (`tests/cascade.rs`,
+  `a_deferred_revocation_is_polled_with_a_signed_get`). The Agent fetches no
+  metadata; a host answered `404` passes none and the Agent signs the base
+  components. The conformance suite's `agent.person-flow-unpublished-metadata`
+  clause grades the person flow at such a Resource.
 
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
