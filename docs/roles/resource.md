@@ -412,9 +412,12 @@ handler. Failures carry an `application/problem+json` body.
 ## Serving on the person's identity
 
 `PersonIdentityResource::new(endpoint, keys, policy)` serves one endpoint to
-whoever the person is, without consent or scopes. `keys` resolves the public
+whoever the person is, without consent or scopes; `for_origin` binds every
+path of an origin, as for `AgentIdentityResource`. `keys` resolves the public
 keys of the Person Servers you trust, read from each one's
-`aauth-person.json`. `authorize(&request, now)` returns a `PersonDecision`:
+`aauth-person.json`. Serve `metadata()` at `/.well-known/aauth-resource.json`:
+it declares `access_mode` `person-token`, and `with_display` adds your name
+and description. `authorize(&request, now)` returns a `PersonDecision`:
 
 | Decision | Response |
 | --- | --- |

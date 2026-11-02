@@ -1266,7 +1266,9 @@ Added on 2026-11-02, after alpha.21 (not released):
   verified Person token, unsigned or signed with an Agent or Auth token, is
   `401` with `AAuth-Requirement: requirement=person-token` and no parameters
   (Person Token Required, line 615). A Person token for another Resource is
-  `invalid_jwt` with the audience detail. `Authorized` takes the verified
+  `invalid_jwt` with the audience detail. Like `AgentIdentityResource` it
+  binds an endpoint (`new`) or an origin (`for_origin`), and its `metadata`
+  declares `access_mode` `person-token`. `Authorized` takes the verified
   token type as a second parameter, which defaults to the Agent token. The
   conformance suite's `core.person-token-required` clause grades it.
 - A direct agent's Person token. `Agent::person_request` signs the Person

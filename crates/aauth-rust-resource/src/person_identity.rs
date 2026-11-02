@@ -3,7 +3,8 @@
 use crate::ps_authorization::refusal;
 use crate::{Authorized, Decision, Deny, PolicyOutcome, SignatureFailure, Target};
 use aauth_rust_core::{
-    AgentKeyResolver, PersonToken, TokenError, VerifiedPersonToken, validate_server_identifier,
+    AgentKeyResolver, MetadataDisplay, PersonToken, TokenError, VerifiedPersonToken,
+    validate_server_identifier,
 };
 use aauth_rust_jose::Jws;
 use aauth_rust_signature_key::{Error, KeyMaterial};
@@ -85,7 +86,8 @@ pub struct PersonIdentityResource<K, P> {
     policy: P,
     identifier: String,
     authority: String,
-    path: String,
+    path: Option<String>,
+    display: MetadataDisplay,
 }
 impl<K: AgentKeyResolver, P, O> PersonIdentityResource<K, P>
 where
@@ -113,8 +115,46 @@ where
             policy,
             identifier,
             authority,
-            path: uri.path().to_owned(),
+            path: Some(uri.path().to_owned()),
+            display: MetadataDisplay::new(),
         })
+    }
+    /// Bind one Resource to an HTTPS origin across all router paths, as
+    /// [`crate::AgentIdentityResource::for_origin`] does. Every request must
+    /// still be signed over its actual path; the host router and policy own
+    /// route admission. Use [`Self::new`] for an exact endpoint binding.
+    ///
+    /// # Errors
+    /// Rejects an origin that is not a server identifier, a non-root path, a
+    /// query or a fragment. A trailing root slash is accepted.
+    pub fn for_origin(origin: &str, keys: K, policy: P) -> Result<Self, Error> {
+        let uri: http::Uri = origin.parse().map_err(|_| Error::InvalidUri)?;
+        if !uri.path().is_empty() && uri.path() != "/" {
+            return Err(Error::InvalidUri);
+        }
+        let mut resource = Self::new(origin, keys, policy)?;
+        resource.path = None;
+        Ok(resource)
+    }
+    /// Publish `name`, `description`, `logo_uri` and the other display
+    /// members in [`Self::metadata`]. The checked values replace any earlier ones.
+    pub fn with_display(mut self, display: MetadataDisplay) -> Self {
+        self.display = display;
+        self
+    }
+    /// Metadata for this Resource, served by the host at
+    /// `/.well-known/aauth-resource.json`: its identifier as `issuer`,
+    /// `access_mode` `person-token` and the 60-second signature window
+    /// (protocol, Resource Metadata), with display members after
+    /// [`Self::with_display`].
+    pub fn metadata(&self) -> Vec<u8> {
+        let mut metadata = serde_json::json!({
+            "issuer": self.identifier, "access_mode": "person-token", "signature_window": 60
+        });
+        for (member, value) in self.display.members() {
+            metadata[member] = serde_json::json!(value);
+        }
+        metadata.to_string().into_bytes()
     }
     /// Check a buffered absolute HTTPS request at `now` in Unix seconds.
     /// The proof window is ±60 seconds. Token expiry has no leeway; a future
@@ -138,7 +178,7 @@ where
     ) -> Result<Option<VerifiedPersonToken>, SignatureFailure> {
         let target = Target {
             authority: &self.authority,
-            path: Some(&self.path),
+            path: self.path.as_deref(),
             accepted: &["jwt"],
             additional: &[],
         };
