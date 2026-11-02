@@ -16,7 +16,7 @@ the compiler.
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.19
+git checkout v0.1.0-alpha.20
 ```
 
 ## 2. Run the example

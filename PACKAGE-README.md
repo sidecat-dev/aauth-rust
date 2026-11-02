@@ -1,7 +1,7 @@
 # AAuth for Rust crates
 
 Development libraries for [AAuth](https://github.com/dickhardt/AAuth), version
-`0.1.0-alpha.19`, licensed under the included [MIT license](LICENSE).
+`0.1.0-alpha.20`, licensed under the included [MIT license](LICENSE).
 The [canonical project](https://gitlab.com/sidecat-dev/aauth-rust) is the project
 home and issue tracker. An archive verification run is not a release or registry
 publication; APIs and package names may change during the alpha series.
@@ -35,13 +35,13 @@ implementation, not a full-profile conformance claim.
 
 ## Use and verify development sources
 
-Internal dependencies declare version `0.1.0-alpha.19`. Until the sibling packages
+Internal dependencies declare version `0.1.0-alpha.20`. Until the sibling packages
 are available in a registry, use versioned path dependencies from a complete
 checkout. For example, in an application next to an `aauth-rust` checkout:
 
 ```toml
 [dependencies]
-aauth-rust-resource = { version = "0.1.0-alpha.19", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-resource = { version = "0.1.0-alpha.20", path = "../aauth-rust/crates/aauth-rust-resource" }
 ```
 
 Adjust the path to your checkout. Cargo can also fetch the crates from the
@@ -49,7 +49,7 @@ release tag instead:
 
 ```toml
 [dependencies]
-aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.19" }
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.20" }
 ```
 
 A single archive cannot supply its unpublished sibling dependencies. To create and compile-verify all thirteen archives together,
