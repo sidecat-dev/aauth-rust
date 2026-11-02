@@ -167,6 +167,11 @@ impl TokenError {
         }
     }
 }
+/// Seconds before an Agent, Person or Auth token's `exp` at which an agent
+/// refreshes it, and inside which it does not present it (Protocol, Expiry
+/// and the Refresh Margin). An Agent token's lifetime must exceed it.
+pub const REFRESH_MARGIN: i64 = 300;
+
 /// Token issuer keys and `cnf.jwk` confirmation keys use the compact JWS
 /// profile: Ed25519 or ES256.
 pub(crate) fn require_token_key(jwk: &Jwk) -> Result<(), TokenError> {

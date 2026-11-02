@@ -46,8 +46,11 @@ returns the private key itself: write it only where the key's owner can read
 it, or keep the key in a keystore or HSM behind `SigningKey::external`, which
 never exports it. A valid signature proves a key
 and signed claims; the application's Resource policy decides access. Replay
-storage, enrollment and sub-agent delegation remain host responsibilities or
-unimplemented; revocation transport is the host's unless it installs
+storage remains a host responsibility. Enrollment, refresh and sub-agent
+issuance at a hosted Agent Provider run through `bootstrap::BootstrapService`
+only with the host's `BootstrapPolicy` and `BootstrapStore`; the policy
+verifies any platform attestation and binds it to a nonce it issued.
+Revocation transport is the host's unless it installs
 `aauth-rust-discovery`'s `RevocationClient`. The PS store supports binding revocation;
 it supplies no revocation endpoint or event delivery. The buffered profile signs and verifies SHA-256
 Content-Digest for nonempty content or a supplied digest, up to 1 MiB. It also

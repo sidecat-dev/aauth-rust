@@ -1292,6 +1292,38 @@ Added on 2026-11-02 (alpha.22 and alpha.23):
   components. The conformance suite's `agent.person-flow-unpublished-metadata`
   clause grades the person flow at such a Resource.
 
+Added on 2026-11-02, for alpha.24 (not released):
+
+- Bootstrap (`draft-hardt-aauth-bootstrap`). The Agent Provider crate's
+  `bootstrap::BootstrapService` serves a hosted provider's four steps at
+  host-configured URLs: enrollment of an install's durable key under `hwk`,
+  two-key refresh under `jkt-jwt` (the naming JWT, its single-use `jti`, the
+  HTTP signature by the delegated key, then the token bound to that key),
+  single-key refresh under `hwk`, and sub-agent issuance to a top-level
+  parent that presents its own token under `jwt`. A host `BootstrapPolicy`
+  decides each enrollment, refresh and sub-agent; a `BootstrapStore` keeps
+  enrollments, used naming-JWT identifiers and sub-agent records
+  (`MemoryBootstrapStore` is the volatile reference). The agent identifier
+  stays the same across refreshes and differs per install. A sub-agent
+  token copies the parent's `ps`, never outlives the parent's token, and
+  takes the offered discriminator unless a live sibling holds it. A
+  self-hosted domain issues each agent's token with
+  `AgentProvider::issue_to`, its sub-agents' with `issue_subagent_to`, and
+  publishes only the provider key. The Agent crate's `BootstrapClient`
+  enrolls the durable key, refreshes with a fresh ephemeral key each time,
+  checks the refreshed token, and reports `needs_refresh` inside the
+  five-minute margin; `Agent::subagent_request` asks for a sub-agent token
+  with the parent's current token and key
+  (`aauth-rust-agent-provider/tests/bootstrap.rs`). Platform attestation is
+  the host policy's to verify. The readings are in INTERPRETATIONS.md. The
+  conformance suite's three Bootstrap roles grade it.
+- API additions: `REFRESH_MARGIN` in Core; `AgentProvider::public_jwk`,
+  `issue_to` and `issue_subagent_to`, and the `bootstrap` module; in the
+  Agent crate `BootstrapClient`, `PendingRefresh`, `BootstrapError`,
+  `issued_agent_token`, `NAMING_JWT_LIFETIME` and `Agent::subagent_request`.
+- The workspace version is `0.1.0-alpha.24`. The manifests had stayed at
+  `0.1.0-alpha.21` through the `v0.1.0-alpha.22` and `v0.1.0-alpha.23` tags.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.
@@ -1565,8 +1597,8 @@ a general delegation lifecycle or automatic sub-agent process supervision.
   unsupported PS parameters are refused explicitly.
 - R3 behavior is limited to the opt-in subsets above; the default Core profile
   does not negotiate it. Events is implemented as recorded above.
-  Bootstrap behavior is absent. Supervision is recorded under "Added on
-  2026-10-31".
+  Supervision is recorded under "Added on 2026-10-31", and Bootstrap under
+  "Added on 2026-11-02, for alpha.24".
   Pinning a document does not imply implementing it. Opt-in budgets are the
   separate row above.
 - Header web keys sign and verify Ed25519, ES256, ES384, RS256, and PS256. RSA `n` and `e` are minimal unsigned integers, the modulus is 256 to 1024 bytes, and the exponent is odd and at least 3. Compact JWS

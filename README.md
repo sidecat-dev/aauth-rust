@@ -217,9 +217,8 @@ This is an alpha, version `v0.1.0-alpha.24`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the
-R3, Budgets, Events and Supervision drafts, each with the limits listed in
-[CONFORMANCE.md](CONFORMANCE.md). The Bootstrap draft, which covers how an
-agent enrolls with its provider, is not implemented.
+R3, Budgets, Events, Supervision and Bootstrap drafts, each with the limits
+listed in [CONFORMANCE.md](CONFORMANCE.md).
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
 in Go, makes the same choices where the drafts leave room except for the
 differences listed in [INTERPRETATIONS.md](INTERPRETATIONS.md), and is tested

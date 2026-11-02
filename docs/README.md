@@ -30,6 +30,7 @@ it.
 | [Budgets](features/budgets.md) | a cap on what an agent may spend at an API | `draft-hardt-aauth-budgets` |
 | [Events](features/events.md) | an API notifying an agent later, through its Agent Provider | `draft-hardt-aauth-events` |
 | [Supervision](features/supervision.md) | what happens to each request a supervision server decides | `draft-hardt-aauth-supervision` |
+| [Bootstrap](features/bootstrap.md) | how an agent comes to hold its Agent token: enrollment, refresh, sub-agents, self-hosted domains | `draft-hardt-aauth-bootstrap` |
 
 ## Reference
 

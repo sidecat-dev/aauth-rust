@@ -263,8 +263,9 @@ fn requirement(response: &Response<Vec<u8>>) -> &str {
 The parts that matter in a real service:
 
 - `AgentProvider::issue` signs an Agent token. Before it does, the provider
-  decides that this agent is who it says it is. How it decides is up to you;
-  the library does not enroll agents.
+  decides that this agent is who it says it is. How it decides is up to you.
+  For an agent that enrolls a key with the provider and refreshes its token,
+  see [Bootstrap](features/bootstrap.md).
 - `AgentProviderKeys::from_documents` keeps the provider's published keys. Your
   service fetches those documents, with its own timeouts and limits, from
   providers you have chosen to trust. The library never fetches anything.

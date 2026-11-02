@@ -26,8 +26,11 @@ compose the roles for tests and examples. No role imports `aauth-rust-discovery`
 a host passes its `KeyResolver` and `RevocationClient` to a role through the
 role's existing `AgentKeyResolver` and `RevocationDirectory` parameters. Examples import the roles and compose
 them without a cross-role lifecycle abstraction. The storage adapter imports the
-PS role; the role never imports a database engine. Bootstrap and R3 get
-boundaries as executing journeys require them. Events tokens live in Core and
+PS role; the role never imports a database engine. Bootstrap lives with the
+two parties it serves: the Agent Provider crate's `bootstrap` module (the
+hosted enrollment, refresh and sub-agent service, and self-hosted issuance)
+and the Agent crate's `BootstrapClient`. R3 gets boundaries as executing
+journeys require them. Events tokens live in Core and
 each role's Events behavior in its own crate. Budgets are the opt-in
 `aauth-rust-budgets` crate. Unsupported vocabularies and the full-R3 gap are
 recorded in CONFORMANCE.md.

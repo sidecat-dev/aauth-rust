@@ -177,17 +177,19 @@ with `NotExportable`, and a failure of the signer makes `issue` or
 ## What your service supplies
 
 - **Enrollment.** How an agent proves to you that it is genuine: a platform
-  attestation, a person signing in, a key the person controls. The library
-  has no enrollment endpoint; the Bootstrap draft that describes one is not
-  implemented.
+  attestation, a person signing in, a key the person controls. Your
+  `BootstrapPolicy` decides it; the `bootstrap` module runs the endpoints.
+  See [Bootstrap](../features/bootstrap.md).
 - **The signing key**, kept safe and loaded at start, as above.
 - **Publishing.** Serve `metadata()` and `jwks()` over HTTPS. `jwks()`
   publishes only the current key. After you change keys, servers that refresh
   your JWKS reject tokens signed with the old key. To change keys without
   breaking live tokens, publish your own JWKS with both keys, each under its
   own key ID, until the old tokens expire.
-- **Renewal.** Issue a new token before the old one expires, naming the same
-  public key. The agent switches with `agent.with_token(new_token)`.
+- **Renewal.** Issue a new token before the old one expires. With the
+  `bootstrap` module the agent refreshes itself: each refresh names a fresh
+  key, signed for by the key it enrolled. Without it, name the same public
+  key; the agent switches with `agent.with_token(new_token)`.
 - **Revocation.** To withdraw an Agent token early, revoke it at the agent's
   Person Server. `RevocationClient::deliver` in `aauth-rust-discovery` sends
   it, signed as the provider (its issuer, `aauth-agent.json`, key ID and
@@ -195,6 +197,9 @@ with `NotExportable`, and a failure of the signer makes `issue` or
 
 ## Also in this crate
 
+- The `bootstrap` module serves enrollment, refresh and sub-agent issuance
+  for a hosted provider, and `issue_to` and `issue_subagent_to` issue tokens
+  for a self-hosted domain's agents. See [Bootstrap](../features/bootstrap.md).
 - `issue_subagent` issues a token for a sub-agent: an agent that a parent
   agent starts to do part of its work, one level below it. See
   [Obtain credentials for a one-level sub-agent](../../USE-IN-YOUR-SERVICE.md#obtain-credentials-for-a-one-level-sub-agent).

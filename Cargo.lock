@@ -36,6 +36,7 @@ dependencies = [
 name = "aauth-rust-agent-provider"
 version = "0.1.0-alpha.24"
 dependencies = [
+ "aauth-rust-agent",
  "aauth-rust-core",
  "aauth-rust-jose",
  "aauth-rust-signature-key",

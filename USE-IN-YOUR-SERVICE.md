@@ -150,6 +150,10 @@ If enrollment changes the confirmation key, create a new Agent with that key.
 Use `agent.public_jwk()` for the renewed claims' `cnf.jwk`: it returns an owned
 public-only value, so the host need not parse the previous token or retain seed
 bytes. No background enrollment or refresh loop runs inside the library.
+`BootstrapClient` builds an install's enrollment and refresh requests, checks
+the refreshed token, and reports when to refresh (`needs_refresh`, fewer than
+five minutes left); the host sends the requests. See
+[Bootstrap](docs/features/bootstrap.md).
 
 `Agent::new` checks syntax and key binding; it does **not** authenticate the AP's
 signature. `AgentToken::parse(...).unverified_claims()` can inspect refresh hints,
@@ -1260,7 +1264,10 @@ public snapshot with the parent and with the AP route's identity gate; it does
 not give the parent the AP's signing key.
 
 The host defines the child-enrollment endpoint. `/subagents` below is an example
-route, not a standardized AP bootstrap endpoint supplied by the library. It uses
+route, not a standardized AP bootstrap endpoint supplied by the library.
+`bootstrap::BootstrapService` serves the same step in the shape the Bootstrap
+draft sketches, with a store and a host policy; see
+[Bootstrap](docs/features/bootstrap.md). It uses
 `AgentIdentityResource::for_origin` to verify the parent's actual issuer token
 and HTTP proof. Its explicit host policy allows the configured top-level parent
 only. The signed JSON body must contain exactly `discriminator` and `jwk`, fit

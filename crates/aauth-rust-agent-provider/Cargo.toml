@@ -10,7 +10,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
-description = "Host-controlled AAuth Agent token issuance, public discovery documents and the Events inbox"
+description = "Host-controlled AAuth Agent token issuance, public discovery documents, the Events inbox, and Bootstrap enrollment, refresh and sub-agent issuance"
 
 [dependencies]
 aauth-rust-jose.workspace = true
@@ -18,3 +18,6 @@ aauth-rust-core.workspace = true
 aauth-rust-signature-key.workspace = true
 http.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+aauth-rust-agent.workspace = true

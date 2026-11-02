@@ -278,6 +278,10 @@ The four-party example runs a deferred exchange:
 
 ## Also in this crate
 
+- `BootstrapClient` enrolls the install's durable key with its Agent Provider
+  and refreshes the Agent token, with a fresh key each time, and
+  `agent.subagent_request` asks the provider for a sub-agent's token. See
+  [Bootstrap](../features/bootstrap.md).
 - `agent.missions()` tracks missions the Person Server reported ended. See
   [Missions](../features/missions.md).
 - `Subagent` checks the token and credentials of a sub-agent: an agent that

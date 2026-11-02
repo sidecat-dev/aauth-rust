@@ -501,3 +501,90 @@ crate.
     reported deferred, and the next delivery posts again.
 14. **Answer size.** A revocation answer is bounded like a discovery
     document, 65536 bytes; a larger one is `revocation_unavailable`.
+
+# Selected bootstrap interpretations
+
+Source: `draft-hardt-aauth-bootstrap` as pinned in SPECIFICATIONS.md, with
+the Core and Signature-Key sections it applies. The draft is informational
+and uses no BCP 14 keywords (line 130), so each item below is a choice the
+library made where the draft describes a pattern. These choices concern the
+Agent Provider crate's `bootstrap` module and the Agent crate's
+`BootstrapClient`.
+
+1. **Routes and bodies.** The draft defines no endpoint (lines 371 and 410).
+   The host configures the four URLs in `BootstrapEndpoints`. Every step is a
+   POST with label `sig`. Enrollment reads `{"evidence"?}`, a refresh
+   `{"ps"?, "evidence"?}`, a sub-agent request `{"jwk", "discriminator"?}`,
+   the members of the draft's example (line 391). Other members are ignored,
+   and an empty body reads as `{}`. Enrollment answers `201 {"agent"}`;
+   refresh and sub-agent issuance answer `200 {"agent_token"}`. Successes
+   carry `Cache-Control: no-store`, as Core's token responses do.
+2. **Body coverage is required.** Line 319 says a request with a body to an
+   AP endpoint should cover `content-digest` and `content-type`. The service
+   refuses a body without both covered: `401` `invalid_input` with
+   `required_input`. A body must be `application/json`.
+3. **The naming JWT's `jti` is required and single-use.** Signature-Key makes
+   `jti` optional for `jkt-jwt`; the Bootstrap naming JWT carries one "for
+   replay protection" (line 321). A refresh without one is `invalid_jwt`. A
+   `jti` already used with the same durable key is `invalid_signature`, as a
+   replayed signature is (Signature-Key, `clock_skew`). The store keeps each
+   `jti` until the naming JWT's `exp`. A single-key refresh has no naming
+   JWT, so its replay is bounded only by the 60-second signature window.
+4. **Durable keys are Ed25519 or ES256.** The durable key signs naming JWTs,
+   which are compact JWS. Enrollment under `hwk` with an ES384, RS256 or
+   PS256 key is `unsupported_algorithm`.
+5. **Identifiers.** Host policy assigns the local part (line 253).
+   `thumbprint_local_part` gives the durable key's base64url thumbprint. The
+   store refuses a second install with an identifier already enrolled
+   (`409 conflict`), so each install is its own agent (line 257).
+6. **A repeated enrollment.** An active durable key that enrolls again gets
+   its existing record, `200 {"agent"}`, and policy is not asked again. A
+   disabled or revoked enrollment is `403 enrollment_inactive`, for
+   enrollment and refresh alike. A revoked key cannot enroll again: a new
+   install brings a new durable key (line 337).
+7. **Unknown durable key.** A naming JWT that verifies but names a durable
+   key with no enrollment is `404 enrollment_not_found` (line 300, step 4).
+8. **Lifetime floor.** An Agent token of five minutes or less is inside the
+   refresh margin when issued (line 291). `issue_to` refuses a lifetime of
+   300 seconds or less, and over 86400, with `InvalidTokenLifetime`; the
+   service answers `500 server_error`, since the lifetime is host policy.
+9. **`ps`.** The token's `ps` is what host policy grants. The refresh body's
+   `ps` is passed to policy as the Person Server the agent asks for (line
+   413: "the agent's configured person server"). The library keeps no Person
+   Server per enrollment.
+10. **Sub-agent refusals.** A parent token that is itself a sub-agent's is
+    `403 access_denied` (line 375). A parent token from another provider,
+    expired, or with a bad signature is `401` with the token's code. A
+    sub-agent key equal to the parent's, or a malformed body, is
+    `400 invalid_request`.
+11. **Discriminators.** The provider uses the parent's discriminator unless a
+    live sub-agent of that parent already has it, and otherwise chooses a
+    random 128-bit base64url one (line 376). A malformed offered
+    discriminator is refused (`400`) rather than replaced. A record is live
+    until its token's `exp`, which is how long a party can rely on the token
+    (line 362).
+12. **Sub-agent lifetime.** Host policy grants seconds; the token's `exp` is
+    the earlier of that and the parent's `exp` (lines 365 and 376). `ps` is
+    copied from the parent's token. The record is written before the token
+    is released (line 400).
+13. **Evidence.** The `evidence` member reaches host policy unparsed. The
+    library verifies no platform attestation and issues no nonce (lines 208
+    and 455): both belong to the policy.
+14. **Revocation.** `BootstrapStore::set_state` disables or revokes an
+    enrollment, which stops refreshes (line 449). The current token stays
+    valid until `exp`; revoking it at the agent's Person Server is the host's,
+    for example with `RevocationClient` in `aauth-rust-discovery`.
+15. **The agent checks what it receives.** `BootstrapClient::complete_refresh`
+    verifies the token under the provider's published keys and refuses one
+    that names another provider, names a parent, binds a key other than the
+    one the refresh named, or changes the agent identifier of an earlier
+    refresh (line 259). It does not require `Cache-Control: no-store` on the
+    answer: that header is the provider's to send. Its naming JWT is valid
+    for 120 seconds, and `needs_refresh` is true with fewer than 300 seconds
+    left (line 291; Core, Expiry and the Refresh Margin).
+16. **Self-hosted domains.** `AgentProvider::issue_to` issues each agent's
+    token with that agent's key, or with `AgentProvider::public_jwk` for a
+    single-key domain (line 182). `jwks()` publishes only the provider key
+    (lines 190 to 192). `issue_subagent_to` issues a sub-agent the same way
+    (line 345) and refuses a parent that is itself a sub-agent. The
+    operator's process keeps discriminators unique; no store is involved.
