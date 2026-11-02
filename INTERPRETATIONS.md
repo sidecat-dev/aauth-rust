@@ -339,6 +339,31 @@ SPECIFICATIONS.md.
   later request without them. A refusal whose every entry was covered is
   `AlreadyCovered`, and a list that is not plain strings is not read.
 
+- **A thumbprint of a key without `alg`.** Signature Algorithms (line 2170)
+  requires `alg` on every AAuth key, and RFC 7638 hashes no `alg`.
+  `Jwk::thumbprint` validates the key as AAuth uses it, so a key without
+  `alg` is `unsupported_algorithm`. `Jwk::rfc7638_thumbprint` also takes a
+  key without `alg`, as the RFC 7638 and RFC 8037 examples are, and checks
+  its material under the algorithm its type and curve determine: Ed25519,
+  ES256 for P-256, ES384 for P-384 and RS256 for RSA. For a key with `alg`
+  the two agree.
+- **Person identity access.** Person Token Required (line 615) asks for a
+  person token when the Resource "has not verified a person token on the
+  request". `PersonIdentityResource` answers that for an unsigned request
+  and for one signed with an Agent or Auth token, without verifying that
+  token, so a Resource that trusts only Person Servers still sends the agent
+  to its PS. A Person token must name the Resource's identifier, the HTTPS
+  origin of its endpoint, as `aud`. Person Identity Access (line 328) leaves
+  access control to the Resource, so a verified Person token reaches host
+  policy with its `mission_s256` and `tenant` unchanged.
+- **A direct agent's Person token.** Person Token Endpoint (line 803) has the
+  agent present its Agent token and send `resource`. `Agent::person_request`
+  builds that POST with only `resource`, no mission and no capabilities, and
+  refuses to sign it with a Person or Auth token. `Agent::verify_person_delivery`
+  requires the PS's own `iss`, the intended `aud`, this agent's key, no
+  `mission_s256`, and an `exp` no later than the Agent token's (Person Token
+  Structure, line 863). When the Agent token names a `ps`, the PS must be it.
+
 # Selected supervision interpretations
 
 Choices `draft-hardt-aauth-supervision` leaves open, as the supervision server

@@ -615,7 +615,7 @@ fn requested_scope(
     }
     Ok(scope.to_owned())
 }
-fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
+pub(crate) fn refusal(status: StatusCode, code: &str) -> Response<Vec<u8>> {
     typed_refusal(status, code, "about:blank")
 }
 /// `401 revoked_jwt`. A body sent with `Signature-Error` names that error as its type.

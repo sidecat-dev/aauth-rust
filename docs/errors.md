@@ -47,8 +47,9 @@ keys for an issuer you have not chosen to trust, whatever the token names.
 ## Refusals by policy
 
 A `403` without `Signature-Error` means the request was authenticated and then
-refused: by your Resource policy (`AgentIdentityResource` or
-`PsAuthorizationResource`, body `error` `forbidden` or `access_denied`), by a
+refused: by your Resource policy (`AgentIdentityResource`,
+`PersonIdentityResource` or `PsAuthorizationResource`, body `error`
+`forbidden` or `access_denied`), by a
 Person Server or Access Server policy (`access_denied`), or by a supervision
 server (`access_denied`). Signing again will not help. Tell the person, or ask
 for different access.

@@ -95,7 +95,7 @@ different one on each endpoint.
 | --- | --- | --- | --- |
 | Agent identity | which agent | the Agent Provider | `AgentIdentityResource` |
 | Resource-managed | which person | the Resource's own sign-in | `SessionLedger` (Resource) and `AccessSession` (agent) |
-| Person identity | which person | the Person Server | no Resource helper |
+| Person identity | which person | the Person Server | `PersonIdentityResource` |
 | PS authorization (three-party) | the person and what they consented to | the Person Server | `PsAuthorizationResource::new` |
 | Federated authorization (four-party) | the person and the Access Server's decision | the Access Server | `PsAuthorizationResource::new_federated` |
 
@@ -109,8 +109,10 @@ make three; an Access Server makes four.
   then hands the agent a session token in an `AAuth-Access` header, which the
   agent sends back in `Authorization`.
 - **Person identity.** The Resource serves requests signed with a Person
-  token. This library has no helper for it: `PsAuthorizationResource` answers
-  a Person token by asking for an Auth token.
+  token and decides from who the person is. `PersonIdentityResource` asks for
+  a Person token with `requirement=person-token`, and the agent gets one with
+  `Agent::person_request`. [Resource](roles/resource.md#serving-on-the-persons-identity)
+  describes it.
 - **Three-party** and **four-party**, below.
 
 ### Three-party: the Person Server authorizes

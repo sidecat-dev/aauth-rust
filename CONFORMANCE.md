@@ -1259,6 +1259,25 @@ Added on 2026-11-02 (alpha.21):
   `a_supervised_resource_interaction_is_decided_first_and_issued_within_the_allow`,
   `a_held_resource_interaction_is_relayed_at_the_one_pending_url`).
 
+Added on 2026-11-02, after alpha.21 (not released):
+
+- Person identity access. `PersonIdentityResource` serves on a verified
+  Person token alone (Protocol, Person Identity Access). A request with no
+  verified Person token, unsigned or signed with an Agent or Auth token, is
+  `401` with `AAuth-Requirement: requirement=person-token` and no parameters
+  (Person Token Required, line 615). A Person token for another Resource is
+  `invalid_jwt` with the audience detail. `Authorized` takes the verified
+  token type as a second parameter, which defaults to the Agent token. The
+  conformance suite's `core.person-token-required` clause grades it.
+- A direct agent's Person token. `Agent::person_request` signs the Person
+  token request with the Agent token, and `Agent::verify_person_delivery`
+  checks the token the PS returns (Person Token Endpoint). The conformance
+  suite's `agent.person-flow` clause grades the retry that presents it.
+- `Jwk::rfc7638_thumbprint` computes the RFC 7638 thumbprint of a key
+  without `alg`, such as the RFC 8037 example key. `Jwk::thumbprint` still
+  refuses such a key. The suite's `vector.jwk-thumbprint.no-alg` clause
+  grades it.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.

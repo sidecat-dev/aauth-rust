@@ -356,24 +356,6 @@ impl Subagent {
         {
             return Err(TokenError::InvalidJwt);
         }
-        let uri: http::Uri = endpoint.parse().map_err(|_| TokenError::InvalidJwt)?;
-        let authority = uri.authority().ok_or(TokenError::InvalidJwt)?;
-        if uri.scheme_str() != Some("https")
-            || authority.host().is_empty()
-            || authority.as_str().contains('@')
-            || uri.query().is_some()
-            || endpoint.contains('#')
-        {
-            return Err(TokenError::InvalidJwt);
-        }
-        let mut request = Request::post(uri)
-            .header("content-type", "application/json")
-            .header("aauth-capabilities", "budget")
-            .body(serde_json::to_vec(&body).map_err(|_| TokenError::InvalidJwt)?)
-            .map_err(|_| TokenError::InvalidJwt)?;
-        parent
-            .sign(&mut request, now)
-            .map_err(|_| TokenError::InvalidJwt)?;
-        Ok(request)
+        parent.sign_json_post(endpoint, &body, Some("budget"), now)
     }
 }

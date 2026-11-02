@@ -1,9 +1,11 @@
-//! Agent-identity and PS-authorization Resources. Verification precedes host policy.
+//! Agent-identity, person-identity and PS-authorization Resources.
+//! Verification precedes host policy.
 //! The [`events`] module adds AAuth Events subscription and delivery.
 #![deny(missing_docs)]
 mod budget_gate;
 pub mod events;
 mod held;
+mod person_identity;
 mod ps_authorization;
 mod session;
 use aauth_rust_core::{
@@ -15,6 +17,7 @@ use aauth_rust_signature_key::{
 };
 pub use held::{HeldInvocations, HeldPoll};
 use http::{Request, Response, StatusCode};
+pub use person_identity::{BoxedPersonPolicy, PersonDecision, PersonIdentityResource};
 pub use ps_authorization::{
     AuthAuthorized, AuthDecision, AuthorizationAsk, BoxedAuthAdmissionPolicy, BoxedAuthPolicy,
     BoxedR3Display, BoxedR3OperationMapper, HeldAdmission, ObservedAdmission, ProactiveDecision,
@@ -123,6 +126,50 @@ pub(crate) fn prepare_failure(
     }
 }
 
+/// The endpoint a Resource is bound to and the signatures it accepts there.
+pub(crate) struct Target<'a> {
+    pub(crate) authority: &'a str,
+    /// `None` binds every path of the origin.
+    pub(crate) path: Option<&'a str>,
+    pub(crate) accepted: &'a [&'static str],
+    pub(crate) additional: &'a [&'a str],
+}
+
+impl Target<'_> {
+    /// Check that `request` was sent to this endpoint, then prepare its
+    /// signature: target, coverage, digest and time are checked, and neither
+    /// the key nor the signature is verified yet. `None` when the request
+    /// carries no `Signature-Key`, `Signature-Input` or `Signature` field.
+    pub(crate) fn arrive(
+        &self,
+        request: &Request<Vec<u8>>,
+        now: i64,
+    ) -> Result<Option<PreparedRequest>, SignatureFailure> {
+        let authority = aauth_rust_signature_key::canonical_authority(request.uri())
+            .map_err(SignatureFailure::Proof)?;
+        if authority != self.authority || self.path.is_some_and(|path| request.uri().path() != path)
+        {
+            return Err(SignatureFailure::Proof(Error::TargetMismatch));
+        }
+        if ["signature-key", "signature-input", "signature"]
+            .iter()
+            .all(|h| !request.headers().contains_key(*h))
+        {
+            return Ok(None);
+        }
+        PreparedRequest::prepare_with_components(
+            request,
+            "sig",
+            now,
+            60,
+            self.accepted,
+            self.additional,
+        )
+        .map(Some)
+        .map_err(|error| prepare_failure(error, request, now, self.accepted, self.additional))
+    }
+}
+
 /// Checked `additional_signature_components`, in order, each once.
 pub(crate) fn additional_components<I, S>(components: I) -> Option<Vec<String>>
 where
@@ -182,14 +229,16 @@ impl<T> PolicyOutcome for Result<T, Deny> {
 
 /// Verified caller identity and the value returned by successful host policy.
 /// Dereferences to the token for read-only claim/compact-byte inspection.
+/// The token is the Agent token, or the Person token at a
+/// [`PersonIdentityResource`].
 #[derive(Debug)]
-pub struct Authorized<T = ()> {
-    token: VerifiedAgentToken,
+pub struct Authorized<T = (), K = VerifiedAgentToken> {
+    token: K,
     admitted: T,
 }
-impl<T> Authorized<T> {
+impl<T, K> Authorized<T, K> {
     /// Authenticated caller token; the HTTP proof and host policy also succeeded.
-    pub fn token(&self) -> &VerifiedAgentToken {
+    pub fn token(&self) -> &K {
         &self.token
     }
     /// Application context produced by policy, such as a verified upstream token.
@@ -197,13 +246,13 @@ impl<T> Authorized<T> {
         &self.admitted
     }
     /// Move both values into an application handler without verifying again.
-    pub fn into_parts(self) -> (VerifiedAgentToken, T) {
+    pub fn into_parts(self) -> (K, T) {
         (self.token, self.admitted)
     }
 }
-impl<T> std::ops::Deref for Authorized<T> {
-    type Target = VerifiedAgentToken;
-    fn deref(&self) -> &VerifiedAgentToken {
+impl<T, K> std::ops::Deref for Authorized<T, K> {
+    type Target = K;
+    fn deref(&self) -> &K {
         &self.token
     }
 }
@@ -581,48 +630,22 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn authorize(&self, request: &Request<Vec<u8>>, now: i64) -> Decision<O::Context> {
-        let authority = match aauth_rust_signature_key::canonical_authority(request.uri()) {
-            Ok(authority) => authority,
-            Err(error) => return Decision::SignatureFailure(SignatureFailure::Proof(error)),
-        };
-        if authority != self.authority
-            || self
-                .path
-                .as_deref()
-                .is_some_and(|path| request.uri().path() != path)
-        {
-            return Decision::SignatureFailure(SignatureFailure::Proof(Error::TargetMismatch));
-        }
-        if ["signature-key", "signature-input", "signature"]
-            .iter()
-            .all(|h| !request.headers().contains_key(*h))
-        {
-            return Decision::AgentTokenRequired;
-        }
         let accepted = self.accepted_schemes();
         let additional: Vec<&str> = self
             .additional_components
             .iter()
             .map(String::as_str)
             .collect();
-        let proof = match PreparedRequest::prepare_with_components(
-            request,
-            "sig",
-            now,
-            60,
-            &accepted,
-            &additional,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                return Decision::SignatureFailure(prepare_failure(
-                    e,
-                    request,
-                    now,
-                    &accepted,
-                    &additional,
-                ));
-            }
+        let target = Target {
+            authority: &self.authority,
+            path: self.path.as_deref(),
+            accepted: &accepted,
+            additional: &additional,
+        };
+        let proof = match target.arrive(request, now) {
+            Ok(None) => return Decision::AgentTokenRequired,
+            Ok(Some(proof)) => proof,
+            Err(failure) => return Decision::SignatureFailure(failure),
         };
         if !matches!(proof.key(), KeyMaterial::Jwt { .. }) {
             return Decision::OtherScheme(Box::new(proof));

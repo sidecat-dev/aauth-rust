@@ -227,9 +227,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Checking what servers send
 
-Check every token a server sends you before you use it or send it on. When a
-Resource answers with `requirement=auth-token`, the header carries a Resource
-token:
+Check every token a server sends you before you use it or send it on.
+
+When a Resource answers with `requirement=person-token`, build the request to
+your Person Server's `person_token_endpoint` with
+`agent.person_request(endpoint, resource, now)`, where `resource` is the
+Resource's origin. Check the `person_token` it returns with
+`agent.verify_person_delivery`, then sign the retry with the agent that
+`agent.with_token(person_token)` returns. Keep the agent that holds the Agent
+token for later Person Server requests.
+
+When a Resource answers with `requirement=auth-token`, the header carries a
+Resource token:
 
 - In three-party access, check it with `agent.verify_resource_challenge`,
   exchange it at your Person Server, and check the Auth token you get back

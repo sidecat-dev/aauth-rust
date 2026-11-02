@@ -102,9 +102,26 @@ impl Jwk {
     }
 
     fn classify(&self) -> Result<Material, Error> {
-        if self.alg.is_empty()
+        self.classify_as(&self.alg)
+    }
+
+    /// The algorithm a key without `alg` is checked under: the one its type
+    /// and curve determine. An RSA key is checked as RS256, since the padding
+    /// does not change the key.
+    fn implied_alg(&self) -> &'static str {
+        match (self.kty.as_str(), self.crv.as_str()) {
+            ("OKP", "Ed25519") => "Ed25519",
+            ("EC", "P-256") => "ES256",
+            ("EC", "P-384") => "ES384",
+            ("RSA", _) => "RS256",
+            _ => "",
+        }
+    }
+
+    fn classify_as(&self, alg: &str) -> Result<Material, Error> {
+        if alg.is_empty()
             || self.kty == "oct"
-            || matches!(self.alg.as_str(), "none" | "HS256" | "HS384" | "HS512")
+            || matches!(alg, "none" | "HS256" | "HS384" | "HS512")
         {
             return Err(Error::UnsupportedAlgorithm);
         }
@@ -120,7 +137,7 @@ impl Jwk {
         {
             return Err(Error::InvalidKey);
         }
-        match (self.kty.as_str(), self.alg.as_str()) {
+        match (self.kty.as_str(), alg) {
             ("OKP", "Ed25519") => {
                 if self.crv != "Ed25519"
                     || !self.y.is_empty()
@@ -228,9 +245,36 @@ impl Jwk {
     /// # Errors
     /// Returns the same key/algorithm errors as [`Jwk::validate`].
     pub fn thumbprint(&self) -> Result<String, Error> {
+        Ok(self.thumbprint_of(&self.classify()?))
+    }
+
+    /// RFC 7638 SHA-256 thumbprint of a public key that may lack `alg`, as
+    /// the RFC 7638 and RFC 8037 example keys do.
+    ///
+    /// RFC 7638 hashes no `alg`, so for a key that carries one the result
+    /// equals [`Jwk::thumbprint`]. A key without `alg` is checked under the
+    /// algorithm its type and curve determine: Ed25519 for an OKP Ed25519
+    /// key, ES256 for P-256, ES384 for P-384 and RS256 for RSA. Every AAuth
+    /// key carries `alg` (protocol, Signature Algorithms), so AAuth code uses
+    /// [`Jwk::thumbprint`], which refuses a key without one.
+    ///
+    /// # Errors
+    /// Returns the same key/algorithm errors as [`Jwk::validate`], and
+    /// `UnsupportedAlgorithm` for a key without `alg` whose type and curve
+    /// determine none of those algorithms.
+    pub fn rfc7638_thumbprint(&self) -> Result<String, Error> {
+        let alg = if self.alg.is_empty() {
+            self.implied_alg()
+        } else {
+            self.alg.as_str()
+        };
+        Ok(self.thumbprint_of(&self.classify_as(alg)?))
+    }
+
+    fn thumbprint_of(&self, material: &Material) -> String {
         // Every value below was decoded as unpadded base64url or matched a
         // fixed curve name, so none needs JSON escaping.
-        let canonical = match self.classify()? {
+        let canonical = match material {
             Material::Ed25519(_) => format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{}"}}"#, self.x),
             Material::Ecdsa { .. } => format!(
                 r#"{{"crv":"{}","kty":"EC","x":"{}","y":"{}"}}"#,
@@ -238,7 +282,7 @@ impl Jwk {
             ),
             Material::Rsa { .. } => format!(r#"{{"e":"{}","kty":"RSA","n":"{}"}}"#, self.e, self.n),
         };
-        Ok(URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes())))
+        URL_SAFE_NO_PAD.encode(Sha256::digest(canonical.as_bytes()))
     }
 }
 

@@ -5,10 +5,12 @@ your handler runs: that it was sent to your origin, that the signature and the
 token are valid, and then what your policy says. It hands your handler the
 verified token, or gives you the refusal to send.
 
-There are two checks to choose from:
+There are three checks to choose from:
 
 - `AgentIdentityResource` decides from the agent's identity alone: which agent
   is calling, vouched for by its Agent Provider.
+- `PersonIdentityResource` decides from the person the agent acts for, named
+  by a Person token from their Person Server.
 - `PsAuthorizationResource` requires an Auth token: a person's consent from
   their Person Server (`new`), or a decision from your own Access Server
   (`new_federated`).
@@ -406,6 +408,24 @@ agent identifier as the body.
 The policy can return `bool`, or `Result<T, Deny>` to hand a value to your
 handler. Failures carry an `application/problem+json` body.
 [Errors](../errors.md) lists every code.
+
+## Serving on the person's identity
+
+`PersonIdentityResource::new(endpoint, keys, policy)` serves one endpoint to
+whoever the person is, without consent or scopes. `keys` resolves the public
+keys of the Person Servers you trust, read from each one's
+`aauth-person.json`. `authorize(&request, now)` returns a `PersonDecision`:
+
+| Decision | Response |
+| --- | --- |
+| `PersonTokenRequired` | 401, `requirement=person-token`, for a request with no Person token |
+| `SignatureFailure` | 401 with `Signature-Error` |
+| `Forbidden` | 403, your policy refused the person |
+| `Granted` | your handler gets the verified Person token |
+
+The agent then gets a Person token for your origin from its Person Server and
+signs again with it. Your policy receives the verified token: its `sub` and
+`iss` name the person, as for an Auth token. The Person Server is not called.
 
 ## Asking for an Auth token
 

@@ -19,6 +19,7 @@ pub use r3::{R3AgentError, R3TransportError};
 mod attempts;
 mod governance;
 mod missions;
+mod person;
 mod requirements;
 use aauth_rust_core::{AgentToken, TokenError};
 use aauth_rust_jose::{Jwk, SigningKey};
