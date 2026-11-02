@@ -1324,6 +1324,35 @@ Added on 2026-11-02, for alpha.24 (not released):
 - The workspace version is `0.1.0-alpha.24`. The manifests had stayed at
   `0.1.0-alpha.21` through the `v0.1.0-alpha.22` and `v0.1.0-alpha.23` tags.
 
+Added on 2026-11-02, for alpha.24 (not released):
+
+- R3 issuance at the Access Server (`draft-hardt-aauth-r3`, Issuer
+  Processing, Hash Verification and Audit Log Integrity).
+  `AccessServer::with_r3(R3IssuerConfig { .. })` verifies the R3 reference of
+  a Resource token addressed to it, after the Core checks. It fetches `r3_uri`
+  signed as itself under `aauth-access.json`, refuses bytes that do not hash
+  to `r3_s256` with `400 invalid_resource_token`, and gives the exact class
+  document to the host `R3Policy`, which grants operations and Core scopes. A
+  Resource token may carry R3 claims without `scope`. The Auth token carries
+  `r3_uri`, `r3_s256` and `r3_granted`. The issuance audit record is committed
+  before the token is released, and a failed commit withholds it. With the
+  Person Server's federated R3, which already fetched, consented and relayed,
+  the four-party exchange now runs with this library's roles alone
+  (`aauth-rust-person-server/tests/federated_r3.rs`,
+  `native_access_server_fetches_as_itself_and_signs_only_a_verified_class_grant`).
+  The conformance suite's `r3.federated-issuer` role grades it.
+- Limits: this Access Server issues no `r3_per_call`, and refuses a per-call
+  proposal and an R3 Resource token that offers a budget with `400
+  invalid_resource_token`, so a federated per-call grant still needs another
+  Access Server. Deferred custody holds Core grants only: an R3 request is
+  decided at once, and an R3 Resource token presented while a request waits
+  is refused. The readings are in INTERPRETATIONS.md.
+- API additions in `aauth-rust-access-server`: `AccessServer::with_r3`,
+  `R3IssuerConfig`, `R3Policy`, `BoxedR3Policy`, `R3AuthorizationRequest` and
+  `R3Decision`. The crate now depends on `aauth-rust-r3`.
+  `AuthorizationRequest::scopes` is empty for an R3 Resource token without
+  `scope`; only `R3Policy` sees such a request.
+
 `Ledger::open_directory` writes the Resource budget meter to a host directory.
 Each successful `open`, `reserve`, `commit`, `release`, `complete_held`, and
 `prune_keys` publishes `ledger.json` only after the new bytes are synchronized.

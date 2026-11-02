@@ -146,8 +146,9 @@ the draft required each spelling.
   above `omit_above`; (4) the PS-to-AS request carries `budget` with the
   ceiling, and omits it when there is none; (5, 6) the Access Server checks
   the offer, grants within the ceiling and signs the per-call token with
-  `budget`, which this library's Access Server does not do, since it has no
-  R3; (7) the PS verifies the per-call token with the budget profile when it
+  `budget`, which this library's Access Server does not do, since it signs
+  class grants only and refuses an R3 Resource token that offers a budget;
+  (7) the PS verifies the per-call token with the budget profile when it
   sent a ceiling and without it when it did not, and refuses a missing,
   extra, wider or re-denominated `budget` with `502 as_unreachable`;
   (8) an Access Server `202` or `402` is refused with `500 server_error` and
@@ -588,3 +589,41 @@ Agent Provider crate's `bootstrap` module and the Agent crate's
     (lines 190 to 192). `issue_subagent_to` issues a sub-agent the same way
     (line 345) and refuses a parent that is itself a sub-agent. The
     operator's process keeps discriminators unique; no store is involved.
+
+# Selected R3 Access Server interpretations
+
+Source: `draft-hardt-aauth-r3` at `70d67375deb0bb002af7da0711fc58f6e8926e7e`.
+`AccessServer::with_r3` executes these readings.
+
+1. **Who decides.** Resource Token Extensions (line 530) lets a Resource
+   token carry `scope`, R3 claims, or both, and has the issuer enforce each.
+   For an R3 Resource token this Access Server asks only `R3Policy`, which
+   returns the operations and the Core scopes; the Core policy is not called.
+   A Resource token with R3 claims and no `scope` asks for no Core scope, as
+   at this library's Person Server.
+2. **Refusal code.** Issuer Processing step 3 (line 547) says the issuer
+   "MUST reject the resource token". A document whose bytes do not hash to
+   `r3_s256`, a `404` or `410`, a response that is not `application/json`,
+   an account mismatch and a per-call proposal are `400
+   invalid_resource_token`, the code this library's Person Server uses for its
+   own fetch. A transport failure is `500 server_error`.
+3. **Direct grants.** Step 6 (line 550) includes `r3_per_call` "if
+   applicable". This Access Server grants operations outright and issues none.
+   It refuses a per-call proposal, so it never makes an operation per call
+   that it would then refuse. aauth-go's Access Server also approves
+   proposals.
+4. **Audit record.** Step 4 (line 548) and the paragraph after the steps
+   (line 552): the agent
+   identifier is the `sub` of the Agent token the Auth token is bound to, the
+   sub-agent's when one is present, and the parent's `sub` is recorded with
+   it. `account` is the Auth token's. Audit Log Integrity (line 744): the
+   record is committed after the token is signed and before it is released; a
+   failed commit withholds the token. A token withheld after the commit, when
+   an input expires meanwhile, leaves a record of a token never released; no
+   rollback is claimed.
+5. **No document cache.** Caching (line 560) does not require retaining
+   documents. This Access Server fetches `r3_uri` for every request.
+6. **Deferred custody.** Deferred continuations hold Core grants. With
+   `with_deferred` and `with_r3` both on, an R3 request is decided at once by
+   `R3Policy`, and an R3 Resource token presented while a Core request waits
+   is `400 invalid_resource_token`.

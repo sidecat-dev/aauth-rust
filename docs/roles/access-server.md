@@ -370,6 +370,9 @@ runs payment and approval over TLS.
   request; otherwise the answer is `400 invalid_agent_token`. Call chaining is
   the exception: see [Call chaining](../features/call-chaining.md).
 - The Access Server publishes one key and has no key rotation schedule.
+- With `with_r3`, the Access Server issues R3 Auth tokens for class
+  documents and grants their operations outright: it issues no
+  `r3_per_call`, and refuses per-call proposals. See [R3](../features/r3.md).
 
 ## Next
 

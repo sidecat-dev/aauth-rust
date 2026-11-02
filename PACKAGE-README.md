@@ -15,7 +15,7 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-signature-key` | HTTP request signatures and Signature-Key proofs. |
 | `aauth-rust-agent-provider` | Agent Provider discovery and Agent token issuance. |
 | `aauth-rust-agent` | Agent request signing, credential verification and explicit polling helpers. |
-| `aauth-rust-access-server` | Access Server grant issuance and deferred continuations. |
+| `aauth-rust-access-server` | Access Server grant issuance, deferred continuations and R3 class grants. |
 | `aauth-rust-person-server` | Person bindings, consent, credential issuance and federation custody. |
 | `aauth-rust-person-server-redb` | Transactional file-backed Person Server storage on supported Unix filesystems. |
 | `aauth-rust-budgets` | Budget objects, narrowing, metering, and usage counters. |

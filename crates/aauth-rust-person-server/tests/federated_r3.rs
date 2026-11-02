@@ -1434,3 +1434,245 @@ fn federated_budgeted_class_grant_is_released_only_within_the_ceiling() {
     assert_eq!(access.ceilings.lock().unwrap().last(), Some(&None));
     assert_eq!(server.budget_accounted(), Some(2_000_000));
 }
+
+/// The access server's own document transport: it keeps each fetch's
+/// `Signature-Key` and serves `served` as the class document.
+struct AccessDocuments {
+    served: Arc<Mutex<Vec<u8>>>,
+    signers: Arc<Mutex<Vec<String>>>,
+}
+impl FetchTransport for AccessDocuments {
+    fn send(&self, request: Request<Vec<u8>>, _: Instant) -> io::Result<FetchResponse> {
+        assert_eq!(request.uri().to_string(), CLASS_URI);
+        let signer = request.headers()["signature-key"].to_str().unwrap();
+        self.signers.lock().unwrap().push(signer.to_owned());
+        Ok(Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Box::new(Body {
+                bytes: self.served.lock().unwrap().clone(),
+                offset: 0,
+            }) as Box<dyn FetchBody>)
+            .unwrap())
+    }
+}
+
+/// Hands the Person Server's signed request to a native access server in
+/// process, unchanged.
+type AccessHandler = Box<dyn Fn(&Request<Vec<u8>>) -> Response<Vec<u8>> + Send + Sync>;
+struct NativeAccess(AccessHandler);
+impl aauth_rust_person_server::Federation for NativeAccess {
+    fn endpoint(&self, issuer: &str) -> Result<String, aauth_rust_person_server::FederationError> {
+        if issuer != ACCESS {
+            return Err(aauth_rust_person_server::FederationError);
+        }
+        Ok(format!("{ACCESS}/token"))
+    }
+    fn send(
+        &self,
+        request: &Request<Vec<u8>>,
+    ) -> Result<Response<Vec<u8>>, aauth_rust_person_server::FederationError> {
+        Ok((self.0)(request))
+    }
+}
+
+#[derive(Default)]
+struct Audit(Mutex<Vec<IssuanceRecord>>);
+impl IssuanceStore for Audit {
+    fn commit(&self, record: &IssuanceRecord) -> Result<(), IssuanceError> {
+        self.0.lock().unwrap().push(record.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn native_access_server_fetches_as_itself_and_signs_only_a_verified_class_grant() {
+    use aauth_rust_access_server as access_server;
+    let registry = standard_registry().unwrap();
+    let holder = agent();
+    let served = Arc::new(Mutex::new(CLASS.to_vec()));
+    let signers = Arc::new(Mutex::new(Vec::new()));
+    let audit = Arc::new(Audit::default());
+    // Core grants are closed; the R3 policy grants `records.read` and the
+    // requested scopes.
+    let access = access_server::AccessServer::new(
+        access_server::Config::new(ACCESS, "as-key", SigningKey::from_seed([7; 32])),
+        Keys,
+        |_: &access_server::AuthorizationRequest| Err(access_server::PolicyError::Denied),
+        || NOW,
+        || "as-token".to_owned(),
+    )
+    .unwrap()
+    .with_r3(access_server::R3IssuerConfig {
+        registry: registry.clone(),
+        egress: Box::new(|_: &str, _: Instant| Ok(())),
+        transport: Box::new(AccessDocuments {
+            served: served.clone(),
+            signers: signers.clone(),
+        }),
+        limits: FetchLimits::default(),
+        policy: Box::new(
+            |request: &access_server::R3AuthorizationRequest<'_>| -> Result<
+                access_server::R3Decision,
+                access_server::PolicyError,
+            > {
+                let grant = standard_registry()
+                    .unwrap()
+                    .parse_grant(READ, request.document)
+                    .map_err(|_| access_server::PolicyError::Denied)?;
+                Ok(access_server::R3Decision {
+                    granted: grant.granted_operations(),
+                    scopes: request.core.scopes.clone(),
+                    lifetime: 600,
+                })
+            },
+        ),
+        audit: audit.clone(),
+    })
+    .unwrap();
+    let consent = Arc::new(Consent {
+        order: Arc::new(Mutex::new(Vec::new())),
+        core: AtomicUsize::new(0),
+        documents: AtomicUsize::new(0),
+        proposals: AtomicUsize::new(0),
+        deny_proposal: Mutex::new(false),
+    });
+    let server = PersonServer::new(
+        Config::new(PS, "ps-key", SigningKey::from_seed([3; 32])),
+        Keys,
+        MemoryStore::default(),
+        Box::new(ConsentGate(consent.clone())) as BoxedPolicy,
+        Box::new(|| NOW) as BoxedClock,
+        Box::new(|| "ps-token".into()) as BoxedTokenIds,
+    )
+    .unwrap()
+    .with_federation(NativeAccess(Box::new(move |request: &Request<Vec<u8>>| {
+        access.handle(request)
+    })))
+    .with_r3(R3IssuerConfig {
+        registry: registry.clone(),
+        egress: Box::new(|_: &str, _: Instant| Ok(())),
+        transport: Box::new(Documents {
+            artifacts: Arc::new(Mutex::new(std::collections::BTreeMap::from([(
+                CLASS_URI.to_owned(),
+                CLASS.to_vec(),
+            )]))),
+            order: Arc::new(Mutex::new(Vec::new())),
+            status: Arc::new(Mutex::new(200)),
+            fail: Arc::new(Mutex::new(false)),
+        }),
+        limits: FetchLimits::default(),
+        policy: Box::new(R3Gate(consent.clone())) as _,
+        audit: Arc::new(NoAudit),
+    })
+    .unwrap();
+    let post = |path: &str, body: Value| {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(format!("{PS}{path}"))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&body).unwrap())
+            .unwrap();
+        holder.sign(&mut request, NOW).unwrap();
+        server.handle(&request)
+    };
+    let person = post("/person", json!({"resource": RESOURCE}));
+    let person_token = serde_json::from_slice::<Value>(person.body()).unwrap()["person_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let person_jti = aauth_rust_core::PersonToken::parse(&person_token)
+        .unwrap()
+        .unverified_claims()
+        .jti
+        .clone();
+    let (resource_token, reference) = mint_resource_token(
+        &registry,
+        &SigningKey::from_seed([4; 32]),
+        "resource-key",
+        &ResourceClaims {
+            iss: RESOURCE.into(),
+            dwk: "aauth-resource.json".into(),
+            aud: ACCESS.into(),
+            ps: PS.into(),
+            sub: "person-1".into(),
+            jti: "resource-class".into(),
+            presented_jti: person_jti.clone(),
+            agent_jkt: holder.public_jwk().thumbprint().unwrap(),
+            iat: NOW,
+            exp: NOW + 300,
+            scope: Some("records.read".into()),
+            account: None,
+            login_hint: None,
+            nbf: None,
+            tenant: None,
+            mission_s256: None,
+            extra: Default::default(),
+        },
+        CLASS_URI,
+        CLASS,
+    )
+    .unwrap();
+    let exchange = || {
+        post(
+            "/token",
+            json!({"resource_token": resource_token, "presented_token": person_token}),
+        )
+    };
+
+    // The access server signs the class grant from the bytes it fetched itself.
+    let granted = exchange();
+    assert_eq!(
+        granted.status(),
+        200,
+        "{}",
+        String::from_utf8_lossy(granted.body())
+    );
+    let delivered = serde_json::from_slice::<Value>(granted.body()).unwrap()["auth_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let token = aauth_rust_core::AuthToken::parse(&delivered)
+        .unwrap()
+        .verify(&Keys, NOW)
+        .unwrap();
+    let claims = token.claims();
+    assert_eq!((claims.iss.as_str(), claims.ps.as_str()), (ACCESS, PS));
+    assert_eq!(claims.scope.as_deref(), Some("records.read"));
+    assert_eq!(claims.extra["r3_uri"], CLASS_URI);
+    assert_eq!(claims.extra["r3_s256"], reference.digest());
+    assert_eq!(
+        claims.extra["r3_granted"],
+        serde_json::from_slice::<Value>(READ).unwrap()
+    );
+    assert!(!claims.extra.contains_key("r3_per_call"));
+    let signer = signers.lock().unwrap()[0].clone();
+    assert!(
+        signer.contains(r#"id="https://as.example""#)
+            && signer.contains(r#"dwk="aauth-access.json""#),
+        "{signer}"
+    );
+    {
+        let records = audit.0.lock().unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.auth_token_issuer, ACCESS);
+        assert_eq!(record.auth_token_jti, claims.jti);
+        assert_eq!(record.r3_reference, reference);
+        assert_eq!(record.person_server, PS);
+        assert_eq!(record.presented_jti, person_jti);
+        assert_eq!(record.agent, "aauth:Caller@ap.example");
+        assert_eq!(record.parent_agent, None);
+    }
+
+    // Bytes served to the access server that do not hash to `r3_s256` refuse
+    // the Resource token. Nothing is signed or recorded.
+    *served.lock().unwrap() = CLASS.iter().copied().chain(*b" ").collect();
+    let refused = exchange();
+    assert_eq!(refused.status(), 400);
+    let body = serde_json::from_slice::<Value>(refused.body()).unwrap();
+    assert_eq!(body["error"], "invalid_resource_token");
+    assert!(body.get("auth_token").is_none());
+    assert_eq!(signers.lock().unwrap().len(), 2);
+    assert_eq!(audit.0.lock().unwrap().len(), 1);
+}

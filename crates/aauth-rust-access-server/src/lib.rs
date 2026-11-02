@@ -12,8 +12,10 @@
 //! `revoked`. A mission-bound request is evaluated against its mission by the
 //! Person Server; this AS copies the `mission_s256` it verified on the Resource
 //! and presented tokens into the Auth token. The presented token, which the
-//! Person Server capped at the mission's expiry, bounds that token. Full R3
-//! remains outside this profile and is refused.
+//! Person Server capped at the mission's expiry, bounds that token.
+//! Explicit `with_r3` issues R3 Auth tokens for class documents: this AS
+//! fetches `r3_uri` as itself, refuses bytes that do not hash to `r3_s256`,
+//! and grants operations directly. Per-call proposals are refused.
 //! A complete configuration that publishes metadata and refuses grants until
 //! application trust and resource policy are supplied:
 //!
@@ -43,6 +45,7 @@
 //! ```
 #![deny(missing_docs)]
 mod continuation;
+mod r3;
 mod revocation;
 mod usage;
 mod wire;
@@ -57,11 +60,13 @@ use aauth_rust_core::{
     verify_subagent,
 };
 use aauth_rust_jose::{Jwk, Jws, SigningKey, strict_json};
+use aauth_rust_r3::Reference;
 use aauth_rust_signature_key::{
     Error as ProofError, KeyMaterial, PreparedRequest, canonical_authority,
 };
 pub use continuation::{DeferredConfig, DeferredContext};
 use http::{Request, Response, StatusCode};
+pub use r3::{BoxedR3Policy, R3AuthorizationRequest, R3Decision, R3IssuerConfig, R3Policy};
 use serde_json::{Value, json};
 use wire::{Failure, bytes_response, token_response};
 
@@ -117,8 +122,9 @@ pub struct AuthorizationRequest {
     /// identifier and equals the presented token's. The issued Auth token
     /// carries it. Mission content and history stay with the Person Server.
     pub resource: VerifiedResourceToken,
-    /// Nonempty distinct requested Core scope values: the Resource token's, or
-    /// the narrower `scope` the Person Server sent.
+    /// Distinct requested Core scope values: the Resource token's, or the
+    /// narrower `scope` the Person Server sent. Nonempty except for an R3
+    /// Resource token without `scope`, which only [`R3Policy`] sees.
     pub scopes: Vec<String>,
     /// The latest `exp` the Person Server allows, from its `exp` member. The
     /// issued Auth token, and any wait for it, end no later.
@@ -207,6 +213,7 @@ pub struct AccessServer<K, P, C, I> {
     deferred: Option<continuation::Deferred>,
     revocation: Option<revocation::Gate>,
     budgets: Option<IssuerPolicy>,
+    r3: Option<Box<R3IssuerConfig>>,
     display: MetadataDisplay,
 }
 struct Resolver<'a, K> {
@@ -274,6 +281,7 @@ impl<
             deferred: None,
             revocation: None,
             budgets: None,
+            r3: None,
             display: MetadataDisplay::new(),
         })
     }
@@ -352,8 +360,10 @@ impl<
         let id = self.verify_ps(request, now, true)?;
         let body =
             strict_json(request.body()).map_err(|_| Failure::parameter("invalid_request"))?;
-        let (context, presented) = self.authorize_body(&body, &id, now)?;
-        if self.deferred.is_some() {
+        let (context, presented, reference) = self.authorize_request(&body, &id, now)?;
+        if let Some(reference) = reference {
+            self.issue_r3(context, presented, &reference)
+        } else if self.deferred.is_some() {
             self.begin_deferred(context, presented, body, now)
         } else {
             self.issue(context, presented)
@@ -407,12 +417,26 @@ impl<
         }
         Ok(id.clone())
     }
+    /// Core-only verification, for deferred custody: it holds Core grants, so
+    /// an R3 Resource token is refused.
     fn authorize_body(
         &self,
         body: &Value,
         id: &str,
         now: i64,
     ) -> Result<(AuthorizationRequest, Presented), Failure> {
+        match self.authorize_request(body, id, now)? {
+            (context, presented, None) => Ok((context, presented)),
+            _ => Err(Failure::parameter("invalid_resource_token")),
+        }
+    }
+    /// Verify a token request and, when R3 is enabled, its R3 reference.
+    fn authorize_request(
+        &self,
+        body: &Value,
+        id: &str,
+        now: i64,
+    ) -> Result<(AuthorizationRequest, Presented, Option<Reference>), Failure> {
         let object = body
             .as_object()
             .ok_or_else(|| Failure::parameter("invalid_request"))?;
@@ -477,6 +501,12 @@ impl<
             .map_err(|e| Failure::token(e, "resource", now))?;
         let r = resource.claims();
         check_iat(r.iat, now)?;
+        let reference = self.r3_reference(resource_compact, now)?;
+        let mut core = r.extra.clone();
+        if reference.is_some() {
+            core.remove("r3_uri");
+            core.remove("r3_s256");
+        }
         if r.aud != self.config.issuer
             || r.ps != id
             || r.exp - r.iat > self.config.max_resource_lifetime
@@ -487,7 +517,7 @@ impl<
                     .jwk
                     .thumbprint()
                     .map_err(|_| Failure::internal())?
-            || extra_blocks(&r.extra, self.budgets.is_some(), self.budgets.is_some())
+            || extra_blocks(&core, self.budgets.is_some(), self.budgets.is_some())
         {
             return Err(Failure::parameter("invalid_resource_token"));
         }
@@ -502,8 +532,12 @@ impl<
             self.budgets.is_some(),
         )?;
         presented.matches(r)?;
-        let requested_scopes = scopes(r.scope.as_deref().unwrap_or(""))
-            .ok_or_else(|| Failure::parameter("invalid_resource_token"))?;
+        // Resource tokens MAY carry both `scope` and R3 claims, or R3 alone.
+        let requested_scopes = match r.scope.as_deref() {
+            None if reference.is_some() => Vec::new(),
+            scope => scopes(scope.unwrap_or(""))
+                .ok_or_else(|| Failure::parameter("invalid_resource_token"))?,
+        };
         let (requested_scopes, expires_at) = narrowing(object, requested_scopes, now)?;
         let context = AuthorizationRequest {
             person_server: id.to_owned(),
@@ -515,7 +549,7 @@ impl<
             budget: parameter,
             upstream,
         };
-        Ok((context, presented))
+        Ok((context, presented, reference))
     }
     /// Upstream Token Verification at an AS: steps 1 to 3.
     fn verify_upstream(
@@ -606,9 +640,6 @@ impl<
         context: AuthorizationRequest,
         presented: Presented,
     ) -> Result<Response<Vec<u8>>, Failure> {
-        let holder = context.subagent.as_ref().unwrap_or(&context.agent);
-        let r = context.resource.claims();
-        let id = context.person_server.clone();
         let decision = (self.policy)(&context).map_err(Failure::policy)?;
         if !(1..=3600).contains(&decision.lifetime)
             || scopes(&decision.scopes.join(" ")).is_none()
@@ -616,8 +647,27 @@ impl<
         {
             return Err(Failure::internal());
         }
+        let extra = self.issued_extra(&context)?;
+        self.release(&context, &presented, &decision, extra, |claims| {
+            mint_auth_token(&self.config.signing_key, &self.config.kid, claims)
+                .map_err(|_| Failure::internal())
+        })
+    }
+    /// Cap, sign and release a granted token. `mint` signs the claims and
+    /// commits anything that must precede release; an empty grant of scopes
+    /// issues no `scope`.
+    fn release(
+        &self,
+        context: &AuthorizationRequest,
+        presented: &Presented,
+        decision: &Decision,
+        extra: std::collections::BTreeMap<String, Value>,
+        mint: impl FnOnce(&AuthClaims) -> Result<String, Failure>,
+    ) -> Result<Response<Vec<u8>>, Failure> {
+        let holder = context.subagent.as_ref().unwrap_or(&context.agent);
+        let r = context.resource.claims();
         let issued_at = (self.clock)();
-        current(issued_at, &context, &presented)?;
+        current(issued_at, context, presented)?;
         let mut expires_at = issued_at
             .saturating_add(decision.lifetime)
             .min(context.agent.claims().exp)
@@ -636,7 +686,7 @@ impl<
             iss: self.config.issuer.clone(),
             dwk: "aauth-access.json".into(),
             aud: r.iss.clone(),
-            ps: id.clone(),
+            ps: context.person_server.clone(),
             sub: r.sub.clone(),
             cnf: Confirmation {
                 jwk: holder.claims().cnf.jwk.clone(),
@@ -644,15 +694,14 @@ impl<
             jti: (self.ids)(),
             iat: issued_at,
             exp: expires_at,
-            scope: Some(decision.scopes.join(" ")),
+            scope: (!decision.scopes.is_empty()).then(|| decision.scopes.join(" ")),
             account: r.account.clone(),
             tenant: r.tenant.clone(),
             mission_s256: r.mission_s256.clone(),
             nbf: None,
-            extra: self.issued_extra(&context)?,
+            extra,
         };
-        let compact = mint_auth_token(&self.config.signing_key, &self.config.kid, &claims)
-            .map_err(|_| Failure::internal())?;
+        let compact = mint(&claims)?;
         self.note_issued(revocation::IssuedAuth {
             jti: claims.jti.clone(),
             resource: claims.aud.clone(),
@@ -661,7 +710,7 @@ impl<
             presented_jti: presented.jti.clone(),
         });
         let release = (self.clock)();
-        current(release, &context, &presented)?;
+        current(release, context, presented)?;
         if release >= expires_at {
             return Err(Failure::internal());
         }
