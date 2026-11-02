@@ -476,7 +476,14 @@ fn update_requires_description_and_audit_returns_the_same_blob() {
         URL_SAFE_NO_PAD.encode(Sha256::digest(&update_bytes)),
         update_s256
     );
+    // The persisted entry is the update object itself, `action` included, so
+    // any reader decodes it as an update.
+    assert_eq!(
+        update_bytes,
+        br#"{"action":"update","description":"add the appendix"}"#
+    );
     let update_json: Value = serde_json::from_slice(&update_bytes).unwrap();
+    assert_eq!(update_json["action"], "update");
     assert_eq!(update_json["description"], "add the appendix");
     let unknown = fixture.server.handle(&signed(
         &fixture.owner,
@@ -531,7 +538,17 @@ fn completion_requires_summary_and_terminates() {
     );
     assert_eq!(audit["mission"], approved["mission"]);
     assert_eq!(audit["termination_reason"], "completed");
-    assert!(audit.get("summary").is_some());
+    let summary_bytes = URL_SAFE_NO_PAD
+        .decode(audit["summary"]["encoded"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(
+        summary_bytes,
+        br#"{"action":"completion","summary":"the note is filed"}"#
+    );
+    assert_eq!(
+        audit["summary"]["s256"],
+        URL_SAFE_NO_PAD.encode(Sha256::digest(&summary_bytes))
+    );
 }
 
 #[test]

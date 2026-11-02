@@ -441,13 +441,16 @@ impl<K: AgentKeyResolver, S: Store, P: Policy, C: Fn() -> i64, I: Fn() -> String
             _ => return Err(Failure::parameter("invalid_request")),
         };
         let edit = match action.as_str() {
-            "update" => MissionEdit::Update(update_bytes(
+            "update" => MissionEdit::Update(edit_bytes(
+                "update",
                 "description",
                 &required_text(body, "description")?,
             )?),
-            "completion" => {
-                MissionEdit::Completion(update_bytes("summary", &required_text(body, "summary")?)?)
-            }
+            "completion" => MissionEdit::Completion(edit_bytes(
+                "completion",
+                "summary",
+                &required_text(body, "summary")?,
+            )?),
             _ => return Err(Failure::parameter("invalid_request")),
         };
         let owner = agent.claims();
@@ -678,8 +681,12 @@ fn required_text(object: &serde_json::Map<String, Value>, name: &str) -> Result<
     }
 }
 
-fn update_bytes(field: &str, text: &str) -> Result<MissionUpdateBytes, Failure> {
+/// The persisted entry is the validated edit object, `action` and its one text
+/// member, so a reader decodes it as the update or completion the agent sent.
+/// Its digest is the `s256` the PS returns for it.
+fn edit_bytes(action: &str, field: &str, text: &str) -> Result<MissionUpdateBytes, Failure> {
     let mut object = serde_json::Map::new();
+    object.insert("action".into(), Value::String(action.into()));
     object.insert(field.into(), Value::String(text.into()));
     let bytes = serde_json::to_vec(&Value::Object(object)).map_err(|_| Failure::internal())?;
     MissionUpdateBytes::from_exact(&bytes).map_err(stored)
