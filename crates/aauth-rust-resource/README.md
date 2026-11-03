@@ -11,11 +11,11 @@ AI agents and other software agents call.
 aauth-rust-resource = "0.1.0-alpha.27"
 aauth-rust-core = "0.1.0-alpha.27"
 http = "1"
+# used by the example to play the agent and its provider
+aauth-rust-agent = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
 ```
-
-The example runs the whole exchange in one process, so it also uses
-`aauth-rust-agent`, `aauth-rust-agent-provider` and `aauth-rust-jose` to play
-the agent and its provider.
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -67,12 +67,12 @@ fn enroll(provider: &AgentProvider, name: &str, now: i64) -> Result<Agent, Box<d
     let key = SigningKey::generate();
     let token = provider.issue(&AgentClaims {
         iss: "https://ap.example".into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: format!("aauth:{name}@ap.example"),
         jti: format!("{name}-{now}"),
         iat: now,
         exp: now + 600,
-        cnf: Confirmation { jwk: key.public_jwk() },
+        cnf: Confirmation { jwk: key.public_jwk() }, // binds the token to the agent's key
         ps: None,
         parent_agent: None,
         nbf: None,
@@ -129,6 +129,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-resource)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::resource` in the umbrella crate, with the rest of the family
 - [Resource guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/resource.md): each way to decide, and the endpoints to serve
 - [Get started](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/getting-started.md): an agent calling an API over TLS
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)

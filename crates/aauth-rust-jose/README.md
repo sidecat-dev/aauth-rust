@@ -25,17 +25,25 @@ fn main() -> Result<(), aauth_rust_jose::Error> {
     let compact = Jws::sign(&header, br#"{"hello":"world"}"#, &key)?;
     let parsed = Jws::parse(&compact)?;
     parsed.verify(&public)?;
-    assert_eq!(parsed.payload(), br#"{"hello":"world"}"#);
+    println!("verified: {}", String::from_utf8_lossy(parsed.payload()));
 
     // Any other key is refused.
-    assert!(parsed.verify(&SigningKey::generate().public_jwk()).is_err());
+    let other = parsed.verify(&SigningKey::generate().public_jwk());
+    println!("another key: {}", if other.is_err() { "refused" } else { "accepted" });
 
     // Save the key as PKCS #8 and load it again: same key, same thumbprint.
     let saved = key.export_pkcs8_der()?;
     let loaded = SigningKey::from_pkcs8_der("Ed25519", saved.as_bytes())?;
-    assert_eq!(loaded.public_jwk().thumbprint()?, public.thumbprint()?);
+    let same = loaded.public_jwk().thumbprint()? == public.thumbprint()?;
+    println!("reloaded, same thumbprint: {same}");
     Ok(())
 }
+```
+
+```text
+verified: {"hello":"world"}
+another key: refused
+reloaded, same thumbprint: true
 ```
 
 ## Why use it
@@ -70,6 +78,7 @@ on RFC 7515, 7517, 7518, 7638, 8032 and 8037.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-jose)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::jose` in the umbrella crate, with the rest of the family
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust), with a guide for each role
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)
 - [Changelog](https://gitlab.com/sidecat-dev/aauth-rust/-/releases)

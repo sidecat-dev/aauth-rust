@@ -12,11 +12,14 @@ aauth-rust-access-server = "0.1.0-alpha.27"
 aauth-rust-core = "0.1.0-alpha.27"
 aauth-rust-jose = "0.1.0-alpha.27"
 http = "1"
+# used by the example to play the other parties
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-signature-key = "0.1.0-alpha.27"
+serde_json = "1"
 ```
 
 In the example, `from_person_server` stands in for the Person Server and the
-API, so it also uses `aauth-rust-agent-provider`, `aauth-rust-signature-key`
-and `serde_json`.
+API.
 
 ```rust
 use aauth_rust_access_server::{AccessServer, AuthorizationRequest, Config, Decision, PolicyError};
@@ -30,6 +33,7 @@ use aauth_rust_signature_key::{KeyMaterial, sign_request};
 use http::Request;
 use serde_json::{Value, json};
 use std::error::Error;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const AS: &str = "https://as.example";
@@ -47,6 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     ]);
 
     // The API's rule: Person Server ps.example may have notes.read, for an hour.
+    let ids = AtomicU64::new(0);
     let server = AccessServer::new(
         Config::new(AS, "as-1", as_key),
         trust.clone(),
@@ -58,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         now,
-        || format!("as-{}", now()),
+        move || format!("as-{}", ids.fetch_add(1, Ordering::SeqCst)),
     )?;
 
     // The Person Server asks for an Auth token for its agent.
@@ -105,10 +110,11 @@ impl Others {
     /// What the Person Server sends: the Agent token, its Person token and
     /// the API's Resource token, signed with the Person Server's key.
     fn from_person_server(&self, scope: &str) -> Result<Request<Vec<u8>>, Box<dyn Error>> {
+        // cnf binds each token to the agent's key.
         let (now, cnf) = (now(), Confirmation { jwk: self.agent.public_jwk() });
         let agent_token = self.provider.issue(&AgentClaims {
             iss: "https://ap.example".into(),
-            dwk: "aauth-agent.json".into(),
+            dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
             sub: "aauth:assistant@ap.example".into(),
             jti: format!("agent-{scope}"),
             iat: now,
@@ -143,7 +149,7 @@ impl Others {
             exp: now + 300,
             ps: PS.into(),
             presented_jti: format!("person-{scope}"),
-            agent_jkt: cnf.jwk.thumbprint()?,
+            agent_jkt: cnf.jwk.thumbprint()?, // the agent key's JWK thumbprint
             nbf: None,
             tenant: None,
             mission_s256: None,
@@ -217,6 +223,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-access-server)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::access_server` in the umbrella crate, with the rest of the family
 - [Access Server guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/access-server.md): the four-party flow with a real Person Server and API
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

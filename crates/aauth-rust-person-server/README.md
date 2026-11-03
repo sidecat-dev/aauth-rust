@@ -13,10 +13,10 @@ aauth-rust-core = "0.1.0-alpha.27"
 aauth-rust-jose = "0.1.0-alpha.27"
 http = "1"
 serde_json = "1"
+# used by the example to play the agent and its provider
+aauth-rust-agent = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
 ```
-
-The example runs in one process, so it also uses `aauth-rust-agent` and
-`aauth-rust-agent-provider` to play the agent and its provider.
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -101,12 +101,12 @@ fn enroll(provider: &AgentProvider) -> Result<Agent, Box<dyn Error>> {
     let key = SigningKey::generate();
     let token = provider.issue(&AgentClaims {
         iss: "https://ap.example".into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: "aauth:assistant@ap.example".into(),
         jti: "assistant-1".into(),
         iat: now(),
         exp: now() + 3600,
-        cnf: Confirmation { jwk: key.public_jwk() },
+        cnf: Confirmation { jwk: key.public_jwk() }, // binds the token to the agent's key
         ps: Some(PS.into()),
         parent_agent: None,
         nbf: None,
@@ -164,6 +164,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-person-server)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::person_server` in the umbrella crate, with the rest of the family
 - [Person Server guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/person-server.md): the full flow to an Auth token, and the endpoints
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

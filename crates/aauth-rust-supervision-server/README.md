@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let connect = json!({"action": "connect", "id": "c-1", "iat": now(),
                          "sub": "person-1", "tenant": "acme.example"});
     assert_eq!(server.handle(&from_ps(&ps_key, "/connect", connect)?).status(), 200);
+    // sdi is the decision's id, which the Person Server mints for each act.
     for (sdi, action) in [("d-1", "ReadInbox"), ("d-2", "SendEmail")] {
         let act = json!({"sdi": sdi, "act": "permission", "iat": now(), "sub": "person-1",
                          "agent": "aauth:assistant@ap.example", "action": action});
@@ -86,7 +87,7 @@ fn from_ps(key: &SigningKey, path: &str, body: Value) -> Result<Request<Vec<u8>>
         .body(body.to_string().into_bytes())?;
     let signer = KeyMaterial::JwksUri {
         id: PS.into(),
-        dwk: "aauth-person.json".into(),
+        dwk: "aauth-person.json".into(), // the issuer's well-known metadata document
         kid: "ps-1".into(),
     };
     sign_request(&mut request, key, signer, now())?;
@@ -146,6 +147,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-supervision-server)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::supervision_server` in the umbrella crate, with the rest of the family
 - [Supervision Server guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/supervision-server.md)
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

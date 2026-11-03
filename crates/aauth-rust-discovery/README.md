@@ -12,11 +12,14 @@ aauth-rust-discovery = "0.1.0-alpha.27"
 aauth-rust-resource = "0.1.0-alpha.27"
 aauth-rust-core = "0.1.0-alpha.27"
 http = "1"
+# used by the second example
+aauth-rust-signature-key = "0.1.0-alpha.27"
 ```
 
-A Resource whose keys come from discovery. The first request from an agent of
-`ap.example` fetches that provider's metadata and JWKS over HTTPS; later ones
-use the cache.
+A Resource whose keys come from discovery. The first signed request from an
+agent of `ap.example` fetches that provider's metadata and JWKS over HTTPS;
+later ones use the cache. In the example, `request` stands for the request
+your server received.
 
 ```rust,no_run
 use aauth_rust_core::VerifiedAgentToken;
@@ -34,7 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         |agent: &VerifiedAgentToken, _: &Request<Vec<u8>>| agent.claims().sub.ends_with("@ap.example"),
     )?;
 
-    // For each request your server receives, on a blocking thread:
+    // For each request your server receives, on a blocking thread.
+    // Here an unsigned stand-in, which gets a 401 before anything is fetched.
     let request = Request::builder().uri("https://api.example/hello").body(Vec::new())?;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
     let response = api.authorize(&request, now).into_response();
@@ -101,6 +105,7 @@ with the egress and cache rules of HTTP Signature Keys, from the
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-discovery)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::discovery` in the umbrella crate, with the rest of the family
 - [Discovery guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/discovery.md): installing it in each role, and revocation delivery
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

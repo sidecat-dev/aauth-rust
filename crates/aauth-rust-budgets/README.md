@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         sub: "u-7f3c9a".into(),
         aud: "https://api.example".into(),
         iss: PS.into(),
-        jkt: "thumbprint-of-the-agent-key".into(),
+        jkt: "thumbprint-of-the-agent-key".into(), // the agent key's JWK thumbprint
         tenant: None,
         mission: None,
     })?;
@@ -87,6 +87,7 @@ Implements the Budgets draft (`draft-hardt-aauth-budgets`), from the
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-budgets)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::budgets` in the umbrella crate, with the rest of the family
 - [Budgets guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/features/budgets.md): turning budgets on in each role
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

@@ -81,6 +81,7 @@ Implements Rich Resource Requests (`draft-hardt-aauth-r3`), from the
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-r3)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::r3` in the umbrella crate, with the rest of the family
 - [R3 guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/features/r3.md): turning R3 on in each role, and its limits
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

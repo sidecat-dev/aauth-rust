@@ -3,7 +3,9 @@
 The AAuth tokens shared by every role: the claims of Agent, Person, Resource
 and Auth tokens, and the checks that a token was signed by an issuer you
 trust and is still valid. The role crates are built on it; use it directly
-when your service reads AAuth tokens itself.
+when your service reads AAuth tokens itself. To protect an HTTP API, use
+[aauth-rust-resource](https://crates.io/crates/aauth-rust-resource) instead:
+it checks the request's signature as well as its token.
 
 ```toml
 [dependencies]
@@ -13,7 +15,7 @@ serde_json = "1"
 ```
 
 ```rust
-use aauth_rust_core::{AgentClaims, AgentProviderKeys, AgentToken, Confirmation, TokenError};
+use aauth_rust_core::{AgentClaims, AgentProviderKeys, AgentToken, Confirmation};
 use aauth_rust_jose::{Jws, SigningKey};
 use serde_json::json;
 use std::error::Error;
@@ -40,16 +42,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     // A token from that provider verifies, and its claims can be used.
     let token = agent_token("https://ap.example", &provider, now)?;
     let verified = AgentToken::parse(&token)?.verify(&trusted, now)?;
-    assert_eq!(verified.claims().sub, "aauth:assistant@ap.example");
+    println!("verified: {}", verified.claims().sub);
 
     // After it expires, it is refused.
-    let later = AgentToken::parse(&token)?.verify(&trusted, now + 3600);
-    assert_eq!(later.unwrap_err(), TokenError::ExpiredJwt);
+    let later = AgentToken::parse(&token)?.verify(&trusted, now + 3600).unwrap_err();
+    println!("expired: {later:?}, wire code {}", later.code());
 
     // A provider you did not trust is refused before any key is looked up.
     let stranger = agent_token("https://elsewhere.example", &provider, now)?;
-    let refused = AgentToken::parse(&stranger)?.verify(&trusted, now);
-    assert_eq!(refused.unwrap_err(), TokenError::UntrustedIssuer);
+    let refused = AgentToken::parse(&stranger)?.verify(&trusted, now).unwrap_err();
+    println!("untrusted: {refused:?}, wire code {}", refused.code());
     Ok(())
 }
 
@@ -59,12 +61,12 @@ fn agent_token(issuer: &str, key: &SigningKey, now: i64) -> Result<String, Box<d
     let domain = issuer.trim_start_matches("https://");
     let claims = AgentClaims {
         iss: issuer.into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: format!("aauth:assistant@{domain}"),
         jti: "token-1".into(),
         iat: now,
         exp: now + 600,
-        cnf: Confirmation { jwk: SigningKey::generate().public_jwk() },
+        cnf: Confirmation { jwk: SigningKey::generate().public_jwk() }, // binds the token to the agent's key
         ps: None,
         parent_agent: None,
         nbf: None,
@@ -73,6 +75,12 @@ fn agent_token(issuer: &str, key: &SigningKey, now: i64) -> Result<String, Box<d
     let header = json!({"alg": "Ed25519", "typ": "aa-agent+jwt", "kid": "ap-1"});
     Ok(Jws::sign(&header, &serde_json::to_vec(&claims)?, key)?)
 }
+```
+
+```text
+verified: aauth:assistant@ap.example
+expired: ExpiredJwt, wire code expired_jwt
+untrusted: UntrustedIssuer, wire code invalid_key
 ```
 
 ## Why use it
@@ -106,6 +114,7 @@ the Events and Supervision drafts, from the
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-core)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::core` in the umbrella crate, with the rest of the family
 - [How AAuth works](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/how-aauth-works.md): the parties and the tokens
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

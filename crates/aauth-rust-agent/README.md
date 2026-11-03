@@ -59,12 +59,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn token_from_your_provider(key: &SigningKey, now: i64) -> Result<String, Box<dyn Error>> {
     let claims = AgentClaims {
         iss: "https://ap.example".into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: "aauth:assistant@ap.example".into(),
         jti: "token-1".into(),
         iat: now,
         exp: now + 600,
-        cnf: Confirmation { jwk: key.public_jwk() },
+        cnf: Confirmation { jwk: key.public_jwk() }, // binds the token to the agent's key
         ps: None,
         parent_agent: None,
         nbf: None,
@@ -119,6 +119,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-agent)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::agent` in the umbrella crate, with the rest of the family
 - [Agent guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/agent.md): the response flow, keys and tokens
 - [Get started](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/getting-started.md): an agent calling an API over TLS
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)

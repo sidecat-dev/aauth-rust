@@ -27,12 +27,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_key = SigningKey::generate();
     let token = provider.issue(&AgentClaims {
         iss: "https://ap.example".into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: "aauth:assistant@ap.example".into(),
         jti: format!("assistant-{now}"),
         iat: now,
         exp: now + 600,
-        cnf: Confirmation { jwk: agent_key.public_jwk() },
+        cnf: Confirmation { jwk: agent_key.public_jwk() }, // binds the token to the agent's key
         ps: None,
         parent_agent: None,
         nbf: None,
@@ -89,6 +89,7 @@ suite grades for this role passes.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-agent-provider)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::agent_provider` in the umbrella crate, with the rest of the family
 - [Agent Provider guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/agent-provider.md)
 - [Bootstrap guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/features/bootstrap.md): enrollment, refresh and sub-agents
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)

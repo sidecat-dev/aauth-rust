@@ -4,17 +4,23 @@ Durable storage for an AAuth Person Server: the bindings between agents and
 people, and the lineage of every token the server issued, kept in one
 transactional [redb](https://crates.io/crates/redb) file. Use it in place of
 `MemoryStore` when your Person Server must keep its records across restarts.
+It works on Unix only.
 
 ```toml
 [dependencies]
 aauth-rust-person-server = "0.1.0-alpha.27"
 aauth-rust-person-server-redb = "0.1.0-alpha.27"
+# used by the example to play the other parties
+aauth-rust-agent = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
+http = "1"
+tempfile = "3"
 ```
 
 The example issues a Person token, restarts, and finds the agent's binding
-still there. It uses `aauth-rust-agent`, `aauth-rust-agent-provider`,
-`aauth-rust-core`, `aauth-rust-jose`, `http` and `tempfile` to play the other
-parties.
+still there.
 
 ```rust
 use aauth_rust_agent::Agent;
@@ -28,6 +34,7 @@ use aauth_rust_person_server::{
 use aauth_rust_person_server_redb::RedbStore;
 use http::Request;
 use std::error::Error;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const PS: &str = "https://ps.example";
@@ -53,13 +60,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Open the file and hand a clone to the Person Server; clones share it.
     let store = RedbStore::open(&path)?;
+    let ids = AtomicU64::new(0); // a durable server keeps its token ids unique across restarts
     let ps = PersonServer::new(
         Config::new(PS, "ps-1", SigningKey::generate()),
         providers,
         store.clone(),
         People,
         now,
-        || SigningKey::generate().public_jwk().thumbprint().unwrap(),
+        move || format!("ps-{}", ids.fetch_add(1, Ordering::SeqCst)),
     )?;
 
     // The agent gets a Person token, which binds it to person-1.
@@ -91,12 +99,12 @@ fn enroll(provider: &AgentProvider) -> Result<Agent, Box<dyn Error>> {
     let key = SigningKey::generate();
     let token = provider.issue(&AgentClaims {
         iss: "https://ap.example".into(),
-        dwk: "aauth-agent.json".into(),
+        dwk: "aauth-agent.json".into(), // the issuer's well-known metadata document
         sub: "aauth:assistant@ap.example".into(),
         jti: "assistant-1".into(),
         iat: now(),
         exp: now() + 3600,
-        cnf: Confirmation { jwk: key.public_jwk() },
+        cnf: Confirmation { jwk: key.public_jwk() }, // binds the token to the agent's key
         ps: Some(PS.into()),
         parent_agent: None,
         nbf: None,
@@ -147,6 +155,7 @@ store.
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-person-server-redb)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::person_server_redb` in the umbrella crate, with the rest of the family
 - [Person Server guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/roles/person-server.md)
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)

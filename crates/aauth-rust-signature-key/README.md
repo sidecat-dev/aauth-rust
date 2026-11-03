@@ -92,6 +92,7 @@ and the HTTP signing profile of the AAuth protocol draft, from the
 ## Links
 
 - [API documentation](https://docs.rs/aauth-rust-signature-key)
+- [aauth-rust](https://crates.io/crates/aauth-rust): this crate is also available as `aauth_rust::signature_key` in the umbrella crate, with the rest of the family
 - [Repository](https://gitlab.com/sidecat-dev/aauth-rust), with a guide for each role
 - [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)
 - [Changelog](https://gitlab.com/sidecat-dev/aauth-rust/-/releases)
