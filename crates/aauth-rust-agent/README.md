@@ -39,7 +39,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .header("content-type", "application/json")
         .body(br#"{"text":"hello"}"#.to_vec())?;
     agent.sign(&mut request, now)?;
-    println!("{}", request.headers()["signature-input"].to_str()?);
+    // The parts of the request the signature covers, before its `created` time.
+    let input = request.headers()["signature-input"].to_str()?;
+    println!("signed: {}", input.split(";created=").next().unwrap_or(input));
 
     // When the API refuses with 401, AAuth-Requirement says what it needs next.
     let response = Response::builder()
@@ -76,12 +78,12 @@ fn token_from_your_provider(key: &SigningKey, now: i64) -> Result<String, Box<dy
 ```
 
 ```text
-sig=("@method" "@authority" "@path" "content-digest" "content-type" "signature-key");created=1793674158
+signed: sig=("@method" "@authority" "@path" "content-digest" "content-type" "signature-key")
 next: a Person token from the Person Server
 ```
 
-The `created` time is when the request was signed, so it differs on every
-run.
+The signature also covers the time it was made, in the `created` parameter of
+the `Signature-Input` header.
 
 `Agent::new` refuses a token whose confirmation key is not the agent's own.
 
