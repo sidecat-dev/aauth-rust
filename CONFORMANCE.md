@@ -101,7 +101,15 @@ R3 on the direct Person-Server path. The host selects definitions, maps requests
 to operations and provides an immutable document store; exact document bytes
 and entitlement are committed before token release. Buffered admission verifies
 request proof, token identity and document-bound grants before application
-effects. The direct per-call
+effects. At `f763511`, 97 Resource CODE CHECKS passed, including 11 R3 controls,
+plus workspace compile, lint and docs. [Sprint qualification evidence](https://gitlab.com/sidecat-dev/sprint-aauth-20261024/sprint/-/tree/main/cycles/wc-05/r3-resource-role/)
+records the actual Go Agent/PS → Rust Resource workflow with matching issuer
+and signed origin: authorization, signed document fetch, narrowed grant,
+Resource process restart, signed POST, exact-body receipt and refusals. A
+separate actual signed HTTP control used explicit endpoints at a different
+host/nondefault port, fetched the advertised URI verbatim and reused its grant.
+Qualification used host HTTP/disk adapters and volatile Go PS custody;
+production host/store integration remains application work. The direct per-call
 subset is described below. Budgets, missions, AS federation and deferred Auth
 delivery remain unsupported R3 compositions. `/authorize` refuses account-bearing bodies;
 host-account challenge composition remains unqualified. Full R3 conformance
@@ -116,7 +124,15 @@ and issuance records before release. R3 revocation is rechecked after callbacks
 and after child registration; the non-R3 Core callback/revocation gap remains a
 separate follow-up.
 
-Host transport, egress, consent, definition/request
+At `d79be7db`, 267 CODE CHECKS passed, including blocked-consent/audit withdrawal,
+revocation precedence, cascade, omitted Core scope, strict Resource scope and
+Observed grant controls; build, workspace compile, lint and docs also passed.
+[Sprint qualification evidence](https://gitlab.com/sidecat-dev/sprint-aauth-20261024/sprint/-/tree/main/cycles/wc-05/r3-agent-ps/)
+records actual TLS Rust Agent → Rust PS → Rust Resource with distinct issuer
+and signed origin, Go Agent → Rust PS/Resource with matching origin, and
+Go Agent/PS → Rust Resource. They exercise literal signed fetch, a narrowed
+grant, exact-body application receipts and refusals. This does not claim Rust
+Agent → Go PS equivalence. Host transport, egress, consent, definition/request
 mapping and durable storage remain application responsibilities; cascades need
 a complete retained-token scan. The example PS stores/audit are volatile.
 R3 compositions with budgets, missions, sub-agents, chaining and AS authorization
