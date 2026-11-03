@@ -23,10 +23,11 @@ publication; APIs and package names may change during the alpha series.
 | `aauth-rust-resource` | Resource request verification and application admission policy. |
 | `aauth-rust-discovery` | Opt-in HTTPS: admitted metadata and JWKS fetching, a caching key resolver, and revocation delivery. |
 | `aauth-rust-supervision-server` | Supervision server decisions, standing reach and event records. |
+| `aauth-rust` | Every crate above re-exported as a module, with a feature per role. |
 
 Each archive contains that crate's sources, tests and examples where present,
 its normalized Cargo manifest, lockfile and license. It does not include the
-other twelve crates or the workspace's complete service guides. The root
+other thirteen crates or the workspace's complete service guides. The root
 `README.md`, the `docs/` guides, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and
 `SPECIFICATIONS.md` in the full development checkout describe executable
 examples, host integration, conformance results and pinned protocol
@@ -52,7 +53,7 @@ release tag instead:
 aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
 ```
 
-A single archive cannot supply its unpublished sibling dependencies. To create and compile-verify all thirteen archives together,
+A single archive cannot supply its unpublished sibling dependencies. To create and compile-verify all fourteen archives together,
 run this from the full workspace with its lockfile:
 
 ```sh

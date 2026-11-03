@@ -194,6 +194,7 @@ aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust/crate
 | `aauth-rust-discovery` | Fetches other servers' keys and delivers revocations over HTTPS; the only crate that opens connections | [Discovery](docs/discovery.md) |
 | `aauth-rust-r3`, `aauth-rust-budgets` | Operation lists and spending caps, used by the roles | [R3](docs/features/r3.md), [Budgets](docs/features/budgets.md) |
 | `aauth-rust-core`, `aauth-rust-signature-key`, `aauth-rust-jose` | Tokens, HTTP signatures and keys, used by the roles | |
+| `aauth-rust` | All of the crates above in one dependency, one module each, with a default-on feature per role | |
 
 ## Documentation
 

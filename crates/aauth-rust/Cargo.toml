@@ -1,0 +1,48 @@
+[package]
+name = "aauth-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
+description = "AAuth for Rust: every role and the shared building blocks, re-exported from one crate"
+
+[features]
+default = [
+    "agent",
+    "agent_provider",
+    "resource",
+    "person_server",
+    "person_server_redb",
+    "access_server",
+    "supervision_server",
+    "discovery",
+]
+agent = ["dep:aauth-rust-agent"]
+agent_provider = ["dep:aauth-rust-agent-provider"]
+resource = ["dep:aauth-rust-resource"]
+person_server = ["dep:aauth-rust-person-server"]
+person_server_redb = ["person_server", "dep:aauth-rust-person-server-redb"]
+access_server = ["dep:aauth-rust-access-server"]
+supervision_server = ["dep:aauth-rust-supervision-server"]
+discovery = ["dep:aauth-rust-discovery"]
+
+[dependencies]
+aauth-rust-jose = { version = "0.1.0-alpha.26", path = "../aauth-rust-jose" }
+aauth-rust-core = { version = "0.1.0-alpha.26", path = "../aauth-rust-core" }
+aauth-rust-signature-key = { version = "0.1.0-alpha.26", path = "../aauth-rust-signature-key" }
+aauth-rust-r3 = { version = "0.1.0-alpha.26", path = "../aauth-rust-r3" }
+aauth-rust-budgets = { version = "0.1.0-alpha.26", path = "../aauth-rust-budgets" }
+aauth-rust-agent = { version = "0.1.0-alpha.26", path = "../aauth-rust-agent", optional = true }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.26", path = "../aauth-rust-agent-provider", optional = true }
+aauth-rust-resource = { version = "0.1.0-alpha.26", path = "../aauth-rust-resource", optional = true }
+aauth-rust-person-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-person-server", optional = true }
+aauth-rust-person-server-redb = { version = "0.1.0-alpha.26", path = "../aauth-rust-person-server-redb", optional = true }
+aauth-rust-access-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-access-server", optional = true }
+aauth-rust-supervision-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-supervision-server", optional = true }
+aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust-discovery", optional = true }
