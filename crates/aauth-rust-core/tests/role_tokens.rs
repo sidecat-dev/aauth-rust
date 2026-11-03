@@ -475,7 +475,15 @@ fn trusted_role_snapshot_never_resolves_an_unconfigured_issuer_or_role() {
         verify("person", &signed("person", &renamed, &signer), &named, NOW).unwrap_err(),
         TokenError::InvalidDiscoveryDocument
     );
-    for bad in ["", ".", "..", "a/b", "../aauth-person.json", "doc?x", "doc%2F"] {
+    for bad in [
+        "",
+        ".",
+        "..",
+        "a/b",
+        "../aauth-person.json",
+        "doc?x",
+        "doc%2F",
+    ] {
         assert_eq!(
             TrustedIssuerKeys::from_documents(
                 "https://ps.example",
