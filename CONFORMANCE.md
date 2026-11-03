@@ -16,11 +16,11 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
 | Item | Value |
 | --- | --- |
-| Suite | map at `ff45ab3`; the run used `afcbb3b`, which has the same suite digest |
-| Library | `920519b`, tag `v0.1.0-alpha.25` |
+| Suite | map at `7c0d3c8`; the run used `482cba2`, which has the same suite digest |
+| Library | tag `v0.1.0-alpha.26`; the run used `abd5ab4`, and the tag changes only version strings, the lockfile and documents since |
 | Roles | 24 of 24 offered, all passed |
-| Assertions | 1,606 pass, 0 fail, 0 not claimed |
-| Suite clauses | 338 of 338 pass |
+| Assertions | 1,633 pass, 0 fail, 0 not claimed |
+| Suite clauses | 342 of 342 pass |
 
 ## What it does not say
 
@@ -34,7 +34,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
   vector roles, deferred authorization, sub-agents and missions need a
   launcher. Scenarios that need launcher-only access, such as re-signing the
   server's own token, are reported as not exercised. The suite's
-  [REMOTE.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/REMOTE.md)
+  [REMOTE.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/7c0d3c8/REMOTE.md)
   lists them.
 - **The suite grades behavior, not readings.** Where a draft leaves room, the
   reading this library takes is in [INTERPRETATIONS.md](INTERPRETATIONS.md).
@@ -44,7 +44,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 ## Reproduce the run
 
 The suite's
-[README](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/README.md#run-against-local-checkouts)
+[README](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/7c0d3c8/README.md#run-against-local-checkouts)
 gives the commands and their prerequisites. From a suite checkout at the commit
 above, with this repository at the library commit, run once per role:
 
@@ -54,7 +54,7 @@ go run ./cmd/aauth-conformance -targets build/ROLE/targets.json -report build/RO
 ```
 
 `go run ./cmd/build-adapters -h` lists the 24 role names. The suite's
-[CONFORMANCE-MAP.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/CONFORMANCE-MAP.md)
+[CONFORMANCE-MAP.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/7c0d3c8/CONFORMANCE-MAP.md)
 gives the command that builds the map from those reports.
 
 ## Updating this page
