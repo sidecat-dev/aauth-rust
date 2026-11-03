@@ -34,7 +34,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
   vector roles, deferred authorization, sub-agents and missions need a
   launcher. Scenarios that need launcher-only access, such as re-signing the
   server's own token, are reported as not exercised. The suite's
-  [REMOTE.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/dbf640d/REMOTE.md)
+  [REMOTE.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/REMOTE.md)
   lists them.
 - **The suite grades behavior, not readings.** Where a draft leaves room, the
   reading this library takes is in [INTERPRETATIONS.md](INTERPRETATIONS.md).
@@ -44,7 +44,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 ## Reproduce the run
 
 The suite's
-[README](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/dbf640d/README.md#run-against-local-checkouts)
+[README](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/README.md#run-against-local-checkouts)
 gives the commands and their prerequisites. From a suite checkout at the commit
 above, with this repository at the library commit, run once per role:
 
@@ -54,7 +54,7 @@ go run ./cmd/aauth-conformance -targets build/ROLE/targets.json -report build/RO
 ```
 
 `go run ./cmd/build-adapters -h` lists the 24 role names. The suite's
-[CONFORMANCE-MAP.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/dbf640d/CONFORMANCE-MAP.md)
+[CONFORMANCE-MAP.md](https://gitlab.com/sidecat-dev/aauth-conformance/-/blob/ff45ab3/CONFORMANCE-MAP.md)
 gives the command that builds the map from those reports.
 
 ## Updating this page
