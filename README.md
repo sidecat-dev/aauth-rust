@@ -35,11 +35,11 @@ Add the crates to the `[dependencies]` table of its `Cargo.toml`:
 
 <!-- consumer-bootstrap-dependencies:begin -->
 ```toml
-aauth-rust-agent = "0.1.0-alpha.27"
-aauth-rust-agent-provider = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
-aauth-rust-resource = "0.1.0-alpha.27"
+aauth-rust-agent = "0.1.0-alpha.28"
+aauth-rust-agent-provider = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
+aauth-rust-resource = "0.1.0-alpha.28"
 http = "1"
 ```
 <!-- consumer-bootstrap-dependencies:end -->
@@ -117,15 +117,15 @@ To run a Person Server or an Access Server as well, and to fetch keys and
 deliver revocations over HTTPS, add these lines too:
 
 ```toml
-aauth-rust-person-server = "0.1.0-alpha.27"
-aauth-rust-access-server = "0.1.0-alpha.27"
-aauth-rust-discovery = "0.1.0-alpha.27"
+aauth-rust-person-server = "0.1.0-alpha.28"
+aauth-rust-access-server = "0.1.0-alpha.28"
+aauth-rust-discovery = "0.1.0-alpha.28"
 ```
 
 `aauth-rust-discovery` uses a TLS library that needs a C compiler:
 `build-essential` on Linux, the Xcode Command Line Tools on macOS, or the
 Visual Studio C++ Build Tools on Windows. The other crates are pure Rust.
-`aauth-rust = "0.1.0-alpha.27"` brings every crate in one dependency, one module each,
+`aauth-rust = "0.1.0-alpha.28"` brings every crate in one dependency, one module each,
 with a default-on feature per role.
 
 | Crate | What it does | Guide |
@@ -151,7 +151,7 @@ compiler.
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.27
+git checkout v0.1.0-alpha.28
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
@@ -179,7 +179,7 @@ and [CONTRIBUTING.md](CONTRIBUTING.md) says how to change the code.
 
 ## Status
 
-This is an alpha, version `v0.1.0-alpha.27`. APIs can change from one release
+This is an alpha, version `v0.1.0-alpha.28`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the

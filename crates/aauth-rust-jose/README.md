@@ -7,7 +7,7 @@ keys your agent or server signs with.
 
 ```toml
 [dependencies]
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.28"
 serde_json = "1"
 ```
 

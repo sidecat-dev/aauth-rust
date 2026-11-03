@@ -9,8 +9,8 @@ it checks the request's signature as well as its token.
 
 ```toml
 [dependencies]
-aauth-rust-core = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
 serde_json = "1"
 ```
 

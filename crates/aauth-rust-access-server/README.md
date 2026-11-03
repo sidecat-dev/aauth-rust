@@ -8,13 +8,13 @@ keeps its own access rules instead of trusting each person's Person Server.
 
 ```toml
 [dependencies]
-aauth-rust-access-server = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-access-server = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
 http = "1"
 # used by the example to play the other parties
-aauth-rust-agent-provider = "0.1.0-alpha.27"
-aauth-rust-signature-key = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.28"
+aauth-rust-signature-key = "0.1.0-alpha.28"
 serde_json = "1"
 ```
 

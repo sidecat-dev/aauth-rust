@@ -8,12 +8,12 @@ family that opens connections, and you add it only if you want it to.
 
 ```toml
 [dependencies]
-aauth-rust-discovery = "0.1.0-alpha.27"
-aauth-rust-resource = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-discovery = "0.1.0-alpha.28"
+aauth-rust-resource = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
 http = "1"
 # used by the second example
-aauth-rust-signature-key = "0.1.0-alpha.27"
+aauth-rust-signature-key = "0.1.0-alpha.28"
 ```
 
 A Resource whose keys come from discovery. The first signed request from an

@@ -8,14 +8,14 @@ it to run the server that speaks for your users.
 
 ```toml
 [dependencies]
-aauth-rust-person-server = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-person-server = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
 http = "1"
 serde_json = "1"
 # used by the example to play the agent and its provider
-aauth-rust-agent = "0.1.0-alpha.27"
-aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-agent = "0.1.0-alpha.28"
+aauth-rust-agent-provider = "0.1.0-alpha.28"
 ```
 
 ```rust

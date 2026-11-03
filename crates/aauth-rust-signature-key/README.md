@@ -8,8 +8,8 @@ messages under your own key scheme.
 
 ```toml
 [dependencies]
-aauth-rust-jose = "0.1.0-alpha.27"
-aauth-rust-signature-key = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.28"
+aauth-rust-signature-key = "0.1.0-alpha.28"
 http = "1"
 ```
 

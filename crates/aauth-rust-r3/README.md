@@ -9,7 +9,7 @@ definition into operations and check calls against a grant.
 
 ```toml
 [dependencies]
-aauth-rust-r3 = "0.1.0-alpha.27"
+aauth-rust-r3 = "0.1.0-alpha.28"
 ```
 
 ```rust

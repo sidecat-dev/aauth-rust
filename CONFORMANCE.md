@@ -17,7 +17,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 | Item | Value |
 | --- | --- |
 | Suite | map at `7c0d3c8`; the run used `482cba2`, which has the same suite digest |
-| Library | tag `v0.1.0-alpha.27`; the run used `abd5ab4`, and since then the library code is unchanged: the tag adds the `aauth-rust` crate, which only re-exports the family crates, and otherwise changes version strings, the lockfile and documents |
+| Library | tag `v0.1.0-alpha.28`; the run used `abd5ab4`, and since then the library code is unchanged: the later tags add the `aauth-rust` crate, which only re-exports the family crates, and otherwise change version strings, the lockfile and documents |
 | Roles | 24 of 24 offered, all passed |
 | Assertions | 1,633 pass, 0 fail, 0 not claimed |
 | Suite clauses | 342 of 342 pass |

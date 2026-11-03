@@ -31,19 +31,19 @@ supervision_server = ["dep:aauth-rust-supervision-server"]
 discovery = ["dep:aauth-rust-discovery"]
 
 [dependencies]
-aauth-rust-jose = { version = "0.1.0-alpha.27", path = "../aauth-rust-jose" }
-aauth-rust-core = { version = "0.1.0-alpha.27", path = "../aauth-rust-core" }
-aauth-rust-signature-key = { version = "0.1.0-alpha.27", path = "../aauth-rust-signature-key" }
-aauth-rust-r3 = { version = "0.1.0-alpha.27", path = "../aauth-rust-r3" }
-aauth-rust-budgets = { version = "0.1.0-alpha.27", path = "../aauth-rust-budgets" }
-aauth-rust-agent = { version = "0.1.0-alpha.27", path = "../aauth-rust-agent", optional = true }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.27", path = "../aauth-rust-agent-provider", optional = true }
-aauth-rust-resource = { version = "0.1.0-alpha.27", path = "../aauth-rust-resource", optional = true }
-aauth-rust-person-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-person-server", optional = true }
-aauth-rust-person-server-redb = { version = "0.1.0-alpha.27", path = "../aauth-rust-person-server-redb", optional = true }
-aauth-rust-access-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-access-server", optional = true }
-aauth-rust-supervision-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-supervision-server", optional = true }
-aauth-rust-discovery = { version = "0.1.0-alpha.27", path = "../aauth-rust-discovery", optional = true }
+aauth-rust-jose = { version = "0.1.0-alpha.28", path = "../aauth-rust-jose" }
+aauth-rust-core = { version = "0.1.0-alpha.28", path = "../aauth-rust-core" }
+aauth-rust-signature-key = { version = "0.1.0-alpha.28", path = "../aauth-rust-signature-key" }
+aauth-rust-r3 = { version = "0.1.0-alpha.28", path = "../aauth-rust-r3" }
+aauth-rust-budgets = { version = "0.1.0-alpha.28", path = "../aauth-rust-budgets" }
+aauth-rust-agent = { version = "0.1.0-alpha.28", path = "../aauth-rust-agent", optional = true }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.28", path = "../aauth-rust-agent-provider", optional = true }
+aauth-rust-resource = { version = "0.1.0-alpha.28", path = "../aauth-rust-resource", optional = true }
+aauth-rust-person-server = { version = "0.1.0-alpha.28", path = "../aauth-rust-person-server", optional = true }
+aauth-rust-person-server-redb = { version = "0.1.0-alpha.28", path = "../aauth-rust-person-server-redb", optional = true }
+aauth-rust-access-server = { version = "0.1.0-alpha.28", path = "../aauth-rust-access-server", optional = true }
+aauth-rust-supervision-server = { version = "0.1.0-alpha.28", path = "../aauth-rust-supervision-server", optional = true }
+aauth-rust-discovery = { version = "0.1.0-alpha.28", path = "../aauth-rust-discovery", optional = true }
 
 [dev-dependencies]
 http.workspace = true

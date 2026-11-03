@@ -98,7 +98,7 @@ Each module is one crate of the family:
 
   ```toml
   [dependencies]
-  aauth-rust = { version = "0.1.0-alpha.27", default-features = false, features = ["resource"] }
+  aauth-rust = { version = "0.1.0-alpha.28", default-features = false, features = ["resource"] }
   ```
 
 - **No network unless you ask.** The protocol modules open no connections:

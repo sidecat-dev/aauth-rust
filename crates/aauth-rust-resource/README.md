@@ -8,13 +8,13 @@ AI agents and other software agents call.
 
 ```toml
 [dependencies]
-aauth-rust-resource = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-resource = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
 http = "1"
 # used by the example to play the agent and its provider
-aauth-rust-agent = "0.1.0-alpha.27"
-aauth-rust-agent-provider = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-agent = "0.1.0-alpha.28"
+aauth-rust-agent-provider = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
 ```
 
 ```rust

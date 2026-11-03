@@ -18,7 +18,7 @@ Windows. The example's TLS library needs the compiler.
 ```sh
 cargo new aauth-hello
 cd aauth-hello
-cargo add aauth-rust-agent@0.1.0-alpha.27 aauth-rust-agent-provider@0.1.0-alpha.27 aauth-rust-core@0.1.0-alpha.27 aauth-rust-jose@0.1.0-alpha.27 aauth-rust-resource@0.1.0-alpha.27 http@1
+cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 aauth-rust-resource@0.1.0-alpha.28 http@1
 ```
 
 Replace `src/main.rs` with this program: an Agent Provider issues a token, an
@@ -87,7 +87,7 @@ so run it from the source:
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.27
+git checkout v0.1.0-alpha.28
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 

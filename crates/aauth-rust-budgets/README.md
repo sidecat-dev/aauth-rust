@@ -7,7 +7,7 @@ use it when you turn budgets on; use it directly to meter calls in your API.
 
 ```toml
 [dependencies]
-aauth-rust-budgets = "0.1.0-alpha.27"
+aauth-rust-budgets = "0.1.0-alpha.28"
 ```
 
 ```rust

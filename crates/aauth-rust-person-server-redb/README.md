@@ -8,13 +8,13 @@ It works on Unix only.
 
 ```toml
 [dependencies]
-aauth-rust-person-server = "0.1.0-alpha.27"
-aauth-rust-person-server-redb = "0.1.0-alpha.27"
+aauth-rust-person-server = "0.1.0-alpha.28"
+aauth-rust-person-server-redb = "0.1.0-alpha.28"
 # used by the example to play the other parties
-aauth-rust-agent = "0.1.0-alpha.27"
-aauth-rust-agent-provider = "0.1.0-alpha.27"
-aauth-rust-core = "0.1.0-alpha.27"
-aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-agent = "0.1.0-alpha.28"
+aauth-rust-agent-provider = "0.1.0-alpha.28"
+aauth-rust-core = "0.1.0-alpha.28"
+aauth-rust-jose = "0.1.0-alpha.28"
 http = "1"
 tempfile = "3"
 ```
