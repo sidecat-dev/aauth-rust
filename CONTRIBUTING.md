@@ -1,7 +1,7 @@
 # Contributing
 
 Start with the [README](README.md), [architecture](ARCHITECTURE.md),
-[pinned sources](SPECIFICATIONS.md), and [executing subset](CONFORMANCE.md).
+[pinned sources](SPECIFICATIONS.md), and [conformance](CONFORMANCE.md).
 Report ordinary bugs and propose changes in the
 [canonical project](https://gitlab.com/sidecat-dev/aauth-rust/-/issues).
 Use the [security policy](SECURITY.md) for vulnerabilities.

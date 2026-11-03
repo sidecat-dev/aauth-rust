@@ -27,5 +27,5 @@ explanations remain host responsibilities.
 
 This crate alone does not run an R3 exchange. The Resource, Person Server and
 Access Server crates wire it into their roles; the [R3 guide](../../docs/features/r3.md)
-shows how to turn it on, and the [conformance profile](../../CONFORMANCE.md)
-records what is implemented.
+shows how to turn it on, and its
+[Limits](../../docs/features/r3.md#limits) say what is not implemented.

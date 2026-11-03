@@ -835,8 +835,7 @@ expired, and the new class token has a different `jti`. A still-live challenge
 stays in place. After the horizon, the same call may run again. The R3 draft
 has no invocation id and does not carry a digest of the result, so a Person
 Server approval that is still live can release the new bytes when the proposal
-document is unchanged. That limit is described in
-[CONFORMANCE.md](CONFORMANCE.md). The executable scene is
+document is unchanged. The executable scene is
 `cargo run --locked -p aauth-rust-resource --example r3-per-call`.
 
 To meter the release of a result rather than the execution, enable budgets and

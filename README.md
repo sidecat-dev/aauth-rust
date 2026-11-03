@@ -201,8 +201,8 @@ aauth-rust-discovery = { version = "0.1.0-alpha.24", path = "../aauth-rust/crate
   feature, and what to do about each error.
 - [USE-IN-YOUR-SERVICE.md](USE-IN-YOUR-SERVICE.md): the full reference for
   running each role in a service.
-- [CONFORMANCE.md](CONFORMANCE.md): what the libraries do and do not do, and
-  the tests that show it.
+- [CONFORMANCE.md](CONFORMANCE.md): how the conformance suite measures the
+  libraries, and what its latest run says and does not say.
 - [INTERPRETATIONS.md](INTERPRETATIONS.md): the choices made where a draft
   leaves room.
 - [SPECIFICATIONS.md](SPECIFICATIONS.md): the exact draft text implemented.
@@ -217,8 +217,8 @@ This is an alpha, version `v0.1.0-alpha.25`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the
-R3, Budgets, Events, Supervision and Bootstrap drafts, each with the limits
-listed in [CONFORMANCE.md](CONFORMANCE.md).
+R3, Budgets, Events, Supervision and Bootstrap drafts, each described, with its
+limits, in its guide under [docs/features](docs/features).
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
 in Go, makes the same choices where the drafts leave room except for the
 differences listed in [INTERPRETATIONS.md](INTERPRETATIONS.md), and is tested

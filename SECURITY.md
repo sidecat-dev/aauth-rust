@@ -160,6 +160,7 @@ provide neither process restart durability nor automatic recovery.
 ## Supported code
 
 Security fixes target the current development line. The crates are alpha code
-against pinned editor drafts, with the tested subset and gaps recorded in
-[CONFORMANCE.md](CONFORMANCE.md). No stable or security-audited release exists.
+against pinned editor drafts, with conformance results in
+[CONFORMANCE.md](CONFORMANCE.md) and each feature described in its guide under
+[docs/features](docs/features). No stable or security-audited release exists.
 A release support policy will accompany supported releases.

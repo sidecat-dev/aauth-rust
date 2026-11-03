@@ -1,9 +1,11 @@
 # Specification baseline
 
 This implementation follows the editor sources below, at these exact commits.
-They are not a claim about later published drafts. What the crates do with each
-draft, and what they leave out, is in [CONFORMANCE.md](CONFORMANCE.md); the
-choices made where a draft leaves room are in [INTERPRETATIONS.md](INTERPRETATIONS.md).
+They are not a claim about later published drafts. How the conformance suite
+measures the crates against them is in [CONFORMANCE.md](CONFORMANCE.md). What
+each feature leaves out is in its guide under [docs/features](docs/features),
+and the choices made where a draft leaves room are in
+[INTERPRETATIONS.md](INTERPRETATIONS.md).
 
 | Document | Commit | Source | SHA-256 |
 | --- | --- | --- | --- |

@@ -296,9 +296,10 @@ Person Server, as for any Auth token. `AAuth-Budget` is sent on refusals too.
 
 - The library implements the budget object, offers, narrowing, issuance at the
   Person Server and Access Server, metering, refusals and usage counters, not
-  the whole draft. [CONFORMANCE.md](../../CONFORMANCE.md) ("Opt-in budgets")
-  and [INTERPRETATIONS.md](../../INTERPRETATIONS.md) ("Selected budget
-  interpretations") record the choices, for example how the client's maximum
+  the whole draft. The conformance suite's budget scenarios
+  ([73-78](https://gitlab.com/sidecat-dev/aauth-conformance/-/tree/dbf640d/scenarios)) grade it, and
+  [INTERPRETATIONS.md](../../INTERPRETATIONS.md) ("Selected budget
+  interpretations") records the choices, for example how the client's maximum
   cost header is spelled.
 - A server without `with_budgets` refuses a token that carries a budget.
 

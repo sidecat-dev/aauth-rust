@@ -32,8 +32,8 @@ hosted enrollment, refresh and sub-agent service, and self-hosted issuance)
 and the Agent crate's `BootstrapClient`. R3 gets boundaries as executing
 journeys require them. Events tokens live in Core and
 each role's Events behavior in its own crate. Budgets are the opt-in
-`aauth-rust-budgets` crate. Unsupported vocabularies and the full-R3 gap are
-recorded in CONFORMANCE.md.
+`aauth-rust-budgets` crate. What R3 support leaves out, including vocabularies
+and full R3 conformance, is in [docs/features/r3.md](docs/features/r3.md#limits).
 
 ## Facts before policy
 

@@ -40,7 +40,8 @@ it.
   about each.
 - [USE-IN-YOUR-SERVICE.md](../USE-IN-YOUR-SERVICE.md): the full reference for
   running each role in a service.
-- [CONFORMANCE.md](../CONFORMANCE.md): what the libraries do and do not do.
+- [CONFORMANCE.md](../CONFORMANCE.md): how the conformance suite measures the
+  libraries, and what its latest run says and does not say.
 - [INTERPRETATIONS.md](../INTERPRETATIONS.md): the choices made where a draft
   leaves room.
 - [SPECIFICATIONS.md](../SPECIFICATIONS.md): the draft versions implemented.

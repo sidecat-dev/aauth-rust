@@ -29,7 +29,7 @@ its normalized Cargo manifest, lockfile and license. It does not include the
 other twelve crates or the workspace's complete service guides. The root
 `README.md`, the `docs/` guides, `USE-IN-YOUR-SERVICE.md`, `CONFORMANCE.md` and
 `SPECIFICATIONS.md` in the full development checkout describe executable
-examples, host integration, the implemented subset and pinned protocol
+examples, host integration, conformance results and pinned protocol
 sources. This is a partial protocol
 implementation, not a full-profile conformance claim.
 

@@ -415,7 +415,7 @@ Where the draft's text pulls two ways, this library reads it as follows.
 9. **"Endpoint URLs MUST be … on the issuer's origin or one the SS controls".** A PS cannot check control. The library's PS checks HTTPS only and leaves the origin to the host's egress admission. The library's SS publishes same-origin endpoints.
 10. **`unsupported_iss` vs. `unknown_sub`.** The draft does not say how an SS tells them apart. The library: an untrusted PS (key resolver) is `unsupported_iss`; a trusted PS without the connection is `unknown_sub` (choice 10).
 11. **An agent with no person yet.** Routing is per person, so a permission or mission request from an agent not yet bound to a person cannot be routed. The library lets host policy decide it.
-12. **Mission approval and `approved_resources`.** The SS `allow` names the resources "the PS is to issue person tokens for at approval". The library's mission endpoint returns no `person_tokens` (see CONFORMANCE.md).
+12. **Mission approval and `approved_resources`.** The SS `allow` names the resources "the PS is to issue person tokens for at approval". The library's mission endpoint returns no `person_tokens`.
 
 # Selected discovery and revocation delivery interpretations
 
