@@ -1,33 +1,29 @@
 # Executing behavior
 
-As of 2026-10-24. This is not complete AAuth or
-HTTP Signature Keys conformance. No percentage of either draft is claimed.
-The exact editor-source pins are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
+This document gives aauth-rust's per-requirement status against the pinned
+editor drafts of AAuth and its companions. [SPECIFICATIONS.md](SPECIFICATIONS.md)
+lists the pins.
 
-This Rust 10 platform follow-up branches from Rust 09 `91d61ea`, which adds
-delivery-custody controls on the pushed Rust 08 candidate `4dbbcfe`,
-itself based on merged Rust 07 sprint main `5c9c89e`. Rust 07 includes the Rust 05
-Access Server and Rust 06 deferred profiles and passed independent review, an
-application user test and the 185-assertion shared-wire smoke before merge. Rust
-08 adds regression coverage and the host guide; Rust 09 preserves claimed PS
-delivery custody against competing expiry/trust cleanup. Rust 10 adds only
-compile-time platform coverage and scoped platform documentation. The combined
-follow-up remains a candidate until its own review and merge. Earlier shared-wire results
-remain attributed to their exact revisions.
+The [aauth-conformance](https://gitlab.com/sidecat-dev/aauth-conformance) suite
+measures it through the suite's Rust launcher. The suite's `conformance-map.edn`
+records the result for each suite clause and the draft sentences it reaches.
 
-Engineer evidence at the unchanged Rust 09 runtime `91d61ea`:
-**303 integration tests and 5 backend unit tests
-passed, 0 failed**, including
-the direct-identity TLS test (**14 wire/TLS checks**) and a three-party TLS test
-that executes Orders→Inventory authorization and POST effects. A four-party TLS
-test executes PS service proof, AS grant/delivery and one POST effect, compares
-forwarded compact bytes at the TLS receiver and asserts wire problem codes. Executable examples
-run those same compositions. A wire check is not counted as a separate Rust test.
-Four additional rustdoc tests execute an unsigned Resource challenge, the PS
-and AS constructor/metadata examples and durable-store open/reopen. One ignored backend
-test is a subprocess entry point, executed by its two parent recovery tests.
-The buffered `subagent` example separately passes eight route/workflow tests and its
-executable scenes; those tests are outside the workspace test total.
+| v0.1.0-alpha.25 (`920519b`), suite `dbf640d` | Result |
+| --- | --- |
+| Roles | 24 of 24 offered, all passed |
+| Assertions | 1,601 pass, 0 fail, 0 not claimed |
+| Suite clauses | 337 of 337 pass |
+
+The suite grades only the clauses its scenarios reach. Of the 1,067 keyword
+sentences in the pinned drafts, 433 sit in sections no scenario reaches and are
+not measured. No percentage of a draft and no official or certified status is claimed.
+
+Below are a table of each source area's executing subset and evidence, sections
+on each profile's boundaries, and dated blocks of what each change added.
+
+Updating this document: check
+- after a library change: rerun the suite, regenerate the map, update the figures and the row the change touches;
+- after a suite change: the suite commit and the counts.
 
 | Source area | Executing subset | Evidence |
 | --- | --- | --- |
