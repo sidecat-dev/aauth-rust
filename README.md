@@ -30,7 +30,7 @@ Rust.
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.24
+git checkout v0.1.0-alpha.25
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
@@ -50,12 +50,12 @@ From git, list each crate you use with the repository and the tag:
 <!-- checked: git-dependencies -->
 ```toml
 [dependencies]
-aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
-aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
-aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
-aauth-rust-discovery = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
-aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
-aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.24" }
+aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
+aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
+aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
+aauth-rust-discovery = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
+aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
+aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.25" }
 http = "1"
 ```
 
@@ -213,7 +213,7 @@ aauth-rust-discovery = { version = "0.1.0-alpha.24", path = "../aauth-rust/crate
 
 ## Status
 
-This is an alpha, version `v0.1.0-alpha.24`. APIs can change from one release
+This is an alpha, version `v0.1.0-alpha.25`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the
