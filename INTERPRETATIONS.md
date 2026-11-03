@@ -1,7 +1,7 @@
 # Selected mission interpretations
 
-Source: Core70d67375deb0bb002af7da0711fc58f6e8926e7e, as recorded in
-SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
+Source: the protocol draft at `70d67375deb0bb002af7da0711fc58f6e8926e7e`, as
+recorded in SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
 
 - ISO8601 mission timestamps use the RFC3339 profile, including offsets and
   fractions. Integer JWT expiry uses the floor of the mission timestamp, so a
@@ -61,8 +61,8 @@ SPECIFICATIONS.md. These choices concern the bounded immediate PS/Resource path.
   bounded by the mission and verified parent credentials. Resource host policy
   owns operation/revision/payload enforcement and any current revocation channel.
 
-AS, children, chaining, human review, creation and deferred mission control are
-not implemented by this profile. This is no full R3/latest-edition qualification.
+The limits of mission support are listed in
+[Missions](docs/features/missions.md#limits).
 
 # Selected budget interpretations
 
@@ -211,9 +211,8 @@ SPECIFICATIONS.md.
   Algorithm Determination (lines 225-233) and protocol Verification (Server)
   step 6 (line 2249) make it `unsupported_algorithm`. Under `jwks_uri`,
   `jwks`, `jwt`, `jkt-jwt`, `self-jwt` and `cached` the algorithm is known only
-  once the key is resolved, so `PreparedRequest` and `PreparedResponse` no
-  longer refuse a signature whose length is not 64 bytes before then; `verify`
-  checks the length against the resolved key. An ML-DSA-44 signature under a `jwks_uri` member that
+  once the key is resolved, so `verify` checks the signature length against
+  the resolved key. An ML-DSA-44 signature under a `jwks_uri` member that
   selects an `AKP` key is `unsupported_algorithm`, not `invalid_signature`.
 - **ES256 for tokens and agent keys.** Signature Algorithms (line 2166) has
   every party MUST support `Ed25519` and SHOULD support `ES256`, RECOMMENDED
@@ -230,8 +229,7 @@ SPECIFICATIONS.md.
   ("JWS and JWK alg is Ed25519 or ES256"). **Cross-language difference:** the
   community aauth-go keeps AAuth tokens, compact JWS and the `jwt`, `jwks` and
   `jwks_uri` keys at Ed25519 (its "Request-key algorithms are an endpoint
-  choice"). That is its current state, not a feature Go built first, so the
-  draft's SHOULD governs here. A Rust ES256 agent, or a token a Rust server
+  choice"). A Rust ES256 agent, or a token a Rust server
   signs with an ES256 key, is refused by a Go verifier with
   `unsupported_algorithm` and `Accept-Signature-Alg: Ed25519`; Ed25519 works
   across both.
@@ -252,9 +250,7 @@ SPECIFICATIONS.md.
   the delegated `cnf.jwk` may each be Ed25519 or ES256, the compact JWS set;
   `ServerKeyBinding` admits either as a pseudonym key; and a cache
   identifier's seal holds the whole public confirmation key (`kty`, `crv`,
-  `x`, `y`, `alg`). An identifier sealed by an earlier release held only an
-  Ed25519 `x`; it no longer opens, so it is `cache_miss` and the caller
-  resends its assertion in full (Signature-Key `cache_miss`, line 1006).
+  `x`, `y`, `alg`).
 - **Required components a server lists.** Covered Components (line 2216) and
   Verification (Server) step 2 (line 2245) let a server require components
   beyond the base set and refuse a signature without them with
@@ -282,7 +278,7 @@ SPECIFICATIONS.md.
 - **Unsupported scheme names what the endpoint accepts.** Verification
   (Server) step 4 (line 2247) and Signature-Key `unsupported_scheme` (line
   993) make `Accept-Signature-Scheme` the schemes that endpoint accepts.
-  Every Resource endpoint now names its own list, with no default: `jwt` at
+  Every Resource endpoint names its own list, with no default: `jwt` at
   the agent endpoints, `jwt` and the further schemes at an
   `AgentIdentityResource` that has them, and `jwks_uri` at the R3 document,
   revocation and usage endpoints.
@@ -318,10 +314,9 @@ SPECIFICATIONS.md.
   (step 6, line 2249), and a metadata document that fails its issuer check is
   `issuer_missing` or `issuer_mismatch` (step 5, line 2248); any other
   unusable key is `invalid_key`. The Supervision Server's authenticate step
-  now answers so. An issuer it does not trust stays `403 unsupported_iss`
+  answers so. An issuer it does not trust stays `403 unsupported_iss`
   (Supervision). The Resource's usage endpoint answers these as any signed
-  request is answered, with `Signature-Error`, where it used
-  `invalid_signature`, `invalid_key` or `untrusted_issuer` in the body only.
+  request is answered, with `Signature-Error`.
 - **What an Agent signs for a Resource.** Covered Components (line 2216): an
   agent learns further components "from server metadata or from an
   `invalid_input` error response that includes `required_input`". The library
@@ -420,7 +415,7 @@ Where the draft's text pulls two ways, this library reads it as follows.
 9. **"Endpoint URLs MUST be … on the issuer's origin or one the SS controls".** A PS cannot check control. The library's PS checks HTTPS only and leaves the origin to the host's egress admission. The library's SS publishes same-origin endpoints.
 10. **`unsupported_iss` vs. `unknown_sub`.** The draft does not say how an SS tells them apart. The library: an untrusted PS (key resolver) is `unsupported_iss`; a trusted PS without the connection is `unknown_sub` (choice 10).
 11. **An agent with no person yet.** Routing is per person, so a permission or mission request from an agent not yet bound to a person cannot be routed. The library lets host policy decide it.
-12. **Mission approval and `approved_resources`.** The SS `allow` names the resources "the PS is to issue person tokens for at approval". The library's mission endpoint returns no `person_tokens` today (see CONFORMANCE.md).
+12. **Mission approval and `approved_resources`.** The SS `allow` names the resources "the PS is to issue person tokens for at approval". The library's mission endpoint returns no `person_tokens` (see CONFORMANCE.md).
 
 # Selected discovery and revocation delivery interpretations
 

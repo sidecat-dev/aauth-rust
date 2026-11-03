@@ -1,8 +1,8 @@
 # Use AAuth in a service
 
-The current profile supports direct Agent identity and Person Server (PS)
-authorization, including an immediate downstream call. Your service supplies
-issuer trust, HTTPS transport, person authentication, admission policy and state.
+This is the full reference for running each AAuth role in a service. The
+[guides in docs/](docs/README.md) introduce each role and feature; this page
+holds the details they link to. Your service supplies issuer trust, HTTPS transport, person authentication, admission policy and state.
 Replay/idempotency storage remains the application's responsibility.
 Start with the README's library program, then run the framework example:
 
@@ -171,14 +171,14 @@ Resource `clock_skew` responses include Date using the verifier clock you passed
 
 ## Rotation and discovery documents
 
-**AP-KEY-ROLLOVER is an explicit gap.** The AP convenience API publishes only its
+**The Agent Provider has no key rollover.** Its convenience API publishes only its
 active signing key. It has no retained-key list, overlap schedule or automatic
 retirement lifecycle. Replacing the AP does not remove keys from existing verifier
 snapshots. Old tokens fail after a refresh replaces the snapshot with a JWKS
 that omits their key; do not describe that as seamless rotation. A host supplying
 its own multi-key JWKS can retain public keys for its outstanding tokens; the
 resolver selects by kid and tests cover old/new verification and later removal.
-The host owns retention, refresh and retirement policy. Go shares this AP gap.
+The host owns retention, refresh and retirement policy.
 
 `metadata()` supplies minimal issuer/JWKS-location bytes, plus the display
 members described in [Publish display metadata](#publish-display-metadata).
@@ -382,7 +382,7 @@ the PS consumes custody.
 
 Forwarded Agent-token bytes prove what their issuer signed. They do not prove
 that the original caller authorized this service or this downstream operation:
-Agent tokens have no Resource audience binding in this slice. Carrying the bytes
+Agent tokens have no Resource audience binding. Carrying the bytes
 in a covered Authorization header prevents substitution in that request; it does
 not create AAuth delegation. Person binding and protocol call chaining require
 Person/Auth tokens and the Person Server exchange described below.
@@ -618,8 +618,8 @@ sync refusal and reconstructed
 direct/chained PS exchanges. These are separate backend checks, not evidence of
 physical power loss, every disk failure, distributed operation or other database
 engines. The contract also retains AS Auth receipts in an explicit PS namespace;
-this is not AS audit storage. Missions and token-revocation delivery remain
-outside the supported PS profile; persistence does not add those roles.
+this is not AS audit storage. The redb store does not hold missions, and it
+delivers no revocations.
 
 ## Protect a Resource with PS authorization
 
@@ -982,8 +982,7 @@ presented credential. The challenge must be current but does not cap the
 grant's lifetime, mission-bound or not. The host supplies authorization policy; accepting
 a valid PS proof alone does not grant access. This AS profile additionally requires
 the Agent token's optional `ps` claim to be present and equal to the signing PS.
-Missing/different `ps` is 400 `invalid_agent_token` before policy; this is the named
-`AS-AGENT-PS-PROFILE` limit shared with the Go sibling. A call-chaining request
+Missing/different `ps` is 400 `invalid_agent_token` before policy. A call-chaining request
 is the exception: it carries the passed-through `upstream_token`, and the
 intermediary's own `ps`, if any, names its Person Server rather than the person's.
 The AS verifies that token per Upstream Token Verification before policy: a person
@@ -1081,8 +1080,7 @@ validate the exact retained presented parent and commit the receipt atomically
 before release. A receipt for a chained request also keeps `upstream`, equal to
 that of the Person token presented for it; `TokenRecord::validate_federated_parent`
 refuses one that drops or changes the tie. Custom adapters must honor these
-fields and the updated storetest contract; an older adapter is not
-federation-qualified. The PS's internal
+fields and pass the storetest contract. The PS's internal
 accountable person and directed identity remain stable across this exchange.
 If an AS reuses an issuer/JTI whose retained receipt names a different Person
 parent, the PS refuses the conflicting answer with `502 as_unreachable` and a
@@ -1092,10 +1090,8 @@ Auth carries neither a Resource challenge identifier nor a continuation
 identifier, so there is no cross-exchange binding check or global grant replay
 cache. Single terminal delivery applies to each continuation. Hosts own operation
 replay protection and application idempotency.
-Full R3 compliance remains a named vocabulary gap: general media/service
-vocabularies grow in R3 and both libraries on demand, one test at a time.
-Recursive sub-agent delegation remains a named gap of this Core-scope profile.
-One-level parent-mediated children execute. Deferred federation requires the explicit configuration below. See the complete
+Full R3 conformance is not claimed. Recursive sub-agent delegation is not
+implemented; one-level parent-mediated children are. Deferred federation requires the explicit configuration below. See the complete
 [four-party TLS example](crates/aauth-rust-resource/examples/four_party/mod.rs).
 
 A federated PS chains calls through its AS. It verifies `upstream_token` exactly
@@ -1575,9 +1571,11 @@ revocation does not revoke an AP Agent token. AP-token revocation, per-child
 revocation, key lifecycle and live snapshot refresh remain host responsibilities.
 
 This path is missionless Core with immediate direct/federated grants and bounded
-AS approval/payment. Missions, R3, child chaining, general remote AP enrollment
-and durable continuation recovery remain gaps. The small host-defined AP route
-is a buffered enrollment example, not a remote provider integration. Memory
+AS approval/payment. Missions, R3, child chaining and durable continuation
+recovery are not implemented for sub-agents. The small host-defined AP route
+is a buffered enrollment example; a hosted Agent Provider serves sub-agent
+issuance with the `bootstrap` module, described in
+[Bootstrap](docs/features/bootstrap.md). Memory
 continuations have no restart recovery; issuance storage and continuation
 durability are separate host concerns.
 
@@ -1933,13 +1931,12 @@ with its own effect storage; continuation custody does not provide that guarante
 
 This Core-scope profile supports top-level Agents, with or without a mission,
 and missionless one-level parent-mediated children. Deadlines are capped by all original credentials,
-including both Agent tokens for a child and the Resource challenge. Long-wait refresh needs a later profile; submit a fresh original
-request after expiry. A clarification `updated_request` replaces the pending
+including both Agent tokens for a child and the Resource challenge. A wait cannot be
+refreshed; submit a fresh original request after expiry. A clarification `updated_request` replaces the pending
 resource and presented tokens after the pair verifies and the new resource
 token keeps the original `iss`, `ps`, `sub`, `agent_jkt`, `mission_s256`, and
 `tenant`. AS and PS independently enforce five clarification rounds,
-preserve unanswered question deadlines and advertise remaining timeout seconds. There is no durable AS/PS continuation adapter in this
-release. Custom stores must preserve atomic revisions, bounded records and
+preserve unanswered question deadlines and advertise remaining timeout seconds. There is no durable AS/PS continuation adapter. Custom stores must preserve atomic revisions, bounded records and
 role namespaces across restart, collect expiry and reconcile uncertain in-flight
 transitions. No automatic recovery repeats a POST, settlement or grant delivery.
 The ordinary PS issued-token store, including redb, remains a separate contract.

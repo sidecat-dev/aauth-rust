@@ -25,16 +25,7 @@ serializing an equivalent JSON value does not preserve arbitrary whitespace,
 member order or its digest. Release-gating policy and required human-readable
 explanations remain host responsibilities.
 
-Built Rust and Go consumers have exchanged artifacts and signed references;
-the retained execution records distinguish each exact source and input set.
-The foundation batch also exercised large objects, quoted media parameters,
-malformed input, changed-byte and wrong-key refusals. These library workflows
-do not by themselves establish an integrated Resource/PS/AS R3 exchange.
-Role wiring, release gating, and held-result refresh are in the Resource and
-Person Server crates and are described in the repository's
-[conformance profile](../../CONFORMANCE.md). Discovery, entitlements, account
-binding, and audit remain unfinished there.
-
-The optional-field constructors/accessors use `Option<&str>`, and
-`ProposalOptions` includes `result`. Consumers of earlier development commits
-must migrate those calls. No published crate compatibility is claimed.
+This crate alone does not run an R3 exchange. The Resource, Person Server and
+Access Server crates wire it into their roles; the [R3 guide](../../docs/features/r3.md)
+shows how to turn it on, and the [conformance profile](../../CONFORMANCE.md)
+records what is implemented.
