@@ -1,9 +1,10 @@
 # aauth-rust-agent
 
-The AAuth Agent role: an HTTP client that calls APIs for a person signs each
-request with its own key and its current token, reads what an API asks for
-when it refuses, and checks the tokens it gets back before using them. Use it
-in any agent, CLI or service that calls AAuth APIs.
+The AAuth Agent role, for HTTP clients that call APIs on a person's behalf.
+It signs each request with the agent's own key and current token, reads what
+an API asks for when it refuses, and checks the tokens servers hand back
+before they are used. Use it in any agent, CLI or service that calls AAuth
+APIs.
 
 ```toml
 [dependencies]
