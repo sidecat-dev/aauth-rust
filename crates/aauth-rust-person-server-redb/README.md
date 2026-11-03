@@ -7,8 +7,8 @@ transactional [redb](https://crates.io/crates/redb) file. Use it in place of
 
 ```toml
 [dependencies]
-aauth-rust-person-server = "0.1.0-alpha.26"
-aauth-rust-person-server-redb = "0.1.0-alpha.26"
+aauth-rust-person-server = "0.1.0-alpha.27"
+aauth-rust-person-server-redb = "0.1.0-alpha.27"
 ```
 
 The example issues a Person token, restarts, and finds the agent's binding

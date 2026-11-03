@@ -389,8 +389,8 @@ Person/Auth tokens and the Person Server exchange described below.
 
 ## Run a Person Server
 
-Add `aauth-rust-person-server` alongside the README's path dependencies. Its
-[`PersonServer`](crates/aauth-rust-person-server/src/server.rs) accepts a `Config`,
+Add `aauth-rust-person-server = "0.1.0-alpha.27"` alongside the README's
+dependencies. Its [`PersonServer`](crates/aauth-rust-person-server/src/server.rs) accepts a `Config`,
 trusted issuer resolver, `Store`, `Policy`, clock and token-ID source. The crate's
 module rustdoc contains a complete constructor example. The role is synchronous
 and framework-independent; adapt absolute HTTPS requests with bounded actual
@@ -502,10 +502,9 @@ without naming closures. The constructor rustdoc uses these aliases.
 
 ## Durable Person Server storage
 
-Add `aauth-rust-person-server-redb` alongside the PS dependency. With local
-checkouts, use `path = "../aauth-rust/crates/aauth-rust-person-server-redb"` in
-your consumer's dependencies, adjusting the path to your checkout. It implements
-the same `Store` as `MemoryStore` and adds no database dependency to the PS role.
+Add `aauth-rust-person-server-redb = "0.1.0-alpha.27"` alongside the PS
+dependency. It implements the same `Store` as `MemoryStore` and adds no
+database dependency to the PS role.
 
 In the complete PS constructor linked above, replace `MemoryStore` with
 `RedbStore` in the `HostServer` type and pass this store argument:

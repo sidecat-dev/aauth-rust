@@ -7,9 +7,9 @@ provider for your own agents.
 
 ```toml
 [dependencies]
-aauth-rust-agent-provider = "0.1.0-alpha.26"
-aauth-rust-core = "0.1.0-alpha.26"
-aauth-rust-jose = "0.1.0-alpha.26"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
 ```
 
 ```rust

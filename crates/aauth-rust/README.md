@@ -98,7 +98,7 @@ The example also uses `http = "1"`.
 
   ```toml
   [dependencies]
-  aauth-rust = { version = "0.1.0-alpha.26", default-features = false, features = ["resource"] }
+  aauth-rust = { version = "0.1.0-alpha.27", default-features = false, features = ["resource"] }
   ```
 
 - **No network unless you ask.** The protocol modules open no connections:

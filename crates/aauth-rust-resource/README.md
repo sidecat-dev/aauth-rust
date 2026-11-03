@@ -8,8 +8,8 @@ AI agents and other software agents call.
 
 ```toml
 [dependencies]
-aauth-rust-resource = "0.1.0-alpha.26"
-aauth-rust-core = "0.1.0-alpha.26"
+aauth-rust-resource = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
 http = "1"
 ```
 

@@ -8,9 +8,9 @@ it to run the server that speaks for your users.
 
 ```toml
 [dependencies]
-aauth-rust-person-server = "0.1.0-alpha.26"
-aauth-rust-core = "0.1.0-alpha.26"
-aauth-rust-jose = "0.1.0-alpha.26"
+aauth-rust-person-server = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
 http = "1"
 serde_json = "1"
 ```

@@ -7,8 +7,8 @@ when your service reads AAuth tokens itself.
 
 ```toml
 [dependencies]
-aauth-rust-core = "0.1.0-alpha.26"
-aauth-rust-jose = "0.1.0-alpha.26"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
 serde_json = "1"
 ```
 
