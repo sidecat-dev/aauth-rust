@@ -19,6 +19,7 @@ dependencies = [
  "aauth-rust-resource",
  "aauth-rust-signature-key",
  "aauth-rust-supervision-server",
+ "http",
 ]
 
 [[package]]
