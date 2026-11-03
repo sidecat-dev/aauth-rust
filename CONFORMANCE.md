@@ -1,4 +1,4 @@
-# Executing behavior
+# Conformance
 
 ## How this library approaches conformance
 
@@ -25,9 +25,10 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 ## What it does not say
 
 - **A clause with no scenario is not measured.** In the map, those are the
-  `:clauses` entries whose `:suite-clauses` is empty: 433 of the 1,067 keyword
-  sentences at this suite commit. A linked entry means a scenario grades a
-  requirement of that section, not necessarily that sentence.
+  `:clauses` entries whose `:suite-clauses` is empty. Of the 617 MUST-level
+  sentences in the pinned drafts, 408 are in sections a scenario reaches and
+  209 are in sections no scenario reaches. A reached entry means a scenario
+  grades a requirement of that section, not necessarily that sentence.
 - **The figures come from a launcher run.** Remote mode tests a deployed
   server with no launcher and runs 13 of the 24 roles. The Agent signer, the
   vector roles, deferred authorization, sub-agents and missions need a
@@ -38,8 +39,7 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 - **The suite grades behavior, not readings.** Where a draft leaves room, the
   reading this library takes is in [INTERPRETATIONS.md](INTERPRETATIONS.md).
   Each feature's limits are in its guide under [docs/features](docs/features).
-- **No official or certified status is claimed,** and no percentage of any
-  draft.
+- **No official or certified status is claimed.**
 
 ## Reproduce the run
 
@@ -62,7 +62,8 @@ gives the command that builds the map from those reports.
 Updating this page: check
 - the suite commit, and the run's suite commit if it differs;
 - the library commit and tag;
-- the figures: assertions, suite clauses and unmeasured keyword sentences;
+- the figures: assertions, suite clauses and the MUST-level sentences reached
+  and not reached;
 - the roles line.
 
 After a library change, rerun every role and regenerate the map first. After a
