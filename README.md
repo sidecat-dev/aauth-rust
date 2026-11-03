@@ -22,7 +22,9 @@ destinations unless you allow them.
 ## Install
 
 The crates are on [crates.io](https://crates.io/crates/aauth-rust). Your
-project needs Rust 1.99 or later. Start a project:
+project needs Rust 1.99 or later, and Rust needs the system linker to build:
+on Ubuntu or Debian, `sudo apt-get install build-essential`; on macOS, the
+Xcode command line tools; on Windows, the MSVC build tools. Start a project:
 
 <!-- consumer-bootstrap-setup:begin -->
 ```sh
@@ -122,9 +124,8 @@ aauth-rust-access-server = "0.1.0-alpha.28"
 aauth-rust-discovery = "0.1.0-alpha.28"
 ```
 
-`aauth-rust-discovery` uses a TLS library that needs a C compiler:
-`build-essential` on Linux, the Xcode Command Line Tools on macOS, or the
-Visual Studio C++ Build Tools on Windows. The other crates are pure Rust.
+`aauth-rust-discovery` uses a TLS library that also needs a C compiler,
+which the same tools provide. The other crates have no C dependencies.
 `aauth-rust = "0.1.0-alpha.28"` brings every crate in one dependency, one module each,
 with a default-on feature per role.
 

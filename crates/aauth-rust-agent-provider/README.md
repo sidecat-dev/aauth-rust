@@ -5,11 +5,13 @@ Agent tokens, each naming an agent and the public key it signs with, and
 publishes the keys that let any API check those tokens. Use it to run the
 provider for your own agents.
 
-```toml
-[dependencies]
-aauth-rust-agent-provider = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28
 ```
 
 ```rust
@@ -71,7 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - It routes nothing: your HTTP server serves the two documents and calls
   `issue`. The host supplies each token's claims, with a unique `jti` and
   times in Unix seconds from its clock, and keeps the provider's key.

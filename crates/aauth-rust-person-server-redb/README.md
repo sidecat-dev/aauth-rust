@@ -6,17 +6,15 @@ transactional [redb](https://crates.io/crates/redb) file. Use it in place of
 `MemoryStore` when your Person Server must keep its records across restarts.
 It works on Unix only.
 
-```toml
-[dependencies]
-aauth-rust-person-server = "0.1.0-alpha.28"
-aauth-rust-person-server-redb = "0.1.0-alpha.28"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-person-server@0.1.0-alpha.28 aauth-rust-person-server-redb@0.1.0-alpha.28
 # used by the example to play the other parties
-aauth-rust-agent = "0.1.0-alpha.28"
-aauth-rust-agent-provider = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-http = "1"
-tempfile = "3"
+cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 http@1 tempfile@3
 ```
 
 The example issues a Person token, restarts, and finds the agent's binding
@@ -131,12 +129,13 @@ aauth:assistant@ap.example still acts for person-1
   schema first. A damaged file, another application's database, or a second
   live owner fails with `store_unavailable` or `unsupported_store_schema`
   instead of starting empty.
-- **Pure Rust, one file.** No database server to run. The tradeoff: one
+- **No C dependencies, one file.** No database server to run. The tradeoff: one
   process owns the file, so the Person Server runs as one process per file.
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - Unix only, on a filesystem that supports syncing a directory. `open` fails
   on other platforms; use another `Store` there.
 - One process owns a file at a time. Drop every clone before reopening.

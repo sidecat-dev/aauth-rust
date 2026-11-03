@@ -8,7 +8,7 @@ repository.workspace = true
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-description = "Transactional pure Rust durable storage for AAuth Person Server bindings and exact credential lineage"
+description = "Transactional durable storage, with no C dependencies, for AAuth Person Server bindings and exact credential lineage"
 
 [dependencies]
 aauth-rust-person-server = { version = "0.1.0-alpha.28", path = "../aauth-rust-person-server" }

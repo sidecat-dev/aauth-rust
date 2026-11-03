@@ -6,16 +6,15 @@ Person tokens that tell an API who the person is, and issues Auth tokens
 for what the person approved, itself or through an API's Access Server. Use
 it to run the server that speaks for your users.
 
-```toml
-[dependencies]
-aauth-rust-person-server = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-http = "1"
-serde_json = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-person-server@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 http@1 serde_json@1
 # used by the example to play the agent and its provider
-aauth-rust-agent = "0.1.0-alpha.28"
-aauth-rust-agent-provider = "0.1.0-alpha.28"
+cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28
 ```
 
 ```rust
@@ -143,7 +142,8 @@ internal `person-1`.
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - The host authenticates the person, supplies the trusted issuers' keys, an
   atomic store, the clock in Unix seconds, and fresh token ids.
 - It routes nothing and fetches nothing: your HTTP server passes requests to

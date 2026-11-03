@@ -7,11 +7,13 @@ when your service reads AAuth tokens itself. To protect an HTTP API, use
 [aauth-rust-resource](https://crates.io/crates/aauth-rust-resource) instead:
 it checks the request's signature as well as its token.
 
-```toml
-[dependencies]
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-serde_json = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 serde_json@1
 ```
 
 ```rust
@@ -98,7 +100,8 @@ untrusted: UntrustedIssuer, wire code invalid_key
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - Times are Unix seconds, and `exp` has no leeway. Your host supplies the
   clock.
 - It never fetches. Your service fetches the metadata and JWKS of the issuers

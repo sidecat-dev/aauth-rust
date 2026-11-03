@@ -6,14 +6,15 @@ delivers revocations, while refusing destinations an attacker could choose.
 Every AAuth role can use it as its key resolver; it is the one crate of the
 family that opens connections, and you add it only if you want it to.
 
-```toml
-[dependencies]
-aauth-rust-discovery = "0.1.0-alpha.28"
-aauth-rust-resource = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-http = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-discovery@0.1.0-alpha.28 aauth-rust-resource@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 http@1
 # used by the second example
-aauth-rust-signature-key = "0.1.0-alpha.28"
+cargo add aauth-rust-signature-key@0.1.0-alpha.28
 ```
 
 A Resource whose keys come from discovery. The first signed request from an
@@ -47,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+```text
+401 Unauthorized
+```
+
 What it refuses, before any request leaves the process:
 
 ```rust
@@ -67,8 +72,13 @@ fn main() -> Result<(), DiscoveryError> {
     assert!(matches!(plain, Err(DiscoveryError::Refused { reason: Refusal::NotHttps, .. })));
     let local = client.get(DiscoveryFetch::Metadata { url: "https://127.0.0.1/.well-known/aauth-agent.json" });
     assert!(matches!(local, Err(DiscoveryError::Refused { reason: Refusal::RestrictedAddress(_), .. })));
+    println!("refused: an untrusted issuer, plain http, a loopback address");
     Ok(())
 }
+```
+
+```text
+refused: an untrusted issuer, plain http, a loopback address
 ```
 
 ## Why use it

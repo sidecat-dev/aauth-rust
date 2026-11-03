@@ -6,15 +6,15 @@ and token, asks your policy whether to admit it, and gives you either the
 verified caller or the exact 401 or 403 to send. Use it in any HTTP API that
 AI agents and other software agents call.
 
-```toml
-[dependencies]
-aauth-rust-resource = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-http = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-resource@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 http@1
 # used by the example to play the agent and its provider
-aauth-rust-agent = "0.1.0-alpha.28"
-aauth-rust-agent-provider = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
+cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28
 ```
 
 ```rust
@@ -108,8 +108,12 @@ its signature was accepted.
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. The library is pure Rust; the
-  repository's TLS examples need a C compiler.
+- Rust 1.99 or later, edition 2024. The library has no C dependencies, but
+  Rust still needs the system linker; the repository's TLS examples also
+  need a C compiler.
+- A first build of this crate alone, with an empty Cargo cache, downloads
+  107 crates (8.6 MB compressed) and takes 74 s in debug or 141 s in release
+  on 2 vCPUs.
 - It opens no connections. The host supplies the trusted issuers and their
   keys (fetched with `aauth-rust-discovery` or your own client), the clock in
   Unix seconds, and storage for any state the opt-in features keep.

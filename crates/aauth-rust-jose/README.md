@@ -5,10 +5,13 @@ keys, their public JWKs and thumbprints, and the Ed25519 and ES256 compact JWS
 that AAuth tokens use. Use it directly to create, save, load or hand off the
 keys your agent or server signs with.
 
-```toml
-[dependencies]
-aauth-rust-jose = "0.1.0-alpha.28"
-serde_json = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-jose@0.1.0-alpha.28 serde_json@1
 ```
 
 ```rust
@@ -62,7 +65,8 @@ reloaded, same thumbprint: true
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - `SigningKey::generate` uses the operating system's random number generator.
 - Saving the private key is up to you. `export_pkcs8_der` returns unencrypted
   bytes, zeroed when dropped; store them where only the key's owner can read

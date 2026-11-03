@@ -6,14 +6,13 @@ Person Server, which then asks it about every act of the agents routed there
 `deny` or `ask`. Use it to build an approval service that applies a person's
 or an organization's standing rules to their agents.
 
-```toml
-[dependencies]
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-aauth-rust-signature-key = "0.1.0-alpha.28"
-aauth-rust-supervision-server = "0.1.0-alpha.28"
-http = "1"
-serde_json = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 aauth-rust-signature-key@0.1.0-alpha.28 aauth-rust-supervision-server@0.1.0-alpha.28 http@1 serde_json@1
 ```
 
 ```rust
@@ -128,7 +127,8 @@ SendEmail: "ask"
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - The host supplies the policy, the keys of the Person Servers it admits, one
   atomic `ContinuationStore` for every record, and the clock in Unix seconds.
   `MemoryContinuations` keeps records in memory only.

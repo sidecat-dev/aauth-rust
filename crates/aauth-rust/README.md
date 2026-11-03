@@ -6,8 +6,13 @@ its own key, and the API checks that signature and the token sent with it,
 asking for a token that names the person when it needs one. This crate is
 every role of AAuth for Rust in one dependency, one module per crate.
 
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
 ```sh
-cargo add aauth-rust http
+cargo add aauth-rust@0.1.0-alpha.28 http@1
 ```
 
 An agent calls an API, in one process: the Agent Provider vouches for the
@@ -94,7 +99,8 @@ Each module is one crate of the family:
   one dependency keeps them in step.
 - **Keep only the roles you run.** Every module is on by default. Each role
   module and `discovery` has a Cargo feature of the same name, so an API that
-  only checks requests can keep just the Resource:
+  only checks requests can keep just the Resource, with this block in place
+  of the empty `[dependencies]` section that `cargo new` writes:
 
   ```toml
   [dependencies]
@@ -110,7 +116,8 @@ Each module is one crate of the family:
 
 - Rust 1.99 or later, edition 2024.
 - The default features include `discovery`, whose TLS library needs a C
-  compiler to build. Without `discovery`, everything is pure Rust.
+  compiler to build. Without `discovery`, nothing has C dependencies, but
+  Rust still needs the system linker.
 - `person_server_redb` works on Unix only.
 - The host supplies the transport, the trusted issuers and their keys, the
   clock in Unix seconds, key custody and storage.

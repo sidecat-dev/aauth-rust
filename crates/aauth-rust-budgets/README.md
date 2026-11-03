@@ -5,9 +5,13 @@ the meter the API keeps against it, and the `AAuth-Budget` header that tells
 the agent what is left. The Resource, Person Server and Access Server crates
 use it when you turn budgets on; use it directly to meter calls in your API.
 
-```toml
-[dependencies]
-aauth-rust-budgets = "0.1.0-alpha.28"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-budgets@0.1.0-alpha.28
 ```
 
 ```rust
@@ -71,7 +75,8 @@ AAuth-Budget: remaining=375, required=400, unit="USD", decimals=2
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - Amounts are integers in the grant's own unit and decimal scale.
 - A `Ledger` belongs to one process: share it behind a mutex. A directory
   ledger takes no file lock, so open each directory from one process at a

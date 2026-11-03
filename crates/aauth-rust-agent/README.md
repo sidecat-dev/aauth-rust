@@ -6,13 +6,13 @@ an API asks for when it refuses, and checks the tokens servers hand back
 before they are used. Use it in any agent, CLI or service that calls AAuth
 APIs.
 
-```toml
-[dependencies]
-aauth-rust-agent = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-http = "1"
-serde_json = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 http@1 serde_json@1
 ```
 
 ```rust
@@ -102,7 +102,8 @@ the `Signature-Input` header.
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - The agent's key must outlive a restart, because its Agent token names it.
   Save it with `aauth-rust-jose`, or keep it in a keystore with
   `SigningKey::external`.

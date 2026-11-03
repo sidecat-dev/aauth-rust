@@ -7,9 +7,13 @@ operations that were granted. The Resource, Person Server and Access Server
 crates use it when you turn R3 on; use it directly to turn your API's own
 definition into operations and check calls against a grant.
 
-```toml
-[dependencies]
-aauth-rust-r3 = "0.1.0-alpha.28"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-r3@0.1.0-alpha.28
 ```
 
 ```rust
@@ -63,7 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - It fetches nothing. The signed artifact fetcher runs over an HTTPS
   transport your host supplies.
 - GraphQL introspection is refused, because a schema alone names no

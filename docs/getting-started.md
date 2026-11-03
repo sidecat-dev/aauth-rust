@@ -8,10 +8,11 @@ the outside.
 
 ## Before you start
 
-Install [rustup](https://rustup.rs/). For step 2, also install
-[git](https://git-scm.com/) and a C compiler: `build-essential` on Linux, the
-Xcode Command Line Tools on macOS, or the Visual Studio C++ Build Tools on
-Windows. The example's TLS library needs the compiler.
+Install [rustup](https://rustup.rs/). Rust needs the system linker to build,
+from step 1 on: on Ubuntu or Debian, `sudo apt-get install build-essential`;
+on macOS, the Xcode command line tools; on Windows, the MSVC build tools. For
+step 2, also install [git](https://git-scm.com/); the example's TLS library
+needs a C compiler, which the same tools provide.
 
 ## 1. Add the crates to a project
 

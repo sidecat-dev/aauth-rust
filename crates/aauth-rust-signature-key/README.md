@@ -6,11 +6,13 @@ the signature covers the request you actually received. Every AAuth role
 signs and checks requests with it; use it directly to sign or verify HTTP
 messages under your own key scheme.
 
-```toml
-[dependencies]
-aauth-rust-jose = "0.1.0-alpha.28"
-aauth-rust-signature-key = "0.1.0-alpha.28"
-http = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-jose@0.1.0-alpha.28 aauth-rust-signature-key@0.1.0-alpha.28 http@1
 ```
 
 ```rust
@@ -76,7 +78,8 @@ the `content-digest` header that the signature covers.
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - Times are Unix seconds. Your host supplies the clock.
 - It never opens a connection. Fetching a `jwks_uri` or `x5u` is your
   transport's job, through the egress checks this crate provides;

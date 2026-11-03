@@ -6,16 +6,15 @@ an agent, and it checks every signature and token in the request, runs your
 policy, and issues the Auth token the API will accept. Use it when your API
 keeps its own access rules instead of trusting each person's Person Server.
 
-```toml
-[dependencies]
-aauth-rust-access-server = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-http = "1"
+Rust needs the system linker to build: on Ubuntu or Debian,
+`sudo apt-get install build-essential`; on macOS, the Xcode command line
+tools; on Windows, the MSVC build tools. Then, in a project made with
+`cargo new`:
+
+```sh
+cargo add aauth-rust-access-server@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 http@1
 # used by the example to play the other parties
-aauth-rust-agent-provider = "0.1.0-alpha.28"
-aauth-rust-signature-key = "0.1.0-alpha.28"
-serde_json = "1"
+cargo add aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-signature-key@0.1.0-alpha.28 serde_json@1
 ```
 
 In the example, `from_person_server` stands in for the Person Server and the
@@ -202,7 +201,8 @@ fn now() -> i64 {
 
 ## Compatibility and limits
 
-- Rust 1.99 or later, edition 2024. Pure Rust.
+- Rust 1.99 or later, edition 2024. No C dependencies, but Rust still
+  needs the system linker.
 - It routes nothing and fetches nothing: your HTTP server passes requests to
   `handle`. The host admits issuers before keys are resolved, and supplies
   the clock in Unix seconds and fresh token ids.
