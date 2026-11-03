@@ -47,9 +47,10 @@ cargo publish --workspace --dry-run --locked
 ```
 
 Keep `--dry-run`: this creates and compile-verifies the workspace crate archives
-without uploading them. Check the workspace together so Cargo can stage the
-unpublished sibling dependencies. The Docker CI job runs the same command.
-It verifies archive builds, not registry publication, package tests, or a release.
+without uploading them, so it checks packaging. Run it for the whole workspace,
+so Cargo stages each sibling at the version being packaged rather than the one
+on crates.io. The Docker CI job runs the same command. Publishing to crates.io
+happens only from a tagged release.
 Each archive includes its crate's own `README.md`, the page crates.io shows,
 and its MIT license. The README is also the crate's documentation
 (`#![doc = include_str!("../README.md")]`), so `cargo test --doc` runs its

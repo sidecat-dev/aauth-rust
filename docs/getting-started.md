@@ -1,27 +1,93 @@
 # Get started
 
-This page takes you from a fresh clone to an agent calling an API over TLS on
-your own machine. The example runs entirely on that machine: there is no
-account to create, no DNS change and no port to open to the outside.
+This page takes you from an empty directory to an agent calling an API: first
+in one process, in a project of your own that uses the crates from crates.io,
+then over TLS with the repository's example. Everything runs on your own
+machine: there is no account to create, no DNS change and no port to open to
+the outside.
 
 ## Before you start
 
-Install [git](https://git-scm.com/), [rustup](https://rustup.rs/) and a C
-compiler: `build-essential` on Linux, the Xcode Command Line Tools on macOS, or
-the Visual Studio C++ Build Tools on Windows. The example's TLS library needs
-the compiler.
+Install [rustup](https://rustup.rs/). For step 2, also install
+[git](https://git-scm.com/) and a C compiler: `build-essential` on Linux, the
+Xcode Command Line Tools on macOS, or the Visual Studio C++ Build Tools on
+Windows. The example's TLS library needs the compiler.
 
-## 1. Get the code
+## 1. Add the crates to a project
+
+```sh
+cargo new aauth-hello
+cd aauth-hello
+cargo add aauth-rust-agent@0.1.0-alpha.27 aauth-rust-agent-provider@0.1.0-alpha.27 aauth-rust-core@0.1.0-alpha.27 aauth-rust-jose@0.1.0-alpha.27 aauth-rust-resource@0.1.0-alpha.27 http@1
+```
+
+Replace `src/main.rs` with this program: an Agent Provider issues a token, an
+agent signs a request with it, and a Resource checks the request.
+
+<!-- sample: crates/aauth-rust-resource/examples/library.rs -->
+```rust ignore
+use aauth_rust_agent::Agent;
+use aauth_rust_agent_provider::AgentProvider;
+use aauth_rust_core::{AgentClaims, AgentProviderKeys, Confirmation, VerifiedAgentToken};
+use aauth_rust_jose::SigningKey;
+use aauth_rust_resource::{AgentIdentityResource, Decision};
+use http::Request;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+    let issuer = "https://ap.example";
+    let provider = AgentProvider::new(issuer, "ap-1", SigningKey::generate())?;
+    let agent_key = SigningKey::generate();
+    let token = provider.issue(&AgentClaims {
+        iss: issuer.into(),
+        dwk: "aauth-agent.json".into(),
+        sub: "aauth:Agent@ap.example".into(),
+        jti: "example-issuance-1".into(),
+        iat: now,
+        exp: now + 300,
+        cnf: Confirmation {
+            jwk: agent_key.public_jwk(),
+        },
+        ps: None,
+        parent_agent: None,
+        nbf: None,
+        extra: Default::default(),
+    })?;
+    // This program trusts this provider. A service fetches these documents over HTTPS.
+    let keys = AgentProviderKeys::from_documents(issuer, &provider.metadata()?, &provider.jwks()?)?;
+    let resource = AgentIdentityResource::new(
+        "https://resource.example/whoami",
+        keys,
+        |token: &VerifiedAgentToken, _request: &Request<Vec<u8>>| {
+            token.claims().sub == "aauth:Agent@ap.example"
+        },
+    )?;
+    let agent = Agent::new(agent_key, token)?;
+    let mut request = Request::builder()
+        .uri("https://resource.example/whoami")
+        .body(Vec::new())?;
+    agent.sign(&mut request, now)?;
+    match resource.authorize(&request, now) {
+        Decision::Granted(token) => println!("verified {}", token.claims().sub),
+        other => return Err(format!("request refused: {}", other.into_response().status()).into()),
+    }
+    Ok(())
+}
+```
+
+`cargo run` prints `verified aauth:Agent@ap.example`.
+
+## 2. Run the example over TLS
+
+The repository's `getting-started` example runs the same exchange between two
+HTTPS servers. Its small TLS transport is part of the repository's examples,
+so run it from the source:
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.26
-```
-
-## 2. Run the example
-
-```sh
+git checkout v0.1.0-alpha.27
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
@@ -283,8 +349,8 @@ of the API's clock.
 
 ## Next
 
-- [Install](../README.md#install) shows how to use the crates from your own
-  project.
+- [Install](../README.md#install) lists the crates and the lines to add for
+  each role.
 - [How AAuth works](how-aauth-works.md) explains the roles and tokens, and the
   ways an API can decide who gets in.
 - [Agent](roles/agent.md) and [Resource](roles/resource.md) cover the two

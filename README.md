@@ -19,54 +19,34 @@ does open connections: it fetches other servers' keys and delivers
 revocations over HTTPS, refusing private addresses and other unsafe
 destinations unless you allow them.
 
-## Get started
-
-You need [git](https://git-scm.com/), [rustup](https://rustup.rs/) and a C
-compiler: `build-essential` on Linux, the Xcode Command Line Tools on macOS, or
-the Visual Studio C++ Build Tools on Windows. The TLS library of the examples
-and of `aauth-rust-discovery` uses the compiler; the other libraries are pure
-Rust.
-
-```sh
-git clone https://gitlab.com/sidecat-dev/aauth-rust.git
-cd aauth-rust
-git checkout v0.1.0-alpha.26
-cargo run --locked -p aauth-rust-resource --example getting-started
-```
-
-The first run downloads the pinned Rust 1.99.1 (several hundred MB) and the
-dependencies. The example starts an Agent Provider and an API on loopback
-ports, with TLS, and has an agent call the API.
-[Get started](docs/getting-started.md) walks through the output and the code.
-
 ## Install
 
-The crates are not on crates.io. Your project depends on a release tag, either
-fetched by Cargo from git or in a checkout next to your project. Your project
-needs Rust 1.99 or later.
+The crates are on [crates.io](https://crates.io/crates/aauth-rust). Your
+project needs Rust 1.99 or later. Start a project:
 
-From git, list each crate you use with the repository and the tag:
+<!-- consumer-bootstrap-setup:begin -->
+```sh
+cargo new aauth-service
+cd aauth-service
+```
+<!-- consumer-bootstrap-setup:end -->
 
-<!-- checked: git-dependencies -->
+Add the crates to the `[dependencies]` table of its `Cargo.toml`:
+
+<!-- consumer-bootstrap-dependencies:begin -->
 ```toml
-[dependencies]
-aauth-rust-agent = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
-aauth-rust-agent-provider = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
-aauth-rust-core = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
-aauth-rust-discovery = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
-aauth-rust-jose = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
-aauth-rust-resource = { git = "https://gitlab.com/sidecat-dev/aauth-rust.git", tag = "v0.1.0-alpha.26" }
+aauth-rust-agent = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-resource = "0.1.0-alpha.27"
 http = "1"
 ```
+<!-- consumer-bootstrap-dependencies:end -->
 
-The other crates in the table below are added the same way.
-
-From a checkout, by path: run the commands below from inside the checkout.
-They create a new project next to it, `../aauth-service`, and copy
-`crates/aauth-rust-resource/examples/library.rs` into it as `src/main.rs`.
-That program, shown here, has an Agent Provider issue a token, an agent sign a
-request with it, and a Resource check the request, all in one process. In a
-real API, also serve `resource.metadata()` at
+Replace `src/main.rs` with this program. It has an Agent Provider issue a
+token, an agent sign a request with it, and a Resource check the request, all
+in one process. In a real API, also serve `resource.metadata()` at
 `/.well-known/aauth-resource.json`; the [Resource](docs/roles/resource.md)
 guide shows how.
 
@@ -121,66 +101,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The commands assume the checkout directory is named `aauth-rust`, and stop if
-`../aauth-service` already exists. They copy the checkout's
-`rust-toolchain.toml`, because a path dependency does not choose your
-toolchain, and create a lockfile, because your project does not use the
-checkout's.
-
-<!-- consumer-bootstrap-setup:begin -->
-```sh
-(
-set -eu
-mkdir ../aauth-service
-mkdir ../aauth-service/src
-cp rust-toolchain.toml ../aauth-service/
-cp crates/aauth-rust-resource/examples/library.rs ../aauth-service/src/main.rs
-cat > ../aauth-service/Cargo.toml <<'TOML'
-[package]
-name = "aauth-service"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.99"
-publish = false
-
-[workspace]
-
-[dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-resource" }
-http = "1"
-TOML
-cd ../aauth-service
-rustup show active-toolchain
-test ! -e Cargo.lock
-cargo generate-lockfile
-)
-```
-<!-- consumer-bootstrap-setup:end -->
-
-Then build it, and keep the new `Cargo.lock` with your source:
+Then run it, and keep the new `Cargo.lock` with your source:
 
 <!-- consumer-bootstrap-build:begin -->
 ```sh
-(cd ../aauth-service && cargo build --locked --jobs 2)
+cargo run
 ```
 <!-- consumer-bootstrap-build:end -->
 
-The first build downloads crates from crates.io. To run a Person Server or an
-Access Server as well, and to fetch keys and deliver revocations over HTTPS,
-add these lines to the `[dependencies]` table in
-`../aauth-service/Cargo.toml`, run `cargo generate-lockfile` there again, and
-build:
-
-<!-- checked: role-crates -->
-```toml
-aauth-rust-person-server = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-person-server" }
-aauth-rust-access-server = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-access-server" }
-aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-discovery" }
+```text
+verified aauth:Agent@ap.example
 ```
+
+To run a Person Server or an Access Server as well, and to fetch keys and
+deliver revocations over HTTPS, add these lines too:
+
+```toml
+aauth-rust-person-server = "0.1.0-alpha.27"
+aauth-rust-access-server = "0.1.0-alpha.27"
+aauth-rust-discovery = "0.1.0-alpha.27"
+```
+
+`aauth-rust-discovery` uses a TLS library that needs a C compiler:
+`build-essential` on Linux, the Xcode Command Line Tools on macOS, or the
+Visual Studio C++ Build Tools on Windows. The other crates are pure Rust.
+`aauth-rust = "0.1.0-alpha.27"` brings every crate in one dependency, one module each,
+with a default-on feature per role.
 
 | Crate | What it does | Guide |
 | --- | --- | --- |
@@ -195,6 +141,25 @@ aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust/crate
 | `aauth-rust-r3`, `aauth-rust-budgets` | Operation lists and spending caps, used by the roles | [R3](docs/features/r3.md), [Budgets](docs/features/budgets.md) |
 | `aauth-rust-core`, `aauth-rust-signature-key`, `aauth-rust-jose` | Tokens, HTTP signatures and keys, used by the roles | |
 | `aauth-rust` | All of the crates above in one dependency, one module each, with a default-on feature per role | |
+
+## Build from source
+
+The repository's examples run over TLS on your machine, with no account and no
+outside service. You need [git](https://git-scm.com/), rustup and a C
+compiler.
+
+```sh
+git clone https://gitlab.com/sidecat-dev/aauth-rust.git
+cd aauth-rust
+git checkout v0.1.0-alpha.27
+cargo run --locked -p aauth-rust-resource --example getting-started
+```
+
+The first run downloads the pinned Rust 1.99.1 (several hundred MB) and the
+dependencies. The example starts an Agent Provider and an API on loopback
+ports, with TLS, and has an agent call the API.
+[Get started](docs/getting-started.md) walks through the output and the code,
+and [CONTRIBUTING.md](CONTRIBUTING.md) says how to change the code.
 
 ## Documentation
 
@@ -214,7 +179,7 @@ aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust/crate
 
 ## Status
 
-This is an alpha, version `v0.1.0-alpha.26`. APIs can change from one release
+This is an alpha, version `v0.1.0-alpha.27`. APIs can change from one release
 to the next, and each release's notes list the changes.
 
 The crates implement the core AAuth protocol and HTTP Signature Keys, and the

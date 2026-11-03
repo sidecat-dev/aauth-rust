@@ -8,9 +8,9 @@ keeps its own access rules instead of trusting each person's Person Server.
 
 ```toml
 [dependencies]
-aauth-rust-access-server = "0.1.0-alpha.26"
-aauth-rust-core = "0.1.0-alpha.26"
-aauth-rust-jose = "0.1.0-alpha.26"
+aauth-rust-access-server = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
 http = "1"
 ```
 

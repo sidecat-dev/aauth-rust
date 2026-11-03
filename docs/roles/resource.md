@@ -186,17 +186,16 @@ request:
 The `axum` example does all of this:
 `cargo run --locked -p aauth-rust-resource --example axum`. Its adapter is
 [`examples/framework/mod.rs`](../../crates/aauth-rust-resource/examples/framework/mod.rs).
-To start your own axum service from it, run these commands from inside the
-checkout. They create `../aauth-axum-service` with the example as its
-`src/main.rs`, the adapter beside it, and the dependencies it needs, then run
-it:
+To start your own axum service from it, run these commands from inside a
+checkout of the repository. They create `../aauth-axum-service` with the
+example as its `src/main.rs`, the adapter beside it, and the crates.io
+dependencies it needs, then run it:
 
 <!-- checked: axum-project -->
 ```sh
 (
 set -eu
 mkdir ../aauth-axum-service ../aauth-axum-service/src ../aauth-axum-service/src/framework
-cp rust-toolchain.toml ../aauth-axum-service/
 cp crates/aauth-rust-resource/examples/axum.rs ../aauth-axum-service/src/main.rs
 cp crates/aauth-rust-resource/examples/framework/mod.rs ../aauth-axum-service/src/framework/
 cat > ../aauth-axum-service/Cargo.toml <<'TOML'
@@ -210,11 +209,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-agent-provider" }
-aauth-rust-core = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-core" }
-aauth-rust-jose = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-jose" }
-aauth-rust-resource = { version = "0.1.0-alpha.26", path = "../aauth-rust/crates/aauth-rust-resource" }
+aauth-rust-agent = "0.1.0-alpha.27"
+aauth-rust-agent-provider = "0.1.0-alpha.27"
+aauth-rust-core = "0.1.0-alpha.27"
+aauth-rust-jose = "0.1.0-alpha.27"
+aauth-rust-resource = "0.1.0-alpha.27"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http = "1"
 hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }
@@ -228,8 +227,7 @@ cargo run --locked
 ```
 
 `hyper-util` is there only because the example calls its own server as a
-client; your service may not need it. With git dependencies, replace each
-`path` with the `git` and `tag` shown in the [README](../../README.md#install).
+client; your service may not need it.
 
 `AgentIdentityResource::new(endpoint, ...)` accepts one exact URL;
 `for_origin(origin, ...)` accepts any path on that origin, and your router
