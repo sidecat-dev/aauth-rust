@@ -1,8 +1,4 @@
-//! Host-controlled Agent-token issuance and public discovery documents.
-//! Enrollment and issuance policy are supplied by the application.
-//! The opt-in [`events`] module adds the AAuth Events inbox, and the
-//! [`bootstrap`] module enrollment, refresh and sub-agent issuance for a
-//! hosted provider, and issuance for a self-hosted domain's agents.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 pub mod bootstrap;
 pub mod events;

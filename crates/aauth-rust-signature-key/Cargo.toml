@@ -5,11 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Buffered HTTP Message Signatures with inline, JWT, jkt-jwt, self-jwt, direct JWKS, X.509, cached, and explicit JWKS-URI key conveyance"
 
 [dependencies]

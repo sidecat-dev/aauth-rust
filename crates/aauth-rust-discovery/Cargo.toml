@@ -5,11 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Opt-in HTTPS client for AAuth discovery: admitted metadata and JWKS fetching, a caching key resolver, and revocation cascade delivery"
 
 [dependencies]

@@ -5,11 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "AAuth for Rust: every role and the shared building blocks, re-exported from one crate"
 
 [features]
@@ -46,3 +44,6 @@ aauth-rust-person-server-redb = { version = "0.1.0-alpha.26", path = "../aauth-r
 aauth-rust-access-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-access-server", optional = true }
 aauth-rust-supervision-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-supervision-server", optional = true }
 aauth-rust-discovery = { version = "0.1.0-alpha.26", path = "../aauth-rust-discovery", optional = true }
+
+[dev-dependencies]
+http.workspace = true

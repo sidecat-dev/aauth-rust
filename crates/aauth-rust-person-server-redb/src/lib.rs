@@ -1,39 +1,4 @@
-//! Durable Person Server bindings and issuance through transactional redb storage.
-//!
-//! One database file has one process owner. Clone the store to share its database
-//! with concurrent handlers; drop every clone before reopening. Successful writes
-//! use immediate durability. Files retain internal person identity and all token
-//! lineage indefinitely; hosts own filesystem permissions, backup and capacity.
-//! No signing keys or compact credential bytes are stored.
-//! `aauth_ps_missions` stores an approved mission document and its accepted
-//! updates. A version-1 database that predates that table gains it on open.
-//! This adapter requires Unix and a filesystem supporting directory `sync_all`.
-//! Open synchronizes the database's parent after initializing its file; the host
-//! must durably provision that directory. Other platforms fail closed at open.
-//! Open scans engine page integrity before schema access and catches unwinding
-//! engine panics as `store_unavailable`. Failed engine commits require dropping every
-//! clone and reopening; this adapter does not automatically recover a live
-//! handle. Records are limited to [`MAX_RECORD_BYTES`], but total growth has no
-//! adapter-enforced bound or reclamation API.
-//!
-//! ```
-//! # #[cfg(unix)]
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use aauth_rust_person_server_redb::RedbStore;
-//! let database_path = std::path::Path::new("person.redb");
-//! # let directory = tempfile::tempdir()?;
-//! # let database_path = directory.path().join("person.redb");
-//! let store = RedbStore::open(&database_path)?;
-//! // Give store.clone() to PersonServer::new; clones share transactions.
-//! let path = store.path().to_owned();
-//! drop(store);
-//! let reopened = RedbStore::open(path)?;
-//! # drop(reopened);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! # }
-//! # #[cfg(not(unix))]
-//! # fn main() {}
-//! ```
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
 #[cfg(all(test, unix))]

@@ -5,11 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Ed25519, ECDSA and RSA JWKs, signing keys, external signers and thumbprints, and Ed25519 and ES256 compact JWS primitives for AAuth"
 
 [dependencies]

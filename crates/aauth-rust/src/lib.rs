@@ -1,36 +1,4 @@
-//! AAuth for Rust, every crate of the family in one dependency.
-//!
-//! [AAuth](https://github.com/dickhardt/AAuth) tells an API which software
-//! agent is calling it and on whose behalf. The agent signs every HTTP request
-//! with its own key, and the API checks that signature and the token sent with
-//! it, asking for a token that names the person when it needs one.
-//!
-//! Each role lives in its own module:
-//!
-//! - Agent: [`agent`] signs an agent's requests and checks the tokens it receives.
-//! - Agent Provider: [`agent_provider`] issues Agent tokens and publishes the provider's keys.
-//! - Resource, the API: [`resource`] checks requests before your handler runs.
-//! - Person Server: [`person_server`] issues tokens that name the person an
-//!   agent acts for; [`person_server_redb`] stores its state in a file, on Unix.
-//! - Access Server: [`access_server`] decides access for an API from the API's own rules.
-//! - Supervision Server: [`supervision_server`] approves or refuses an agent's
-//!   requests for the person.
-//!
-//! The roles share [`core`] for tokens, [`signature_key`] for HTTP signatures,
-//! [`jose`] for keys, and [`r3`] and [`budgets`] for operation lists and
-//! spending caps. [`discovery`] is the one module that opens connections: it
-//! fetches other servers' keys and delivers revocations over HTTPS.
-//!
-//! Every module is on by default. Each role module and [`discovery`] has a
-//! Cargo feature of the same name, so a service that only checks requests can
-//! keep just the Resource:
-//!
-//! ```toml
-//! aauth-rust = { version = "0.1.0-alpha.26", default-features = false, features = ["resource"] }
-//! ```
-//!
-//! The guides are in the repository's
-//! [docs](https://gitlab.com/sidecat-dev/aauth-rust/-/tree/main/docs).
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
 /// Keys, thumbprints and compact JWS.

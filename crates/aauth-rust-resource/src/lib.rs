@@ -1,6 +1,4 @@
-//! Agent-identity, person-identity and PS-authorization Resources.
-//! Verification precedes host policy.
-//! The [`events`] module adds AAuth Events subscription and delivery.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 mod budget_gate;
 pub mod events;

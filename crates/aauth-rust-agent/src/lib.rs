@@ -1,10 +1,4 @@
-//! Buffered request signing and immediate PS credential-context verification.
-//! AAuth Events: subscription requests signed with a subscribe token, and
-//! verification of delivered event tokens and bodies.
-//! AAuth Bootstrap: [`BootstrapClient`] enrolls an install's durable key and
-//! refreshes its Agent token, and [`Agent::subagent_request`] asks the Agent
-//! Provider for a sub-agent token.
-//! Transport, response-header extraction and retries belong to hosts.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 mod access;
 mod bootstrap;
