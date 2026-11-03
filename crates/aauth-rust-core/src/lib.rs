@@ -20,7 +20,9 @@ mod tokens;
 pub use discovery::{
     AgentKeyResolver, AgentProviderKeys, TrustedIssuerKeys, metadata_jwks_uri, verify_with_refresh,
 };
-pub use identifiers::{validate_agent_identifier, validate_server_identifier};
+pub use identifiers::{
+    validate_agent_identifier, validate_document_name, validate_server_identifier,
+};
 pub use metadata::{DISPLAY_URI_MEMBERS, DisplayError, MetadataDisplay};
 pub use revocation::{
     CallOutcome, DownstreamReport, RevocationBody, RevocationDirectory, RevocationLedger,
@@ -92,9 +94,11 @@ pub enum TokenError {
     /// Agent subject or parent identifier has invalid syntax.
     InvalidAgentIdentifier,
     #[error(
-        "dwk must be exactly the issuer role's well-known metadata document name, such as aauth-agent.json in an Agent token"
+        "dwk must be exactly the issuer role's well-known metadata document name, such as aauth-agent.json in an Agent token, and any dwk one well-known path segment"
     )]
-    /// A token's dwk does not name its issuer role's metadata document.
+    /// A token's dwk does not name its issuer role's metadata document, a
+    /// key lookup names a document other than the trusted one, or a `dwk`
+    /// is not a well-known document name.
     InvalidDiscoveryDocument,
     /// Discovery metadata has no usable HTTPS JWKS URL, or a display URL such
     /// as `logo_uri` is not `https`; a key refresh cannot fix it.

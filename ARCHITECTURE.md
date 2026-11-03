@@ -49,7 +49,9 @@ access. `hwk` can prove a key but cannot satisfy an AAuth Agent-identity challen
 immutable snapshot of metadata and JWKS for an explicitly configured AP. It
 checks exact metadata issuer equality and selects only the JWT's named key.
 It performs no network requests and makes no trust decision for its host.
-`TrustedIssuerKeys` adds exact role-document binding for PS and Resource snapshots.
+`TrustedIssuerKeys` adds exact metadata-document binding: a snapshot for one
+issuer and one `dwk`, an AAuth role document or any other well-known name a
+`jwks_uri` signer uses, answers for that name only.
 Production hosts implement egress admission and bounded cache/refresh behavior
 before supplying these snapshots or their own resolver, or use
 `aauth-rust-discovery`'s `KeyResolver`, which builds a `TrustedIssuerKeys` from

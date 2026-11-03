@@ -239,7 +239,8 @@ impl<T: AgentKeyResolver + ?Sized> AgentKeyResolver for Box<T> {
     }
 }
 
-/// Immutable metadata/JWKS snapshot for one explicitly trusted issuer and role.
+/// Immutable metadata/JWKS snapshot for one explicitly trusted issuer and
+/// metadata document.
 /// It never fetches token-named endpoints or makes a host trust decision.
 #[derive(Clone)]
 pub struct TrustedIssuerKeys {
@@ -247,28 +248,24 @@ pub struct TrustedIssuerKeys {
     dwk: String,
 }
 impl TrustedIssuerKeys {
-    /// Retain discovery documents for the exact issuer and metadata role the host trusts.
-    /// Supports Agent, Person, Resource, Access and Supervisor well-known document names.
+    /// Retain discovery documents for the exact issuer and metadata document
+    /// the host trusts. `dwk` is any well-known document name
+    /// ([`crate::validate_document_name`]): an AAuth role document such as
+    /// `aauth-person.json`, or another one a `jwks_uri` signer names, such as
+    /// `example-configuration` (Signature-Key, JWKS URI Discovery). The
+    /// snapshot answers only for that name, and each token still requires
+    /// its own role's document in its `dwk` claim.
     ///
     /// # Errors
-    /// Rejects an unknown role, invalid metadata/issuer or malformed/oversized JWKS.
+    /// Rejects a malformed document name, invalid metadata/issuer or
+    /// malformed/oversized JWKS.
     pub fn from_documents(
         issuer: &str,
         dwk: &str,
         metadata: &[u8],
         jwks: &[u8],
     ) -> Result<Self, TokenError> {
-        if ![
-            "aauth-agent.json",
-            "aauth-person.json",
-            "aauth-resource.json",
-            "aauth-access.json",
-            crate::supervision::SUPERVISOR_DOCUMENT,
-        ]
-        .contains(&dwk)
-        {
-            return Err(TokenError::InvalidDiscoveryDocument);
-        }
+        crate::validate_document_name(dwk)?;
         Ok(Self {
             snapshot: AgentProviderKeys::from_documents(issuer, metadata, jwks)?,
             dwk: dwk.into(),
@@ -278,10 +275,10 @@ impl TrustedIssuerKeys {
     pub fn jwks_uri(&self) -> &str {
         self.snapshot.jwks_uri()
     }
-    /// Resolve a key only inside this exact issuer/role trust boundary.
+    /// Resolve a key only inside this exact issuer/document trust boundary.
     ///
     /// # Errors
-    /// Rejects a foreign issuer or role, empty/missing kid, or malformed selected key.
+    /// Rejects a foreign issuer or document name, empty/missing kid, or malformed selected key.
     pub fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
         <Self as AgentKeyResolver>::key(self, issuer, dwk, kid)
     }

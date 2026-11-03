@@ -443,13 +443,49 @@ fn trusted_role_snapshot_never_resolves_an_unconfigured_issuer_or_role() {
         )
         .is_err()
     );
+    // A jwks_uri signer may name any well-known document (Signature-Key,
+    // JWKS URI Discovery, whose example is `example-configuration`). The
+    // snapshot answers only for that name, so a Person token, whose `dwk`
+    // must be `aauth-person.json`, never verifies under it.
+    let named = keys("https://ps.example", "example-configuration", &signer);
     assert!(
-        TrustedIssuerKeys::from_documents(
-            "https://ps.example",
-            "other.json",
-            br#"{"issuer":"https://ps.example","jwks_uri":"https://ps.example/keys"}"#,
-            br#"{"keys":[]}"#
-        )
-        .is_err()
+        named
+            .key("https://ps.example", "example-configuration", "issuer-1")
+            .is_ok()
     );
+    assert_eq!(
+        named
+            .key("https://ps.example", "aauth-person.json", "issuer-1")
+            .unwrap_err(),
+        TokenError::InvalidDiscoveryDocument
+    );
+    assert_eq!(
+        verify(
+            "person",
+            &signed("person", &payload("person"), &signer),
+            &named,
+            NOW
+        )
+        .unwrap_err(),
+        TokenError::InvalidDiscoveryDocument
+    );
+    let mut renamed = payload("person");
+    renamed["dwk"] = json!("example-configuration");
+    assert_eq!(
+        verify("person", &signed("person", &renamed, &signer), &named, NOW).unwrap_err(),
+        TokenError::InvalidDiscoveryDocument
+    );
+    for bad in ["", ".", "..", "a/b", "../aauth-person.json", "doc?x", "doc%2F"] {
+        assert_eq!(
+            TrustedIssuerKeys::from_documents(
+                "https://ps.example",
+                bad,
+                br#"{"issuer":"https://ps.example","jwks_uri":"https://ps.example/keys"}"#,
+                br#"{"keys":[]}"#
+            )
+            .err(),
+            Some(TokenError::InvalidDiscoveryDocument),
+            "{bad:?}"
+        );
+    }
 }

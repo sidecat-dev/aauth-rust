@@ -317,6 +317,18 @@ SPECIFICATIONS.md.
   answers so. An issuer it does not trust stays `403 unsupported_iss`
   (Supervision). The Resource's usage endpoint answers these as any signed
   request is answered, with `Signature-Error`.
+- **Any document name under `jwks_uri`.** Signature-Key JWKS URI Discovery
+  (line 454) makes `dwk` a metadata document name under `/.well-known/`, and
+  its example (line 479) names `example-configuration`. `TrustedIssuerKeys`
+  therefore takes any name `validate_document_name` accepts, one path
+  segment of ASCII letters, digits, `-`, `_` and `.` other than `.` and
+  `..`, the rule `aauth-rust-discovery` applies before fetching. The role
+  checks are not in the snapshot. A snapshot answers only for the name it
+  was built with. Each token requires its own role's document in its `dwk`
+  claim (protocol lines 515, 738, 861 and 1773). Each endpoint that a server calls in its own
+  right requires that server's role document (protocol line 2187), such as
+  `aauth-person.json` at the Access Server and `aauth-supervisor.json` at a
+  supervised Person Server.
 - **What an Agent signs for a Resource.** Covered Components (line 2216): an
   agent learns further components "from server metadata or from an
   `invalid_input` error response that includes `required_input`". The library

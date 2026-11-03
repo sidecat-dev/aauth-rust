@@ -1,6 +1,6 @@
 //! The admitted HTTPS client every fetch and revocation goes through.
 use crate::http1::{self, WireError};
-use aauth_rust_core::{TokenError, validate_server_identifier};
+use aauth_rust_core::{TokenError, validate_document_name, validate_server_identifier};
 use aauth_rust_jose::strict_json;
 use aauth_rust_signature_key::{
     DiscoveryFetch, EgressLimits, Error as AdmissionError, FetchedHeaders, MAX_DISCOVERY_RESPONSE,
@@ -522,9 +522,7 @@ impl DiscoveryClient {
             error,
         };
         validate_server_identifier(issuer).map_err(document_error)?;
-        if !document_name(dwk) {
-            return Err(document_error(TokenError::InvalidDiscoveryDocument));
-        }
+        validate_document_name(dwk).map_err(document_error)?;
         let url = format!("{issuer}/.well-known/{dwk}");
         let fetched = self.get(DiscoveryFetch::Metadata { url: &url })?;
         let document = strict_json(fetched.body())
@@ -876,15 +874,6 @@ fn host_port(url: &str) -> Result<(String, u16), DiscoveryError> {
 }
 
 /// The Signature-Key `dwk` grammar: one safe path segment under `/.well-known/`.
-pub(crate) fn document_name(dwk: &str) -> bool {
-    !dwk.is_empty()
-        && dwk != "."
-        && dwk != ".."
-        && dwk
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-}
-
 fn is_https(url: &str) -> bool {
     url.get(..8)
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))

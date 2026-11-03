@@ -28,6 +28,26 @@ pub fn validate_server_identifier(s: &str) -> Result<(), TokenError> {
     }
     Ok(())
 }
+/// Validate a `dwk` metadata document name: one path segment under
+/// `/.well-known/` of ASCII letters, digits, `-`, `_` and `.`, and not `.`
+/// or `..`. Any such name is a document a `jwks_uri` signer may name
+/// (Signature-Key, JWKS URI Discovery), such as `example-configuration`;
+/// which name an AAuth role requires is checked where that role is.
+///
+/// # Errors
+/// Returns `InvalidDiscoveryDocument` for any other name.
+pub fn validate_document_name(dwk: &str) -> Result<(), TokenError> {
+    if dwk.is_empty()
+        || dwk == "."
+        || dwk == ".."
+        || !dwk
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+    {
+        return Err(TokenError::InvalidDiscoveryDocument);
+    }
+    Ok(())
+}
 /// Validate `aauth:local@domain` syntax without inferring delegation authority.
 ///
 /// A local part is a top-level name without `+`, or a sub-agent's name: a

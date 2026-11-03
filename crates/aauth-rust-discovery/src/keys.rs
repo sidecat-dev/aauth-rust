@@ -1,7 +1,8 @@
 //! A key resolver that discovers trusted signers' keys over the admitted client.
-use crate::client::{DiscoveryClient, DiscoveryError, document_name};
+use crate::client::{DiscoveryClient, DiscoveryError};
 use aauth_rust_core::{
-    AgentKeyResolver, TokenError, TrustedIssuerKeys, metadata_jwks_uri, validate_server_identifier,
+    AgentKeyResolver, TokenError, TrustedIssuerKeys, metadata_jwks_uri, validate_document_name,
+    validate_server_identifier,
 };
 use aauth_rust_jose::{Jwk, Jws, strict_json};
 use aauth_rust_signature_key::{
@@ -355,9 +356,7 @@ impl KeyResolver {
         }
         let source = Source::Issuer { issuer, dwk };
         validate_server_identifier(issuer).map_err(|error| source.document_error(error))?;
-        if !document_name(dwk) {
-            return Err(source.document_error(TokenError::InvalidDiscoveryDocument));
-        }
+        validate_document_name(dwk).map_err(|error| source.document_error(error))?;
         Ok(source)
     }
 
