@@ -3,6 +3,25 @@
 version = 4
 
 [[package]]
+name = "aauth-rust"
+version = "0.1.0-alpha.26"
+dependencies = [
+ "aauth-rust-access-server",
+ "aauth-rust-agent",
+ "aauth-rust-agent-provider",
+ "aauth-rust-budgets",
+ "aauth-rust-core",
+ "aauth-rust-discovery",
+ "aauth-rust-jose",
+ "aauth-rust-person-server",
+ "aauth-rust-person-server-redb",
+ "aauth-rust-r3",
+ "aauth-rust-resource",
+ "aauth-rust-signature-key",
+ "aauth-rust-supervision-server",
+]
+
+[[package]]
 name = "aauth-rust-access-server"
 version = "0.1.0-alpha.26"
 dependencies = [
