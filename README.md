@@ -202,3 +202,5 @@ both Apache-2.0 OR ISC OR MIT. To find the platform's root certificates,
 `rustls-native-certs` uses `openssl-probe` (MIT OR Apache-2.0) on Unix, which
 only locates certificate files and links no OpenSSL, `security-framework`
 (MIT OR Apache-2.0) on macOS, and `schannel` (MIT) on Windows.
+
+[![Built by Sidecat](https://gitlab.com/sidecat-dev/aauth-rust/-/raw/main/assets/built-by-sidecat-240.png)](https://sidecat.dev)

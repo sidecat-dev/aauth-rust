@@ -94,3 +94,5 @@ Alpha: APIs may change before 1.0.
 ## License
 
 MIT
+
+[![Built by Sidecat](https://gitlab.com/sidecat-dev/aauth-rust/-/raw/main/assets/built-by-sidecat-240.png)](https://sidecat.dev)
