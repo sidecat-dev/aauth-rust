@@ -24,7 +24,7 @@ thiserror.workspace = true
 [dev-dependencies]
 aauth-rust-agent.workspace = true
 aauth-rust-agent-provider.workspace = true
-aauth-rust-access-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-access-server" }
-aauth-rust-person-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-person-server" }
-aauth-rust-resource = { version = "0.1.0-alpha.26", path = "../aauth-rust-resource" }
+aauth-rust-access-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-access-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-person-server" }
+aauth-rust-resource = { version = "0.1.0-alpha.27", path = "../aauth-rust-resource" }
 rcgen = "0.13"

@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-alpha.26"
+version = "0.1.0-alpha.27"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -12,13 +12,13 @@ keywords = ["aauth", "authorization", "agent", "ed25519", "http-signatures"]
 categories = ["authentication", "cryptography"]
 
 [workspace.dependencies]
-aauth-rust-jose = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-jose" }
-aauth-rust-signature-key = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-signature-key" }
-aauth-rust-core = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-core" }
-aauth-rust-agent = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-agent" }
-aauth-rust-agent-provider = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-agent-provider" }
-aauth-rust-budgets = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-budgets" }
-aauth-rust-r3 = { version = "0.1.0-alpha.26", path = "crates/aauth-rust-r3" }
+aauth-rust-jose = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-jose" }
+aauth-rust-signature-key = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-signature-key" }
+aauth-rust-core = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-core" }
+aauth-rust-agent = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-agent" }
+aauth-rust-agent-provider = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-agent-provider" }
+aauth-rust-budgets = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-budgets" }
+aauth-rust-r3 = { version = "0.1.0-alpha.27", path = "crates/aauth-rust-r3" }
 base64 = "0.22"
 chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }

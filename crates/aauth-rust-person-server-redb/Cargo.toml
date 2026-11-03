@@ -11,7 +11,7 @@ categories.workspace = true
 description = "Transactional pure Rust durable storage for AAuth Person Server bindings and exact credential lineage"
 
 [dependencies]
-aauth-rust-person-server = { version = "0.1.0-alpha.26", path = "../aauth-rust-person-server" }
+aauth-rust-person-server = { version = "0.1.0-alpha.27", path = "../aauth-rust-person-server" }
 redb = "4.4"
 serde.workspace = true
 serde_json.workspace = true
