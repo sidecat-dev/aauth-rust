@@ -80,6 +80,9 @@ sig=("@method" "@authority" "@path" "content-digest" "content-type" "signature-k
 next: a Person token from the Person Server
 ```
 
+The `created` time is when the request was signed, so it differs on every
+run.
+
 `Agent::new` refuses a token whose confirmation key is not the agent's own.
 
 ## Why use it
