@@ -50,9 +50,12 @@ Keep `--dry-run`: this creates and compile-verifies the workspace crate archives
 without uploading them. Check the workspace together so Cargo can stage the
 unpublished sibling dependencies. The Docker CI job runs the same command.
 It verifies archive builds, not registry publication, package tests, or a release.
-Each archive includes the self-contained `PACKAGE-README.md` and its crate's
-MIT license. Keep package documentation usable without the surrounding checkout;
-workspace-only commands and guide links belong in the root `README.md`.
+Each archive includes its crate's own `README.md`, the page crates.io shows,
+and its MIT license. The README is also the crate's documentation
+(`#![doc = include_str!("../README.md")]`), so `cargo test --doc` runs its
+examples. Keep it usable without the surrounding checkout: absolute links
+only, no hidden `#` lines (crates.io shows them), and workspace-only commands
+in the root `README.md`.
 
 Describe the observable change, source clause, tests, and any interpretation or
 remaining limitation in the merge request. Update public docs when supported

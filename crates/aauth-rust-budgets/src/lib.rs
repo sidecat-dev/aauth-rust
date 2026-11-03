@@ -1,9 +1,4 @@
-//! AAuth Budgets profile (`draft-hardt-aauth-budgets` at `70d67375`).
-//!
-//! Pure protocol rules for the budget object, narrowing, response header,
-//! per-token cap, person ledger, and usage counters. Role crates call these
-//! types when a host opts in. This crate does not fetch metadata or open a
-//! network connection.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
 mod agent;

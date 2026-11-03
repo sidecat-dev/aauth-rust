@@ -1,7 +1,4 @@
-//! AAuth Agent, Person, Resource and Auth JWT trust verification, plus the
-//! Events subscribe and event tokens in [`events`] and the Supervision wire
-//! values in [`supervision`].
-//! No enrollment, HTTP proof verification or application admission policy.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 pub mod capabilities;
 pub mod continuation;

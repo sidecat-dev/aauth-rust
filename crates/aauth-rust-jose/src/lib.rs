@@ -1,6 +1,4 @@
-//! Ed25519, P-256, P-384 and RSA JWKs and signing keys, Ed25519 and ES256
-//! compact JWS, and signing through a caller's [`ExternalSigner`]. No HTTP,
-//! discovery or role policy.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 mod json;
 pub use json::strict_json;

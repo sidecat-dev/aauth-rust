@@ -1,48 +1,4 @@
-//! Core-scope Access Server with host-supplied issuer trust and policy.
-//!
-//! This buffered role verifies a PS service proof plus Agent, Resource and actual
-//! presented credentials before policy. It performs no discovery fetch or HTTP
-//! transport. Hosts admit issuers before key resolution and bound request collection.
-//! Explicit `with_deferred` adds bounded claims, clarification, interaction,
-//! approval and payment continuations. One-level parent-mediated sub-agents use
-//! the parent's policy identity and the child's credential key. A passed-through
-//! `upstream_token` is verified per Upstream Token Verification before policy and
-//! bounds the issued token. A deferred request whose resource token, or upstream
-//! token when chained, is revoked while it waits ends with the polling error
-//! `revoked`. A mission-bound request is evaluated against its mission by the
-//! Person Server; this AS copies the `mission_s256` it verified on the Resource
-//! and presented tokens into the Auth token. The presented token, which the
-//! Person Server capped at the mission's expiry, bounds that token.
-//! Explicit `with_r3` issues R3 Auth tokens for class documents: this AS
-//! fetches `r3_uri` as itself, refuses bytes that do not hash to `r3_s256`,
-//! and grants operations directly. Per-call proposals are refused.
-//! A complete configuration that publishes metadata and refuses grants until
-//! application trust and resource policy are supplied:
-//!
-//! ```
-//! use aauth_rust_access_server::{AccessServer, AuthorizationRequest, Config, PolicyError};
-//! use aauth_rust_core::{AgentKeyResolver, TokenError};
-//! use aauth_rust_jose::{Jwk, SigningKey};
-//! use http::Request;
-//! struct AdmittedKeys;
-//! impl AgentKeyResolver for AdmittedKeys {
-//!     fn key(&self, _: &str, _: &str, _: &str) -> Result<Jwk, TokenError> {
-//!         Err(TokenError::UntrustedIssuer)
-//!     }
-//! }
-//! let server = AccessServer::new(
-//!     Config::new("https://as.example", "as-1", SigningKey::generate()),
-//!     AdmittedKeys,
-//!     |_: &AuthorizationRequest| Err(PolicyError::Denied),
-//!     || 1_792_526_400, // Host trusted clock: Unix seconds.
-//!     || "unique-host-generated-token-id".to_owned(),
-//! )?;
-//! let request = Request::builder()
-//!     .uri("https://as.example/.well-known/aauth-access.json")
-//!     .body(Vec::new())?;
-//! assert_eq!(server.handle(&request).status(), 200);
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 mod continuation;
 mod r3;

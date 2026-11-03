@@ -1,16 +1,4 @@
-//! AAuth Rich Resource Requests (`draft-hardt-aauth-r3`).
-//!
-//! Vocabulary grammar, whole-set algebra, R3 documents, direct grants,
-//! per-call proposals, operation access hints, authoritative definitions, and
-//! the R3 claims of Resource and Auth tokens. A host registers one codec per
-//! vocabulary; codecs for the seven standard vocabularies are included.
-//! Definition parsers derive MCP, OpenAPI, AsyncAPI, gRPC descriptor, WSDL,
-//! and OData CSDL operations. OData metadata does not prove HTTP methods.
-//! GraphQL introspection is refused because a schema alone supplies no
-//! operation identity. gRPC refuses hosted `.proto` text and live reflection.
-//! A signed
-//! artifact fetcher uses a trusted host HTTPS adapter. This crate does not
-//! fetch a definition, decide policy, execute a call, or bind a token to a request.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 
 mod annotation;

@@ -1,6 +1,4 @@
-//! Buffered RFC 9421 request proofs with `hwk`, `jwt`, `jkt-jwt`, `self-jwt`, direct `jwks`, `x509`, `cached`, and explicit `jwks_uri` schemes,
-//! and response signatures that name their signer in a `Signature-Key` response field.
-//! Verification proves a key; the accepting role supplies identity and policy.
+#![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 mod cache;
 mod client;

@@ -5,11 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
-documentation = "https://gitlab.com/sidecat-dev/aauth-rust"
 description = "Host-controlled AAuth Agent token issuance, public discovery documents, the Events inbox, and Bootstrap enrollment, refresh and sub-agent issuance"
 
 [dependencies]

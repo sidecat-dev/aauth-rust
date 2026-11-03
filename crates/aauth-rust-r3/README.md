@@ -1,31 +1,95 @@
-# Rich Resource Requests library
+# aauth-rust-r3
 
-`aauth-rust-r3` provides the data and verification layer for describing which
-operations an authorization permits. A service can register an operation
-vocabulary, parse a document or per-call proposal, check a grant against that
-document, and compare the proposed parameters with the actual call.
+Rich Resource Requests (R3) for AAuth: describe what an API offers as named
+operations, such as MCP tools or OpenAPI operations, so a person approves
+specific operations instead of broad scopes, and the API admits only calls to
+operations that were granted. The Resource, Person Server and Access Server
+crates use it when you turn R3 on; use it directly to turn your API's own
+definition into operations and check calls against a grant.
 
-The crate includes operation codecs for MCP, OpenAPI, AsyncAPI, GraphQL, WSDL,
-OData and gRPC. Definition parsers cover MCP tools, OpenAPI JSON, AsyncAPI,
-gRPC `FileDescriptorSet`, self-contained WSDL 1.1, and OData CSDL 4.0.
-GraphQL introspection is refused because it does not identify an executable
-operation. gRPC refuses hosted `.proto` text and live reflection. OData
-metadata does not prove HTTP methods. The JSON Schema adapter lacks RE2
-pattern validation.
+```toml
+[dependencies]
+aauth-rust-r3 = "0.1.0-alpha.26"
+```
 
-Resource/Auth token helpers verify signed R3 claims and exact artifact digests.
-The artifact fetcher requires the host to supply its trusted HTTPS transport
-and egress policy. It checks PS/AS signing identity and bounded response bytes;
-it does not discover an endpoint or make a consent decision.
+```rust
+use aauth_rust_r3::{GrantedOperations, McpCodec, Operation, ToolsListPage, ToolsListSnapshot};
 
-Proposals support an optional object-valued `result`. Optional display/detail,
-excerpt and media type preserve absent and present-empty values separately.
-Hosts must retain the original bytes used by a signed reference: parsing and
-serializing an equivalent JSON value does not preserve arbitrary whitespace,
-member order or its digest. Release-gating policy and required human-readable
-explanations remain host responsibilities.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The `result` of your MCP server's tools/list response.
+    let tools = br#"{"tools":[
+        {"name":"calendar.read","inputSchema":{"type":"object"}},
+        {"name":"calendar.write","inputSchema":{"type":"object"}}
+    ]}"#;
+    let pages = ToolsListSnapshot::new(vec![ToolsListPage::initial(tools)]);
+    let definition = McpCodec::parse_definition("https://api.example/mcp", &pages)?;
+    let offered = definition.operations();
+    for operation in offered.operations()? {
+        println!("{}", String::from_utf8(operation.json()?)?);
+    }
 
-This crate alone does not run an R3 exchange. The Resource, Person Server and
-Access Server crates wire it into their roles; the [R3 guide](../../docs/features/r3.md)
-shows how to turn it on, and its
-[Limits](../../docs/features/r3.md#limits) say what is not implemented.
+    // The person approved reading the calendar, and nothing else.
+    let mcp = McpCodec::vocabulary()?;
+    let read = Operation::new(&mcp, br#"{"tool":"calendar.read"}"#)?;
+    let write = Operation::new(&mcp, br#"{"tool":"calendar.write"}"#)?;
+    let granted = GrantedOperations::new(&mcp, &[read.clone()])?;
+    assert!(granted.is_subset_of(&offered)?);
+
+    // Each call is admitted only if its operation was granted.
+    assert!(granted.contains(&read)?);
+    assert!(!granted.contains(&write)?);
+    Ok(())
+}
+```
+
+```text
+{"tool":"calendar.read"}
+{"tool":"calendar.write"}
+```
+
+## Why use it
+
+- **Seven vocabularies included.** Codecs for MCP, OpenAPI, AsyncAPI, GraphQL,
+  gRPC, WSDL and OData, and parsers that derive operations from MCP tool
+  lists, OpenAPI and AsyncAPI documents, gRPC descriptor sets, WSDL 1.1 and
+  OData CSDL. You can register your own vocabulary with the `Codec` trait.
+- **Set rules, not string matching.** Operations compare by the vocabulary's
+  rules: subset, union, disjointness and membership. A grant that names an
+  operation the API never offered is detectable before it is used.
+- **Records that cannot drift.** R3 documents and per-call proposals are
+  identified by the hash of their exact bytes, so what the person approved is
+  what the API checks. Keep the original bytes: re-serialized JSON does not
+  hash the same.
+
+## Compatibility and limits
+
+- Rust 1.99 or later, edition 2024. Pure Rust.
+- It fetches nothing. The signed artifact fetcher runs over an HTTPS
+  transport your host supplies.
+- GraphQL introspection is refused, because a schema alone names no
+  operation. gRPC needs a descriptor set: hosted `.proto` text and live
+  reflection are refused. OData metadata does not prove HTTP methods. The
+  JSON Schema checks do not validate `pattern`.
+- It does not decide policy or run a call: the Resource does, and the person
+  decides at their Person Server.
+
+## Specifications
+
+Implements Rich Resource Requests (`draft-hardt-aauth-r3`), from the
+[AAuth drafts, editor's copy of 3 October 2026](https://github.com/dickhardt/AAuth/tree/70d67375deb0bb002af7da0711fc58f6e8926e7e).
+
+## Links
+
+- [API documentation](https://docs.rs/aauth-rust-r3)
+- [R3 guide](https://gitlab.com/sidecat-dev/aauth-rust/-/blob/main/docs/features/r3.md): turning R3 on in each role, and its limits
+- [Repository](https://gitlab.com/sidecat-dev/aauth-rust)
+- [Issues](https://gitlab.com/sidecat-dev/aauth-rust/-/issues)
+- [Changelog](https://gitlab.com/sidecat-dev/aauth-rust/-/releases)
+
+## Status
+
+Alpha: APIs may change before 1.0.
+
+## License
+
+MIT
