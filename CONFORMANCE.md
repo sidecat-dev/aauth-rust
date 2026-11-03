@@ -16,11 +16,11 @@ their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
 | Item | Value |
 | --- | --- |
-| Suite | map at `dbf640d`; the run used `70bf78d`, which has the same suite digest |
+| Suite | map at `ff45ab3`; the run used `afcbb3b`, which has the same suite digest |
 | Library | `920519b`, tag `v0.1.0-alpha.25` |
 | Roles | 24 of 24 offered, all passed |
-| Assertions | 1,601 pass, 0 fail, 0 not claimed |
-| Suite clauses | 337 of 337 pass |
+| Assertions | 1,606 pass, 0 fail, 0 not claimed |
+| Suite clauses | 338 of 338 pass |
 
 ## What it does not say
 
