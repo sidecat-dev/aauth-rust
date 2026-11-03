@@ -23,16 +23,16 @@ sequenceDiagram
     participant Agent
     participant API as API (Resource)
     participant PS as Person Server
-    Agent->>PS: POST /person {"resource": API}
-    Note over PS: Policy::bind_person: which person is this agent for?
-    PS-->>Agent: Person token
-    Agent->>API: GET /notes, signed with the Person token
-    API-->>Agent: 401, requirement=auth-token, Resource token
-    Agent->>PS: POST /token {"resource_token", "presented_token"}
-    Note over PS: Policy::authorize: does the person allow these scopes?
-    PS-->>Agent: Auth token
-    Agent->>API: GET /notes, signed with the Auth token
-    API-->>Agent: 200
+    Agent->>PS : POST /person {"resource": API}
+    Note over PS : your Policy's bind_person decides which person this agent is for
+    PS-->>Agent : Person token
+    Agent->>API : GET /notes, signed with the Person token
+    API-->>Agent : 401, requirement=auth-token, Resource token
+    Agent->>PS : POST /token {"resource_token", "presented_token"}
+    Note over PS : your Policy's authorize decides whether the person allows these scopes
+    PS-->>Agent : Auth token
+    Agent->>API : GET /notes, signed with the Auth token
+    API-->>Agent : 200
 ```
 
 ## Smallest working code

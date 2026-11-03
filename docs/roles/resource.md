@@ -23,9 +23,9 @@ Crate: `aauth-rust-resource`. Terms are defined in
 ```mermaid
 flowchart TD
     A[Request arrives] --> B{Sent to the configured origin?}
-    B -->|no| R1[401 Signature-Error: invalid_signature]
+    B -->|no| R1[401 Signature-Error with invalid_signature]
     B -->|yes| C{Signed?}
-    C -->|no| R2[401 AAuth-Requirement: requirement=agent-token]
+    C -->|no| R2[401 AAuth-Requirement with requirement=agent-token]
     C -->|yes| D{Signature and token valid?}
     D -->|no| R3[401 Signature-Error naming the reason]
     D -->|yes| E{Your policy}

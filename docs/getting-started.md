@@ -66,15 +66,15 @@ sequenceDiagram
     participant Agent
     participant AP as Agent Provider
     participant API as API (Resource)
-    API->>AP: GET /.well-known/aauth-agent.json
-    API->>AP: GET /.well-known/jwks.json
-    Note over Agent,AP: The provider issues an Agent token<br/>that names the agent's public key
-    Agent->>API: GET /.well-known/aauth-resource.json
-    API-->>Agent: 200, the API's metadata
-    Agent->>API: GET /hello, no signature
-    API-->>Agent: 401, AAuth-Requirement: requirement=agent-token
-    Agent->>API: GET /hello, signed, with the Agent token
-    API-->>Agent: 200 hello, aauth:assistant@ap.example
+    API->>AP : GET /.well-known/aauth-agent.json
+    API->>AP : GET /.well-known/jwks.json
+    Note over Agent,AP : The provider issues an Agent token<br/>that names the agent's public key
+    Agent->>API : GET /.well-known/aauth-resource.json
+    API-->>Agent : 200, the API's metadata
+    Agent->>API : GET /hello, no signature
+    API-->>Agent : 401, AAuth-Requirement with requirement=agent-token
+    Agent->>API : GET /hello, signed, with the Agent token
+    API-->>Agent : 200, hello and the agent's name
 ```
 
 The four lines of output are four requests:

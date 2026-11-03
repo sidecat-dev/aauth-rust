@@ -18,15 +18,15 @@ sequenceDiagram
     participant Agent
     participant API as API (Resource)
     participant PS as Person Server
-    Agent->>API: request, signed with the Person token
-    API-->>Agent: 401, Resource token offering budget: 500 (USD, 2 decimals)
-    Agent->>PS: POST /token
-    Note over PS: grants at most its cap: 200
-    PS-->>Agent: Auth token with budget: 200
-    Agent->>API: request, signed with the Auth token
-    API-->>Agent: 200, AAuth-Budget: cost=25, remaining=175
-    Agent->>API: more requests ...
-    API-->>Agent: 401, requirement=auth-token, reason=budget-exhausted
+    Agent->>API : request, signed with the Person token
+    API-->>Agent : 401, Resource token offering a budget of 500 (USD, 2 decimals)
+    Agent->>PS : POST /token
+    Note over PS : grants at most its cap of 200
+    PS-->>Agent : Auth token with a budget of 200
+    Agent->>API : request, signed with the Auth token
+    API-->>Agent : 200, AAuth-Budget with cost=25, remaining=175
+    Agent->>API : more requests ...
+    API-->>Agent : 401, requirement=auth-token, reason=budget-exhausted
 ```
 
 ## Smallest working code

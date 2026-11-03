@@ -22,7 +22,7 @@ flowchart TD
     C --> D{Answer}
     D -->|allow| E[Issued, narrowed to the answer's scope and expiry]
     D -->|deny| F[403 access_denied]
-    D -->|ask, defer, or no answer| G[Held: the agent gets 202 and polls]
+    D -->|ask, defer, or no answer| G[Held, so the agent gets 202 and polls]
     D -->|a question for the agent| H[The agent gets requirement=clarification]
     G --> I[Your service asks the person, then calls resolve_supervision]
     I --> J[The agent's next poll gets the result]

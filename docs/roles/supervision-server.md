@@ -25,15 +25,15 @@ sequenceDiagram
     participant Agent
     participant PS as Person Server
     participant SS as Supervision Server
-    Agent->>PS: POST /person (or /token, a permission, a mission)
-    Note over PS: checks the request as usual
-    PS->>SS: POST /connect (first time only)
-    SS-->>PS: connected
-    PS->>SS: POST /decision: this act, for this person and agent
-    Note over SS: your policy: allow, deny or ask
-    SS-->>PS: allow (signed)
-    PS-->>Agent: Person token
-    PS->>SS: POST /event: person_token.issued
+    Agent->>PS : POST /person (or /token, a permission, a mission)
+    Note over PS : checks the request as usual
+    PS->>SS : POST /connect (first time only)
+    SS-->>PS : connected
+    PS->>SS : POST /decision for this act, this person and this agent
+    Note over SS : your policy answers allow, deny or ask
+    SS-->>PS : allow (signed)
+    PS-->>Agent : Person token
+    PS->>SS : POST /event, person_token.issued
 ```
 
 When the answer is `ask`, or the server cannot be reached, the Person Server

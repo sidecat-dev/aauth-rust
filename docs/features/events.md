@@ -25,16 +25,16 @@ sequenceDiagram
     participant Agent
     participant AP as Agent Provider (inbox)
     participant API as API (Resource)
-    Agent->>AP: may I subscribe at API? (your own request)
-    AP-->>Agent: subscribe token (eid, API, the agent's key)
-    Agent->>API: POST /subscribe, signed with the subscribe token
-    API-->>Agent: 200, subscription registered
-    Note over API: later, something happens
-    API->>AP: GET /.well-known/aauth-agent.json (event_endpoint)
-    API->>AP: POST event_endpoint, event token and body, signed by the API
-    AP-->>API: 202 {"remaining_uses": n}
-    AP->>Agent: the event (your own delivery)
-    Note over Agent: EventSubscriptions::receive checks it
+    Agent->>AP : may I subscribe at API? (your own request)
+    AP-->>Agent : subscribe token (eid, API, the agent's key)
+    Agent->>API : POST /subscribe, signed with the subscribe token
+    API-->>Agent : 200, subscription registered
+    Note over API : later, something happens
+    API->>AP : GET /.well-known/aauth-agent.json (event_endpoint)
+    API->>AP : POST event_endpoint, event token and body, signed by the API
+    AP-->>API : 202 {"remaining_uses": n}
+    AP->>Agent : the event (your own delivery)
+    Note over Agent : receive on EventSubscriptions checks it
 ```
 
 ## The code

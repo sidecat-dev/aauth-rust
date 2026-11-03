@@ -19,18 +19,18 @@ sequenceDiagram
     participant API as API (Resource)
     participant PS as Person Server
     participant AS as Access Server
-    Agent->>PS: POST /person {"resource": API}
-    PS-->>Agent: Person token
-    Agent->>API: GET /notes, signed with the Person token
-    API-->>Agent: 401, requirement=auth-token, Resource token addressed to the AS
-    Agent->>PS: POST /token {"resource_token", "presented_token"}
-    Note over PS: Policy::consent: does the person agree?
-    PS->>AS: POST /token, signed by the PS, with the agent's tokens
-    Note over AS: your policy: does the Resource allow it?
-    AS-->>PS: Auth token
-    PS-->>Agent: Auth token
-    Agent->>API: GET /notes, signed with the Auth token
-    API-->>Agent: 200
+    Agent->>PS : POST /person {"resource": API}
+    PS-->>Agent : Person token
+    Agent->>API : GET /notes, signed with the Person token
+    API-->>Agent : 401, requirement=auth-token, Resource token addressed to the AS
+    Agent->>PS : POST /token {"resource_token", "presented_token"}
+    Note over PS : your Policy's consent decides whether the person agrees
+    PS->>AS : POST /token, signed by the PS, with the agent's tokens
+    Note over AS : your policy decides whether the Resource allows it
+    AS-->>PS : Auth token
+    PS-->>Agent : Auth token
+    Agent->>API : GET /notes, signed with the Auth token
+    API-->>Agent : 200
 ```
 
 Three parties each make a decision: the Person Server asks the person, the

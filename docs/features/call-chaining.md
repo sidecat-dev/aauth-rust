@@ -17,18 +17,18 @@ sequenceDiagram
     participant Orders as Orders (intermediary)
     participant PS as Person Server
     participant Inventory
-    Agent->>Orders: POST /orders, signed with an Auth token
-    Note over Orders: the caller's Auth token is the upstream token
-    Orders->>PS: POST /person {"resource": Inventory, "upstream_token"}
-    PS-->>Orders: Person token for Inventory
-    Orders->>Inventory: POST /reserve, signed with that Person token
-    Inventory-->>Orders: 401, requirement=auth-token, Resource token
-    Orders->>PS: POST /token {"resource_token", "presented_token", "upstream_token"}
-    Note over PS: Policy::authorize_upstream
-    PS-->>Orders: Auth token for Inventory
-    Orders->>Inventory: POST /reserve, signed with the Auth token
-    Inventory-->>Orders: 200
-    Orders-->>Agent: 200
+    Agent->>Orders : POST /orders, signed with an Auth token
+    Note over Orders : the caller's Auth token is the upstream token
+    Orders->>PS : POST /person {"resource": Inventory, "upstream_token"}
+    PS-->>Orders : Person token for Inventory
+    Orders->>Inventory : POST /reserve, signed with that Person token
+    Inventory-->>Orders : 401, requirement=auth-token, Resource token
+    Orders->>PS : POST /token {"resource_token", "presented_token", "upstream_token"}
+    Note over PS : your Policy's authorize_upstream decides
+    PS-->>Orders : Auth token for Inventory
+    Orders->>Inventory : POST /reserve, signed with the Auth token
+    Inventory-->>Orders : 200
+    Orders-->>Agent : 200
 ```
 
 The intermediary signs every downstream request with its own key and its own

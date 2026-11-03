@@ -126,17 +126,17 @@ sequenceDiagram
     participant Agent
     participant Resource
     participant PS as Person Server
-    Agent->>Resource: request, unsigned
-    Resource-->>Agent: 401, AAuth-Requirement: requirement=person-token
-    Agent->>PS: POST /person (signed with the Agent token)
-    PS-->>Agent: Person token for this Resource
-    Agent->>Resource: request, signed with the Person token
-    Resource-->>Agent: 401, requirement=auth-token, with a Resource token
-    Agent->>PS: POST /token with the Resource token and the Person token
-    Note over PS: The Person Server applies the person's consent
-    PS-->>Agent: Auth token
-    Agent->>Resource: request, signed with the Auth token
-    Resource-->>Agent: 200
+    Agent->>Resource : request, unsigned
+    Resource-->>Agent : 401, AAuth-Requirement with requirement=person-token
+    Agent->>PS : POST /person (signed with the Agent token)
+    PS-->>Agent : Person token for this Resource
+    Agent->>Resource : request, signed with the Person token
+    Resource-->>Agent : 401, requirement=auth-token, with a Resource token
+    Agent->>PS : POST /token with the Resource token and the Person token
+    Note over PS : The Person Server applies the person's consent
+    PS-->>Agent : Auth token
+    Agent->>Resource : request, signed with the Auth token
+    Resource-->>Agent : 200
 ```
 
 [Person Server](roles/person-server.md) runs this flow.
@@ -153,14 +153,14 @@ sequenceDiagram
     participant Resource
     participant PS as Person Server
     participant AS as Access Server
-    Agent->>Resource: request, signed with the Person token
-    Resource-->>Agent: 401 with a Resource token addressed to the AS
-    Agent->>PS: POST /token with the Resource token and the Person token
-    PS->>AS: POST /token, signed by the PS
-    AS-->>PS: Auth token
-    PS-->>Agent: Auth token
-    Agent->>Resource: request, signed with the Auth token
-    Resource-->>Agent: 200
+    Agent->>Resource : request, signed with the Person token
+    Resource-->>Agent : 401 with a Resource token addressed to the AS
+    Agent->>PS : POST /token with the Resource token and the Person token
+    PS->>AS : POST /token, signed by the PS
+    AS-->>PS : Auth token
+    PS-->>Agent : Auth token
+    Agent->>Resource : request, signed with the Auth token
+    Resource-->>Agent : 200
 ```
 
 [Access Server](roles/access-server.md) runs this flow.

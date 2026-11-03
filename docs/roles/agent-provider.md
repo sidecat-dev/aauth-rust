@@ -16,12 +16,12 @@ sequenceDiagram
     participant Agent
     participant AP as Agent Provider
     participant Resource
-    Agent->>Agent: make a key pair
-    Agent->>AP: enroll, sending the public key (your own mechanism)
-    AP-->>Agent: Agent token: sub, cnf = the agent's public key
-    Resource->>AP: GET /.well-known/aauth-agent.json
-    Resource->>AP: GET /.well-known/jwks.json
-    Agent->>Resource: request signed with the agent's key, Agent token in Signature-Key
+    Agent->>Agent : make a key pair
+    Agent->>AP : enroll, sending the public key (your own mechanism)
+    AP-->>Agent : Agent token with sub, cnf = the agent's public key
+    Resource->>AP : GET /.well-known/aauth-agent.json
+    Resource->>AP : GET /.well-known/jwks.json
+    Agent->>Resource : request signed with the agent's key, Agent token in Signature-Key
 ```
 
 ## Smallest working code

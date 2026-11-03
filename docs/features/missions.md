@@ -19,19 +19,19 @@ sequenceDiagram
     participant PS as Person Server
     participant Person
     participant API as API (Resource)
-    Agent->>PS: POST /mission {"description": ...}
-    PS-->>Agent: 202, Location
-    PS->>Person: show the proposal
-    Person-->>PS: approve
-    Agent->>PS: GET Location
-    PS-->>Agent: 200 {"s256", "mission"}
-    Agent->>PS: POST /person {"resource": API, "mission_s256"}
-    PS-->>Agent: Person token with mission_s256
-    Agent->>API: request with the Person token
-    API-->>Agent: 401, Resource token with mission_s256
-    Note over Agent,API: the Auth token carries mission_s256 too
-    Agent->>PS: POST /mission/{s256} completion
-    Note over PS: the mission ends; tokens for it are refused
+    Agent->>PS : POST /mission {"description": ...}
+    PS-->>Agent : 202, Location
+    PS->>Person : show the proposal
+    Person-->>PS : approve
+    Agent->>PS : GET Location
+    PS-->>Agent : 200 {"s256", "mission"}
+    Agent->>PS : POST /person {"resource": API, "mission_s256"}
+    PS-->>Agent : Person token with mission_s256
+    Agent->>API : request with the Person token
+    API-->>Agent : 401, Resource token with mission_s256
+    Note over Agent,API : the Auth token carries mission_s256 too
+    Agent->>PS : POST /mission/{s256} completion
+    Note over PS : the mission ends, and tokens for it are refused
 ```
 
 ## Smallest working code

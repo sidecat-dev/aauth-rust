@@ -19,13 +19,13 @@ flowchart TD
     A[Sign the request with the current token] --> B[Send it]
     B --> C{Response}
     C -->|2xx| D[Done]
-    C -->|401 with AAuth-Requirement| E[Read it with Requirement::from_headers]
+    C -->|401 with AAuth-Requirement| E[Read it with from_headers on Requirement]
     E -->|agent-token| A
     E -->|person-token| F[Get a Person token from the Person Server] --> A
     E -->|auth-token| G[Check the Resource token, exchange it at the Person Server, check the Auth token] --> A
     C -->|401 with Signature-Error| H[Fix what the error names; see Errors]
     C -->|202 with Location| I[Poll the pending URL with PollSession]
-    C -->|403| J[Refused: tell the person]
+    C -->|403| J[Refused, so tell the person]
 ```
 
 ## Smallest working code

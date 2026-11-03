@@ -26,16 +26,16 @@ The draft defines no endpoints, so you choose the URLs. Defined in
 sequenceDiagram
     participant Agent
     participant AP as Agent Provider
-    Agent->>Agent: make the durable key
-    Agent->>AP: POST enrollment {"evidence"}, signed by the durable key (hwk)
-    AP-->>Agent: 201 {"agent"}
-    Note over AP: your policy approved and named the agent
-    Agent->>Agent: make a fresh ephemeral key
-    Agent->>AP: POST refresh {"ps"}, naming JWT by the durable key (jkt-jwt), signed by the ephemeral key
-    AP-->>Agent: 200 {"agent_token"}: sub, cnf = the ephemeral key
-    Note over Agent: fewer than five minutes left: refresh again, with a new key
-    Agent->>AP: POST sub-agent {"jwk", "discriminator"}, signed with the Agent token
-    AP-->>Agent: 200 {"agent_token"}: the sub-agent's token
+    Agent->>Agent : make the durable key
+    Agent->>AP : POST enrollment {"evidence"}, signed by the durable key (hwk)
+    AP-->>Agent : 201 {"agent"}
+    Note over AP : your policy approved and named the agent
+    Agent->>Agent : make a fresh ephemeral key
+    Agent->>AP : POST refresh {"ps"}, naming JWT by the durable key (jkt-jwt), signed by the ephemeral key
+    AP-->>Agent : 200 {"agent_token"}: sub, cnf = the ephemeral key
+    Note over Agent : fewer than five minutes left, so refresh again with a new key
+    Agent->>AP : POST sub-agent {"jwk", "discriminator"}, signed with the Agent token
+    AP-->>Agent : 200 {"agent_token"}: the sub-agent's token
 ```
 
 ## The code
