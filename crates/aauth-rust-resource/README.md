@@ -12,9 +12,9 @@ tools; on Windows, the MSVC build tools. Then, in a project made with
 `cargo new`:
 
 ```sh
-cargo add aauth-rust-resource@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 http@1
+cargo add aauth-rust-resource@0.1.0-alpha.29 aauth-rust-core@0.1.0-alpha.29 http@1
 # used by the example to play the agent and its provider
-cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28
+cargo add aauth-rust-agent@0.1.0-alpha.29 aauth-rust-agent-provider@0.1.0-alpha.29 aauth-rust-jose@0.1.0-alpha.29
 ```
 
 ```rust

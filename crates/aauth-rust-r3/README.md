@@ -13,7 +13,7 @@ tools; on Windows, the MSVC build tools. Then, in a project made with
 `cargo new`:
 
 ```sh
-cargo add aauth-rust-r3@0.1.0-alpha.28
+cargo add aauth-rust-r3@0.1.0-alpha.29
 ```
 
 ```rust

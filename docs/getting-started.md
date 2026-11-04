@@ -19,7 +19,7 @@ needs a C compiler, which the same tools provide.
 ```sh
 cargo new aauth-hello
 cd aauth-hello
-cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 aauth-rust-resource@0.1.0-alpha.28 http@1
+cargo add aauth-rust-agent@0.1.0-alpha.29 aauth-rust-agent-provider@0.1.0-alpha.29 aauth-rust-core@0.1.0-alpha.29 aauth-rust-jose@0.1.0-alpha.29 aauth-rust-resource@0.1.0-alpha.29 http@1
 ```
 
 Replace `src/main.rs` with this program: an Agent Provider issues a token, an
@@ -88,7 +88,7 @@ so run it from the source:
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
 cd aauth-rust
-git checkout v0.1.0-alpha.28
+git checkout v0.1.0-alpha.29
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 

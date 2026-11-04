@@ -209,11 +209,11 @@ publish = false
 [workspace]
 
 [dependencies]
-aauth-rust-agent = "0.1.0-alpha.28"
-aauth-rust-agent-provider = "0.1.0-alpha.28"
-aauth-rust-core = "0.1.0-alpha.28"
-aauth-rust-jose = "0.1.0-alpha.28"
-aauth-rust-resource = "0.1.0-alpha.28"
+aauth-rust-agent = "0.1.0-alpha.29"
+aauth-rust-agent-provider = "0.1.0-alpha.29"
+aauth-rust-core = "0.1.0-alpha.29"
+aauth-rust-jose = "0.1.0-alpha.29"
+aauth-rust-resource = "0.1.0-alpha.29"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http = "1"
 hyper-util = { version = "0.1", default-features = false, features = ["client", "client-legacy", "http1", "tokio"] }

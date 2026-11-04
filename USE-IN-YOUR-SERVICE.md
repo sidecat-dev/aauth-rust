@@ -389,7 +389,7 @@ Person/Auth tokens and the Person Server exchange described below.
 
 ## Run a Person Server
 
-Add `aauth-rust-person-server = "0.1.0-alpha.28"` alongside the README's
+Add `aauth-rust-person-server = "0.1.0-alpha.29"` alongside the README's
 dependencies. Its [`PersonServer`](crates/aauth-rust-person-server/src/server.rs) accepts a `Config`,
 trusted issuer resolver, `Store`, `Policy`, clock and token-ID source. The crate's
 module rustdoc contains a complete constructor example. The role is synchronous
@@ -502,7 +502,7 @@ without naming closures. The constructor rustdoc uses these aliases.
 
 ## Durable Person Server storage
 
-Add `aauth-rust-person-server-redb = "0.1.0-alpha.28"` alongside the PS
+Add `aauth-rust-person-server-redb = "0.1.0-alpha.29"` alongside the PS
 dependency. It implements the same `Store` as `MemoryStore` and adds no
 database dependency to the PS role.
 

@@ -12,7 +12,7 @@ tools; on Windows, the MSVC build tools. Then, in a project made with
 `cargo new`:
 
 ```sh
-cargo add aauth-rust@0.1.0-alpha.28 http@1
+cargo add aauth-rust@0.1.0-alpha.29 http@1
 ```
 
 An agent calls an API, in one process: the Agent Provider vouches for the
@@ -104,7 +104,7 @@ Each module is one crate of the family:
 
   ```toml
   [dependencies]
-  aauth-rust = { version = "0.1.0-alpha.28", default-features = false, features = ["resource"] }
+  aauth-rust = { version = "0.1.0-alpha.29", default-features = false, features = ["resource"] }
   ```
 
 - **No network unless you ask.** The protocol modules open no connections:

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aauth-rust"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-access-server",
  "aauth-rust-agent",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-access-server"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-agent-provider",
  "aauth-rust-budgets",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-agent"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-budgets",
  "aauth-rust-core",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-agent-provider"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-agent",
  "aauth-rust-core",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-budgets"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-jose",
  "base64",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-core"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-jose",
  "base64",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-discovery"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-access-server",
  "aauth-rust-agent",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-jose"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-person-server"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-access-server",
  "aauth-rust-agent",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-person-server-redb"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-agent",
  "aauth-rust-agent-provider",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-r3"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-budgets",
  "aauth-rust-core",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-resource"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-access-server",
  "aauth-rust-agent",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-signature-key"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-jose",
  "base64",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "aauth-rust-supervision-server"
-version = "0.1.0-alpha.28"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aauth-rust-core",
  "aauth-rust-jose",

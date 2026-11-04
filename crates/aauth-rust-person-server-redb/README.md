@@ -12,9 +12,9 @@ tools; on Windows, the MSVC build tools. Then, in a project made with
 `cargo new`:
 
 ```sh
-cargo add aauth-rust-person-server@0.1.0-alpha.28 aauth-rust-person-server-redb@0.1.0-alpha.28
+cargo add aauth-rust-person-server@0.1.0-alpha.29 aauth-rust-person-server-redb@0.1.0-alpha.29
 # used by the example to play the other parties
-cargo add aauth-rust-agent@0.1.0-alpha.28 aauth-rust-agent-provider@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 aauth-rust-jose@0.1.0-alpha.28 http@1 tempfile@3
+cargo add aauth-rust-agent@0.1.0-alpha.29 aauth-rust-agent-provider@0.1.0-alpha.29 aauth-rust-core@0.1.0-alpha.29 aauth-rust-jose@0.1.0-alpha.29 http@1 tempfile@3
 ```
 
 The example issues a Person token, restarts, and finds the agent's binding

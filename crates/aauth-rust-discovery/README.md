@@ -12,9 +12,9 @@ tools; on Windows, the MSVC build tools. Then, in a project made with
 `cargo new`:
 
 ```sh
-cargo add aauth-rust-discovery@0.1.0-alpha.28 aauth-rust-resource@0.1.0-alpha.28 aauth-rust-core@0.1.0-alpha.28 http@1
+cargo add aauth-rust-discovery@0.1.0-alpha.29 aauth-rust-resource@0.1.0-alpha.29 aauth-rust-core@0.1.0-alpha.29 http@1
 # used by the second example
-cargo add aauth-rust-signature-key@0.1.0-alpha.28
+cargo add aauth-rust-signature-key@0.1.0-alpha.29
 ```
 
 A Resource whose keys come from discovery. The first signed request from an
