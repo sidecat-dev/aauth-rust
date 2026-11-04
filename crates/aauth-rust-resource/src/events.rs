@@ -7,8 +7,8 @@
 //! back the response.
 use crate::{AuthAuthorized, Deny, SignatureFailure};
 use aauth_rust_core::events::{
-    EVENT_TOKEN_DOCUMENT, EventClaims, EventToken, SubscribeToken, VerifiedSubscribeToken, body_s256,
-    event_endpoint, generate_identifier, mint_event_token,
+    EVENT_TOKEN_DOCUMENT, EventClaims, EventToken, SubscribeToken, VerifiedSubscribeToken,
+    body_s256, event_endpoint, generate_identifier, mint_event_token,
 };
 use aauth_rust_core::{
     AgentKeyResolver, TokenError, VerifiedAuthToken, VerifiedPersonToken,
@@ -1117,7 +1117,9 @@ impl<K: AgentKeyResolver, S: SubscriptionStore> EventsResource<K, S> {
         if record.version != 1 {
             return Err(EventDeliveryError::InvalidRecord);
         }
-        let subscription = self.store.subscription(&record.agent_provider, &record.eid)
+        let subscription = self
+            .store
+            .subscription(&record.agent_provider, &record.eid)
             .map_err(EventDeliveryError::Store)?
             .ok_or(EventDeliveryError::UnknownSubscription)?;
         if record.agent_provider != subscription.agent_provider
@@ -1134,15 +1136,21 @@ impl<K: AgentKeyResolver, S: SubscriptionStore> EventsResource<K, S> {
             _ => return Err(EventDeliveryError::InvalidPayload),
         }
         let keys = EventSigningKey {
-            issuer: &self.issuer, kid: &self.kid, key: self.signing_key.public_jwk(),
+            issuer: &self.issuer,
+            kid: &self.kid,
+            key: self.signing_key.public_jwk(),
         };
-        let token = EventToken::parse(&record.token).map_err(EventDeliveryError::Token)?
-            .verify(&keys, now).map_err(EventDeliveryError::Token)?;
+        let token = EventToken::parse(&record.token)
+            .map_err(EventDeliveryError::Token)?
+            .verify(&keys, now)
+            .map_err(EventDeliveryError::Token)?;
         let claims = token.claims();
         if claims.aud != record.agent || claims.eid != record.eid {
             return Err(EventDeliveryError::InvalidRecord);
         }
-        claims.verify_body(&record.body).map_err(EventDeliveryError::Token)?;
+        claims
+            .verify_body(&record.body)
+            .map_err(EventDeliveryError::Token)?;
         Ok(PreparedEvent {
             agent_provider: record.agent_provider,
             eid: record.eid,
