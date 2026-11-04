@@ -886,3 +886,104 @@ fn events_flow_from_the_resource_through_the_ap_to_the_agent() {
         EventDeliveryError::InvalidAcceptance
     );
 }
+
+fn restarted_resource(ap: &AgentProvider, subscription: &ResourceSubscription) -> Resource {
+    let store = MemorySubscriptionStore::new();
+    store.register(subscription).unwrap();
+    EventsResource::new(config(RESOURCE, 5), ap_keys(ap), store).unwrap()
+}
+
+#[test]
+fn a_restored_event_retries_the_exact_bytes_without_spending_another_use() {
+    let ap = provider();
+    let original = resource(&ap);
+    let inbox = EventInbox::new(
+        &ap,
+        resource_keys(RESOURCE, &original.jwks().unwrap()),
+        MemoryEventStore::new(),
+    ).unwrap();
+    let subscription = registered(&ap, &original, inbox.store(), Some(2));
+    let event = original.prepare_event("https://ap.example", &subscription.eid,
+        Some(EventPayload { content_type: "application/json", body: PAYLOAD }), 1300, 1000).unwrap();
+    let saved = serde_json::to_vec(&event.to_record()).unwrap();
+    let request = original.delivery_request(&event, &ap.metadata().unwrap(), 1000).unwrap();
+    // The AP accepted this delivery, but the Resource never received the reply.
+    assert_eq!(inbox.receive(&request, 1000).into_response().status(), 202);
+    let exact_token = event.token().to_owned();
+    drop(event);
+    drop(original);
+
+    let recovered = restarted_resource(&ap, &subscription);
+    let record = serde_json::from_slice(&saved).unwrap();
+    let event = recovered.restore_event(record, 1005).unwrap();
+    assert_eq!(event.token(), exact_token);
+    assert_eq!(event.body(), PAYLOAD);
+    assert_eq!(serde_json::to_vec(&event.to_record()).unwrap(), saved);
+    let retry = recovered.delivery_request(&event, &ap.metadata().unwrap(), 1005).unwrap();
+    assert_eq!(retry.headers()["content-type"], "application/json");
+    let reply = inbox.receive(&retry, 1005).into_response();
+    assert_eq!(recovered.delivery_outcome(&event, &reply).unwrap(),
+        DeliveryOutcome::Accepted { remaining_uses: Some(1) });
+    assert_eq!(inbox.store().pending(AGENT).unwrap().len(), 1);
+    assert_eq!(inbox.store().pending(AGENT).unwrap()[0].event_token, exact_token);
+}
+
+#[test]
+fn restored_events_verify_saved_tokens_bodies_and_subscription_binding() {
+    let ap = provider();
+    let original = resource(&ap);
+    let subscription = registered(&ap, &original, &MemoryEventStore::new(), Some(u64::MAX));
+    let event = original.prepare_event("https://ap.example", &subscription.eid,
+        Some(EventPayload { content_type: "application/json", body: PAYLOAD }), 1300, 1000).unwrap();
+    let record = event.to_record();
+    assert_eq!(record.max_uses, Some(u64::MAX));
+    let recovered = restarted_resource(&ap, &subscription);
+    assert!(recovered.restore_event(record.clone(), 1005).is_ok());
+    let mut changed = Vec::new();
+    let mut r = record.clone(); r.version += 1; changed.push(r);
+    let mut r = record.clone(); r.body[0] ^= 1; changed.push(r);
+    let mut r = record.clone(); r.content_type = None; changed.push(r);
+    let mut r = record.clone(); r.content_type = Some("a\nb".into()); changed.push(r);
+    let mut r = record.clone(); r.body.clear(); changed.push(r);
+    let mut r = record.clone(); r.agent_provider = "https://other.example".into(); changed.push(r);
+    let mut r = record.clone(); r.eid.push('x'); changed.push(r);
+    let mut r = record.clone(); r.agent = "aauth:other@ap.example".into(); changed.push(r);
+    let mut r = record.clone(); r.max_uses = None; changed.push(r);
+    let mut r = record.clone(); r.subscription_jti.push('x'); changed.push(r);
+    let mut r = record.clone();
+    let index = r.token.rfind('.').unwrap() + 4;
+    r.token.replace_range(index..index+1, if &r.token[index..index+1] == "A" { "B" } else { "A" });
+    changed.push(r);
+    for (index, record) in changed.into_iter().enumerate() {
+        assert!(recovered.restore_event(record, 1005).is_err(), "corruption {index}");
+    }
+    assert_eq!(recovered.store().subscription("https://ap.example", &subscription.eid).unwrap(), Some(subscription.clone()));
+    for c in [config(RESOURCE, 6), config("https://other.example", 5), {
+        let mut c = config(RESOURCE, 5); c.kid = "different-key-id".into(); c
+    }] {
+        let store = MemorySubscriptionStore::new(); store.register(&subscription).unwrap();
+        let other = EventsResource::new(c, ap_keys(&ap), store).unwrap();
+        assert!(other.restore_event(record.clone(), 1005).is_err());
+    }
+}
+
+#[test]
+fn restoring_never_renews_an_expired_event_or_revives_a_subscription() {
+    let ap = provider();
+    let original = resource(&ap);
+    let subscription = registered(&ap, &original, &MemoryEventStore::new(), None);
+    let event = original.prepare_event("https://ap.example", &subscription.eid, None, 1300, 1000).unwrap();
+    let record = event.to_record();
+    let recovered = restarted_resource(&ap, &subscription);
+    let bare = recovered.restore_event(record.clone(), 1299).unwrap();
+    assert!(bare.body().is_empty());
+    assert!(!recovered.delivery_request(&bare, &ap.metadata().unwrap(), 1299).unwrap().headers().contains_key("content-type"));
+    assert_eq!(recovered.restore_event(record.clone(), 1300).unwrap_err(),
+        EventDeliveryError::Token(TokenError::ExpiredJwt));
+    recovered.store().remove("https://ap.example", &subscription.eid).unwrap();
+    assert_eq!(recovered.restore_event(record.clone(), 1005).unwrap_err(), EventDeliveryError::UnknownSubscription);
+    let mut replacement = subscription.clone(); replacement.token_jti.push('x');
+    recovered.store().register(&replacement).unwrap();
+    assert!(recovered.restore_event(record, 1005).is_err());
+    assert_eq!(recovered.store().subscription("https://ap.example", &subscription.eid).unwrap(), Some(replacement));
+}
