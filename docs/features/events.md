@@ -145,7 +145,11 @@ Resource delivers an event with a body, and the agent checks it.
   `delivery_request(&event, &metadata, now)`, which signs the `POST` to the
   provider's current `event_endpoint`. Send it, following no redirects, and
   pass the answer to `delivery_outcome`. To retry, sign the same prepared
-  event again: the provider drops the duplicate.
+  event again: the provider drops the duplicate. Before the first send, persist
+  `event.to_record()`. After restart, `restore_event(record, now)` verifies the
+  original token, body and current subscription without changing its identity
+  or expiry. Keep the original Resource signing key while deliveries are pending;
+  expired events and changed keys require an explicit host decision.
 - `with_asyncapi(document)` publishes an AsyncAPI description of your event
   channels.
 

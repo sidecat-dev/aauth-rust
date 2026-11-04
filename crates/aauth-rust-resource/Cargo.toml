@@ -18,6 +18,7 @@ aauth-rust-budgets.workspace = true
 aauth-rust-r3.workspace = true
 http.workspace = true
 httpdate = "1"
+serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 
 [dev-dependencies]

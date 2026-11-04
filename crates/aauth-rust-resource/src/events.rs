@@ -7,7 +7,7 @@
 //! back the response.
 use crate::{AuthAuthorized, Deny, SignatureFailure};
 use aauth_rust_core::events::{
-    EVENT_TOKEN_DOCUMENT, EventClaims, SubscribeToken, VerifiedSubscribeToken, body_s256,
+    EVENT_TOKEN_DOCUMENT, EventClaims, EventToken, SubscribeToken, VerifiedSubscribeToken, body_s256,
     event_endpoint, generate_identifier, mint_event_token,
 };
 use aauth_rust_core::{
@@ -20,6 +20,7 @@ use aauth_rust_signature_key::{
     canonical_authority, role_signature_alg_header, sign_request,
 };
 use http::{Method, Request, Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -574,12 +575,71 @@ pub struct PreparedEvent {
     eid: String,
     agent: String,
     max_uses: Option<u64>,
+    subscription_jti: String,
     token: String,
     content_type: Option<String>,
     body: Vec<u8>,
 }
 
+/// Versioned host-storage record for a prepared delivery, not a wire credential.
+/// Persist it before sending; restore through [`EventsResource::restore_event`].
+/// The host protects this record and its subscription store against alteration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedEventRecord {
+    /// Storage format version, currently 1.
+    pub version: u32,
+    /// Agent Provider that registered the subscription.
+    pub agent_provider: String,
+    /// Subscription Event ID.
+    pub eid: String,
+    /// Subscribing Agent identifier.
+    pub agent: String,
+    /// Original subscription's use allowance.
+    pub max_uses: Option<u64>,
+    /// Subscribe-token identity, to distinguish a replacement registration.
+    pub subscription_jti: String,
+    /// Exact signed event token, including its original jti and expiry.
+    pub token: String,
+    /// Delivery media type, absent when there is no body.
+    pub content_type: Option<String>,
+    /// Exact body bytes bound by the event token.
+    pub body: Vec<u8>,
+}
+
+struct EventSigningKey<'a> {
+    issuer: &'a str,
+    kid: &'a str,
+    key: Jwk,
+}
+impl AgentKeyResolver for EventSigningKey<'_> {
+    fn key(&self, issuer: &str, dwk: &str, kid: &str) -> Result<Jwk, TokenError> {
+        if issuer != self.issuer || dwk != EVENT_TOKEN_DOCUMENT {
+            return Err(TokenError::UntrustedIssuer);
+        }
+        if kid != self.kid {
+            return Err(TokenError::UnknownKey);
+        }
+        Ok(self.key.clone())
+    }
+}
+
 impl PreparedEvent {
+    /// Copy the exact delivery into a host-controlled persistence record.
+    /// Restoring the record never mints a replacement event.
+    pub fn to_record(&self) -> PreparedEventRecord {
+        PreparedEventRecord {
+            version: 1,
+            agent_provider: self.agent_provider.clone(),
+            eid: self.eid.clone(),
+            agent: self.agent.clone(),
+            max_uses: self.max_uses,
+            subscription_jti: self.subscription_jti.clone(),
+            token: self.token.clone(),
+            content_type: self.content_type.clone(),
+            body: self.body.clone(),
+        }
+    }
     /// The Agent Provider that receives the delivery.
     pub fn agent_provider(&self) -> &str {
         &self.agent_provider
@@ -605,6 +665,9 @@ impl PreparedEvent {
 /// Event preparation or delivery failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDeliveryError {
+    /// A saved record has an unsupported version or differs from its current
+    /// subscription or authenticated event claims.
+    InvalidRecord,
     /// No registered subscription for this Agent Provider and Event ID.
     UnknownSubscription,
     /// A payload's body is empty or its content type is not a header value.
@@ -622,6 +685,7 @@ pub enum EventDeliveryError {
 impl std::fmt::Display for EventDeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidRecord => f.write_str("saved event does not match its format, subscription or signed claims"),
             Self::UnknownSubscription => f.write_str("no subscription for this Event ID"),
             Self::InvalidPayload => f.write_str(
                 "an event payload needs nonempty body bytes and a valid Content-Type value; omit the payload for none",
@@ -1022,11 +1086,72 @@ impl<K: AgentKeyResolver, S: SubscriptionStore> EventsResource<K, S> {
             eid: subscription.eid,
             agent: subscription.agent,
             max_uses: subscription.max_uses,
+            subscription_jti: subscription.token_jti,
             token,
             content_type: payload.map(|payload| payload.content_type.to_owned()),
             body: payload
                 .map(|payload| payload.body.to_vec())
                 .unwrap_or_default(),
+        })
+    }
+
+    /// Recover an exact prepared event after a host restart.
+    ///
+    /// Checks the saved version and current subscription, then verifies the
+    /// token with this Resource's issuer, kid and signing key, its original
+    /// expiry, audience, Event ID and body hash. No event is minted or sent.
+    /// Retain the original signing key while deliveries are pending; rotation
+    /// requires an explicit host decision, not silent re-signing of old work.
+    /// This validates a host-storage record, not a request to authorize a new
+    /// event. The host still checks current delivery policy before sending.
+    ///
+    /// # Errors
+    /// `InvalidRecord` for a version or subscription/claims mismatch;
+    /// `UnknownSubscription` when removed; `Token` for failed authentication,
+    /// body binding or expiry; `InvalidPayload` for inconsistent payload fields.
+    pub fn restore_event(
+        &self,
+        record: PreparedEventRecord,
+        now: i64,
+    ) -> Result<PreparedEvent, EventDeliveryError> {
+        if record.version != 1 {
+            return Err(EventDeliveryError::InvalidRecord);
+        }
+        let subscription = self.store.subscription(&record.agent_provider, &record.eid)
+            .map_err(EventDeliveryError::Store)?
+            .ok_or(EventDeliveryError::UnknownSubscription)?;
+        if record.agent_provider != subscription.agent_provider
+            || record.eid != subscription.eid
+            || record.agent != subscription.agent
+            || record.max_uses != subscription.max_uses
+            || record.subscription_jti != subscription.token_jti
+        {
+            return Err(EventDeliveryError::InvalidRecord);
+        }
+        match (&record.content_type, record.body.is_empty()) {
+            (None, true) => {}
+            (Some(t), false) if !t.is_empty() && http::HeaderValue::from_str(t).is_ok() => {}
+            _ => return Err(EventDeliveryError::InvalidPayload),
+        }
+        let keys = EventSigningKey {
+            issuer: &self.issuer, kid: &self.kid, key: self.signing_key.public_jwk(),
+        };
+        let token = EventToken::parse(&record.token).map_err(EventDeliveryError::Token)?
+            .verify(&keys, now).map_err(EventDeliveryError::Token)?;
+        let claims = token.claims();
+        if claims.aud != record.agent || claims.eid != record.eid {
+            return Err(EventDeliveryError::InvalidRecord);
+        }
+        claims.verify_body(&record.body).map_err(EventDeliveryError::Token)?;
+        Ok(PreparedEvent {
+            agent_provider: record.agent_provider,
+            eid: record.eid,
+            agent: record.agent,
+            max_uses: record.max_uses,
+            subscription_jti: record.subscription_jti,
+            token: record.token,
+            content_type: record.content_type,
+            body: record.body,
         })
     }
 
