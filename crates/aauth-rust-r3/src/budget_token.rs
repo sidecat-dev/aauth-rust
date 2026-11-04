@@ -353,7 +353,7 @@ fn reject_combined_resource_members(
 
 /// Go `budgets.ValidateFeedbackUnit`: the unit must serialize in `AAuth-Budget`.
 fn validate_feedback_unit(budget: &Budget) -> Result<(), R3TokenError> {
-    let header = BudgetHeader::final_cost(0, 0, budget.unit(), budget.decimals())?;
+    let header = BudgetHeader::final_cost(budget, 0, 0)?;
     sender_field(&header, true)?;
     Ok(())
 }

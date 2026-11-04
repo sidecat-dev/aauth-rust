@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::header::{BudgetHeader, sender_field};
-use crate::value::{Budget, Error, check_amount};
+use crate::value::{Budget, Error, MAX_AMOUNT, check_amount};
 
 /// Identity of one auth-token grant.
 #[derive(Clone, Debug)]
@@ -292,11 +292,14 @@ impl Ledger {
 
     /// Atomically reserve `maximum` against the token identified by `(iss, jti)`.
     /// A refusal changes nothing. A zero maximum does not admit a spent grant.
+    /// A maximum above 15 digits exceeds every remainder and is refused like any
+    /// other maximum that does not fit; its refusal header omits `required`,
+    /// which the header cannot carry.
     ///
     /// # Errors
     /// Returns [`ChargeError::Refused`] when the maximum does not fit, or
-    /// [`ChargeError::Protocol`] when the token was not opened or the directory
-    /// ledger cannot publish the hold.
+    /// [`ChargeError::Protocol`] when the maximum is negative, the token was not
+    /// opened, or the directory ledger cannot publish the hold.
     pub fn reserve(
         &mut self,
         iss: &str,
@@ -312,7 +315,9 @@ impl Ledger {
         jti: &str,
         maximum: i64,
     ) -> Result<Reservation, ChargeError> {
-        check_amount(maximum).map_err(ChargeError::Protocol)?;
+        if maximum < 0 {
+            return Err(ChargeError::Protocol(Error::Malformed));
+        }
         let key = token_key(iss, jti);
         let state = self
             .tokens
@@ -380,13 +385,8 @@ impl Ledger {
             .get(&token_key(&hold.iss, &hold.jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
-        let header = BudgetHeader::reserved_hold(
-            remaining,
-            hold.amount,
-            state.account.grant.unit(),
-            state.account.grant.decimals(),
-        )
-        .map_err(ChargeError::Protocol)?;
+        let header = BudgetHeader::reserved_hold(&state.account.grant, remaining, hold.amount)
+            .map_err(ChargeError::Protocol)?;
         sender_field(&header, true).map_err(ChargeError::Protocol)
     }
 
@@ -684,13 +684,8 @@ impl Ledger {
             .get(&token_key(&iss, &jti))
             .expect("token present");
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
-        let header = BudgetHeader::final_cost(
-            remaining,
-            actual,
-            state.account.grant.unit(),
-            state.account.grant.decimals(),
-        )
-        .map_err(ChargeError::Protocol)?;
+        let header = BudgetHeader::final_cost(&state.account.grant, remaining, actual)
+            .map_err(ChargeError::Protocol)?;
         sender_field(&header, true).map_err(ChargeError::Protocol)
     }
 
@@ -714,13 +709,8 @@ impl Ledger {
             .get(&token_key(iss, jti))
             .ok_or(ChargeError::Protocol(Error::Malformed))?;
         let remaining = state.account.grant.amount() - state.committed - state.reserved;
-        let header = BudgetHeader::final_cost(
-            remaining,
-            cost,
-            state.account.grant.unit(),
-            state.account.grant.decimals(),
-        )
-        .map_err(ChargeError::Protocol)?;
+        let header = BudgetHeader::final_cost(&state.account.grant, remaining, cost)
+            .map_err(ChargeError::Protocol)?;
         sender_field(&header, true).map_err(ChargeError::Protocol)
     }
 
@@ -750,7 +740,7 @@ pub(crate) struct ChargeView<'a> {
 }
 
 fn refusal_header(grant: &Budget, remaining: i64, maximum: i64) -> Result<String, ChargeError> {
-    let required = (remaining > 0).then_some(maximum);
+    let required = (remaining > 0 && maximum <= MAX_AMOUNT).then_some(maximum);
     refusal_header_with(grant, remaining, required)
 }
 
@@ -759,8 +749,8 @@ fn refusal_header_with(
     remaining: i64,
     required: Option<i64>,
 ) -> Result<String, ChargeError> {
-    let header = BudgetHeader::refusal(remaining, required, grant.unit(), grant.decimals())
-        .map_err(ChargeError::Protocol)?;
+    let header =
+        BudgetHeader::refusal(grant, remaining, required).map_err(ChargeError::Protocol)?;
     sender_field(&header, false).map_err(ChargeError::Protocol)
 }
 

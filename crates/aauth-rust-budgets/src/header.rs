@@ -22,54 +22,67 @@ pub struct BudgetHeader {
 
 impl BudgetHeader {
     /// A served request whose cost is known. `cost` is present and `reserved` is not.
+    /// The unit pair is the grant's.
     ///
     /// # Errors
-    /// Returns [`Error::Malformed`] when the pair or the integers are invalid.
-    pub fn final_cost(remaining: i64, cost: i64, unit: &str, decimals: i64) -> Result<Self, Error> {
-        Self::build(
-            remaining,
-            Some(cost),
-            None,
-            None,
-            Some(unit),
-            Some(decimals),
-        )
+    /// Returns [`Error::Malformed`] when an integer is negative or `cost` and
+    /// `remaining` together are above the grant, and [`Error::Range`] when an
+    /// integer is above 15 digits.
+    pub fn final_cost(grant: &Budget, remaining: i64, cost: i64) -> Result<Self, Error> {
+        let header = Self::from_grant(grant, remaining, Some(cost), None, None)?;
+        within_grant(grant, remaining, cost)?;
+        Ok(header)
     }
 
-    /// A streamed response: `reserved` is present and `cost` is not.
+    /// A streamed response: `reserved` is present and `cost` is not. The unit
+    /// pair is the grant's.
     ///
     /// # Errors
-    /// Returns [`Error::Malformed`] when `reserved` is missing or the integers are invalid.
-    pub fn reserved_hold(
-        remaining: i64,
-        reserved: i64,
-        unit: &str,
-        decimals: i64,
-    ) -> Result<Self, Error> {
-        Self::build(
-            remaining,
-            None,
-            Some(reserved),
-            None,
-            Some(unit),
-            Some(decimals),
-        )
+    /// Returns [`Error::Malformed`] when an integer is negative or `reserved` and
+    /// `remaining` together are above the grant, and [`Error::Range`] when an
+    /// integer is above 15 digits.
+    pub fn reserved_hold(grant: &Budget, remaining: i64, reserved: i64) -> Result<Self, Error> {
+        let header = Self::from_grant(grant, remaining, None, Some(reserved), None)?;
+        within_grant(grant, remaining, reserved)?;
+        Ok(header)
     }
 
     /// A refusal. No `cost` and no `reserved`. `required` is set only for
-    /// `insufficient-budget`.
+    /// `insufficient-budget`, and it is above `remaining`, because that
+    /// refusal means the request's maximum cost exceeds the remainder.
     ///
     /// # Errors
-    /// Returns [`Error::Malformed`] when the integers or the unit pair are invalid.
-    pub fn refusal(
-        remaining: i64,
-        required: Option<i64>,
-        unit: &str,
-        decimals: i64,
-    ) -> Result<Self, Error> {
-        Self::build(remaining, None, None, required, Some(unit), Some(decimals))
+    /// Returns [`Error::Malformed`] when an integer is negative, `remaining` is
+    /// above the grant, or `required` is not above `remaining`, and
+    /// [`Error::Range`] when an integer is above 15 digits.
+    pub fn refusal(grant: &Budget, remaining: i64, required: Option<i64>) -> Result<Self, Error> {
+        let header = Self::from_grant(grant, remaining, None, None, required)?;
+        within_grant(grant, remaining, 0)?;
+        Ok(header)
     }
 
+    fn from_grant(
+        grant: &Budget,
+        remaining: i64,
+        cost: Option<i64>,
+        reserved: Option<i64>,
+        required: Option<i64>,
+    ) -> Result<Self, Error> {
+        Self::build(
+            remaining,
+            cost,
+            reserved,
+            required,
+            Some(grant.unit()),
+            Some(grant.decimals()),
+        )
+    }
+
+    /// Members as one field can carry them. `cost` and `reserved` appear
+    /// together only where a recipient merged a `cost` trailer into a header
+    /// that carried `reserved`, so `cost` is then within `reserved`. `required`
+    /// is a refusal's figure: it comes without `cost` or `reserved` and is
+    /// above `remaining`.
     fn build(
         remaining: i64,
         cost: Option<i64>,
@@ -89,6 +102,16 @@ impl BudgetHeader {
             (None, None) => {}
             _ => return Err(Error::Malformed),
         }
+        if let (Some(cost), Some(reserved)) = (cost, reserved)
+            && cost > reserved
+        {
+            return Err(Error::Malformed);
+        }
+        if let Some(required) = required
+            && (cost.is_some() || reserved.is_some() || required <= remaining)
+        {
+            return Err(Error::Malformed);
+        }
         Ok(Self {
             remaining,
             cost,
@@ -98,6 +121,15 @@ impl BudgetHeader {
             decimals,
         })
     }
+}
+
+/// `remaining` is net of everything committed and held, so it and this
+/// request's figure together are never above the grant.
+fn within_grant(grant: &Budget, remaining: i64, figure: i64) -> Result<(), Error> {
+    if remaining + figure > grant.amount() {
+        return Err(Error::Malformed);
+    }
+    Ok(())
 }
 
 /// A parsed field. Unknown members are dropped. `actionable` is false when the
@@ -111,28 +143,43 @@ pub struct ParsedHeader {
 }
 
 /// Serialize one header. A metered response that is not a refusal must carry
-/// `cost` or `reserved`.
+/// `cost` or `reserved`. It does not carry both: `reserved` is meaningful only
+/// while `cost` is not yet known, and a later `cost` goes in a trailer.
 ///
 /// # Errors
-/// Returns [`Error::Malformed`] when a served request omits both figures or the
-/// unit pair is incomplete.
+/// Returns [`Error::Malformed`] when a served request omits both figures, the
+/// header carries both, or the unit pair is incomplete.
 pub fn sender_field(header: &BudgetHeader, served: bool) -> Result<String, Error> {
     if served && header.cost.is_none() && header.reserved.is_none() {
+        return Err(Error::Malformed);
+    }
+    if header.cost.is_some() && header.reserved.is_some() {
         return Err(Error::Malformed);
     }
     serialize(header)
 }
 
 /// Trailer carrying only `cost`. It does not restate a member the header carried.
+/// The header with this `cost` merged in is still one valid field: the cost is
+/// within the header's `reserved` hold, and a refusal takes no trailer.
 ///
 /// # Errors
-/// Returns [`Error::Malformed`] when the header already carried `cost` or any
-/// other member would be repeated.
+/// Returns [`Error::Malformed`] when the header already carried `cost`, the cost
+/// is above the header's `reserved`, or the header is a refusal, and
+/// [`Error::Range`] when the cost is above 15 digits.
 pub fn trailer_field(header: &BudgetHeader, cost: i64) -> Result<Trailer, Error> {
     check_amount(cost)?;
     if header.cost.is_some() {
         return Err(Error::Malformed);
     }
+    BudgetHeader::build(
+        header.remaining,
+        Some(cost),
+        header.reserved,
+        header.required,
+        header.unit.as_deref(),
+        header.decimals,
+    )?;
     let field = {
         let mut serializer = DictSerializer::new();
         let key = KeyRef::from_str("cost").map_err(|_| Error::Malformed)?;
@@ -159,10 +206,13 @@ pub struct Trailer {
 
 /// Parse a field. Unknown members are ignored. A positive cache `current_age`
 /// makes the field non-actionable. A unit pair that disagrees with `grant`
-/// does too.
+/// does too. A field that merged a `cost` trailer into its header carries
+/// `cost` and `reserved` together, and parses.
 ///
 /// # Errors
-/// Returns [`Error::Malformed`] for a missing `remaining` or a bad type.
+/// Returns [`Error::Malformed`] for a missing `remaining`, a bad type, `cost`
+/// above `reserved`, or a `required` that comes with `cost` or `reserved` or is
+/// not above `remaining`.
 pub fn parse_header(
     field: &str,
     grant: Option<&Budget>,

@@ -344,7 +344,7 @@ fn is_javascript_link(text: &str) -> bool {
 #[test]
 fn header_ignores_unknown_members_and_refuses_a_stale_or_foreign_unit() {
     let grant = usd(100);
-    let field = sender_field(&BudgetHeader::final_cost(40, 10, "USD", 6).unwrap(), true).unwrap();
+    let field = sender_field(&BudgetHeader::final_cost(&grant, 40, 10).unwrap(), true).unwrap();
     assert!(field.starts_with("remaining=40"));
     assert!(field.contains("cost=10"));
     assert!(!field.contains("reserved="));
@@ -359,14 +359,15 @@ fn header_ignores_unknown_members_and_refuses_a_stale_or_foreign_unit() {
     );
     assert!(header_is_fresh(Some(0)));
     assert!(!header_is_fresh(Some(2)));
-    let foreign = sender_field(&BudgetHeader::final_cost(40, 10, "EUR", 6).unwrap(), true).unwrap();
+    let eur = Budget::new(100, "EUR", 6).unwrap();
+    let foreign = sender_field(&BudgetHeader::final_cost(&eur, 40, 10).unwrap(), true).unwrap();
     assert!(
         !parse_header(&foreign, Some(&grant), None)
             .unwrap()
             .actionable
     );
     assert!(act_on_header(&parse_header(&foreign, Some(&grant), None).unwrap()).is_none());
-    assert!(BudgetHeader::final_cost(1, 1, "USD", 6).is_ok());
+    assert!(BudgetHeader::final_cost(&usd(2), 1, 1).is_ok());
     assert!(BudgetHeader::build_pair_rejected());
     assert!(parse_max_cost("1000").is_ok());
     assert!(parse_max_cost("1000;x=1").is_err());
@@ -374,15 +375,15 @@ fn header_ignores_unknown_members_and_refuses_a_stale_or_foreign_unit() {
 
 #[test]
 fn trailer_carries_only_cost_and_a_served_request_names_cost_or_reserved() {
-    let header = BudgetHeader::reserved_hold(10, 4, "USD", 6).unwrap();
+    let header = BudgetHeader::reserved_hold(&usd(14), 10, 4).unwrap();
     let field = sender_field(&header, true).unwrap();
     assert!(field.contains("reserved=4"));
     assert!(!field.contains("cost="));
     let trailer = trailer_field(&header, 3).unwrap();
     assert_eq!(trailer.name, "aauth-budget");
     assert_eq!(trailer.field, "cost=3");
-    assert!(trailer_field(&BudgetHeader::final_cost(1, 1, "USD", 6).unwrap(), 1).is_err());
-    let refusal = BudgetHeader::refusal(0, None, "USD", 6).unwrap();
+    assert!(trailer_field(&BudgetHeader::final_cost(&usd(2), 1, 1).unwrap(), 1).is_err());
+    let refusal = BudgetHeader::refusal(&usd(1), 0, None).unwrap();
     assert!(sender_field(&refusal, true).is_err());
     assert!(sender_field(&refusal, false).is_ok());
     assert_eq!(balance_after(1_568_800, 431_200, 221_200), 1_778_800);
@@ -728,12 +729,12 @@ trait PairProbe {
 }
 impl PairProbe for BudgetHeader {
     fn build_pair_rejected() -> bool {
-        BudgetHeader::final_cost(1, 1, "USD", 6).is_ok()
+        BudgetHeader::final_cost(&usd(2), 1, 1).is_ok()
             && matches!(
-                sender_field(&BudgetHeader::refusal(1, None, "USD", 6).unwrap(), true),
+                sender_field(&BudgetHeader::refusal(&usd(1), 1, None).unwrap(), true),
                 Err(Error::Malformed)
             )
-            && BudgetHeader::final_cost(1, 1, "", 6).is_err()
+            && Budget::new(1, "", 6).is_err()
     }
 }
 

@@ -1787,13 +1787,11 @@ where
                         Err(()) => return Ok(AuthDecision::InternalError),
                     }
                 } else {
-                    match BudgetHeader::refusal(
-                        remaining,
-                        Some(gate.default_bound),
-                        grant.unit(),
-                        grant.decimals(),
-                    )
-                    .and_then(|header| sender_field(&header, false))
+                    // `required` reports a bound that exceeds the remainder.
+                    // A host bound that fits is not one, so it is not stated.
+                    let required = (gate.default_bound > remaining).then_some(gate.default_bound);
+                    match BudgetHeader::refusal(&grant, remaining, required)
+                        .and_then(|header| sender_field(&header, false))
                     {
                         Ok(header) => header,
                         Err(_) => return Ok(AuthDecision::InternalError),
@@ -2259,8 +2257,7 @@ fn unsupported_companion(
     })
 }
 fn unstated_required(grant: &Budget, remaining: i64) -> Result<String, ()> {
-    let header =
-        BudgetHeader::refusal(remaining, None, grant.unit(), grant.decimals()).map_err(|_| ())?;
+    let header = BudgetHeader::refusal(grant, remaining, None).map_err(|_| ())?;
     sender_field(&header, false).map_err(|_| ())
 }
 fn insert_budget(response: &mut Response<Vec<u8>>, header: Option<String>) {

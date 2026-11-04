@@ -1080,7 +1080,8 @@ fn a_client_cost_cannot_raise_the_host_bound_or_buy_a_free_admission() {
     );
     let header = zero.headers()["aauth-budget"].to_str().unwrap();
     assert!(header.contains("remaining=2000"), "{header}");
-    assert!(header.contains("required=1000"), "{header}");
+    // The host bound fits the remainder, so it is not a `required` figure.
+    assert!(!header.contains("required="), "{header}");
     assert!(!header.contains("cost="), "{header}");
 
     let charged = resource

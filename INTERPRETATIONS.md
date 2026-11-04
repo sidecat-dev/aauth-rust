@@ -74,10 +74,31 @@ the draft required each spelling.
   Buffered admission reads one bare Structured Field integer from
   `AAuth-Max-Cost`. The host's `default_bound` is the maximum. The client
   header may only lower it. A higher client figure does not raise the bound.
-  A client figure of zero does not admit the host's work. When the header is
+  A client figure of zero does not admit the host's work. That refusal states
+  `required` only when the host bound is above the remainder. When the header is
   absent, the metered cost is `default_bound`. A malformed header is a
   refusal of the call: the grant is not drawn down, and `AAuth-Budget` still
   reports the untouched remainder.
+- An `AAuth-Budget` field is one of the shapes the draft describes, on parse
+  and on send. `required` is a refusal's figure. It comes without `cost` or
+  `reserved`, because a refusal carries neither (Exhaustion, Deferred
+  Delivery), and it is above `remaining`, because `insufficient-budget` means
+  the maximum exceeds the remainder and `remaining` is a floor. A sender
+  writes `cost` or `reserved`, not both: `reserved` is meaningful only while
+  `cost` is not yet known. A parser accepts the two together, because a
+  recipient that merges a `cost` trailer into the header gets that
+  Dictionary (Trailer Rules); `cost` is then within `reserved`. A trailer
+  `cost` above the header's `reserved` is refused, since the header's
+  `remaining` is a floor only when `remaining + reserved - cost` is at least
+  `remaining`. A sender's `remaining` plus this request's `cost` or
+  `reserved` is never above the grant.
+- A hold is refused when it exceeds the remainder, before its size is checked
+  against the 15-digit carrier. A maximum above that carrier exceeds every
+  grant, so it is `insufficient-budget` (or exhausted when nothing remains),
+  and the refusal omits `required`, which the header cannot carry. A hold of
+  zero is accepted while something remains. The draft does not say whether
+  a zero maximum is a reservation; it refuses only a maximum that exceeds
+  the remainder.
 - `"$5.00"` does not specify rounding or a currency symbol. USD amounts render
   with a leading `$` and two digits, half-up from the signed scale. The amount
   string and the description stay separate values. There is no wire field for

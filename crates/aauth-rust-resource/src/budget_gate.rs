@@ -86,7 +86,7 @@ impl BudgetGate {
             .outstanding(token.claims().iss.as_str(), token.claims().jti.as_str())
             .unwrap_or((0, 0));
         let remaining = grant.amount() - committed - reserved;
-        let header = BudgetHeader::refusal(remaining, required, grant.unit(), grant.decimals())?;
+        let header = BudgetHeader::refusal(grant, remaining, required)?;
         sender_field(&header, false)
     }
 
