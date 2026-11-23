@@ -12,7 +12,7 @@ every sentence with a requirement keyword in the pinned drafts, the suite
 clauses and scenarios that reach it, and each library's result. The drafts and
 their pinned commits are in [SPECIFICATIONS.md](SPECIFICATIONS.md).
 
-## What the current run says
+## What the recorded run says
 
 | Item | Value |
 | --- | --- |
