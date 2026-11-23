@@ -19,7 +19,8 @@ fetches other servers' keys and delivers revocations over HTTPS, refusing
 private addresses and other unsafe destinations unless you allow them. The
 umbrella `aauth-rust` crate enables its `discovery` feature by default. Use
 individual role crates, or disable default features and select roles, to omit
-the network client dependency.
+the network client dependency. The HTTP host must limit request bodies before
+constructing the buffered request passed to a role.
 
 ## Install
 
@@ -171,7 +172,7 @@ and [CONTRIBUTING.md](CONTRIBUTING.md) says how to change the code.
 - [USE-IN-YOUR-SERVICE.md](USE-IN-YOUR-SERVICE.md): the full reference for
   running each role in a service.
 - [CONFORMANCE.md](CONFORMANCE.md): how the conformance suite measures the
-  libraries, and what its latest run says and does not say.
+  libraries, and what the recorded run covers.
 - [INTERPRETATIONS.md](INTERPRETATIONS.md): the choices made where a draft
   leaves room.
 - [SPECIFICATIONS.md](SPECIFICATIONS.md): the exact draft text implemented.
