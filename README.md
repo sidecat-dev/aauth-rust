@@ -206,8 +206,9 @@ R3, Budgets, Events, Supervision and Bootstrap drafts, each described, with its
 limits, in its guide under [docs/features](docs/features).
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
 in Go. [INTERPRETATIONS.md](INTERPRETATIONS.md) lists differences where the
-drafts leave room. The recorded bidirectional HTTPS run used Rust alpha.17
-and Go `0e2447b`. [Interop report](https://gitlab.com/sidecat-dev/aauth-interop/-/tree/f9ee96110e44cb54a9a77159a4c4c93a3a93cd00/reports/run-02-alpha17-0e2447b)
+drafts leave room. The bidirectional HTTPS run at Go `ca7b1026` and Rust
+`b3637f52` met all 127 case expectations.
+[HTTPS interop report](https://gitlab.com/sidecat-dev/aauth-interop/-/tree/5edb393b0f6e80d64dbba9fcf8742828f0584a77/reports/run-04-alpha29-ca7b1026)
 
 ## License
 
