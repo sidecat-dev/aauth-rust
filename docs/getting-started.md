@@ -8,18 +8,27 @@ the outside.
 
 ## Before you start
 
-Install [rustup](https://rustup.rs/). Rust needs the system linker to build,
-from step 1 on: on Ubuntu or Debian, `sudo apt-get install build-essential`;
-on macOS, the Xcode command line tools; on Windows, the MSVC build tools. For
-step 2, also install [git](https://git-scm.com/); the example's TLS library
-needs a C compiler, which the same tools provide.
+Follow the README's installation instructions for Rust 1.99 or later and a
+system linker. For step 2, also install Git. The example's TLS library needs
+a C compiler, which the system build tools provide.
+[Install Rust](../README.md#install) · [Install Git](https://git-scm.com/)
 
 ## 1. Add the crates to a project
 
 ```sh
-cargo new aauth-hello
-cd aauth-hello
-cargo add aauth-rust-agent@0.1.0-alpha.29 aauth-rust-agent-provider@0.1.0-alpha.29 aauth-rust-core@0.1.0-alpha.29 aauth-rust-jose@0.1.0-alpha.29 aauth-rust-resource@0.1.0-alpha.29 http@1
+cargo new aauth-service
+cd aauth-service
+```
+
+Add these lines to the `[dependencies]` table in `Cargo.toml`.
+
+```toml
+aauth-rust-agent = "0.1.0-alpha.29"
+aauth-rust-agent-provider = "0.1.0-alpha.29"
+aauth-rust-core = "0.1.0-alpha.29"
+aauth-rust-jose = "0.1.0-alpha.29"
+aauth-rust-resource = "0.1.0-alpha.29"
+http = "1"
 ```
 
 Replace `src/main.rs` with this program: an Agent Provider issues a token, an
@@ -83,7 +92,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The repository's `getting-started` example runs the same exchange between two
 HTTPS servers. Its small TLS transport is part of the repository's examples,
-so run it from the source:
+so run it from source. Checking out the release tag leaves Git in detached
+HEAD mode.
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git

@@ -24,10 +24,16 @@ constructing the buffered request passed to a role.
 
 ## Install
 
-The crates are on [crates.io](https://crates.io/crates/aauth-rust). Your
-project needs Rust 1.99 or later, and Rust needs the system linker to build:
-on Ubuntu or Debian, `sudo apt-get install build-essential`; on macOS, the
-Xcode command line tools; on Windows, the MSVC build tools. Start a project:
+The crates are on [crates.io](https://crates.io/crates/aauth-rust). Install Rust
+with rustup, open a new terminal, and use `rustc --version` and `cargo --version`
+to check that your toolchain is 1.99 or later. If rustup's stable toolchain is
+too old, update it with `rustup update stable`. [Install Rust](https://rust-lang.org/tools/install/)
+
+Rust needs a system linker. On Ubuntu or Debian, run
+`sudo apt-get install build-essential`. On macOS, install the Xcode command
+line tools. On Windows, install the MSVC build tools.
+
+Start a project.
 
 <!-- consumer-bootstrap-setup:begin -->
 ```sh
@@ -148,9 +154,10 @@ with a default-on feature per role.
 
 ## Build from source
 
-The repository's examples run over TLS on your machine, with no account and no
-outside service. You need [git](https://git-scm.com/), rustup and a C
-compiler.
+The repository's example runs over TLS on your machine. In addition to rustup
+and the system build tools above, you need Git. Checking out a release tag
+puts Git in detached HEAD mode, which is expected when running an example from
+that release. [Install Git](https://git-scm.com/)
 
 ```sh
 git clone https://gitlab.com/sidecat-dev/aauth-rust.git
@@ -159,9 +166,17 @@ git checkout v0.1.0-alpha.29
 cargo run --locked -p aauth-rust-resource --example getting-started
 ```
 
-The first run downloads the pinned Rust 1.99.1 (several hundred MB) and the
-dependencies. The example starts an Agent Provider and an API on loopback
-ports, with TLS, and has an agent call the API.
+On the first run, rustup downloads the pinned Rust 1.99.1 if needed, and Cargo
+downloads and builds the dependencies. The example starts an Agent Provider
+and an API on loopback ports, with TLS. It prints these results.
+
+```text
+metadata: 200 issuer=https://api.example
+unsigned: 401 requirement=agent-token
+signed: 200 hello, aauth:assistant@ap.example
+not admitted: 403
+```
+
 [Get started](docs/getting-started.md) walks through the output and the code,
 and [CONTRIBUTING.md](CONTRIBUTING.md) says how to change the code.
 
@@ -190,9 +205,9 @@ The crates implement the core AAuth protocol and HTTP Signature Keys, and the
 R3, Budgets, Events, Supervision and Bootstrap drafts, each described, with its
 limits, in its guide under [docs/features](docs/features).
 [aauth-go](https://gitlab.com/sidecat-dev/aauth-go) implements the same drafts
-in Go, makes the same choices where the drafts leave room except for the
-differences listed in [INTERPRETATIONS.md](INTERPRETATIONS.md), and is tested
-against this library.
+in Go. [INTERPRETATIONS.md](INTERPRETATIONS.md) lists differences where the
+drafts leave room. The recorded bidirectional HTTPS run used Rust alpha.17
+and Go `0e2447b`. [Interop report](https://gitlab.com/sidecat-dev/aauth-interop/-/tree/f9ee96110e44cb54a9a77159a4c4c93a3a93cd00/reports/run-02-alpha17-0e2447b)
 
 ## License
 
