@@ -14,10 +14,12 @@ introduces them.
 
 The protocol libraries open no network connections. Your service sends and
 receives the HTTP messages, fetches other servers' keys and stores state; the
-libraries sign, check and decide. One opt-in crate, `aauth-rust-discovery`,
-does open connections: it fetches other servers' keys and delivers
-revocations over HTTPS, refusing private addresses and other unsafe
-destinations unless you allow them.
+libraries sign, check and decide. The separate `aauth-rust-discovery` crate
+fetches other servers' keys and delivers revocations over HTTPS, refusing
+private addresses and other unsafe destinations unless you allow them. The
+umbrella `aauth-rust` crate enables its `discovery` feature by default. Use
+individual role crates, or disable default features and select roles, to omit
+the network client dependency.
 
 ## Install
 
