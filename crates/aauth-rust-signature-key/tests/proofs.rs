@@ -2888,7 +2888,7 @@ fn x509_accepts_rsa_signed_chains_and_crls() {
             Err(Error::InvalidKey),
         ),
     ] {
-        let issuer = RsaIssuer::key_pair(rsa::RsaPrivateKey::from_pkcs1_der(der).unwrap());
+        let issuer = RsaIssuer::key_pair(rsa::PrivateKey::from_pkcs1_der(der).unwrap());
         let proof = Rooted::new(&issuer, &issuer, &ec_leaf, &ec_signer).verify();
         assert_eq!(proof.map(|identity| identity.key.alg), expected);
     }
@@ -2951,7 +2951,7 @@ struct RsaIssuer {
 }
 
 impl RsaIssuer {
-    fn key_pair(key: rsa::RsaPrivateKey) -> rcgen::KeyPair {
+    fn key_pair(key: rsa::PrivateKey) -> rcgen::KeyPair {
         use rsa::pkcs1::EncodeRsaPublicKey;
         let public = key
             .to_public_key()
