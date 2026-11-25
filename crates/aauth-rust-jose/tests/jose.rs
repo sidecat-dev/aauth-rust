@@ -1,4 +1,5 @@
 use aauth_rust_jose::{ExternalSigner, Jwk, Jws, SigningKey, strict_json};
+use rsa::Generate;
 use serde_json::json;
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -276,12 +277,8 @@ fn pkcs8_keys_sign_only_under_their_own_algorithm() {
         SigningKey::from_seed(seed).sign(b"m").unwrap()
     );
 
-    let es256 = p256::ecdsa::SigningKey::random(&mut rand_core::OsRng)
-        .to_pkcs8_der()
-        .unwrap();
-    let es384 = p384::ecdsa::SigningKey::random(&mut rand_core::OsRng)
-        .to_pkcs8_der()
-        .unwrap();
+    let es256 = p256::ecdsa::SigningKey::generate().to_pkcs8_der().unwrap();
+    let es384 = p384::ecdsa::SigningKey::generate().to_pkcs8_der().unwrap();
     for (alg, der, crv, len) in [
         ("ES256", es256.as_bytes(), "P-256", 64),
         ("ES384", es384.as_bytes(), "P-384", 96),

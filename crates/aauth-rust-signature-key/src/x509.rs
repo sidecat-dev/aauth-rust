@@ -10,12 +10,12 @@
 use super::{Error, KeyMaterial, PreparedRequest};
 use aauth_rust_jose::Jwk;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rsa::{BigUint, Pkcs1v15Sign, Pss};
+use rsa::{BoxedUint, Pkcs1v15Sign, Pss};
 use rustls_pki_types::{
     AlgorithmIdentifier, CertificateDer, InvalidSignature, SignatureVerificationAlgorithm,
     TrustAnchor, UnixTime,
 };
-use sha2::digest::{DynDigest, const_oid::AssociatedOid};
+use sha2::digest::{FixedOutputReset, const_oid::AssociatedOid};
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use std::time::Duration;
 use webpki::{
@@ -143,29 +143,28 @@ fn rsa_pkcs1<D: Digest + AssociatedOid>(
 }
 
 /// The salt is as long as the hash, as the PSS algorithm identifiers require.
-fn rsa_pss<D: Digest + DynDigest + Send + Sync + 'static>(
+fn rsa_pss<D: Digest + FixedOutputReset>(
     public_key: &[u8],
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), InvalidSignature> {
     rsa_issuer_key(public_key)?
-        .verify(Pss::new::<D>(), &<D as Digest>::digest(message), signature)
+        .verify(Pss::<D>::new(), &<D as Digest>::digest(message), signature)
         .map_err(|_| InvalidSignature)
 }
 
 /// An issuer's PKCS #1 `RSAPublicKey`. A modulus outside 256 to 1024 bytes is
 /// refused before any signature is checked. The `rsa` crate also requires an
 /// odd modulus and an odd exponent of at least 3.
-fn rsa_issuer_key(public_key: &[u8]) -> Result<rsa::RsaPublicKey, InvalidSignature> {
-    let parsed = rsa::pkcs1::RsaPublicKey::try_from(public_key).map_err(|_| InvalidSignature)?;
+fn rsa_issuer_key(public_key: &[u8]) -> Result<rsa::PublicKey, InvalidSignature> {
+    let parsed = rsa::pkcs1::RsaPublicKeyRef::try_from(public_key).map_err(|_| InvalidSignature)?;
     let modulus = parsed.modulus.as_bytes();
     if !(256..=1024).contains(&modulus.len()) {
         return Err(InvalidSignature);
     }
-    rsa::RsaPublicKey::new_with_max_size(
-        BigUint::from_bytes_be(modulus),
-        BigUint::from_bytes_be(parsed.public_exponent.as_bytes()),
-        8192,
+    rsa::PublicKey::new(
+        BoxedUint::from_be_slice_vartime(modulus),
+        BoxedUint::from_be_slice_vartime(parsed.public_exponent.as_bytes()),
     )
     .map_err(|_| InvalidSignature)
 }

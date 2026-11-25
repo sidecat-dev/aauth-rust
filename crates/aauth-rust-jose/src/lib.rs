@@ -4,8 +4,9 @@ mod json;
 pub use json::strict_json;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::Signer;
+use rsa::Generate;
 use rsa::pkcs8::{DecodePrivateKey, EncodePrivateKey, SecretDocument};
+use rsa::signature::Signer;
 use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use rsa::traits::PublicKeyParts;
 use serde::{Deserialize, Serialize};
@@ -340,7 +341,7 @@ enum Secret {
     Es256(p256::ecdsa::SigningKey),
     Es384(p384::ecdsa::SigningKey),
     Rs256(rsa::pkcs1v15::SigningKey<Sha256>),
-    Ps256(rsa::pss::BlindedSigningKey<Sha256>),
+    Ps256(rsa::pss::SigningKey<Sha256>),
     External(External),
 }
 
@@ -400,16 +401,15 @@ impl std::fmt::Debug for Pkcs8PrivateKey {
 impl SigningKey {
     /// Generate a fresh Ed25519 signing key using the operating system RNG.
     pub fn generate() -> Self {
-        let key = ed25519_dalek::SigningKey::generate(&mut rand_core::OsRng);
+        let key =
+            ed25519_dalek::SigningKey::generate(&mut rsa::rand_core::UnwrapErr(getrandom::SysRng));
         Self(Secret::Ed25519(key))
     }
     /// Generate a fresh ES256 (ECDSA P-256 with SHA-256) signing key using the
     /// operating system RNG. AAuth tokens and agent keys may use it as well as
     /// Ed25519.
     pub fn generate_es256() -> Self {
-        Self(Secret::Es256(p256::ecdsa::SigningKey::random(
-            &mut rand_core::OsRng,
-        )))
+        Self(Secret::Es256(p256::ecdsa::SigningKey::generate()))
     }
     /// Import a caller-owned seed. Examples/tests use fixed seeds only as fixtures.
     pub fn from_seed(seed: [u8; 32]) -> Self {
@@ -424,8 +424,7 @@ impl SigningKey {
     /// for `RS256` or `PS256`. An RSA key names neither padding nor hash, so
     /// the algorithm is never inferred from the key. RS256 is RSASSA-PKCS1-v1_5
     /// and PS256 is RSASSA-PSS with a 32-byte salt, both with SHA-256. An RSA
-    /// modulus is 256 to 512 bytes (the `rsa` crate's limit for a private
-    /// key), with an odd exponent of at least 3.
+    /// private modulus is 256 to 512 bytes, with an odd exponent of at least 3.
     ///
     /// # Errors
     /// `UnsupportedAlgorithm` when `algorithm` is not one of the five above.
@@ -436,10 +435,17 @@ impl SigningKey {
             "Ed25519" => ed25519_dalek::SigningKey::from_pkcs8_der(der).map(Secret::Ed25519),
             "ES256" => p256::ecdsa::SigningKey::from_pkcs8_der(der).map(Secret::Es256),
             "ES384" => p384::ecdsa::SigningKey::from_pkcs8_der(der).map(Secret::Es384),
-            "RS256" => rsa::RsaPrivateKey::from_pkcs8_der(der)
-                .map(|key| Secret::Rs256(rsa::pkcs1v15::SigningKey::new(key))),
-            "PS256" => rsa::RsaPrivateKey::from_pkcs8_der(der)
-                .map(|key| Secret::Ps256(rsa::pss::BlindedSigningKey::new(key))),
+            "RS256" | "PS256" => {
+                let key = rsa::PrivateKey::from_pkcs8_der(der).map_err(|_| Error::InvalidKey)?;
+                if !(256..=512).contains(&key.size()) {
+                    return Err(Error::InvalidKey);
+                }
+                Ok(if algorithm == "RS256" {
+                    Secret::Rs256(rsa::pkcs1v15::SigningKey::new(key))
+                } else {
+                    Secret::Ps256(rsa::pss::SigningKey::new(key))
+                })
+            }
             _ => return Err(Error::UnsupportedAlgorithm),
         }
         .map_err(|_| Error::InvalidKey)?;
@@ -493,11 +499,11 @@ impl SigningKey {
             Secret::Es256(key) => key.to_pkcs8_der(),
             Secret::Es384(key) => key.to_pkcs8_der(),
             Secret::Rs256(key) => {
-                let private: &rsa::RsaPrivateKey = key.as_ref();
+                let private: &rsa::PrivateKey = key.as_ref();
                 private.to_pkcs8_der()
             }
             Secret::Ps256(key) => {
-                let private: &rsa::RsaPrivateKey = key.as_ref();
+                let private: &rsa::PrivateKey = key.as_ref();
                 private.to_pkcs8_der()
             }
             Secret::External(_) => return Err(Error::NotExportable),
@@ -535,11 +541,11 @@ impl SigningKey {
                 jwk.x = URL_SAFE_NO_PAD.encode(key.verifying_key().as_bytes());
             }
             Secret::Es256(key) => {
-                let point = key.verifying_key().to_encoded_point(false);
+                let point = key.verifying_key().to_sec1_point(false);
                 ec_coordinates(&mut jwk, "P-256", point.as_bytes());
             }
             Secret::Es384(key) => {
-                let point = key.verifying_key().to_encoded_point(false);
+                let point = key.verifying_key().to_sec1_point(false);
                 ec_coordinates(&mut jwk, "P-384", point.as_bytes());
             }
             Secret::Rs256(key) => rsa_members(&mut jwk, key.as_ref()),
@@ -574,11 +580,11 @@ impl SigningKey {
                 signature.to_bytes().to_vec()
             }
             Secret::Rs256(key) => key
-                .try_sign_with_rng(&mut rand_core::OsRng, message)
+                .try_sign_with_rng(&mut getrandom::SysRng, message)
                 .map_err(failed)?
                 .to_vec(),
             Secret::Ps256(key) => key
-                .try_sign_with_rng(&mut rand_core::OsRng, message)
+                .try_sign_with_rng(&mut getrandom::SysRng, message)
                 .map_err(failed)?
                 .to_vec(),
             Secret::External(external) => {
@@ -613,10 +619,10 @@ fn ec_coordinates(jwk: &mut Jwk, crv: &str, point: &[u8]) {
     jwk.y = URL_SAFE_NO_PAD.encode(y);
 }
 
-fn rsa_members(jwk: &mut Jwk, key: &rsa::RsaPrivateKey) {
+fn rsa_members(jwk: &mut Jwk, key: &rsa::PrivateKey) {
     jwk.kty = "RSA".into();
-    jwk.n = URL_SAFE_NO_PAD.encode(key.n().to_bytes_be());
-    jwk.e = URL_SAFE_NO_PAD.encode(key.e().to_bytes_be());
+    jwk.n = URL_SAFE_NO_PAD.encode(key.n().to_be_bytes_trimmed_vartime());
+    jwk.e = URL_SAFE_NO_PAD.encode(key.e().to_be_bytes_trimmed_vartime());
 }
 
 /// Parsed bytes are not authenticated until `verify` succeeds.
@@ -665,10 +671,9 @@ fn verify_rsa(
     signature: &[u8],
 ) -> Result<(), Error> {
     use rsa::signature::Verifier;
-    let key = rsa::RsaPublicKey::new_with_max_size(
-        rsa::BigUint::from_bytes_be(n),
-        rsa::BigUint::from_bytes_be(e),
-        8192,
+    let key = rsa::PublicKey::new(
+        rsa::BoxedUint::from_be_slice_vartime(n),
+        rsa::BoxedUint::from_be_slice_vartime(e),
     )
     .map_err(|_| Error::InvalidKey)?;
     match padding {
